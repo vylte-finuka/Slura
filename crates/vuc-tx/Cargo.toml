@@ -1,0 +1,56 @@
+[package]
+name = "vuc-tx"
+version = "0.0.1"
+edition = { workspace = true }
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+goblin = { workspace = true }
+anyhow = { workspace = true }
+base64 = { workspace = true }
+hashbrown = { workspace = true }
+log = { workspace = true }
+bcs = { workspace = true }
+bstr = "1.12.0"
+triomphe = "0.1.14"
+sys-info = "0.9"
+serde_derive = { workspace = true }
+fastcrypto = { workspace = true }
+rand = { workspace = true }
+prometheus = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+md5 = { workspace = true }
+smallvec = { workspace = true }
+rayon = {workspace = true }
+sha3 = { workspace = true }
+bytes = { workspace = true }
+vuc-core = { path = "../vuc-core" }
+vuc-types = { path = "../vuc-types" }
+vuc-storage = { path = "../vuc-storage" }
+uvm-runtime = { workspace = true }
+lazy_static.workspace = true
+libloading = "0.8.9"
+hex = "0.4"
+ethabi = "18.0.0"
+reth-trie = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.9.1", package = "reth-trie" }
+reth-primitives-traits = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.9.1", package = "reth-primitives-traits" }
+primitive-types = "0.12"  # Requis pour H256 (ajouté automatiquement ou manuellement)
+sha2 = "0.10"
+merkletree = "0.23.0"
+tiny-keccak = "2.0.2"
+alloy-primitives = "1.4.1"
+chrono.workspace = true
+rlp = "0.6.1"
+crossbeam = "0.8.4"
+dashmap = "6.1.0"
+
+
+[lib]
+name = "vuc_tx"
+path = "src/lib.rs"
+
+[package.metadata]
+license = "Vylte-finuka"
+description = "Vyft slurachain transactions service."
