@@ -1203,9 +1203,8 @@ impl LurosonieManager {
         }
     }
 
-    // --- Correction pour CONTRACT_STATE_HISTORY ---
     pub async fn get_complete_contract_data(&self, contract_address: &str) -> serde_json::Value {
-        let vm = self.vm.read().await;
+        let mut vm = self.vm.write().await;
         let current_state = vm.load_complete_contract_state(contract_address)
             .unwrap_or_else(|_| vec![0u8; 4096]); // ✅ CORRIGÉ: utilise load_complete_contract_state
         let history_lock = CONTRACT_STATE_HISTORY.lock().await;
@@ -1354,7 +1353,7 @@ impl LurosonieManager {
 
     /// ✅ CORRECTION: Récupération d'état de contrat (wrapper pour la UVM)
     pub async fn get_contract_state(&self, contract_address: &str) -> Result<Vec<u8>, String> {
-        let vm = self.vm.read().await;
+        let mut vm = self.vm.write().await;
         vm.load_complete_contract_state(contract_address) // ✅ CORRIGÉ: utilise load_complete_contract_state
     }
 
@@ -1383,7 +1382,7 @@ impl LurosonieManager {
         
         // ✅ PRIORITÉ 3: Récupération de l'état courant depuis la VM
         {
-            let vm = self.vm.read().await;
+            let mut vm = self.vm.write().await;
             if let Ok(state) = vm.load_complete_contract_state(contract_address) { // ✅ CORRIGÉ
                 if state != vec![0u8; 4096] { // Ignore les états vides
                     println!("DEBUG: 📚 État contrat {} récupéré depuis VM courante", contract_address);

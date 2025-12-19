@@ -1,24 +1,26 @@
+//___ Unity VM: Slurachain VM avec parallélisme optimiste pour 300M TPS ___//
 use anyhow::Result;
 use goblin::elf::Elf;
 use uvm_runtime::interpreter;
 use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
-use std::hash::{Hash, DefaultHasher};
+use dashmap::DashMap;
+use std::hash::{Hash, Hasher};
+use rayon::iter::IntoParallelIterator;
 use std::sync::{Arc, RwLock, Mutex};
-use std::hash::Hasher;
+use std::sync::atomic::{AtomicU64, Ordering};
 use vuc_storage::storing_access::RocksDBManager;
 use hashbrown::{HashSet, HashMap};
 use hex;
 use sha3::{Digest, Keccak256};
-// ✅ AJOUT: Parallelism optimiste 300M TPS
-use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::task::{JoinHandle, spawn};
-use std::sync::mpsc::{channel, Receiver, Sender};
-use rayon::prelude::*;
-use crossbeam::channel::{bounded, unbounded};
-use dashmap::DashMap;
 
 pub type NerenaValue = serde_json::Value;
+
+
+// ✅ ERC-1967 standard slots (hex, sans 0x)
+const ERC1967_IMPLEMENTATION_SLOT: &str = "360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";
+const ERC1967_ADMIN_SLOT: &str = "b53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103";
+const ERC1967_BEACON_SLOT: &str = "a3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50";
 
 // ============================================================================
 // OPTIMISTIC PARALLELISM POUR 300M TPS
@@ -130,7 +132,7 @@ impl OptimisticParallelEngine {
             // 1. Phase d'exécution parallèle spéculative
             let execution_tasks: Vec<_> = transactions
                 .clone()
-                .into_par_iter()
+                .into_iter()
                 .map(|tx| {
                     let results_clone = results.clone();
                     let storage_versions_clone = storage_versions.clone();
@@ -190,15 +192,16 @@ impl OptimisticParallelEngine {
 
         // 6. Collecte des résultats finaux
         let mut final_results = Vec::new();
-        for i in 0..results.len() {
-            if let Some(result) = results.get(&(i as u64)) {
+        // Parcours dans l'ordre des transactions fournies pour garantir mapping id -> résultat
+        for tx in transactions.iter() {
+            if let Some(result) = results.get(&tx.id) {
                 final_results.push(result.value().clone());
             } else {
-                final_results.push(Err("Transaction non trouvée après retry".to_string()));
+                final_results.push(Err(format!("TX {} manquante après retry", tx.id)));
             }
         }
-
-        final_results
+ 
+         final_results
     }
 
     /// ✅ Exécution spéculative d'une transaction (sans commit)
@@ -645,7 +648,7 @@ impl Default for NativeTokenParams {
             name: "Vyft Enhancing ZER".to_string(),
             symbol: "VEZ".to_string(),
             decimals: 18,
-            total_supply: 1_000_000,
+            total_supply: 888_000_000,
             mintable: true,
             burnable: false,
         }
@@ -673,7 +676,7 @@ impl SimpleInterpreter {
 
     fn setup_uvm_helpers(&mut self) {
         // ✅ SYSTÈME 100% GÉNÉRIQUE - Aucun hardcodage
-        println!("✅ Interpréteur UVM initialisé - système générique sans aucun hardcodage");
+        println!("✅ Interpréteur UVM initialisé");
     }
 
     pub fn add_function_helper(&mut self, selector: u32, function_name: &str, helper: fn(u64, u64, u64, u64, u64) -> u64) {
@@ -790,6 +793,152 @@ impl SlurachainVm {
 
         vm
     }
+
+            /// Charge complètement l'état d'un contrat depuis le storage externe (RocksDB) dans VmState.
+            /// Retourne un buffer binaire représentant l'état courant (taille fixe 4096 bytes si possible).
+            /// - Récupère le bytecode (si présent) à partir de plusieurs clés plausibles.
+            /// - Récupère les slots ERC‑1967 (implementation/admin/beacon) et certains noms logiques.
+            /// - Insère/met à jour AccountState dans self.state.accounts.
+            pub fn load_complete_contract_state(&mut self, contract_address: &str) -> Result<Vec<u8>, String> {
+                let storage_manager = match &self.storage_manager {
+                    Some(m) => m,
+                    None => return Err("Aucun storage_manager configuré".to_string()),
+                };
+        
+                // assure qu'il y a un AccountState pour remplir
+                let mut account = {
+                    let mut accounts = self.state.accounts.write().map_err(|e| format!("Lock accounts failed: {}", e))?;
+                    accounts.entry(contract_address.to_string()).or_insert_with(|| AccountState {
+                        address: contract_address.to_string(),
+                        balance: 0,
+                        contract_state: vec![],
+                        resources: BTreeMap::new(),
+                        state_version: 0,
+                        last_block_number: 0,
+                        nonce: 0,
+                        code_hash: "".to_string(),
+                        storage_root: "".to_string(),
+                        is_contract: false,
+                        gas_used: 0,
+                    }).clone()
+                };
+        
+                // 1) Tenter de lire le bytecode à partir de clés plausibles
+                let code_key_candidates = [
+                    format!("code:{}", contract_address),
+                    format!("contract:{}:code", contract_address),
+                    format!("bytecode:{}", contract_address),
+                    format!("account:{}:code", contract_address),
+                    format!("storage:{}:code", contract_address),
+                ];
+        
+                let mut found_code: Option<Vec<u8>> = None;
+                for key in &code_key_candidates {
+                    match storage_manager.read(key) {
+                        Ok(bytes) if !bytes.is_empty() => {
+                            found_code = Some(bytes);
+                            println!("🔎 Bytecode trouvé pour {} via clé '{}'", contract_address, key);
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+        
+                if let Some(code) = found_code {
+                    account.contract_state = code.clone();
+                    account.is_contract = true;
+                    let hash = Keccak256::digest(&code);
+                    account.code_hash = hex::encode(hash);
+                    println!("✅ Contract {} bytecode chargé ({} bytes), code_hash 0x{}", contract_address, account.contract_state.len(), account.code_hash);
+                } else {
+                    println!("⚠️ Aucun bytecode trouvé pour {}", contract_address);
+                }
+        
+                // Helper closure pour tenter lecture d'un storage key (retourne Option<Vec<u8>>)
+                let try_read_storage = |sm: &Arc<dyn RocksDBManager>, key: &str| -> Option<Vec<u8>> {
+                    match sm.read(key) {
+                        Ok(b) if !b.is_empty() => Some(b),
+                        _ => None,
+                    }
+                };
+        
+                // 2) Lire slots ERC-1967 canoniques
+                let canonical_slots = vec![
+                    ERC1967_IMPLEMENTATION_SLOT.to_string(),
+                    ERC1967_ADMIN_SLOT.to_string(),
+                    ERC1967_BEACON_SLOT.to_string(),
+                ];
+        
+                for slot in &canonical_slots {
+                    let storage_key = format!("storage:{}:{}", contract_address, slot);
+                    if let Some(bytes) = try_read_storage(storage_manager, &storage_key) {
+                        let hexval = format!("0x{}", hex::encode(&bytes));
+                        account.resources.insert(slot.clone(), serde_json::Value::String(hexval.clone()));
+                        println!("💾 Slot canonical {} chargé -> {}", slot, hexval);
+                    }
+                }
+        
+                // 3) Tenter de lire clés logiques courantes (implementation/admin/beacon) et normaliser
+                let logical_names = ["implementation", "admin", "beacon"];
+                for name in &logical_names {
+                    let storage_key = format!("storage:{}:{}", contract_address, name);
+                    if let Some(bytes) = try_read_storage(storage_manager, &storage_key) {
+                        let canonical_slot = self.map_resource_key_to_slot(name);
+                        let hexval = format!("0x{}", hex::encode(&bytes));
+                        account.resources.insert(canonical_slot.clone(), serde_json::Value::String(hexval.clone()));
+                        println!("🔁 Slot logique '{}' lu et mappé -> canonical {} = {}", name, canonical_slot, hexval);
+                    }
+                }
+        
+                // 4) Si le storage manager expose un scan par préfixe, placeholder pour intégration future.
+                #[allow(unused_mut)]
+                if false {
+                    // placeholder
+                }
+        
+                // 5) Ecrit l'AccountState mis à jour dans l'état global
+                {
+                    let mut accounts = self.state.accounts.write().map_err(|e| format!("Lock accounts failed: {}", e))?;
+                    accounts.insert(contract_address.to_string(), account.clone());
+                }
+        
+                println!("🟢 Chargement complet de l'état du contrat {} terminé", contract_address);
+        
+                // Construction du buffer d'état retourné (taille fixe 4096 bytes si possible)
+                fn pad_or_truncate(mut data: Vec<u8>, target: usize) -> Vec<u8> {
+                    if data.len() == target { return data; }
+                    if data.len() > target {
+                        data.truncate(target);
+                        return data;
+                    }
+                    // pad with zeros
+                    data.resize(target, 0u8);
+                    data
+                }
+        
+                // Priorité de retour :
+                // 1) si contract_state non vide -> retourne son contenu (padded/truncated)
+                // 2) sinon si resources non vide -> sérialise en JSON et retourne (padded/truncated)
+                // 3) sinon retourne buffer nul de taille 4096
+                if !account.contract_state.is_empty() {
+                    return Ok(pad_or_truncate(account.contract_state.clone(), 4096));
+                }
+        
+                if !account.resources.is_empty() {
+                    match serde_json::to_vec(&account.resources) {
+                        Ok(mut json_bytes) => {
+                            return Ok(pad_or_truncate(json_bytes, 4096));
+                        }
+                        Err(e) => {
+                            eprintln!("⚠️ Erreur sérialisation resources pour {}: {}", contract_address, e);
+                            return Ok(vec![0u8; 4096]);
+                        }
+                    }
+                }
+        
+                Ok(vec![0u8; 4096])
+            }
+        // ...existing code...
     
     /// ✅ NOUVEAU: Configuration du moteur parallèle
     pub fn with_parallel_engine(mut self, thread_count: usize, batch_size: usize) -> Self {
@@ -934,11 +1083,57 @@ fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<us
             let offset = ((bytecode[i + 7] as usize) << 8) | (bytecode[i + 8] as usize);
             // Vérifie que c'est bien un JUMPDEST
             if offset < len && bytecode[offset] == 0x5b {
-                return Some(offset);
+                // Nouvelle étape : vérifier que depuis ce JUMPDEST on peut atteindre un RETURN (0xf3)
+                // en parcourant un nombre limité d'octets (sécurité).
+                let max_scan = 8 * 1024; // 8 KB de scan max
+                let scan_end = std::cmp::min(len, offset + max_scan);
+                let mut found_return = false;
+                let mut scan_pos = offset;
+                while scan_pos < scan_end {
+                    let op = bytecode[scan_pos];
+                    if op == 0xf3 {
+                        found_return = true;
+                        break;
+                    }
+                    // avance ; si PUSHn rencontré, skip payload pour limiter faux positifs
+                    if (0x60..=0x7f).contains(&op) {
+                        let push_bytes = (op - 0x5f) as usize;
+                        scan_pos = scan_pos.saturating_add(1 + push_bytes);
+                    } else {
+                        scan_pos = scan_pos.saturating_add(1);
+                    }
+                }
+                if found_return {
+                    return Some(offset);
+                } else {
+                    // si pas de RETURN trouvé, on continue la recherche (mais garde ce offset comme fallback)
+                    // on peut choisir de retourner cet offset quand aucune meilleure option est trouvée
+                    // => ici on continue la boucle pour potentiellement trouver un handler plus complet.
+                }
             }
         }
         i += 1;
     }
+
+    // fallback: si on n'a rien trouvé compatible, on retombe sur l'ancien scan simple
+    let mut j = 0;
+    while j + 9 < len {
+        if bytecode[j] == 0x63 {
+            let selector_bytes = selector.to_be_bytes();
+            if &bytecode[j + 1..j + 5] == selector_bytes
+                && bytecode[j + 5] == 0x14
+                && bytecode[j + 6] == 0x61
+                && bytecode[j + 9] == 0x57
+            {
+                let offset = ((bytecode[j + 7] as usize) << 8) | (bytecode[j + 8] as usize);
+                if offset < len && bytecode[offset] == 0x5b {
+                    return Some(offset);
+                }
+            }
+        }
+        j += 1;
+    }
+
     None
 }
     
@@ -986,39 +1181,101 @@ fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<us
             
             // ✅ ÉTAPE 1: Persistance du storage depuis le résultat
             if let Some(storage_obj) = execution_result.get("storage").and_then(|v| v.as_object()) {
-                for (slot, value_hex) in storage_obj {
-                    let storage_key = format!("storage:{}:{}", contract_address, slot);
+                for (slot_key, value_hex) in storage_obj {
+                    // mappe la clé logique vers un slot 32-bytes hex canonique
+                    let canonical_slot = self.map_resource_key_to_slot(slot_key);
+                    
+                    let storage_key = format!("storage:{}:{}", contract_address, canonical_slot);
             
                     let value_bytes = if let Some(hex_str) = value_hex.as_str() {
-                        hex::decode(hex_str).unwrap_or_else(|_| value_hex.to_string().into_bytes())
+                        // accepte "0x..." ou raw hex string
+                        let hex_clean = hex_str.trim_start_matches("0x");
+                        hex::decode(hex_clean).unwrap_or_else(|_| value_hex.to_string().into_bytes())
                     } else {
                         value_hex.to_string().into_bytes()
                     };
             
-                    // AJOUT DU LOG ICI :
-                    println!("📝 [STORAGE WRITE] Contrat: {}, Slot: {}, Key: {}, Value (hex): {}, Value (bytes): {:02x?}",
-                        contract_address, slot, storage_key, value_hex, value_bytes);
+                    println!("📝 [STORAGE WRITE] Contrat: {}, SlotKey: {}, CanonicalSlot: {}, Key: {}, Value (hex): {}, Value (bytes): {:02x?}",
+                        contract_address, slot_key, canonical_slot, storage_key, value_hex, value_bytes);
             
-                    if let Err(e) = storage_manager.write(&storage_key, value_bytes) {
-                        eprintln!("⚠️ Erreur persistance slot {}: {}", slot, e);
+                    if let Err(e) = storage_manager.write(&storage_key, value_bytes.clone()) {
+                        eprintln!("⚠️ Erreur persistance slot {}: {}", slot_key, e);
                     } else {
-                        println!("✅ Slot persisté: {} -> {} bytes", slot, value_hex);
+                        println!("✅ Slot persisté: {} -> {} bytes", canonical_slot, value_bytes.len());
                     }
-                }
-            }
-            
-            // ✅ ÉTAPE 2: Mise à jour IMMÉDIATE des resources dans l'état UVM
-            if let Ok(mut accounts) = self.state.accounts.write() {
-                if let Some(account) = accounts.get_mut(contract_address) {
-                    if let Some(storage_obj) = execution_result.get("storage").and_then(|v| v.as_object()) {
-                        for (slot, value_hex) in storage_obj {
-                            account.resources.insert(slot.clone(), Self::normalize_storage_json_value(value_hex));
-                            println!("🔄 Resource VM mise à jour: {} = {}", slot, value_hex);
+
+                    // Met à jour également resources VM (clé = canonical slot hex préfixé 0x)
+                    if let Ok(mut accounts) = self.state.accounts.write() {
+                        if let Some(account) = accounts.get_mut(contract_address) {
+                            account.resources.insert(canonical_slot.clone(), serde_json::Value::String(format!("0x{}", hex::encode(&value_bytes))));
+                            println!("🔄 Resource VM mise à jour (canonical): {} = 0x{}", canonical_slot, hex::encode(&value_bytes));
                         }
                     }
                 }
             }
-            
+
+            // ✅ ÉTAPE 2: Si l'interpréteur a renvoyé des clés décodées, les expose explicitement
+            if let Some(decoded_obj) = execution_result.get("storage_decoded").and_then(|v| v.as_object()) {
+                for (key, decoded_val) in decoded_obj {
+                    // Normalise la valeur et écris sous une clé logique
+                    let logical_key = key.clone(); // déjà "implementation"/"admin"/slotHex/etc.
+                    // Construit key DB logique
+                    let logical_storage_key = format!("storage:{}:{}", contract_address, logical_key);
+
+                    // Prépare bytes à écrire selon le type JSON (string hex/addr, number, bool)
+                    let bytes_to_write: Vec<u8> = match decoded_val {
+                        serde_json::Value::String(s) => {
+                            if s.starts_with("0x") && s.len() > 2 && s.chars().all(|c| c == 'x' || c.is_ascii_hexdigit() || c == '0') == false {
+                                // s is likely human string (name/symbol) -> store utf8
+                                s.as_bytes().to_vec()
+                            } else if s.starts_with("0x") {
+                                hex::decode(s.trim_start_matches("0x")).unwrap_or_else(|_| s.as_bytes().to_vec())
+                            } else if self.looks_like_address(s) {
+                                // ensure 0x prefixed address -> store as 32 bytes right-aligned
+                                let clean = s.trim_start_matches("0x");
+                                if let Ok(addr_bytes) = hex::decode(clean) {
+                                    let mut buf = vec![0u8; 12];
+                                    buf.extend_from_slice(&addr_bytes);
+                                    buf
+                                } else {
+                                    s.as_bytes().to_vec()
+                                }
+                            } else {
+                                s.as_bytes().to_vec()
+                            }
+                        },
+                        serde_json::Value::Number(n) => {
+                            if let Some(u) = n.as_u64() {
+                                // encode as 32-bytes big endian
+                                let mut buf = [0u8; 32];
+                                buf[24..32].copy_from_slice(&u.to_be_bytes());
+                                buf.to_vec()
+                            } else {
+                                decoded_val.to_string().into_bytes()
+                            }
+                        },
+                        serde_json::Value::Bool(b) => vec![if *b { 1u8 } else { 0u8 }],
+                        other => other.to_string().into_bytes(),
+                    };
+
+                    // Write logical key to DB (best-effort)
+                    if let Err(e) = storage_manager.write(&logical_storage_key, bytes_to_write.clone()) {
+                        eprintln!("⚠️ Erreur persistance logical key {}: {}", logical_storage_key, e);
+                    } else {
+                        println!("✅ Logical key persistée: {} -> {} bytes", logical_storage_key, bytes_to_write.len());
+                    }
+
+                    // And update VM resources with friendly value
+                    if let Ok(mut accounts) = self.state.accounts.write() {
+                        if let Some(account) = accounts.get_mut(contract_address) {
+                            // prefer to insert human-friendly typed value (string/number/bool)
+                            account.resources.insert(logical_key.clone(), decoded_val.clone());
+                            println!("🔄 Resource VM mise à jour (logical): {} = {:?}", logical_key, decoded_val);
+                        }
+                    }
+                }
+            }
+
             println!("🎯 Contrat {} persisté avec succès après exécution", contract_address);
         } else {
             println!("⚠️ Pas de storage manager configuré pour la persistance");
@@ -1027,443 +1284,26 @@ fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<us
         Ok(())
     }
 
-    fn prepare_contract_execution_args(
-        &self,
-        contract_address: &str,
-        function_name: &str,
-        args: Vec<NerenaValue>,
-        sender: &str,
-        function_meta: &FunctionMetadata,
-        _contract_state: Vec<u8>,
-    ) -> Result<uvm_runtime::interpreter::InterpreterArgs, String> {
-
-        let current_time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        let block_number = self.state.block_info.read()
-            .map(|b| b.number)
-            .unwrap_or(1);
-
-        let arg_types_str = function_meta.arg_types.iter()
-            .map(|s| s.trim())
-            .collect::<Vec<_>>()
-            .join(",");
-
-        let full_signature = format!("{}({})", function_meta.name.trim(), arg_types_str);
-        let keccak_hash = Keccak256::digest(full_signature.as_bytes());
-        let real_selector = u32::from_be_bytes([keccak_hash[0], keccak_hash[1], keccak_hash[2], keccak_hash[3]]);
-
-        if self.debug_mode {
-            println!("FONCTION: {}", function_name);
-            println!("SIGNATURE: {}", full_signature);
-            println!("SÉLECTEUR KECCAK256 (réel): 0x{:08x}", real_selector);
-        }
-
-        use ethabi::{Token, encode};
-
-        let tokens: Vec<Token> = function_meta.arg_types.iter().zip(&args).map(|(typ, val)| {
-            match (typ.trim(), val) {
-                ("address", serde_json::Value::String(s)) => {
-                    let addr = s.trim_start_matches("0x");
-                    let mut bytes = [0u8; 20];
-                    hex::decode_to_slice(addr, &mut bytes).ok();
-                    Token::Address(ethabi::Address::from(bytes))
+/// Mappe une clé logique (ex: "implementation", "admin") vers un slot 32 bytes hex canonique.
+    fn map_resource_key_to_slot(&self, key: &str) -> String {
+        // clés connues → slots ERC-1967
+        match key {
+            "implementation" | "implementation_slot" => ERC1967_IMPLEMENTATION_SLOT.to_string(),
+            "admin" | "admin_slot" => ERC1967_ADMIN_SLOT.to_string(),
+            "beacon" | "beacon_slot" => ERC1967_BEACON_SLOT.to_string(),
+            k => {
+                // si la clé ressemble déjà à un slot hex 64 chars (avec ou sans 0x) -> normalise
+                let s = k.trim_start_matches("0x");
+                if s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return s.to_lowercase();
                 }
-                ("uint256" | "uint", serde_json::Value::Number(n)) => Token::Uint(n.as_u64().unwrap_or(0).into()),
-                ("uint256" | "uint", serde_json::Value::String(s)) => Token::Uint(s.parse::<u64>().unwrap_or(0).into()),
-                ("string", serde_json::Value::String(s)) => Token::String(s.clone()),
-                ("bool", serde_json::Value::Bool(b)) => Token::Bool(*b),
-                _ => Token::String(val.to_string()),
-            }
-        }).collect();
-
-        let encoded_args = encode(&tokens);
-        let mut calldata = Vec::with_capacity(4 + encoded_args.len());
-        calldata.extend_from_slice(&real_selector.to_be_bytes());
-        calldata.extend_from_slice(&encoded_args);
-
-        Ok(uvm_runtime::interpreter::InterpreterArgs {
-            function_name: function_name.to_string(),
-            contract_address: contract_address.to_string(),
-            sender_address: sender.to_string(),
-            args,
-            state_data: calldata,
-            gas_limit: function_meta.gas_limit,
-            gas_price: self.gas_price,
-            value: 0,
-            call_depth: 0,
-            block_number,
-            timestamp: current_time,
-            caller: sender.to_string(),
-            origin: sender.to_string(),
-            beneficiary: sender.to_string(),
-            function_offset: None,
-            base_fee: Some(0),
-            blob_base_fee: Some(0),
-            blob_hash: Some([0u8; 32]),
-            // is_view: function_meta.is_view,
-            evm_stack_init: Some(vec![real_selector as u64]),
-        })
-    }
-
-    // ...dans impl SlurachainVm...
-    fn format_contract_function_result(
-        &self,
-        result: serde_json::Value,
-        _args: &uvm_runtime::interpreter::InterpreterArgs,
-        function_meta: &FunctionMetadata,
-    ) -> Result<NerenaValue, String> {
-        if self.debug_mode {
-            println!("🎨 FORMATAGE RÉSULTAT");
-            println!("   Type retour: {}", function_meta.return_type);
-            println!("   Résultat brut: {:?}", result);
-        }
-    
-        let mut raw = if let Some(ret) = result.get("return") {
-            ret.clone()
-        } else {
-            result.clone()
-        };
-    
-        // PATCH AUTOMATIQUE : si retour == 0 et storage.deployed_by existe, retourne deployed_by
-        if (function_meta.return_type == "address")
-            && (raw == serde_json::json!(0) || raw == serde_json::json!("0x0000000000000000000000000000000000000000"))
-        {
-            if let Some(storage) = result.get("storage").and_then(|v| v.as_object()) {
-                if let Some(deployed_by) = storage.get("deployed_by") {
-                    if let Some(addr) = deployed_by.as_str() {
-                        // Remplace le résultat par deployed_by (toujours, même si pas de clé owner)
-                        raw = serde_json::json!(addr);
-                    }
-                }
-            }
-        }
-    
-        Ok(raw)
-    }
-
-      /// ✅ AJOUT: Support complet des modifiers Solidity (isOwner, etc.)
-    pub fn setup_solidity_modifiers_support(&mut self) {
-        println!("🔧 [MODIFIERS] Initialisation du support des modifiers Solidity...");
-        
-        if let Ok(mut interpreter) = self.interpreter.try_lock() {
-            
-            // ✅ isOwner modifier - vérification de propriétaire
-            let is_owner_modifier = |caller_addr: u64, _arg2: u64, _arg3: u64, _arg4: u64, _arg5: u64| -> u64 {
-                println!("🛡️  [MODIFIER] isOwner: vérification pour caller 0x{:x}", caller_addr);
-                
-                // Retourne 1 si autorisé, 0 si refusé
-                // La logique réelle sera dans execute_module
-                1
-            };
-            interpreter.add_function_helper(0x2f54bf6e, "isOwner", is_owner_modifier);
-            
-            // ✅ onlyOwner modifier (alias de isOwner)
-            let only_owner_modifier = |caller_addr: u64, _arg2: u64, _arg3: u64, _arg4: u64, _arg5: u64| -> u64 {
-                println!("🛡️  [MODIFIER] onlyOwner: vérification pour caller 0x{:x}", caller_addr);
-                1
-            };
-            interpreter.add_function_helper(0x8da5cb5b, "onlyOwner", only_owner_modifier);
-            
-            // ✅ whenNotPaused modifier
-            let when_not_paused_modifier = |_arg1: u64, _arg2: u64, _arg3: u64, _arg4: u64, _arg5: u64| -> u64 {
-                println!("⏸️  [MODIFIER] whenNotPaused: vérification état pause");
-                1 // Par défaut non pausé
-            };
-            interpreter.add_function_helper(0x3f4ba83a, "whenNotPaused", when_not_paused_modifier);
-            
-            // ✅ nonReentrant modifier
-            let non_reentrant_modifier = |_arg1: u64, _arg2: u64, _arg3: u64, _arg4: u64, _arg5: u64| -> u64 {
-                println!("🔒 [MODIFIER] nonReentrant: vérification réentrance");
-                1 // Par défaut autorisé
-            };
-            interpreter.add_function_helper(0x56de96db, "nonReentrant", non_reentrant_modifier);
-            
-            // ✅ validAddress modifier
-            let valid_address_modifier = |address_check: u64, _arg2: u64, _arg3: u64, _arg4: u64, _arg5: u64| -> u64 {
-                println!("📍 [MODIFIER] validAddress: vérification adresse 0x{:x}", address_check);
-                if address_check == 0 { 0 } else { 1 }
-            };
-            interpreter.add_function_helper(0x6b2c0f55, "validAddress", valid_address_modifier);
-            
-            // ✅ onlyAdmin modifier
-            let only_admin_modifier = |caller_addr: u64, _arg2: u64, _arg3: u64, _arg4: u64, _arg5: u64| -> u64 {
-                println!("👑 [MODIFIER] onlyAdmin: vérification admin pour 0x{:x}", caller_addr);
-                1
-            };
-            interpreter.add_function_helper(0x6e9f61da, "onlyAdmin", only_admin_modifier);
-            
-            println!("✅ [MODIFIERS] Support des modifiers Solidity configuré");
-        }
-    }
-
-    /// ✅ AJOUT: Support des événements console.log Solidity
-    pub fn setup_console_log_events_support(&mut self) {
-        println!("🔧 [CONSOLE] Initialisation du support console.log...");
-        
-        if let Ok(mut interpreter) = self.interpreter.try_lock() {
-            
-            // ✅ console.log(string)
-            let console_log_string = |_arg1: u64, _arg2: u64, _arg3: u64, _arg4: u64, _arg5: u64| -> u64 {
-                println!("📝 [CONSOLE.LOG] String logged from contract");
-                0 // Les logs ne retournent rien
-            };
-            interpreter.add_function_helper(0x41304fac, "console.log(string)", console_log_string);
-            
-            // ✅ console.log(uint256)
-            let console_log_uint = |value: u64, _arg2: u64, _arg3: u64, _arg4: u64, _arg5: u64| -> u64 {
-                println!("📝 [CONSOLE.LOG] Uint logged: {}", value);
-                0
-            };
-            interpreter.add_function_helper(0xf82c50f1, "console.log(uint256)", console_log_uint);
-            
-            // ✅ console.log(address)
-            let console_log_address = |addr: u64, _arg2: u64, _arg3: u64, _arg4: u64, _arg5: u64| -> u64 {
-                println!("📝 [CONSOLE.LOG] Address logged: 0x{:x}", addr);
-                0
-            };
-            interpreter.add_function_helper(0x2c2ecbc2, "console.log(address)", console_log_address);
-            
-            // ✅ console.log(bool)
-            let console_log_bool = |value: u64, _arg2: u64, _arg3: u64, _arg4: u64, _arg5: u64| -> u64 {
-                println!("📝 [CONSOLE.LOG] Bool logged: {}", value != 0);
-                0
-            };
-            interpreter.add_function_helper(0x32458eed, "console.log(bool)", console_log_bool);
-            
-            // ✅ console.log(string, uint256)
-            let console_log_string_uint = |_str_arg: u64, value: u64, _arg3: u64, _arg4: u64, _arg5: u64| -> u64 {
-                println!("📝 [CONSOLE.LOG] String + Uint: {}", value);
-                0
-            };
-            interpreter.add_function_helper(0xb60e72cc, "console.log(string,uint256)", console_log_string_uint);
-            
-            // ✅ console.log(string, address)
-            let console_log_string_addr = |_str_arg: u64, addr: u64, _arg3: u64, _arg4: u64, _arg5: u64| -> u64 {
-                println!("📝 [CONSOLE.LOG] String + Address: 0x{:x}", addr);
-                0
-            };
-            interpreter.add_function_helper(0x319af333, "console.log(string,address)", console_log_string_addr);
-            
-            // ✅ console.log générique pour autres variantes
-            let console_log_generic = |_arg1: u64, _arg2: u64, _arg3: u64, _arg4: u64, _arg5: u64| -> u64 {
-                println!("📝 [CONSOLE.LOG] Generic log event");
-                0
-            };
-            interpreter.add_function_helper(0x4b5c4277, "console.log_generic", console_log_generic);
-            
-            println!("✅ [CONSOLE] Support console.log configuré");
-        }
-    }
-
-    /// ✅ AJOUT: Support des événements Solidity standards
-    pub fn setup_solidity_events_support(&mut self) {
-        println!("🔧 [EVENTS] Initialisation du support des événements Solidity...");
-        
-        if let Ok(mut interpreter) = self.interpreter.try_lock() {
-            
-            // ✅ OwnershipTransferred(address indexed previousOwner, address indexed newOwner)
-            let ownership_transferred = |prev_owner: u64, new_owner: u64, _arg3: u64, _arg4: u64, _arg5: u64| -> u64 {
-                println!("📢 [EVENT] OwnershipTransferred: 0x{:x} -> 0x{:x}", prev_owner, new_owner);
-                0
-            };
-            interpreter.add_function_helper(0x8be0079c, "OwnershipTransferred", ownership_transferred);
-            
-            // ✅ Transfer(address indexed from, address indexed to, uint256 value)
-            let transfer_event = |from: u64, to: u64, value: u64, _arg4: u64, _arg5: u64| -> u64 {
-                println!("📢 [EVENT] Transfer: 0x{:x} -> 0x{:x}, amount: {}", from, to, value);
-                0
-            };
-            interpreter.add_function_helper(0xddf252ad, "Transfer", transfer_event);
-            
-            // ✅ Approval(address indexed owner, address indexed spender, uint256 value)
-            let approval_event = |owner: u64, spender: u64, value: u64, _arg4: u64, _arg5: u64| -> u64 {
-                println!("📢 [EVENT] Approval: owner 0x{:x}, spender 0x{:x}, amount: {}", owner, spender, value);
-                0
-            };
-            interpreter.add_function_helper(0x8c5be1e5, "Approval", approval_event);
-            
-            // ✅ Paused(address account)
-            let paused_event = |account: u64, _arg2: u64, _arg3: u64, _arg4: u64, _arg5: u64| -> u64 {
-                println!("📢 [EVENT] Paused by: 0x{:x}", account);
-                0
-            };
-            interpreter.add_function_helper(0x62e78cea, "Paused", paused_event);
-            
-            // ✅ Unpaused(address account)
-            let unpaused_event = |account: u64, _arg2: u64, _arg3: u64, _arg4: u64, _arg5: u64| -> u64 {
-                println!("📢 [EVENT] Unpaused by: 0x{:x}", account);
-                0
-            };
-            interpreter.add_function_helper(0x5db9ee0a, "Unpaused", unpaused_event);
-            
-            println!("✅ [EVENTS] Support des événements Solidity configuré");
-        }
-    }
-
-    /// ✅ NOUVELLE VERSION COMPLÈTE: VM avec tous les supports Solidity
-    pub fn new_with_complete_solidity_support() -> Self {
-        let mut vm = Self::new();
-        vm.setup_constructor_and_state_support();
-        vm.setup_solidity_modifiers_support();    // ✅ NOUVEAU
-        vm.setup_console_log_events_support();    // ✅ NOUVEAU  
-        vm.setup_solidity_events_support();       // ✅ NOUVEAU
-        println!("🚀 VM Slurachain avec support Solidity COMPLET initialisée");
-        vm
-    }
-
-    /// ✅ AJOUT: Méthode manquante pour support des extensions Solidity
-    pub fn setup_constructor_and_state_support(&mut self) {
-        println!("🔧 [CONSTRUCTOR] Initialisation du support constructeur et état...");
-        
-        if let Ok(mut interpreter) = self.interpreter.try_lock() {
-            
-            // ✅ Constructor helper générique
-            let constructor_helper = |_arg1: u64, _arg2: u64, _arg3: u64, _arg4: u64, _arg5: u64| -> u64 {
-                println!("🏗️  [CONSTRUCTOR] Exécution du constructeur");
-                1
-            };
-            interpreter.add_function_helper(0x00000000, "constructor", constructor_helper);
-            
-            // ✅ State initialization helper
-            let state_init_helper = |_arg1: u64, _arg2: u64, _arg3: u64, _arg4: u64, _arg5: u64| -> u64 {
-                println!("📦 [STATE] Initialisation de l'état du contrat");
-                1
-            };
-            interpreter.add_function_helper(0xffffffff, "state_init", state_init_helper);
-            
-            println!("✅ [CONSTRUCTOR] Support constructeur et état configuré");
-        }
-    }
-
-    /// ✅ AJOUT: Vérification des modifiers dans l'exécution
-    pub fn check_modifier_authorization(
-        &self,
-        contract_address: &str,
-        function_name: &str,
-        sender: &str,
-        modifier_name: &str,
-    ) -> Result<bool, String> {
-        match modifier_name {
-            "isOwner" | "onlyOwner" => {
-                // Vérifie si l'appelant est le propriétaire
-                if let Ok(accounts) = self.state.accounts.read() {
-                    if let Some(account) = accounts.get(contract_address) {
-                        // Cherche l'owner dans les resources
-                        if let Some(owner_addr) = account.resources.get("owner") {
-                            if let Some(owner_str) = owner_addr.as_str() {
-                                let sender_normalized = if sender.starts_with("0x") {
-                                    sender.to_string()
-                                } else {
-                                    format!("0x{:016x}", encode_string_to_u64(sender))
-                                };
-                                
-                                let is_owner = owner_str == sender_normalized || sender == "*system*#default#";
-                                println!("🛡️  [MODIFIER CHECK] {} pour {}: owner={}, sender={}, authorized={}", 
-                                        modifier_name, function_name, owner_str, sender_normalized, is_owner);
-                                return Ok(is_owner);
-                            }
-                        }
-                    }
-                }
-                Ok(false)
-            }
-            "whenNotPaused" => {
-                // Vérifie si le contrat n'est pas en pause
-                if let Ok(accounts) = self.state.accounts.read() {
-                    if let Some(account) = accounts.get(contract_address) {
-                        let is_paused = account.resources.get("paused")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false);
-                        println!("⏸️  [MODIFIER CHECK] whenNotPaused: paused={}, authorized={}", is_paused, !is_paused);
-                        return Ok(!is_paused);
-                    }
-                }
-                Ok(true) // Par défaut non pausé
-            }
-            "nonReentrant" => {
-                // Vérifie la réentrance (simplifié)
-                println!("🔒 [MODIFIER CHECK] nonReentrant: OK (simplifié)");
-                Ok(true)
-            }
-            "validAddress" => {
-                // Vérifie que l'adresse n'est pas 0x0
-                let is_valid = !sender.is_empty() && sender != "0x0000000000000000000000000000000000000000";
-                println!("📍 [MODIFIER CHECK] validAddress: {}, authorized={}", sender, is_valid);
-                Ok(is_valid)
-            }
-            _ => {
-                println!("❓ [MODIFIER CHECK] Modifier inconnu: {}, autorisé par défaut", modifier_name);
-                Ok(true)
+                // fallback déterministe : keccak256(key) -> 32 bytes hex
+                let hash = Keccak256::digest(k.as_bytes());
+                hex::encode(hash)
             }
         }
     }
 
-    /// ✅ AJOUT: Émission d'événements Solidity
-    pub fn emit_solidity_event(
-        &mut self,
-        contract_address: &str,
-        event_name: &str,
-        indexed_params: Vec<u64>,
-        data_params: Vec<u64>,
-    ) -> Result<(), String> {
-        println!("📢 [EMIT EVENT] {} depuis contrat {}", event_name, contract_address);
-        println!("   Indexed: {:?}", indexed_params);
-        println!("   Data: {:?}", data_params);
-
-        // Enregistre l'événement dans l'état VM
-        if let Ok(mut logs) = self.state.pending_logs.write() {
-            let topics = vec![event_name.to_string()]
-                .into_iter()
-                .chain(indexed_params.into_iter().map(|p| format!("0x{:x}", p)))
-                .collect();
-
-            let data = data_params
-                .into_iter()
-                .flat_map(|p| p.to_be_bytes())
-                .collect();
-
-            logs.push(UvmLog {
-                address: contract_address.to_string(),
-                topics,
-                data,
-            });
-
-            println!("✅ [EMIT EVENT] Événement {} enregistré", event_name);
-        }
-
-        Ok(())
-    }
-
-    pub fn load_complete_contract_state(&self, contract_address: &str) -> Result<Vec<u8>, String> {
-        if let Ok(accounts) = self.state.accounts.read() {
-            if let Some(account) = accounts.get(contract_address) {
-                let mut state_data = Vec::new();
-                
-                state_data.extend_from_slice(&account.balance.to_le_bytes());
-                state_data.extend_from_slice(&account.nonce.to_le_bytes());
-                state_data.extend_from_slice(&account.state_version.to_le_bytes());
-                
-                if let Ok(resources_bytes) = serde_json::to_vec(&account.resources) {
-                    state_data.extend_from_slice(&(resources_bytes.len() as u32).to_le_bytes());
-                    state_data.extend_from_slice(&resources_bytes);
-                }
-                
-                while state_data.len() % 8 != 0 {
-                    state_data.push(0);
-                }
-                
-                return Ok(state_data);
-            }
-        }
-        
-        Ok(vec![0u8; 1024])
-    }
-
-    /// ✅ Point d'entrée principal UVM - 100% GÉNÉRIQUE
-   /// ✅ Point d'entrée principal UVM - 100% GÉNÉRIQUE (SUPPRIME LES TRAITEMENTS SPÉCIAUX)
     pub fn execute_module(
         &mut self,
         module_path: &str,
@@ -1471,32 +1311,32 @@ fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<us
         mut args: Vec<NerenaValue>,
         sender_vyid: Option<&str>,
     ) -> Result<NerenaValue, String> {
-    // Scope du lock
-    let (vyid, sender, is_deployed_contract, has_bytecode, bytecode_opt) = {
-        let _guard = self.global_execution_lock.lock().unwrap();
+        // Scope du lock
+        let (vyid, sender, is_deployed_contract, has_bytecode, bytecode_opt) = {
+            let _guard = self.global_execution_lock.lock().unwrap();
 
-        let vyid = Self::extract_address(module_path);
-        let sender = sender_vyid.unwrap_or("*system*#default#");
+            let vyid = Self::extract_address(module_path);
+            let sender = sender_vyid.unwrap_or("*system*#default#");
 
-        if self.debug_mode {
-            println!("🔧 EXÉCUTION MODULE UVM GÉNÉRIQUE PURE");
-            println!("   Module: {}", vyid);
-            println!("   Fonction: {}", function_name);
-            println!("   Arguments: {:?}", args);
-            println!("   Sender: {}", sender);
-        }
-
-        let (is_deployed_contract, has_bytecode, bytecode_opt) = {
-            let accounts = self.state.accounts.read().unwrap();
-            if let Some(account) = accounts.get(vyid) {
-                (account.is_contract, !account.contract_state.is_empty(), Some(account.contract_state.clone()))
-            } else {
-                (false, false, None)
+            if self.debug_mode {
+                println!("🔧 EXÉCUTION MODULE UVM GÉNÉRIQUE PURE");
+                println!("   Module: {}", vyid);
+                println!("   Fonction: {}", function_name);
+                println!("   Arguments: {:?}", args);
+                println!("   Sender: {}", sender);
             }
-        };
 
-        (vyid.to_string(), sender.to_string(), is_deployed_contract, has_bytecode, bytecode_opt)
-    };
+            let (is_deployed_contract, has_bytecode, bytecode_opt) = {
+                let accounts = self.state.accounts.read().unwrap();
+                if let Some(account) = accounts.get(vyid) {
+                    (account.is_contract, !account.contract_state.is_empty(), Some(account.contract_state.clone()))
+                } else {
+                    (false, false, None)
+                }
+            };
+
+            (vyid.to_string(), sender.to_string(), is_deployed_contract, has_bytecode, bytecode_opt)
+        };
 
     // Ici, le lock est relâché, tu peux muter self
 
@@ -1624,9 +1464,10 @@ fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<us
         if let Ok(mut accounts) = self.state.accounts.write() {
             if let Some(account) = accounts.get_mut(&vyid) {
                 for (slot, value) in storage_obj {
-                    // Normalise les valeurs hex (ex: "deadbeef..." -> "0xdeadbeef...") afin
-                    // que convert_resource_to_storage_bytes les reconnaisse correctement.
-                    account.resources.insert(slot.clone(), Self::normalize_storage_json_value(value));
+                    // mappe slot logique → slot canonique ERC1967 le cas échéant
+                    let canonical_slot = self.map_resource_key_to_slot(slot);
+                    account.resources.insert(canonical_slot.clone(), Self::normalize_storage_json_value(value));
+                    println!("🔁 [APPLY STORAGE] {} <- {} (as canonical {})", vyid, slot, canonical_slot);
                 }
             }
         }
@@ -1651,6 +1492,9 @@ fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<us
         // ✅ Persistance immédiate si storage manager disponible
         if let Some(storage_manager) = &self.storage_manager {
             self.persist_result_to_storage(storage_manager, contract_address, result)?;
+            // ✅ NOUVEAU : persiste aussi le state logique/decoded dans RocksDB + met à jour resources VM
+            // assure que les clés décodées (storage_decoded) sont exposées comme clés logiques
+            self.persist_contract_state_immediate(contract_address, result)?;
         }
 
         // ✅ Mise à jour des logs si nécessaire
@@ -2091,6 +1935,12 @@ fn estimate_generic_function_offset(bytecode: &[u8], selector: u32) -> usize {
     0
 }
 
+    pub fn new_with_cluster(cluster: &str) -> Self {
+        let mut vm = SlurachainVm::new();
+        vm.state.cluster = cluster.to_string();
+        vm
+    }
+
 /// ✅ NORMALISATION: assure que les valeurs hex sont préfixées "0x" pour être reconnues
 fn normalize_storage_json_value(value: &serde_json::Value) -> serde_json::Value {
     if let Some(s) = value.as_str() {
@@ -2105,18 +1955,4 @@ fn normalize_storage_json_value(value: &serde_json::Value) -> serde_json::Value 
     }
     // sinon on renvoie la valeur originale
     value.clone()
-}
-
-    pub fn new_with_cluster(cluster: &str) -> Self {
-        let mut vm = SlurachainVm::new();
-        vm.state.cluster = cluster.to_string();
-        vm
-    }
-
-    pub fn storage_prefix(&self) -> &str {
-        &self.state.cluster
-    }
-    pub fn prefixed_key(&self, key: &str) -> String {
-        format!("{}:{}", self.storage_prefix(), key)
-    }
-}
+}}

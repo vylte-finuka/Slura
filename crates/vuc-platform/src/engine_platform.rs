@@ -3175,14 +3175,6 @@ async fn main() {
             }
         };
 
-        // ✅ DÉPLOIEMENT DU CONTRAT VEZ avec bytecode spécifique
-        println!("🪙 Deploying VEZ contract with bytecode...");
-        if let Err(e) = deploy_vez_contract_evm(&mut vm_guard, &validator_address_generated).await {
-            eprintln!("❌ Failed to deploy VEZ contract: {}", e);
-        } else {
-            println!("✅ VEZ contract deployed successfully with bytecode");
-        }
-
         // ✅ VÉRIFICATION QUE LE MODULE EST BIEN ENREGISTRÉ
         if vm_guard.modules.contains_key("0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448") {
             println!("✅ VEZ module correctly registered");
@@ -3967,11 +3959,7 @@ let mint_result = vm_guard.execute_module(
 
 if let Ok(_) = mint_result {
     println!("✅ Mint de 888M VEZ vers {} effectué avec succès", mint_address);
-    // Optionnel : mets à jour le storage si besoin
-    if let Some(proxy_acc) = vm_guard.state.accounts.write().unwrap().get_mut(&proxy_address) {
-        let key = format!("balance_{}", mint_address);
-        proxy_acc.resources.insert(key, serde_json::Value::String(mint_amount.to_string()));
-    }
+
 } else {
     println!("❌ Erreur lors du mint de VEZ : {:?}", mint_result);
 }
@@ -4060,7 +4048,6 @@ fn detect_uups_functions_in_bytecode(bytecode: &[u8]) -> Vec<String> {
     detected_functions
 }
 
-/// ✅ CORRECTION: Suppression de toute fonction avec hardcodage
 // Suppression de assign_private_key_to_system_account (contenait des valeurs hardcodées)
 // Suppression de create_initial_accounts_with_vez (contenait des valeurs hardcodées)
 

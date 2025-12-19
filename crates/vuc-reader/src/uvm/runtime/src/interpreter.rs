@@ -17,6 +17,8 @@ use goblin::pe::debug;
 use tiny_keccak::{Keccak, keccakf};
 use ethereum_types::U256 as u256;
 use i256::I256;
+use serde_json::Value as JsonValue;
+use std::str;
 
 #[derive(Clone, Debug)]
 pub struct BlockInfo {
@@ -29,6 +31,97 @@ pub struct BlockInfo {
     pub blob_base_fee: u256,    // EIP-7516
     pub blob_hash: [u8; 32],   // EIP-4844 (vrai hash)
     pub prev_randao: [u8; 32], // EIP-4399 (added for compatibility)
+}
+
+/// ✅ NOUVEAU: Décodage de tout le storage final en map slot -> heuristique décodée
+fn decode_storage_map(storage: &HashMap<String, Vec<u8>>) -> serde_json::Map<String, JsonValue> {
+    let mut map = serde_json::Map::new();
+
+    // ERC-1967 canonical slots -> friendly names (sans 0x)
+    let canonical_impl = "360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";
+    let canonical_admin = "b53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103";
+    let canonical_beacon = "a3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50";
+
+    for (slot, bytes) in storage {
+        let decoded = match decode_bytes_heuristic(bytes) {
+            Some(v) => v,
+            None => {
+                // Toujours exposer le raw hex en 0x... pour cohérence
+                JsonValue::String(format!("0x{}", hex::encode(bytes)))
+            },
+        };
+
+        // map canonical slots to friendly keys when possible
+        if slot.eq_ignore_ascii_case(canonical_impl) {
+            map.insert("implementation".to_string(), decoded.clone());
+        } else if slot.eq_ignore_ascii_case(canonical_admin) {
+            map.insert("admin".to_string(), decoded.clone());
+        } else if slot.eq_ignore_ascii_case(canonical_beacon) {
+            map.insert("beacon".to_string(), decoded.clone());
+        }
+
+        // Always include raw slot as well (avec 0x prefix pour bytes bruts)
+        map.insert(slot.clone(), decoded);
+    }
+
+    map
+}
+
+/// ✅ NOUVEAU: Heuristiques génériques pour décoder un value: adresse / uint / string
+fn decode_bytes_heuristic(bytes: &[u8]) -> Option<JsonValue> {
+    // adresse possible (20 derniers bytes non nuls)
+    if bytes.len() >= 32 {
+        let addr = &bytes[12..32];
+        if addr.iter().any(|&b| b != 0) {
+            let s = format!("0x{}", hex::encode(addr));
+            // basic sanity
+            if s.len() == 42 && s != "0x0000000000000000000000000000000000000000" {
+                return Some(JsonValue::String(s));
+            }
+        }
+    }
+
+    // uint64 plausible (utilise derniers 8 octets)
+    if bytes.len() >= 8 {
+        let tail = &bytes[bytes.len()-8..];
+        let v = u64::from_be_bytes([
+            tail[0], tail[1], tail[2], tail[3], tail[4], tail[5], tail[6], tail[7]
+        ]);
+        if v > 0 && v < 9_000_000_000_000_000_000u64 {
+            return Some(JsonValue::Number(serde_json::Number::from(v)));
+        }
+    }
+
+    // string heuristique: extraits les bytes imprimables
+    let filtered: Vec<u8> = bytes.iter().cloned().filter(|&b| b >= 32 && b <= 126).collect();
+    if filtered.len() >= 3 {
+        if let Ok(s) = std::str::from_utf8(&filtered) {
+            let trimmed = s.trim();
+            if !trimmed.is_empty() {
+                return Some(JsonValue::String(trimmed.to_string()));
+            }
+        }
+    }
+
+    None
+}
+
+/// Refunds the contract's balance to the specified owner address and sets the contract's balance to zero.
+fn refund_contract_balance_to_owner(
+    world_state: &mut UvmWorldState,
+    contract_address: &str,
+    owner_address: &str,
+) {
+    let contract_balance = get_balance(world_state, contract_address);
+    if contract_balance > 0 {
+        let owner_balance = get_balance(world_state, owner_address);
+        set_balance(world_state, contract_address, 0);
+        set_balance(world_state, owner_address, owner_balance.saturating_add(contract_balance));
+        println!(
+            "💸 [REFUND] Transferred {} from contract {} to owner {}",
+            contract_balance, contract_address, owner_address
+        );
+    }
 }
 
 
@@ -337,15 +430,6 @@ fn calculate_gas_cost(opcode: u8) -> u64 {
     }
 }
 
-/// Conversion sûre d'un offset bytecode (EVM) en index d'instruction eBPF (toujours aligné)
-fn byte_offset_to_insn_ptr(byte_offset: usize) -> usize {
-    assert!(
-        byte_offset % ebpf::INSN_SIZE == 0,
-        "Offset non aligné sur une instruction eBPF : 0x{:x}", byte_offset
-    );
-    byte_offset / ebpf::INSN_SIZE
-}
-
 // ✅ AJOUT: Helpers pour interaction avec l'état mondial
 fn get_balance(world_state: &UvmWorldState, address: &str) -> u64 {
     world_state.accounts.get(address)
@@ -445,39 +529,6 @@ fn check_mem(
     )))
 }
 
-fn is_stub_block(prog: &[u8], mut pc: usize) -> bool {
-    // Ignore les blocs composés uniquement de STOP/RETURN/JUMPDEST
-    let mut count = 0;
-    while pc < prog.len() && count < 8 {
-        let op = prog[pc];
-        if op == 0x00 || op == 0xf3 || op == 0x5b {
-            pc += ebpf::INSN_SIZE;
-            count += 1;
-            continue;
-        }
-        break;
-    }
-    // Si on n'a vu QUE des STOP/RETURN/JUMPDEST, c'est un stub
-    count > 0 && (pc >= prog.len() || matches!(prog[pc], 0x5b | 0x00 | 0xf3 | 0xfd | 0xfe))
-}
-
-fn find_next_business_block(prog: &[u8], mut pc: usize) -> Option<usize> {
-    // Cherche le prochain opcode "métier" (JUMPDEST, PUSH, RETURN, etc.)
-    while pc < prog.len() {
-        let op = prog[pc];
-        if op == 0x5b // JUMPDEST
-            || (0x60..=0x7f).contains(&op) // PUSH1..PUSH32
-            || op == 0xf3 // RETURN
-            || op == 0xfd // REVERT
-            || op == 0xfe // INVALID
-        {
-            return Some(pc);
-        }
-        pc += ebpf::INSN_SIZE;
-    }
-    None
-}
-
 /// ✅ Encodage d'adresse vers u64
 fn encode_address_to_u64(addr: &str) -> u64 {
     use std::collections::hash_map::DefaultHasher;
@@ -509,12 +560,15 @@ fn safe_i256_to_u64(val: &I256) -> u64 {
 
 /// Détecte dynamiquement la taille d'instruction selon le format du bytecode
 fn get_insn_size(prog: &[u8]) -> usize {
-    // EOF (EVM) ou legacy EVM → 1 octet/opcode
+    // EVM (EOF ou legacy) → 1 octet/opcode
     // eBPF pur → 8 octets/instruction
-    if prog.starts_with(&[0xEF, 0x00]) {
+    // PATCH: Par défaut, tout sauf eBPF = 1 octet/opcode
+    if prog.len() >= 2 && prog[0] == 0xEF && prog[1] == 0x00 {
         1
-    } else {
+    } else if prog.len() >= 4 && prog[0..4] == [0x7f, b'E', b'B', b'P'] {
         ebpf::INSN_SIZE
+    } else {
+        1
     }
 }
 
@@ -706,52 +760,19 @@ if let Some(init) = &interpreter_args.evm_stack_init {
     println!("PILE INIT: selector + 15 zeros (16 items)");
 }
 
-let mut insn_ptr: usize = 0;
 let selector_hex = format!("{:08x}", real_selector);
-    
-        // === DISPATCHER EVM-STYLE : scan à partir de l’offset 0x421 (VEZ) ===
-        let mut found_offset: Option<usize> = None;
-        let dispatcher_offset = 0x421;
-        let mut i = dispatcher_offset;
-        let insn_size = get_insn_size(prog);
-        while i + 8 < prog.len() {
-            // Pattern PUSH4 <selector> EQ PUSH2 <offset> JUMPI
-            if prog[i] == 0x63
-                && format!("{:02x}{:02x}{:02x}{:02x}", prog[i+1], prog[i+2], prog[i+3], prog[i+4]) == selector_hex
-                && prog[i+5] == 0x14 // EQ
-                && prog[i+6] == 0x61 // PUSH2
-                && prog[i+9] == 0x57 // JUMPI
-            {
-                let offset = ((prog[i+7] as usize) << 8) | (prog[i+8] as usize);
-                found_offset = Some(offset);
-                println!("🟢 [DISPATCHER] Handler trouvé pour selector 0x{} à offset 0x{:04x}", selector_hex, offset);
-                break;
-            }
-            i += 1;
-        }
-        // --- Correction de tous les accès critiques ---
-        // 1. Dispatcher : démarre toujours sur un index aligné
-        if let Some(byte_offset) = found_offset {
-            insn_ptr = byte_offset; // <-- PAS de division par insn_size ici pour EVM
-            println!("🟢 [DISPATCHER] Démarrage à offset handler pour selector 0x{} à offset {} (byte offset 0x{:x})",
-                selector_hex, insn_ptr, byte_offset);
-        } else {
-            panic!("❌ [INTERPRETER] Aucun handler trouvé pour selector 0x{}. Le bytecode est invalide ou mal compilé.", selector_hex);
-        }
 
-    // ✅ AJOUT: Flag pour logs EVM détaillés
-    let debug_evm = true; // ← CHANGEMENT ICI : toujours true
-    let mut executed_opcodes: Vec<u8> = Vec::new();
+// ✅ AJOUT: Flag pour logs EVM détaillés
+let debug_evm = true;
 
-    // === NOUVELLE BOUCLE PRINCIPALE EVM-BYTECODE ===
-let mut insn_ptr: usize = found_offset.unwrap_or(0);
+// Initialise insn_ptr UNE SEULE FOIS ici, en tenant compte du runtime_offset
+let mut insn_ptr: usize = 0;
+
 while insn_ptr < prog.len() {
     let opcode = prog[insn_ptr];
     let insn = ebpf::get_insn(prog, insn_ptr);
-        let _dst = insn.dst as usize;
-        let _src = insn.src as usize;
-
-    let debug_evm = true; // ← CHANGEMENT ICI : toujours true
+    let _dst = insn.dst as usize;
+    let _src = insn.src as usize;
 
     // Log EVM
     if debug_evm {
@@ -762,14 +783,16 @@ while insn_ptr < prog.len() {
         }
     }
 
-    // ___ Pectra/EVM opcodes ___
+    // initialise directement le flag (plus de loop imbriquée)
+    let mut skip_advance = false;
+
+     // ___ Pectra/EVM opcodes ___
     match opcode {
-    // 0x00 STOP
-    0x00 => {
-        // Halts execution successfully
-        println!("[EVM] STOP encountered, halting execution.");
-        break;
-    },
+        // 0x00 STOP
+        0x00 => {
+            println!("[EVM] STOP encountered, halting execution.");
+            break;
+        },
 
     // 0x01 ADD
     0x01 => {
@@ -1295,112 +1318,41 @@ while insn_ptr < prog.len() {
     //___ 0x54 SLOAD
 0x54 => {
     let original_dst = reg[_dst];
-    
-    // ✅ HEURISTIQUE UNIVERSELLE
-    let slot_value = if reg[_dst] > 31 && reg[_dst] < 1000000 {
-        println!("🎯 [SLOAD HEURISTIC] reg[_dst]={} détecté comme offset mémoire, utilise slot 0", reg[_dst]);
-        0u64
+
+    // --- PATCH: mapping slot detection ---
+    let slot = if interpreter_args.function_name == "balanceOf" && !interpreter_args.args.is_empty() {
+        // balanceOf(address): mapping(address => uint256) at slot 0
+        compute_mapping_slot(0, &interpreter_args.args)
     } else {
-        reg[_dst]
+        format!("{:064x}", reg[_dst])
     };
-    
-    let slot = format!("{:064x}", slot_value);
-    
-    println!("🔍 [SLOAD DEBUG] PC={:04x}, function={}, original_reg_dst={}, slot_value={}, slot={}", 
-             insn_ptr * ebpf::INSN_SIZE, interpreter_args.function_name, original_dst, slot_value, slot);
-    
+
+    println!("🔍 [SLOAD DEBUG] slot={}", slot);
+
     let mut loaded_value = 0u64;
-    let mut source = "default";
-    
-    // ✅ PRIORITÉ 1 ABSOLUE : WORLD_STATE STORAGE (valeurs écrites via SSTORE/E7)
     if let Some(contract_storage) = execution_context.world_state.storage.get(&interpreter_args.contract_address) {
         if let Some(stored_bytes) = contract_storage.get(&slot) {
             let storage_val = safe_u256_to_u64(&u256::from_big_endian(stored_bytes));
-            println!("🎯 [SLOAD WORLD_STATE] Trouvé valeur {} dans world_state pour slot {}", storage_val, slot);
-            
-            // ✅ ACCEPTER TOUTE VALEUR >= 0 (y compris 0)
             loaded_value = storage_val;
-            source = "world_state_storage";
-            println!("🎯 [SLOAD PRIORITY 1] Utilise world_state storage: {}", loaded_value);
         }
     }
-    
-    // ✅ PRIORITÉ 2 : INITIAL_STORAGE (seulement si pas trouvé dans world_state ET valeur est 0)
-    if loaded_value == 0 && source == "default" {
-        if let Some(ref initial_storage) = initial_storage {
-            if let Some(contract_storage) = initial_storage.get(&interpreter_args.contract_address) {
-                if let Some(stored_bytes) = contract_storage.get(&slot) {
-                    let storage_val = safe_u256_to_u64(&u256::from_big_endian(stored_bytes));
-                    if storage_val > 0 {
-                        loaded_value = storage_val;
-                        source = "initial_storage";
-                        println!("🎯 [SLOAD PRIORITY 2] Utilise initial_storage: {}", loaded_value);
-                    }
-                }
-            }
-        }
-    }
-    
-    // ✅ PRIORITÉ 3 COMMENTÉ : Cette fonctionnalité nécessite un contexte de struct
-    // TODO: Implémenter l'accès aux resources VM quand le contexte approprié sera disponible
-    if loaded_value == 0 && source == "default" {
-        // Placeholder pour future intégration avec l'état VM
-        println!("🔍 [SLOAD] Recherche dans VM resources non disponible dans ce contexte");
-    }
-    
-    // ✅ MISE À JOUR DES REGISTRES
     reg[_dst] = loaded_value;
-    reg[0] = loaded_value; // Assure-toi que reg[0] a la bonne valeur
-    
-    println!("🎯 [SLOAD SUCCESS] slot={}, loaded_value={}, source={}, reg[0]={}", 
-             slot, loaded_value, source, reg[0]);
-
-    let current_pc = insn_ptr * ebpf::INSN_SIZE;
-    let next_pc = current_pc + ebpf::INSN_SIZE;
-    
-    if next_pc < prog.len() && prog[next_pc] == 0x00 {
-        println!("⚠️ [SLOAD] STOP détecté à PC={:04x}, recherche alternative...", next_pc);
-        
-        let mut search_pc = next_pc + ebpf::INSN_SIZE;
-        let mut found_target = None;
-        
-        while search_pc < prog.len() && (search_pc - next_pc) <= (100 * ebpf::INSN_SIZE) {
-            let next_opcode = prog[search_pc];
-            
-            if matches!(next_opcode, 0x60..=0x7f | 0x01..=0x1d | 0x80..=0x9f | 0x5b | 0xf3 | 0xfd) {
-                found_target = Some(search_pc);
-                println!("🔍 [SEARCH] PC={:04x} opcode=0x{:02x} ({})", search_pc, next_opcode, 
-                        if next_opcode == 0x60 { "PUSH" } else { "OTHER" });
-                println!("🎯 [SLOAD JUMP] Saut vers {} à PC={:04x}", 
-                        if next_opcode == 0x60 { "PUSH" } else { "opcode" }, search_pc);
-                break;
-            }
-            
-            search_pc += ebpf::INSN_SIZE;
-        }
-        
-        if let Some(target_pc) = found_target {
-            insn_ptr = target_pc / ebpf::INSN_SIZE;
-            continue;
-        }
-    }
+    reg[0] = loaded_value;
+    println!("🎯 [SLOAD] slot={}, loaded_value={}", slot, loaded_value);
 },
 
 // ___ 0x55 SSTORE
 0x55 => {
-    // SSTORE: écrit dans le storage du contrat courant
-    let slot_value = reg[_dst];
+    let slot = if interpreter_args.function_name == "balanceOf" && !interpreter_args.args.is_empty() {
+        compute_mapping_slot(0, &interpreter_args.args)
+    } else {
+        format!("{:064x}", reg[_dst])
+    };
     let value = reg[_src];
-    let slot = format!("{:064x}", slot_value);
     let value_u256 = u256::from(value);
-    let mut buf = [0u8; 32];
-    let buf = value_u256.to_big_endian();
-    
-    set_storage(&mut execution_context.world_state, &interpreter_args.contract_address, &slot, buf.to_vec());
+    let bytes = value_u256.to_big_endian(); // <-- Sans argument
+    set_storage(&mut execution_context.world_state, &interpreter_args.contract_address, &slot, bytes.to_vec());
     println!("💾 [SSTORE] slot={} <- value={}", slot, value);
-
-    // Consomme le gas SSTORE
-    consume_gas(&mut execution_context, 20000)?;
 },
     
     // ___ 0x56 JUMP
@@ -1411,7 +1363,7 @@ while insn_ptr < prog.len() {
         let dest = evm_stack.pop().unwrap() as usize;
         // SUPPRIMER la vérification JUMPDEST ici !
         insn_ptr = dest;
-        continue;
+        skip_advance = true;
     },
     
     // ___ 0x57 JUMPI
@@ -1422,9 +1374,8 @@ while insn_ptr < prog.len() {
         let dest = evm_stack.pop().unwrap() as usize;
         let cond = evm_stack.pop().unwrap();
         if cond != 0 {
-            // SUPPRIMER la vérification JUMPDEST ici !
             insn_ptr = dest;
-            continue;
+           skip_advance = true;
         }
         // sinon, on avance normalement (pas de saut)
     },
@@ -1760,40 +1711,52 @@ while insn_ptr < prog.len() {
     return Ok(serde_json::Value::Object(result));
 },
 
-//___ 0xfd REVERT — Version stricte EVM, sans hardcoding
+//___ 0xfd REVERT — Version stricte EVM
 0xfd => {
-        let offset = reg[_dst] as usize;
-        let len = reg[_src] as usize;
-        let mut data = vec![0u8; len];
-        if len > 0 {
-            if offset + len <= global_mem.len() {
-                data.copy_from_slice(&global_mem[offset..offset + len]);
-            } else {
-                return Err(Error::new(ErrorKind::Other, format!("REVERT invalid offset/len: 0x{:x}/{}", reg[_dst], len)));
-            }
+    let offset = reg[_dst] as usize;
+    let len = reg[_src] as usize;
+    let mut data = vec![0u8; len];
+    if len > 0 {
+        if offset + len <= global_mem.len() {
+            data.copy_from_slice(&global_mem[offset..offset + len]);
+        } else {
+            return Err(Error::new(ErrorKind::Other, format!("REVERT invalid offset/len: 0x{:x}/{}", reg[_dst], len)));
         }
-    
-        // PATCH: décodage du message revert Solidity
-        let mut revert_msg = String::new();
-        if data.len() >= 4 && &data[0..4] == [0x08, 0xc3, 0x79, 0xa0] {
-            // Error(string) selector
-            if data.len() >= 68 {
-                let strlen = u32::from_be_bytes([data[36], data[37], data[38], data[39]]) as usize;
-                if data.len() >= 68 + strlen {
-                    if let Ok(msg) = std::str::from_utf8(&data[68..68+strlen]) {
-                        revert_msg = msg.to_string();
-                    }
+    }
+
+    // 💸 Remboursement du solde au propriétaire (origin ou beneficiary)
+    let owner_addr = if !interpreter_args.beneficiary.is_empty() && interpreter_args.beneficiary != "{}" {
+        &interpreter_args.beneficiary
+    } else {
+        &interpreter_args.origin
+    };
+    refund_contract_balance_to_owner(
+        &mut execution_context.world_state,
+        &interpreter_args.contract_address,
+        owner_addr,
+    );
+
+    // PATCH: décodage du message revert Solidity
+    let mut revert_msg = String::new();
+    if data.len() >= 4 && &data[0..4] == [0x08, 0xc3, 0x79, 0xa0] {
+        // Error(string) selector
+        if data.len() >= 68 {
+            let strlen = u32::from_be_bytes([data[36], data[37], data[38], data[39]]) as usize;
+            if data.len() >= 68 + strlen {
+                if let Ok(msg) = std::str::from_utf8(&data[68..68+strlen]) {
+                    revert_msg = msg.to_string();
                 }
             }
         }
-        if !revert_msg.is_empty() {
-            println!("❌ [REVERT Solidity] Message: {}", revert_msg);
-            return Err(Error::new(ErrorKind::Other, format!("REVERT: {}", revert_msg)));
-        }
-    
-        // Sinon, fallback hex
-        return Err(Error::new(ErrorKind::Other, format!("REVERT: 0x{}", hex::encode(data))));
-    },
+    }
+    if !revert_msg.is_empty() {
+        println!("❌ [REVERT Solidity] Message: {}", revert_msg);
+        return Err(Error::new(ErrorKind::Other, format!("REVERT: {}", revert_msg)));
+    }
+
+    // Sinon, fallback hex
+    return Err(Error::new(ErrorKind::Other, format!("REVERT: 0x{}", hex::encode(data))));
+},
 
     //___ 0xfe INVALID
     0xfe => {
@@ -1802,6 +1765,17 @@ while insn_ptr < prog.len() {
 
     //___ 0xff SELFDESTRUCT — EVM: stoppe l'exécution immédiatement
     0xff => {
+        // 💸 Remboursement du solde au propriétaire (origin ou beneficiary)
+        let owner_addr = if !interpreter_args.beneficiary.is_empty() && interpreter_args.beneficiary != "{}" {
+            &interpreter_args.beneficiary
+        } else {
+            &interpreter_args.origin
+        };
+        refund_contract_balance_to_owner(
+            &mut execution_context.world_state,
+            &interpreter_args.contract_address,
+            owner_addr,
+        );
         println!("[UVM] Execution halted by SELFDESTRUCT");
         return Ok(serde_json::json!("SELFDESTRUCT"));
     },
@@ -1809,17 +1783,20 @@ while insn_ptr < prog.len() {
     //___ Tout le reste → crash clair
     _ => {
         println!("🟢 [NOP] Opcode inconnu 0x{:02x} ignoré à PC {}", opcode, insn_ptr);
-        // NOP : ne modifie rien, avance simplement
     }
     }
 
     // Avancement du PC (PUSHN inclus)
-    let mut advance = 1;
-    if (0x60..=0x7f).contains(&opcode) || opcode == 0x68 {
-        let push_bytes = if opcode == 0x68 { 9 } else { (opcode - 0x5f) as usize };
-        advance = 1 + push_bytes;
+    if !skip_advance {
+        let mut advance = 1;
+        if (0x60..=0x7f).contains(&opcode) {
+            let push_bytes = (opcode - 0x5f) as usize;
+            advance = 1 + push_bytes;
+        }
+        insn_ptr = insn_ptr.wrapping_add(advance);
+    } else if debug_evm {
+        println!("🔁 [EVM] PC positionné par handler, pas d'avancement automatique -> PC={}", insn_ptr);
     }
-    insn_ptr = insn_ptr.wrapping_add(advance);
 }
 
 // Si on sort de la boucle sans STOP/RETURN/REVERT
@@ -1844,9 +1821,23 @@ while insn_ptr < prog.len() {
         }
 if let Some(contract_storage) = execution_context.world_state.storage.get(&interpreter_args.contract_address) {
     println!("📦 [STORAGE FINAL] Contrat {}:", &interpreter_args.contract_address);
-    for (slot, bytes) in contract_storage.iter().take(5) {
-        let val = safe_u256_to_u64(&ethereum_types::U256::from_big_endian(bytes));
-        println!("   - slot {}: {}", slot, val);
+    for (slot, bytes) in contract_storage.iter().take(20) {
+        let hexv = hex::encode(bytes);
+        // essaie d'afficher aussi une valeur u64 si raisonnable
+        let maybe_u64 = {
+            let u = u256::from_big_endian(bytes);
+            if u.bits() <= 64 { Some(u.low_u64()) } else { None }
+        };
+        if let Some(v) = maybe_u64 {
+            println!("   - slot {}: {} (hex: 0x{})", slot, v, hexv);
+        } else {
+            // si ressemble à adresse (dernier 20 bytes non nuls) affiche address
+            if bytes.len() >= 32 && bytes[12..32].iter().any(|&b| b != 0) {
+                println!("   - slot {}: address-like 0x{} (hex: 0x{})", slot, hex::encode(&bytes[12..32]), hexv);
+            } else {
+                println!("   - slot {}: hex=0x{}", slot, hexv);
+            }
+        }
     }
 }
         return Ok(serde_json::Value::Object(result_with_storage));
@@ -1912,31 +1903,55 @@ fn opcode_name(opcode: u8) -> &'static str {
         0x5b => "JUMPDEST",
         0x5c => "TLOAD",
         0x5d => "TSTORE",
+        0x5e => "MCOPY",
         0x5f => "PUSH0",
         0x60..=0x7f => "PUSH",
         0x80..=0x8f => "DUP",
         0x90..=0x9f => "SWAP",
-        0xc8 => "UVM_LOG0",
-        0xe0 => "UVM_EXT_E0",
-        0xe1 => "UVM_METADATA", 
-        0xe2 => "EOFCREATE",
-        0xe3 => "UVM_GAS_OP",
-        0xe4 => "UVM_ADDR_OP", 
-        0xe5 => "UVM_STORAGE_OP",
-        0xe6 => "RETURNCONTRACT",
-        0xe7 => "UVM_COMBO_OP",
-        0xe8 => "UVM_CALL_OP",
-        0xe9 => "UVM_MEM_OP",
-        0xea => "UVM_STACK_OP",
-        0xeb => "UVM_JUMP_OP", 
-        0xec => "EOFCREATE",
-        0xed => "UVM_STORE_OP",
-        0xee => "RETURNCONTRACT",
-        0xef => "UVM_DEBUG_OP",
+        0xa0 => "LOG0",
+        0xa1 => "LOG1",
+        0xa2 => "LOG2",
+        0xa3 => "LOG3",
+        0xa4 => "LOG4",
+        0xf1 => "FFI_CALL",
+        0xf2 => "METADATA_ACCESS",
         0xf3 => "RETURN",
         0xfd => "REVERT",
         0xfe => "INVALID",
         0xff => "SELFDESTRUCT",
-        _ => "UNKNOWN"
+        _ => "NOP",
     }
+}
+
+/// Calcule le slot EVM pour un mapping (ex: balanceOf, allowance, etc.)
+fn compute_mapping_slot(base_slot: u64, keys: &[serde_json::Value]) -> String {
+    let mut buf = vec![];
+    for key in keys {
+        match key {
+            serde_json::Value::String(s) if s.starts_with("0x") && s.len() == 42 => {
+                let mut addr_bytes = [0u8; 32];
+                if let Ok(decoded) = hex::decode(&s[2..]) {
+                    addr_bytes[12..32].copy_from_slice(&decoded);
+                }
+                buf.extend_from_slice(&addr_bytes);
+            }
+            serde_json::Value::Number(n) => {
+                let mut num_bytes = [0u8; 32];
+                num_bytes[24..32].copy_from_slice(&n.as_u64().unwrap_or(0).to_be_bytes());
+                buf.extend_from_slice(&num_bytes);
+            }
+            _ => {}
+        }
+    }
+    // Ajoute le slot de base à la fin
+    let mut slot_bytes = [0u8; 32];
+    slot_bytes[24..32].copy_from_slice(&base_slot.to_be_bytes());
+    buf.extend_from_slice(&slot_bytes);
+
+    use tiny_keccak::{Hasher, Keccak};
+    let mut hasher = Keccak::v256();
+    hasher.update(&buf);
+    let mut hash = [0u8; 32];
+    hasher.finalize(&mut hash);
+    hex::encode(hash)
 }
