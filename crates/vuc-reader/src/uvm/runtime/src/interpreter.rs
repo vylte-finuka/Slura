@@ -1425,6 +1425,8 @@ let insn_ptr = pc;
 
 // ___ 0x56 JUMP
 0x56 => {
+// ___ 0x56 JUMP
+0x56 => {
     if evm_stack.is_empty() {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
     }
