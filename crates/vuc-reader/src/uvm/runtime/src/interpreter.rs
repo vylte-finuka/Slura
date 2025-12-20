@@ -11,10 +11,8 @@ use crate::lib::*;
 use crate::stack::{StackFrame, StackUsage};
 use core::ops::Range;
 use std::hash::DefaultHasher;
-use std::ops::Add;
 use std::hash::{Hash, Hasher};
-use goblin::pe::debug;
-use tiny_keccak::{Keccak, keccakf};
+use tiny_keccak::{Keccak, Hasher as _};
 use ethereum_types::U256 as u256;
 use i256::I256;
 use serde_json::Value as JsonValue;
@@ -294,37 +292,21 @@ fn consume_gas(context: &mut UvmExecutionContext, amount: u64) -> Result<(), Err
     Ok(())
 }
 
-fn find_jumpdest_offset(prog: &[u8], dest: usize) -> Option<usize> {
-    // On vérifie que dest pointe bien sur un JUMPDEST (0x5b)
-    if dest < prog.len() && prog[dest] == 0x5b {
-        return Some(dest);
+/// Calcule le slot Solidity pour un mapping (clé: address ou uint, slot: u64)
+pub fn compute_solidity_mapping_slot(address: &str, slot: u64) -> String {
+    let mut buf = [0u8; 64];
+    // Adresse : 20 bytes à droite, 12 bytes de padding à gauche
+    if address.starts_with("0x") && address.len() == 42 {
+        let addr_bytes = hex::decode(&address[2..]).unwrap_or(vec![0u8; 20]);
+        buf[12..32].copy_from_slice(&addr_bytes);
     }
-    // Sinon, scan en avant jusqu'au prochain JUMPDEST (sécurité)
-    let mut pc = dest;
-    while pc < prog.len() {
-        if prog[pc] == 0x5b {
-            return Some(pc);
-        }
-        pc += 1;
-    }
-    None
-}
-
-// Fonction utilitaire pour trouver le prochain opcode à partir d'un offset byte
-fn find_next_opcode(prog: &[u8], mut offset: usize) -> Option<(usize, u8)> {
-    while offset < prog.len() {
-        let opc = prog[offset];
-        if opc <= 0x5b || (0x60 <= opc && opc <= 0x7f) || opc >= 0xa0 {
-            return Some((offset, opc));
-        }
-        // PUSH1..32
-        if (0x60..=0x7f).contains(&opc) {
-            let push_bytes = (opc - 0x5f) as usize;
-            offset += push_bytes;
-        }
-        offset += 1;
-    }
-    None
+    // Slot : 32 bytes big endian
+    buf[32..64].copy_from_slice(&slot.to_be_bytes().repeat(4)[..32]);
+    let mut hasher = Keccak::v256();
+    hasher.update(&buf);
+    let mut hash = [0u8; 32];
+    hasher.finalize(&mut hash);
+    hex::encode(hash)
 }
 
 fn evm_load_32(global_mem: &[u8], mbuff: &[u8], addr: u64) -> Result<u256, Error> {
@@ -639,6 +621,7 @@ pub fn execute_program(
     let mut mem_write_offset = 0usize;
 
     // 256 Mo → assez pour tous les contrats EOF + initialize + proxy UUPS
+
 let mut global_mem = vec![0u8; 256 * 1024 * 1024];
 
     let mut reg: [u64; 64] = [0; 64];
@@ -741,50 +724,67 @@ reg[54] = interpreter_args.call_depth as u64;           // Profondeur d'appel
 
     // === INIT PILE EVM ===
     let mut evm_stack: Vec<u64> = Vec::with_capacity(1024);
-
-if let Some(init) = &interpreter_args.evm_stack_init {
-    for &v in init {
-        evm_stack.push(v);
+        
+   if let Some(init) = &interpreter_args.evm_stack_init {
+    // PATCH: Si la pile ne commence pas par le selector, on le force
+    let expected_selector = real_selector as u64;
+    if init.is_empty() || init[0] != expected_selector {
+        evm_stack.push(expected_selector);
+        for &v in init {
+            evm_stack.push(v);
+        }
+    } else {
+        for &v in init {
+            evm_stack.push(v);
+        }
     }
-    // Patch: complète à 16 éléments si besoin
     while evm_stack.len() < 16 {
         evm_stack.push(0);
     }
-    println!("PILE INIT: pushed from evm_stack_init ({} items)", evm_stack.len());
-} else if interpreter_args.function_name != "fallback" && interpreter_args.function_name != "receive" {
-    evm_stack.push(real_selector as u64);
-    // Patch : remplir la pile avec 15 zéros pour éviter les underflow sur DUP15
-    for _ in 0..15 {
-        evm_stack.push(0);
+    println!("PILE INIT: forced selector 0x{:08x} ({} items)", expected_selector, evm_stack.len());
+} else {
+        // PATCH: dispatcher EVM → push le selector en premier
+        let selector = {
+            use tiny_keccak::Hasher;
+            let sig = &interpreter_args.function_name;
+            let mut keccak = Keccak::v256();
+            Hasher::update(&mut keccak, sig.as_bytes());
+            let mut hash = [0u8; 32];
+            keccak.finalize(&mut hash);
+            u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]])
+        };
+        evm_stack.push(selector as u64);
+        for _ in 0..15 { evm_stack.push(0); }
+        println!("PILE INIT: selector dispatcher mode ({} items, selector=0x{:08x})", evm_stack.len(), selector);
     }
-    println!("PILE INIT: selector + 15 zeros (16 items)");
-}
-
-let selector_hex = format!("{:08x}", real_selector);
 
 // ✅ AJOUT: Flag pour logs EVM détaillés
 let debug_evm = true;
 
 // Initialise insn_ptr UNE SEULE FOIS ici, en tenant compte du runtime_offset
-let mut insn_ptr: usize = 0;
+ let mut pc: usize = if let Some(off) = interpreter_args.function_offset {
+        off // déjà en bytes
+    } else {
+        0
+    };
 
-while insn_ptr < prog.len() {
-    let opcode = prog[insn_ptr];
-    let insn = ebpf::get_insn(prog, insn_ptr);
-    let _dst = insn.dst as usize;
-    let _src = insn.src as usize;
+    // --- AJOUT: flag pour forcer un pas unique juste après un JUMP/JUMPI
+    let mut force_single_step_after_jump = false;
 
-    // Log EVM
+    // Ajoute ces deux variables AVANT la boucle principale
+    let mut did_return = false;
+    let mut last_return_value: Option<serde_json::Value> = None;
+
+while pc < prog.len() {
+    let opcode = prog[pc];
     if debug_evm {
-        println!("🔍 [EVM LOG] PC={:04x} | OPCODE=0x{:02x} ({})", insn_ptr, opcode, opcode_name(opcode));
-        println!("🔍 [EVM STATE] REG[0-7]: {:?}", &reg[0..8]);
-        if !evm_stack.is_empty() {
-            println!("🔍 [EVM STACK] Top 5: {:?}", evm_stack.iter().rev().take(5).collect::<Vec<_>>());
-        }
+        println!("🔍 [EVM LOG] PC={:04x} | OPCODE=0x{:02x} ({})", pc, opcode, opcode_name(opcode));
     }
 
-    // initialise directement le flag (plus de loop imbriquée)
-    let mut skip_advance = false;
+    let _dst = 0;
+let _src = 1;
+let insn_ptr = pc;
+    let mut advance = 1;
 
      // ___ Pectra/EVM opcodes ___
     match opcode {
@@ -1198,7 +1198,7 @@ while insn_ptr < prog.len() {
         
         // ✅ DEBUG SPÉCIAL POUR ARGUMENTS
         println!("📥 [CALLDATALOAD DEBUG] PC={:04x}, addr={}, loaded_value={}, mbuff.len()={}", 
-                 insn_ptr * ebpf::INSN_SIZE, addr, loaded_value, mbuff.len());
+                 insn_ptr, addr, loaded_value, mbuff.len());
         
         if mbuff.len() > 0 {
             println!("📥 [CALLDATA HEX] Premier 32 bytes: {}", 
@@ -1216,7 +1216,8 @@ while insn_ptr < prog.len() {
     0x37 => {
         let dst = reg[_dst] as usize; // treat as offset into global_mem
         let src = reg[_src] as usize; // treat as offset into mbuff
-        let len = insn.imm as usize;
+        // Remplace insn.imm par lecture directe du bytecode
+        let len = if pc + 2 < prog.len() { prog[pc + 2] as usize } else { 0 };
         if src + len <= mbuff.len() && dst + len <= global_mem.len() {
             let data = &mbuff[src..src + len];
             global_mem[dst..dst + len].copy_from_slice(data);
@@ -1317,12 +1318,17 @@ while insn_ptr < prog.len() {
 
     //___ 0x54 SLOAD
 0x54 => {
-    let original_dst = reg[_dst];
-
-    // --- PATCH: mapping slot detection ---
+    // Si la pile contient une clé mapping (ex: balanceOf(address)), utilise compute_solidity_mapping_slot
     let slot = if interpreter_args.function_name == "balanceOf" && !interpreter_args.args.is_empty() {
         // balanceOf(address): mapping(address => uint256) at slot 0
-        compute_mapping_slot(0, &interpreter_args.args)
+        compute_solidity_mapping_slot(interpreter_args.args[0].as_str().unwrap_or("0x0"), 0)
+    } else if interpreter_args.function_name == "allowance" && interpreter_args.args.len() >= 2 {
+        // allowance(address,address): mapping(address => mapping(address => uint256)) at slot 1
+        // slot = keccak256(pad(spender) ++ keccak256(pad(owner) ++ pad(1)))
+        let owner = interpreter_args.args[0].as_str().unwrap_or("0x0");
+        let spender = interpreter_args.args[1].as_str().unwrap_or("0x0");
+        let inner = compute_solidity_mapping_slot(owner, 1);
+        compute_solidity_mapping_slot(spender, u64::from_str_radix(&inner, 16).unwrap_or(0))
     } else {
         format!("{:064x}", reg[_dst])
     };
@@ -1344,7 +1350,12 @@ while insn_ptr < prog.len() {
 // ___ 0x55 SSTORE
 0x55 => {
     let slot = if interpreter_args.function_name == "balanceOf" && !interpreter_args.args.is_empty() {
-        compute_mapping_slot(0, &interpreter_args.args)
+        compute_solidity_mapping_slot(interpreter_args.args[0].as_str().unwrap_or("0x0"), 0)
+    } else if interpreter_args.function_name == "allowance" && interpreter_args.args.len() >= 2 {
+        let owner = interpreter_args.args[0].as_str().unwrap_or("0x0");
+        let spender = interpreter_args.args[1].as_str().unwrap_or("0x0");
+        let inner = compute_solidity_mapping_slot(owner, 1);
+        compute_solidity_mapping_slot(spender, u64::from_str_radix(&inner, 16).unwrap_or(0))
     } else {
         format!("{:064x}", reg[_dst])
     };
@@ -1355,30 +1366,44 @@ while insn_ptr < prog.len() {
     println!("💾 [SSTORE] slot={} <- value={}", slot, value);
 },
     
-    // ___ 0x56 JUMP
-    0x56 => {
-        if evm_stack.is_empty() {
-            return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
+// ___ 0x56 JUMP
+0x56 => {
+    if evm_stack.is_empty() {
+        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
+    }
+    let dest = evm_stack.pop().unwrap() as usize;
+    if dest >= prog.len() {
+        return Err(Error::new(ErrorKind::Other, format!("EVM REVERT: JUMP hors bytecode 0x{:x}", dest)));
+    }
+    if prog[dest] != 0x5b {
+        return Err(Error::new(ErrorKind::Other, format!(
+            "EVM REVERT: JUMP vers 0x{:x} qui n'est pas un JUMPDEST (opcode=0x{:02x})", dest, prog[dest]
+        )));
+    }
+    pc = dest;
+    continue;
+},
+
+// ___ 0x57 JUMPI
+0x57 => {
+    if evm_stack.len() < 2 {
+        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMPI"));
+    }
+    let dest = evm_stack.pop().unwrap() as usize;
+    let cond = evm_stack.pop().unwrap();
+    if cond != 0 {
+        if dest >= prog.len() {
+            return Err(Error::new(ErrorKind::Other, format!("EVM REVERT: JUMPI hors bytecode 0x{:x}", dest)));
         }
-        let dest = evm_stack.pop().unwrap() as usize;
-        // SUPPRIMER la vérification JUMPDEST ici !
-        insn_ptr = dest;
-        skip_advance = true;
-    },
-    
-    // ___ 0x57 JUMPI
-    0x57 => {
-        if evm_stack.len() < 2 {
-            return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMPI"));
+        if prog[dest] != 0x5b {
+            return Err(Error::new(ErrorKind::Other, format!(
+                "EVM REVERT: JUMPI vers 0x{:x} qui n'est pas un JUMPDEST (opcode=0x{:02x})", dest, prog[dest]
+            )));
         }
-        let dest = evm_stack.pop().unwrap() as usize;
-        let cond = evm_stack.pop().unwrap();
-        if cond != 0 {
-            insn_ptr = dest;
-           skip_advance = true;
-        }
-        // sinon, on avance normalement (pas de saut)
-    },
+        pc = dest;
+        continue;
+    }
+},
     
         //___ 0x58 PC
     0x58 => {
@@ -1425,7 +1450,8 @@ while insn_ptr < prog.len() {
     0x5e => {
         let dst_offset = reg[_dst] as usize;
         let src_offset = reg[_src] as usize;
-        let len = insn.imm as usize;
+        // Remplace insn.imm par lecture directe du bytecode
+        let len = if pc + 2 < prog.len() { prog[pc + 2] as usize } else { 0 };
         // Patch permissif : si OOB, on tronque la copie à ce qui est possible
         let max_len = global_mem.len().saturating_sub(dst_offset).min(global_mem.len().saturating_sub(src_offset));
         let safe_len = len.min(max_len);
@@ -1442,68 +1468,49 @@ while insn_ptr < prog.len() {
         reg[_dst] = 0;
         consume_gas(&mut execution_context, 2)?;
     },
-    
-    //___ 0x60..=0x7f : PUSH1 à PUSH32
-            0x60..=0x7f => {
-                // PUSHn: push n bytes as a value on the stack (right-aligned, big-endian)
-                let n = (opcode - 0x5f) as usize;
-                let start = insn_ptr + 1;
-                let end = start + n;
-                let mut value = 0u64;
-                // On ne gère ici que les PUSH jusqu'à 8 bytes (pour u64), au-delà, tronqué
-                if end <= prog.len() {
-                    let mut bytes = [0u8; 8];
-                    let copy_len = n.min(8);
-                    if start + copy_len <= prog.len() {
-                        bytes[8 - copy_len..].copy_from_slice(&prog[start..start + copy_len]);
-                        value = u64::from_be_bytes(bytes);
-                    } else {
-                        println!("⚠️ [EVM] PUSH{} dépasse la taille du bytecode, valeur ignorée", n);
-                    }
-                } else {
-                    println!("⚠️ [EVM] PUSH{} dépasse la taille du bytecode, valeur ignorée", n);
-                }
-                if evm_stack.len() >= 1024 {
-                    println!("⚠️ [EVM] Stack overflow sur PUSH{} (stack pleine, valeur ignorée)", n);
-                } else {
-                    evm_stack.push(value);
-                }
-                reg[0] = value;
-                // Avance le PC de n+1 (fait plus bas dans la boucle)
-            },
-            
-        //___ 0x80 → 0x8f : DUP1 à DUP16
-        (0x80..=0x8f) => {
-            let depth = (opcode - 0x80 + 1) as usize;
-            if evm_stack.len() < depth {
-                println!("⚠️ [EVM] Stack underflow sur DUP{} (stack size={})", depth, evm_stack.len());
-                // On ignore l'instruction, pas de panic ni d'erreur
-            } else if evm_stack.len() >= 1024 {
-                println!("⚠️ [EVM] Stack overflow sur DUP{} (stack pleine, duplication ignorée)", depth);
-            } else {
-                let value = evm_stack[evm_stack.len() - depth];
-                evm_stack.push(value);
-                reg[_dst] = value;
-            }
-        },
         
-        // ___ 0x90 → 0x9f : SWAP1 à SWAP16
-        (0x90..=0x9f) => {
-            let depth = (opcode - 0x90 + 1) as usize;
-            if evm_stack.len() < depth + 1 {
-                println!("⚠️ [EVM] Stack underflow sur SWAP{} (stack size={})", depth, evm_stack.len());
-                // On ignore l'instruction, pas de panic ni d'erreur
-            } else {
-                let top = evm_stack.len() - 1;
-                // Protection anti-overflow :
-                if top < depth {
-                    println!("⚠️ [EVM] SWAP{} overflow (top={}, depth={})", depth, top, depth);
-                } else {
-                    evm_stack.swap(top, top - depth);
-                    reg[_dst] = evm_stack[top];
-                }
+    //___ 0x60..=0x7f : PUSH1 à PUSH32
+        0x60..=0x7f => {
+            let push_bytes = (opcode - 0x5f) as usize;
+            let start = pc + 1;
+            let end = start + push_bytes;
+            let mut value = [0u8; 32];
+            if end <= prog.len() {
+                value[32 - push_bytes..].copy_from_slice(&prog[start..end]);
             }
-        },
+            let push_value = u256::from_big_endian(&value).low_u64();
+            evm_stack.push(push_value);
+            advance = 1 + push_bytes;
+        }
+    
+    //___ 0x80 → 0x8f : DUP1 à DUP16
+    (0x80..=0x8f) => {
+        let depth = (opcode - 0x80) as usize;
+        if evm_stack.len() <= depth {
+            println!("⚠️ [EVM] Stack underflow sur DUP{} (stack size={})", depth + 1, evm_stack.len());
+            // On ignore l'instruction, pas de panic ni d'erreur
+        } else if evm_stack.len() >= 1024 {
+            println!("⚠️ [EVM] Stack overflow sur DUP{} (stack pleine, duplication ignorée)", depth + 1);
+        } else {
+            // EVM : DUPn duplique la n-ième valeur à partir du sommet (top = fin du Vec)
+            let value = evm_stack[evm_stack.len() - 1 - depth];
+            evm_stack.push(value);
+            // reg[_dst] = value; // Optionnel, selon ton usage
+        }
+    },
+    
+    // ___ 0x90 → 0x9f : SWAP1 à SWAP16
+    (0x90..=0x9f) => {
+        let depth = (opcode - 0x90 + 1) as usize;
+        if evm_stack.len() <= depth {
+            println!("⚠️ [EVM] Stack underflow sur SWAP{} (stack size={})", depth, evm_stack.len());
+            // On ignore l'instruction, pas de panic ni d'erreur
+        } else {
+            let top = evm_stack.len() - 1;
+            evm_stack.swap(top, top - depth);
+            // reg[_dst] = evm_stack[top]; // Optionnel, selon ton usage
+        }
+    },
 
 //___ 0xa0 LOG0
 0xa0 => {
@@ -1690,15 +1697,18 @@ while insn_ptr < prog.len() {
         serde_json::Value::String(hex::encode(&ret_data))
     };
 
-    // Retour final avec storage modifié (si présent)
+    // PATCH: mémorise le retour et stoppe la VM
+    did_return = true;
+    last_return_value = Some(formatted_result);
+
+    // ...stockage final...
     let final_storage = execution_context.world_state.storage
         .get(&interpreter_args.contract_address)
         .cloned()
         .unwrap_or_default();
 
     let mut result = serde_json::Map::new();
-    result.insert("return".to_string(), formatted_result);
-
+    result.insert("return".to_string(), last_return_value.clone().unwrap_or(serde_json::Value::Null));
     if !final_storage.is_empty() {
         let mut storage_json = serde_json::Map::new();
         for (slot, bytes) in final_storage {
@@ -1706,12 +1716,11 @@ while insn_ptr < prog.len() {
         }
         result.insert("storage".to_string(), serde_json::Value::Object(storage_json));
     }
-
     println!("✅ [RETURN SUCCESS] Résultat: {:?}", result.get("return"));
     return Ok(serde_json::Value::Object(result));
 },
 
-//___ 0xfd REVERT — Version stricte EVM
+//___ 0xfd REVERT — DOIT STOPPER L'EXÉCUTION ET SIGNALER UNE ERREUR
 0xfd => {
     let offset = reg[_dst] as usize;
     let len = reg[_src] as usize;
@@ -1720,7 +1729,7 @@ while insn_ptr < prog.len() {
         if offset + len <= global_mem.len() {
             data.copy_from_slice(&global_mem[offset..offset + len]);
         } else {
-            return Err(Error::new(ErrorKind::Other, format!("REVERT invalid offset/len: 0x{:x}/{}", reg[_dst], len)));
+            println!("⚠️ [REVERT] invalid offset/len: 0x{:x}/{}", reg[_dst], len);
         }
     }
 
@@ -1751,11 +1760,22 @@ while insn_ptr < prog.len() {
     }
     if !revert_msg.is_empty() {
         println!("❌ [REVERT Solidity] Message: {}", revert_msg);
-        return Err(Error::new(ErrorKind::Other, format!("REVERT: {}", revert_msg)));
+    } else if len == 0 {
+        println!("⚠️ [REVERT PATCH] REVERT vide (valeur reg[0]={})", reg[0]);
+    } else {
+        println!("⚠️ [REVERT] 0x{}", hex::encode(&data));
     }
 
-    // Sinon, fallback hex
-    return Err(Error::new(ErrorKind::Other, format!("REVERT: 0x{}", hex::encode(data))));
+    // STOPPE L'EXÉCUTION PAR UNE ERREUR (jamais return Ok)
+    return Err(Error::new(ErrorKind::Other,
+        if !revert_msg.is_empty() {
+            format!("EVM REVERT: {}", revert_msg)
+        } else if len == 0 {
+            "EVM REVERT (vide)".to_string()
+        } else {
+            format!("EVM REVERT: 0x{}", hex::encode(&data))
+        }
+    ));
 },
 
     //___ 0xfe INVALID
@@ -1783,65 +1803,12 @@ while insn_ptr < prog.len() {
     //___ Tout le reste → crash clair
     _ => {
         println!("🟢 [NOP] Opcode inconnu 0x{:02x} ignoré à PC {}", opcode, insn_ptr);
-    }
+        }
     }
 
-    // Avancement du PC (PUSHN inclus)
-    if !skip_advance {
-        let mut advance = 1;
-        if (0x60..=0x7f).contains(&opcode) {
-            let push_bytes = (opcode - 0x5f) as usize;
-            advance = 1 + push_bytes;
-        }
-        insn_ptr = insn_ptr.wrapping_add(advance);
-    } else if debug_evm {
-        println!("🔁 [EVM] PC positionné par handler, pas d'avancement automatique -> PC={}", insn_ptr);
-    }
+    pc += advance;
 }
-
-// Si on sort de la boucle sans STOP/RETURN/REVERT
-{
-        // Pour les autres, retourne la valeur du registre 0 + storage si présent
-        let final_storage = execution_context.world_state.storage
-            .get(&interpreter_args.contract_address)
-            .cloned()
-            .unwrap_or_default();
-
-        let mut result_with_storage = serde_json::Map::new();
-        result_with_storage.insert("return".to_string(), serde_json::Value::Number(
-            serde_json::Number::from(reg[0])
-        ));
-        
-        if !final_storage.is_empty() {
-            let mut storage_json = serde_json::Map::new();
-            for (slot, bytes) in final_storage {
-                storage_json.insert(slot, serde_json::Value::String(hex::encode(bytes)));
-            }
-            result_with_storage.insert("storage".to_string(), serde_json::Value::Object(storage_json));
-        }
-if let Some(contract_storage) = execution_context.world_state.storage.get(&interpreter_args.contract_address) {
-    println!("📦 [STORAGE FINAL] Contrat {}:", &interpreter_args.contract_address);
-    for (slot, bytes) in contract_storage.iter().take(20) {
-        let hexv = hex::encode(bytes);
-        // essaie d'afficher aussi une valeur u64 si raisonnable
-        let maybe_u64 = {
-            let u = u256::from_big_endian(bytes);
-            if u.bits() <= 64 { Some(u.low_u64()) } else { None }
-        };
-        if let Some(v) = maybe_u64 {
-            println!("   - slot {}: {} (hex: 0x{})", slot, v, hexv);
-        } else {
-            // si ressemble à adresse (dernier 20 bytes non nuls) affiche address
-            if bytes.len() >= 32 && bytes[12..32].iter().any(|&b| b != 0) {
-                println!("   - slot {}: address-like 0x{} (hex: 0x{})", slot, hex::encode(&bytes[12..32]), hexv);
-            } else {
-                println!("   - slot {}: hex=0x{}", slot, hexv);
-            }
-        }
-    }
-}
-        return Ok(serde_json::Value::Object(result_with_storage));
-    }
+Ok(().into())
 }
 
 /// ✅ AJOUT: Helper pour noms des opcodes
