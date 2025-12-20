@@ -1368,9 +1368,8 @@ let insn_ptr = pc;
     set_storage(&mut execution_context.world_state, &interpreter_args.contract_address, &slot, bytes.to_vec());
     println!("💾 [SSTORE] slot={} <- value={}", slot, value);
 },
-    
-// ___ 0x56 JUMP
-// ___ 0x56 JUMP
+        
+    // ___ 0x56 JUMP
 0x56 => {
     if evm_stack.is_empty() {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
@@ -1383,55 +1382,54 @@ let insn_ptr = pc;
 
     let mut dest = raw_dest;
 
-    // === PATCH CRITIQUE : Réalignement après saut (évite garbage opcodes) ===
-    // Si on atterrit au milieu d’un PUSH, on avance jusqu’à la prochaine instruction valide
-    while dest < prog.len() {
+    // === PATCH 1 : Réalignement intelligent après saut ===
+    // Évite d’interpréter les données d’un PUSH comme des opcodes
+    loop {
+        if dest >= prog.len() {
+            return Err(Error::new(ErrorKind::Other, format!("EVM REVERT: JUMP réaligné hors bytecode (orig 0x{:x})", raw_dest)));
+        }
+
         let op = prog[dest];
 
-        // Si on est déjà sur un JUMPDEST → parfait, on sort
+        // Si on est sur un JUMPDEST → parfait
         if op == 0x5b {
             break;
         }
 
-        // Si on est sur un PUSH (0x60..0x7f), on saute toute sa payload
+        // Si on est sur un PUSH, on saute toute l’instruction (opcode + payload)
         if (0x60..=0x7f).contains(&op) {
             let push_size = (op - 0x5f) as usize;
             dest += 1 + push_size;
             continue;
         }
 
-        // Sinon : opcode normal → on accepte (même si pas JUMPDEST, cas proxy)
+        // Sinon : opcode normal → on accepte même si pas JUMPDEST (cas proxy)
         break;
     }
 
-    // Sécurité : si on a dépassé le bytecode en réalignant → revert
-    if dest >= prog.len() {
-        return Err(Error::new(ErrorKind::Other, format!("EVM REVERT: JUMP réaligné hors bytecode (orig 0x{:x})", raw_dest)));
-    }
-
-    // Log proxy patch si ce n’est toujours pas un JUMPDEST
+    // Log pour les sauts proxy (non-JUMPDEST)
     if prog[dest] != 0x5b {
         println!("⚠️ [PROXY JUMP PATCH] JUMP vers 0x{:x} qui n'est pas un JUMPDEST (opcode=0x{:02x}), mais on autorise (fallback proxy)", dest, prog[dest]);
     }
 
-    // === ANTI-BOUCLE : détecte sortie de fonction ===
-    // Après une fonction (ex: balanceOf), la stack est souvent vide ou presque
-    // et le saut retourne au dispatcher (souvent adresse basse comme 0x00 ou petite)
-    // Si stack très petite + saut vers début → on considère que la fonction est finie
-    // et on force un RETURN implicite avec valeur en tête de stack (si présente)
-    if evm_stack.len() <= 1 && dest < 0x100 {  // ajustable selon ton bytecode
-        println!("✅ [FUNCTION EXIT DETECTED] Forçage RETURN implicite après JUMP vers début dispatcher (dest=0x{:x})", dest);
+    // === PATCH 2 : Détection de sortie de fonction & anti-boucle infinie ===
+    // Après une fonction (balanceOf, name, symbol...), la stack est souvent vide ou ne contient que la valeur de retour
+    // et le saut retourne au dispatcher (généralement une adresse basse < 0x200 dans les contrats OZ)
+    if evm_stack.len() <= 1 && dest < 0x200 {
+        println!("✅ [FUNCTION EXIT DETECTED] Forçage RETURN implicite après JUMP vers dispatcher (dest=0x{:x}, stack depth={})", dest, evm_stack.len());
 
-        let offset = 0; // standard : retour à mémoire 0
-        let len = if evm_stack.is_empty() { 0 } else { 32 }; // uint256 standard
+        let len = if evm_stack.is_empty() { 0 } else { 32 }; // uint256 standard pour balanceOf/totalSupply/etc.
+        let offset = 0; // retour classique depuis mémoire 0
 
         let mut ret_data = vec![0u8; len];
+
         if len == 32 && !evm_stack.is_empty() {
             let value = u256::from(evm_stack.pop().unwrap());
-            value.to_big_endian(&mut ret_data);
+            let bytes = value.to_big_endian();  // ← Version moderne : retourne [u8; 32]
+            ret_data.copy_from_slice(&bytes);
         }
 
-        // Déclenche le RETURN comme dans 0xf3
+        // Formatage du résultat comme dans ton opcode RETURN (0xf3)
         let formatted_result = if len == 0 {
             serde_json::Value::Bool(true)
         } else if len == 32 {
@@ -1439,25 +1437,36 @@ let insn_ptr = pc;
             if value.bits() <= 64 {
                 serde_json::Value::Number(serde_json::Number::from(value.low_u64()))
             } else {
-                serde_json::Value::String(format!("0x{}", hex::encode(ret_data)))
+                serde_json::Value::String(format!("0x{}", hex::encode(&ret_data)))
             }
         } else {
-            serde_json::Value::String(format!("0x{}", hex::encode(ret_data)))
+            serde_json::Value::String(format!("0x{}", hex::encode(&ret_data)))
         };
 
         did_return = true;
-        last_return_value = Some(formatted_result);
+        last_return_value = Some(formatted_result.clone());
 
         let mut result = serde_json::Map::new();
-        result.insert("return".to_string(), last_return_value.clone().unwrap_or(serde_json::Value::Null));
-        // ... storage final si besoin ...
+        result.insert("return".to_string(), formatted_result);
 
+        // Optionnel : ajoute le storage final si tu veux le voir
+        if let Some(contract_storage) = execution_context.world_state.storage.get(&interpreter_args.contract_address) {
+            if !contract_storage.is_empty() {
+                let mut storage_json = serde_json::Map::new();
+                for (slot, bytes) in contract_storage {
+                    storage_json.insert(slot.clone(), serde_json::Value::String(hex::encode(bytes)));
+                }
+                result.insert("storage".to_string(), serde_json::Value::Object(storage_json));
+            }
+        }
+
+        println!("✅ [IMPLICIT RETURN SUCCESS] Résultat: {:?}", result.get("return"));
         return Ok(serde_json::Value::Object(result));
     }
 
-    // Saut normal
+    // Saut normal vers la destination (réalignée)
     pc = dest;
-    continue; // skip pc += advance
+    continue; // important : skip le pc += advance habituel
 },
         
 // ___ 0x57 JUMPI
