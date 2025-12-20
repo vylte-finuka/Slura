@@ -1925,8 +1925,6 @@ let insn_ptr = pc;
 
     pc += advance;
 }
-Ok(().into())
-}
 
 /// ✅ AJOUT: Helper pour noms des opcodes
 fn opcode_name(opcode: u8) -> &'static str {
