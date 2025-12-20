@@ -775,10 +775,6 @@ let debug_evm = true;
     let mut did_return = false;
     let mut last_return_value: Option<serde_json::Value> = None;
 
-// Après un JUMP ou JUMPI réussi :
-pc = dest;
-
-// AJOUT CRITIQUE : réaligner pc sur une opcode valide ou JUMPDEST
 while pc < prog.len() && prog[pc] != 0x5b {  // tant que pas sur JUMPDEST
     // Si on est sur un PUSH, on saute toute sa payload
     let opcode = prog[pc];
@@ -787,11 +783,6 @@ while pc < prog.len() && prog[pc] != 0x5b {  // tant que pas sur JUMPDEST
         pc += 1 + push_size;
         continue;
     }
-    // Sinon, on avance de 1 (cas rare, mais safe)
-    pc += 1;
-}
-// Maintenant pc est sur un JUMPDEST ou une opcode légitime
-continue;
 
     let _dst = 0;
 let _src = 1;
@@ -1925,6 +1916,8 @@ let insn_ptr = pc;
 
     pc += advance;
 }
+Ok(().into())
+}
 
 /// ✅ AJOUT: Helper pour noms des opcodes
 fn opcode_name(opcode: u8) -> &'static str {
@@ -2036,4 +2029,4 @@ fn compute_mapping_slot(base_slot: u64, keys: &[serde_json::Value]) -> String {
     let mut hash = [0u8; 32];
     hasher.finalize(&mut hash);
     hex::encode(hash)
-}
+        }
