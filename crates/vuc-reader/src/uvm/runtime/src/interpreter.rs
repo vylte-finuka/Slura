@@ -1477,7 +1477,7 @@ let insn_ptr = pc;
     // Exécution récursive avec le code de l'impl
     let sub_result = execute_program(
         Some(&impl_code),
-        stack_usage,
+        Some(stack_usage),
         mem,
         &call_data,
         helpers,
