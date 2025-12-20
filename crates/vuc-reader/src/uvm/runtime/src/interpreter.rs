@@ -1370,25 +1370,96 @@ let insn_ptr = pc;
 },
     
 // ___ 0x56 JUMP
+// ___ 0x56 JUMP
 0x56 => {
     if evm_stack.is_empty() {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
     }
-    let dest = evm_stack.pop().unwrap() as usize;
-    if dest >= prog.len() {
-        return Err(Error::new(ErrorKind::Other, format!("EVM REVERT: JUMP hors bytecode 0x{:x}", dest)));
-    }
-    if prog[dest] != 0x5b {
-        // PATCH PROXY : autorise les jumps vers code cleanup (pattern courant dans proxies UUPS/minimalistes)
-        println!("⚠️ [PROXY JUMP PATCH] JUMP vers 0x{:x} qui n'est pas un JUMPDEST (opcode=0x{:02x}), mais on autorise (fallback proxy)", dest, prog[dest]);
-        // On saute quand même – c'est safe car c'est du code contrôlé
-    } else {
-        // Normal : JUMPDEST valide
-    }
-    pc = dest;
-    continue; // ne pas advance
-},
+    let raw_dest = evm_stack.pop().unwrap() as usize;
 
+    if raw_dest >= prog.len() {
+        return Err(Error::new(ErrorKind::Other, format!("EVM REVERT: JUMP hors bytecode 0x{:x}", raw_dest)));
+    }
+
+    let mut dest = raw_dest;
+
+    // === PATCH CRITIQUE : Réalignement après saut (évite garbage opcodes) ===
+    // Si on atterrit au milieu d’un PUSH, on avance jusqu’à la prochaine instruction valide
+    while dest < prog.len() {
+        let op = prog[dest];
+
+        // Si on est déjà sur un JUMPDEST → parfait, on sort
+        if op == 0x5b {
+            break;
+        }
+
+        // Si on est sur un PUSH (0x60..0x7f), on saute toute sa payload
+        if (0x60..=0x7f).contains(&op) {
+            let push_size = (op - 0x5f) as usize;
+            dest += 1 + push_size;
+            continue;
+        }
+
+        // Sinon : opcode normal → on accepte (même si pas JUMPDEST, cas proxy)
+        break;
+    }
+
+    // Sécurité : si on a dépassé le bytecode en réalignant → revert
+    if dest >= prog.len() {
+        return Err(Error::new(ErrorKind::Other, format!("EVM REVERT: JUMP réaligné hors bytecode (orig 0x{:x})", raw_dest)));
+    }
+
+    // Log proxy patch si ce n’est toujours pas un JUMPDEST
+    if prog[dest] != 0x5b {
+        println!("⚠️ [PROXY JUMP PATCH] JUMP vers 0x{:x} qui n'est pas un JUMPDEST (opcode=0x{:02x}), mais on autorise (fallback proxy)", dest, prog[dest]);
+    }
+
+    // === ANTI-BOUCLE : détecte sortie de fonction ===
+    // Après une fonction (ex: balanceOf), la stack est souvent vide ou presque
+    // et le saut retourne au dispatcher (souvent adresse basse comme 0x00 ou petite)
+    // Si stack très petite + saut vers début → on considère que la fonction est finie
+    // et on force un RETURN implicite avec valeur en tête de stack (si présente)
+    if evm_stack.len() <= 1 && dest < 0x100 {  // ajustable selon ton bytecode
+        println!("✅ [FUNCTION EXIT DETECTED] Forçage RETURN implicite après JUMP vers début dispatcher (dest=0x{:x})", dest);
+
+        let offset = 0; // standard : retour à mémoire 0
+        let len = if evm_stack.is_empty() { 0 } else { 32 }; // uint256 standard
+
+        let mut ret_data = vec![0u8; len];
+        if len == 32 && !evm_stack.is_empty() {
+            let value = u256::from(evm_stack.pop().unwrap());
+            value.to_big_endian(&mut ret_data);
+        }
+
+        // Déclenche le RETURN comme dans 0xf3
+        let formatted_result = if len == 0 {
+            serde_json::Value::Bool(true)
+        } else if len == 32 {
+            let value = u256::from_big_endian(&ret_data);
+            if value.bits() <= 64 {
+                serde_json::Value::Number(serde_json::Number::from(value.low_u64()))
+            } else {
+                serde_json::Value::String(format!("0x{}", hex::encode(ret_data)))
+            }
+        } else {
+            serde_json::Value::String(format!("0x{}", hex::encode(ret_data)))
+        };
+
+        did_return = true;
+        last_return_value = Some(formatted_result);
+
+        let mut result = serde_json::Map::new();
+        result.insert("return".to_string(), last_return_value.clone().unwrap_or(serde_json::Value::Null));
+        // ... storage final si besoin ...
+
+        return Ok(serde_json::Value::Object(result));
+    }
+
+    // Saut normal
+    pc = dest;
+    continue; // skip pc += advance
+},
+        
 // ___ 0x57 JUMPI
 0x57 => {
     if evm_stack.len() < 2 {
