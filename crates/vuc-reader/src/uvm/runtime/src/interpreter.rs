@@ -1368,51 +1368,8 @@ let insn_ptr = pc;
     set_storage(&mut execution_context.world_state, &interpreter_args.contract_address, &slot, bytes.to_vec());
     println!("💾 [SSTORE] slot={} <- value={}", slot, value);
 },
-        
-    // ___ 0x56 JUMP
-0x56 => {
-    if evm_stack.is_empty() {
-        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
-    }
-    let raw_dest = evm_stack.pop().unwrap() as usize;
 
-    if raw_dest >= prog.len() {
-        return Err(Error::new(ErrorKind::Other, format!("EVM REVERT: JUMP hors bytecode 0x{:x}", raw_dest)));
-    }
-
-    let mut dest = raw_dest;
-
-    // === PATCH 1 : Réalignement intelligent après saut ===
-    // Évite d’interpréter les données d’un PUSH comme des opcodes
-    loop {
-        if dest >= prog.len() {
-            return Err(Error::new(ErrorKind::Other, format!("EVM REVERT: JUMP réaligné hors bytecode (orig 0x{:x})", raw_dest)));
-        }
-
-        let op = prog[dest];
-
-        // Si on est sur un JUMPDEST → parfait
-        if op == 0x5b {
-            break;
-        }
-
-        // Si on est sur un PUSH, on saute toute l’instruction (opcode + payload)
-        if (0x60..=0x7f).contains(&op) {
-            let push_size = (op - 0x5f) as usize;
-            dest += 1 + push_size;
-            continue;
-        }
-
-        // Sinon : opcode normal → on accepte même si pas JUMPDEST (cas proxy)
-        break;
-    }
-
-    // Log pour les sauts proxy (non-JUMPDEST)
-    if prog[dest] != 0x5b {
-        println!("⚠️ [PROXY JUMP PATCH] JUMP vers 0x{:x} qui n'est pas un JUMPDEST (opcode=0x{:02x}), mais on autorise (fallback proxy)", dest, prog[dest]);
-    }
-
-    // ___ 0x56 JUMP
+// ___ 0x56 JUMP
 0x56 => {
     if evm_stack.is_empty() {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
