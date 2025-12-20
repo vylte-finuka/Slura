@@ -775,11 +775,23 @@ let debug_evm = true;
     let mut did_return = false;
     let mut last_return_value: Option<serde_json::Value> = None;
 
-while pc < prog.len() {
+// Après un JUMP ou JUMPI réussi :
+pc = dest;
+
+// AJOUT CRITIQUE : réaligner pc sur une opcode valide ou JUMPDEST
+while pc < prog.len() && prog[pc] != 0x5b {  // tant que pas sur JUMPDEST
+    // Si on est sur un PUSH, on saute toute sa payload
     let opcode = prog[pc];
-    if debug_evm {
-        println!("🔍 [EVM LOG] PC={:04x} | OPCODE=0x{:02x} ({})", pc, opcode, opcode_name(opcode));
+    if (0x60..=0x7f).contains(&opcode) {
+        let push_size = (opcode - 0x5f) as usize;
+        pc += 1 + push_size;
+        continue;
     }
+    // Sinon, on avance de 1 (cas rare, mais safe)
+    pc += 1;
+}
+// Maintenant pc est sur un JUMPDEST ou une opcode légitime
+continue;
 
     let _dst = 0;
 let _src = 1;
