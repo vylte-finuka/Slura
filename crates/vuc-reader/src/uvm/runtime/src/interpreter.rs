@@ -1423,50 +1423,50 @@ let insn_ptr = pc;
 
         let mut ret_data = vec![0u8; len];
 
-        if len == 32 && !evm_stack.is_empty() {
-            let value = u256::from(evm_stack.pop().unwrap());
-            let bytes = value.to_big_endian();  // ← Version moderne : retourne [u8; 32]
-            ret_data.copy_from_slice(&bytes);
-        }
+// ___ 0x56 JUMP
+0x56 => {
+    if evm_stack.is_empty() {
+        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
+    }
+    let raw_dest = evm_stack.pop().unwrap() as usize;
 
-        // Formatage du résultat comme dans ton opcode RETURN (0xf3)
-        let formatted_result = if len == 0 {
-            serde_json::Value::Bool(true)
-        } else if len == 32 {
-            let value = u256::from_big_endian(&ret_data);
-            if value.bits() <= 64 {
-                serde_json::Value::Number(serde_json::Number::from(value.low_u64()))
-            } else {
-                serde_json::Value::String(format!("0x{}", hex::encode(&ret_data)))
-            }
-        } else {
-            serde_json::Value::String(format!("0x{}", hex::encode(&ret_data)))
-        };
-
-        did_return = true;
-        last_return_value = Some(formatted_result.clone());
-
-        let mut result = serde_json::Map::new();
-        result.insert("return".to_string(), formatted_result);
-
-        // Optionnel : ajoute le storage final si tu veux le voir
-        if let Some(contract_storage) = execution_context.world_state.storage.get(&interpreter_args.contract_address) {
-            if !contract_storage.is_empty() {
-                let mut storage_json = serde_json::Map::new();
-                for (slot, bytes) in contract_storage {
-                    storage_json.insert(slot.clone(), serde_json::Value::String(hex::encode(bytes)));
-                }
-                result.insert("storage".to_string(), serde_json::Value::Object(storage_json));
-            }
-        }
-
-        println!("✅ [IMPLICIT RETURN SUCCESS] Résultat: {:?}", result.get("return"));
-        return Ok(serde_json::Value::Object(result));
+    if raw_dest >= prog.len() {
+        return Err(Error::new(ErrorKind::Other, format!("EVM REVERT: JUMP hors bytecode 0x{:x}", raw_dest)));
     }
 
-    // Saut normal vers la destination (réalignée)
+    let mut dest = raw_dest;
+
+    // Réalignement uniquement : saute les payloads PUSH si on atterrit au milieu
+    loop {
+        if dest >= prog.len() {
+            return Err(Error::new(ErrorKind::Other, "EVM REVERT: JUMP réaligné hors bytecode"));
+        }
+
+        let op = prog[dest];
+
+        if op == 0x5b {  // JUMPDEST → OK
+            break;
+        }
+
+        if (0x60..=0x7f).contains(&op) {  // PUSH
+            let push_size = (op - 0x5f) as usize;
+            dest += 1 + push_size;
+            continue;
+        }
+
+        // Sinon : opcode normal → on accepte même si pas JUMPDEST (proxy)
+        break;
+    }
+
+    if prog[dest] != 0x5b {
+        println!("⚠️ [PROXY JUMP PATCH] JUMP vers 0x{:x} (opcode=0x{:02x}), autorisé", dest, prog[dest]);
+    }
+
+    // === PLUS DE DÉTECTION DE SORTIE NI RETURN FORCÉ ===
+    // On laisse le bytecode faire son travail → il atteindra 0xf3 naturellement
+
     pc = dest;
-    continue; // important : skip le pc += advance habituel
+    continue;
 },
         
 // ___ 0x57 JUMPI
