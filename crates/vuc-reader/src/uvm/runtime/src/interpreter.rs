@@ -1485,7 +1485,7 @@ let insn_ptr = pc;
         ret_type,
         exports,
         &sub_args,
-        initial_storage,
+        initial_storage.clone(),
     );
 
     match sub_result {
