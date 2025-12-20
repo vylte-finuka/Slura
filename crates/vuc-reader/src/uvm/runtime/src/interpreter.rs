@@ -1412,20 +1412,7 @@ let insn_ptr = pc;
         println!("⚠️ [PROXY JUMP PATCH] JUMP vers 0x{:x} qui n'est pas un JUMPDEST (opcode=0x{:02x}), mais on autorise (fallback proxy)", dest, prog[dest]);
     }
 
-    // === PATCH 2 : Détection de sortie de fonction & anti-boucle infinie ===
-    // Après une fonction (balanceOf, name, symbol...), la stack est souvent vide ou ne contient que la valeur de retour
-    // et le saut retourne au dispatcher (généralement une adresse basse < 0x200 dans les contrats OZ)
-    if evm_stack.len() <= 1 && dest < 0x200 {
-        println!("✅ [FUNCTION EXIT DETECTED] Forçage RETURN implicite après JUMP vers dispatcher (dest=0x{:x}, stack depth={})", dest, evm_stack.len());
-
-        let len = if evm_stack.is_empty() { 0 } else { 32 }; // uint256 standard pour balanceOf/totalSupply/etc.
-        let offset = 0; // retour classique depuis mémoire 0
-
-        let mut ret_data = vec![0u8; len];
-
-// ___ 0x56 JUMP
-0x56 => {
-// ___ 0x56 JUMP
+    // ___ 0x56 JUMP
 0x56 => {
     if evm_stack.is_empty() {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
