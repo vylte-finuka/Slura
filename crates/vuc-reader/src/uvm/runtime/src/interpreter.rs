@@ -1374,42 +1374,21 @@ let insn_ptr = pc;
     if evm_stack.is_empty() {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
     }
-    let raw_dest = evm_stack.pop().unwrap() as usize;
+    let dest = evm_stack.pop().unwrap() as usize;
 
-    if raw_dest >= prog.len() {
-        return Err(Error::new(ErrorKind::Other, format!("EVM REVERT: JUMP hors bytecode 0x{:x}", raw_dest)));
+    if dest >= prog.len() {
+        return Err(Error::new(ErrorKind::Other, format!("EVM REVERT: JUMP hors bytecode 0x{:x}", dest)));
     }
 
-    let mut dest = raw_dest;
-
-    // Réalignement uniquement : saute les payloads PUSH si on atterrit au milieu
-    loop {
-        if dest >= prog.len() {
-            return Err(Error::new(ErrorKind::Other, "EVM REVERT: JUMP réaligné hors bytecode"));
-        }
-
-        let op = prog[dest];
-
-        if op == 0x5b {  // JUMPDEST → OK
-            break;
-        }
-
-        if (0x60..=0x7f).contains(&op) {  // PUSH
-            let push_size = (op - 0x5f) as usize;
-            dest += 1 + push_size;
-            continue;
-        }
-
-        // Sinon : opcode normal → on accepte même si pas JUMPDEST (proxy)
-        break;
-    }
-
+    // Vérification JUMPDEST standard
     if prog[dest] != 0x5b {
-        println!("⚠️ [PROXY JUMP PATCH] JUMP vers 0x{:x} (opcode=0x{:02x}), autorisé", dest, prog[dest]);
+        // Autorise uniquement pour proxy fallback (adresses très basses ou pattern connu)
+        if dest < 0x100 {  // ajustable, mais les proxy sautent souvent vers < 0x100
+            println!("⚠️ [PROXY JUMP PATCH] JUMP vers 0x{:x} (opcode=0x{:02x}), autorisé pour proxy", dest, prog[dest]);
+        } else {
+            return Err(Error::new(ErrorKind::Other, format!("EVM REVERT: JUMP invalid (pas JUMPDEST à 0x{:x}, opcode=0x{:02x})", dest, prog[dest])));
+        }
     }
-
-    // === PLUS DE DÉTECTION DE SORTIE NI RETURN FORCÉ ===
-    // On laisse le bytecode faire son travail → il atteindra 0xf3 naturellement
 
     pc = dest;
     continue;
