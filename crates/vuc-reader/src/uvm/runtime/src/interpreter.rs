@@ -1374,10 +1374,11 @@ let insn_ptr = pc;
     if evm_stack.is_empty() {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
     }
-    // Pop the destination, but ignore its value. No jump performed.
+    // On pop la destination (pour épuiser la stack comme le EVM) mais on ne saute pas.
     let _dest = evm_stack.pop().unwrap();
-    println!("[EVM PATCH] Ignoring JUMP: no jump performed, just popping destination");
-    // No continue; pc will be incremented as normal.
+    println!("[EVM PATCH] Ignoring JUMP (0x56): always continues to next PC, never jumping elsewhere!");
+    // On laisse le pc s'incrémenter normalement ("continue" n'est utile ici que pour clarté, mais pc+=advance sera exécuté juste après :)
+    continue;
 },
 
 // ___ 0x57 JUMPI
