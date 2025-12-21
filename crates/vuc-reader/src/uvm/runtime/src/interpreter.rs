@@ -1394,7 +1394,7 @@ let _src = 1;
         continue;
     }
     // cond == 0 → continue normalement
-},
+}
         
         // ___ 0xf4 DELEGATECALL
 0xf4 => {
@@ -1904,7 +1904,7 @@ let _src = 1;
 
     pc += advance;
 }
-Ok(().into())
+Ok!(().into())
 
 /// ✅ AJOUT: Helper pour noms des opcodes
 fn opcode_name(opcode: u8) -> &'static str {
