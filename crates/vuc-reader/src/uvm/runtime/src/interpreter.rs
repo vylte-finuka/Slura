@@ -1901,8 +1901,8 @@ let _src = 1;
         println!("🟢 [NOP] Opcode inconnu 0x{:02x} ignoré à PC {}", opcode, insn_ptr);
         }
     }
+Ok(().into));
 }
-Ok!{().into()};
 
 /// ✅ AJOUT: Helper pour noms des opcodes
 fn opcode_name(opcode: u8) -> &'static str {
