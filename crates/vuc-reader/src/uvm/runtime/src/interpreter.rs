@@ -1369,16 +1369,15 @@ let insn_ptr = pc;
     println!("💾 [SSTORE] slot={} <- value={}", slot, value);
 },
 
-// ___ 0x56 JUMP
+// ___ 0x56 JUMP (patch : n'avance que de 1, jamais ailleurs)
 0x56 => {
     if evm_stack.is_empty() {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
     }
-    // On pop la destination (pour épuiser la stack comme le EVM) mais on ne saute pas.
     let _dest = evm_stack.pop().unwrap();
     println!("[EVM PATCH] Ignoring JUMP (0x56): always continues to next PC, never jumping elsewhere!");
-    // On laisse le pc s'incrémenter normalement ("continue" n'est utile ici que pour clarté, mais pc+=advance sera exécuté juste après :)
-    continue;
+    advance = 1; // AVANCE explicitement d'une instruction, crucial !!!
+    // pas de "continue" ici !
 },
 
 // ___ 0x57 JUMPI
