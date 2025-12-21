@@ -571,6 +571,7 @@ pub fn execute_program(
 ) -> Result<serde_json::Value, Error> {
     const U32MAX: u64 = u32::MAX as u64;
     const SHIFT_MASK_64: u64 = 0x3f;
+
 // Détection proxy ERC-1967
 let impl_slot = "360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";
 let impl_bytes = get_storage(&execution_context.world_state, &interpreter_args.contract_address, impl_slot);
@@ -591,14 +592,6 @@ if impl_bytes.len() == 32 && !impl_bytes.iter().all(|&b| b == 0) {
 
 // Puis utilise actual_prog au lieu de prog dans la boucle
 let prog = &actual_prog;
-    let prog = match prog_ {
-        Some(prog) => prog,
-        None => return Err(Error::new(
-            ErrorKind::Other,
-            "Error: No program set, call prog_set() to load one",
-        )),
-    };
-
     let default_stack_usage = StackUsage::new();
     let stack_usage = stack_usage.unwrap_or(&default_stack_usage);
 
