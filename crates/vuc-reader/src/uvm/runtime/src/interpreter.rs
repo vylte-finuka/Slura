@@ -1370,7 +1370,6 @@ let insn_ptr = pc;
 },
 
 // ___ 0x56 JUMP
-// ___ 0x56 JUMP
 0x56 => {
     if evm_stack.is_empty() {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
@@ -1382,8 +1381,9 @@ let insn_ptr = pc;
     }
 
     if prog[dest] != 0x5b {
-        if dest < 0x100 {
-            println!("⚠️ [PROXY JUMP PATCH] JUMP vers 0x{:x} (opcode=0x{:02x}) autorisé", dest, prog[dest]);
+        // Autorise les sauts non-JUMPDEST dans la zone du proxy/dispatcher (typiquement < 0x300 pour OZ)
+        if dest < 0x300 {
+            println!("⚠️ [PROXY JUMP PATCH] JUMP vers 0x{:x} (opcode=0x{:02x}) autorisé (fallback proxy ou dispatcher)", dest, prog[dest]);
         } else {
             return Err(Error::new(ErrorKind::Other, format!("EVM REVERT: Invalid JUMP (pas JUMPDEST à 0x{:x})", dest)));
         }
