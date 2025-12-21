@@ -786,8 +786,6 @@ while pc < prog.len() {
     let mut advance = 1;
     let _dst = 0;
 let _src = 1;
-let insn_ptr = pc;
-    let mut advance = 1;
 
      // ___ Pectra/EVM opcodes ___
     match opcode {
@@ -1907,7 +1905,6 @@ let insn_ptr = pc;
     pc += advance;
 }
 Ok(().into())
-}
 
 /// ✅ AJOUT: Helper pour noms des opcodes
 fn opcode_name(opcode: u8) -> &'static str {
