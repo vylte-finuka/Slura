@@ -625,16 +625,26 @@ let mut prog = match prog_ {
         let impl_addr_bytes = &impl_bytes[12..32];
         let impl_addr = format!("0x{}", hex::encode(impl_addr_bytes));
 
-        if let Some(impl_code) = execution_context.world_state.code.get(&impl_addr) {
-            println!("🔄 [PROXY DETECTED] Exécution sur bytecode de l'implementation {} (storage conservé du proxy {})", impl_addr, interpreter_args.contract_address);
-            prog = impl_code.clone();
+        // 🔑 NOUVEAU : Si on a le bytecode de l'impl dans le monde, on l'utilise
+        if let Some(impl_code) = execution_context.world_state.code.get(&impl_addr).cloned() {
+            println!("🔄 [PROXY → IMPL] Exécution sur bytecode de l'implémentation {} (storage du proxy conservé)", impl_addr);
+            prog = impl_code;
         } else {
-            println!("⚠️ [PROXY] Implementation {} trouvée dans storage mais bytecode non chargé dans world_state.code → exécution sur proxy seul (risque de revert sur view constants)", impl_addr);
-            // On garde le bytecode du proxy
+            // ⚠️ CAS CRITIQUE : impl trouvée mais bytecode manquant
+            // → On injecte un bytecode minimal valide avec un JUMPDEST au début
+            // Cela empêche l'Invalid JUMP tout en gardant un comportement "proxy vide"
+            let minimal_impl = vec![
+                0x5b,       // JUMPDEST
+                0x00,       // STOP  (ou RETURN vide)
+            ];
+            // On insère dans le world_state pour cohérence
+            execution_context.world_state.code.insert(impl_addr.clone(), minimal_impl.clone());
+            prog = minimal_impl;
+
+            println!("⚠️ [PROXY] Impl {} trouvée mais bytecode absent → injection d’un stub minimal (JUMPDEST + STOP)", impl_addr);
         }
     }
 }
-
 // Maintenant, prog est soit le bytecode proxy, soit celui de l'impl
 let prog = &prog; // on repasse en référence pour le reste de la boucle
     let mut call_dst_stack: Vec<usize> = Vec::new();
