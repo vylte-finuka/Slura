@@ -1374,45 +1374,39 @@ let insn_ptr = pc;
     if evm_stack.is_empty() {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
     }
-    let _dest = evm_stack.pop().unwrap();
-    println!("[EVM PATCH] JUMP: always jumping to next JUMPDEST (0x5b) after PC={:04x}", pc);
-
-    let mut found = false;
-    let mut next_pc = pc + 1;
-    while next_pc < prog.len() {
-        if prog[next_pc] == 0x5b {
-            found = true;
-            break;
-        }
-        next_pc += 1;
+    let dest = evm_stack.pop().unwrap() as usize;
+    // Vérifier que 'dest' est dans les bornes ET opcode JUMPDEST (0x5b)
+    if dest >= prog.len() {
+        return Err(Error::new(ErrorKind::Other, "EVM REVERT: JUMP destination out of bounds"));
     }
-    if found {
-        pc = next_pc;
-        advance = 0;
-    } else {
-        return Err(Error::new(ErrorKind::Other, "No next JUMPDEST found after JUMP"));
+    if prog[dest] != 0x5b {
+        return Err(Error::new(ErrorKind::Other, format!("EVM REVERT: JUMP to non-JUMPDEST (0x{:02x})", prog[dest])));
     }
-    continue;
-},
+    pc = dest;
+    advance = 0; // car on positionne explicitement le PC (pas d’auto-incrément)
+    continue;    // Important : saute la ligne d’incrément
+}
 
-// ___ 0x57 JUMPI
+//___ 0x57 JUMPI
 0x57 => {
     if evm_stack.len() < 2 {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMPI"));
     }
     let dest = evm_stack.pop().unwrap() as usize;
     let cond = evm_stack.pop().unwrap();
-
     if cond != 0 {
         if dest >= prog.len() {
-            return Err(Error::new(ErrorKind::Other, "EVM REVERT: Invalid JUMPI destination out of bounds"));
+            return Err(Error::new(ErrorKind::Other, "EVM REVERT: JUMPI dest out of bounds"));
         }
-    
+        if prog[dest] != 0x5b {
+            return Err(Error::new(ErrorKind::Other, format!("EVM REVERT: JUMPI to non-JUMPDEST (0x{:02x})", prog[dest])));
+        }
         pc = dest;
+        advance = 0;
         continue;
     }
-    // cond == 0 → continue normalement
-},
+    // Sinon, continue à l'instruction suivante (advance pas modifié)
+}
         
         // ___ 0xf4 DELEGATECALL
 0xf4 => {
