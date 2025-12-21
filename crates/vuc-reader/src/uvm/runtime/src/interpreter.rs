@@ -1377,22 +1377,18 @@ let insn_ptr = pc;
     let dest = evm_stack.pop().unwrap() as usize;
 
     if dest >= prog.len() {
-        return Err(Error::new(ErrorKind::Other, format!("EVM REVERT: JUMP hors bytecode 0x{:x}", dest)));
+        return Err(Error::new(ErrorKind::Other, "EVM REVERT: Invalid JUMP destination out of bounds"));
     }
 
+    // Règle EVM stricte : destination DOIT être un JUMPDEST
     if prog[dest] != 0x5b {
-        // Autorise les sauts non-JUMPDEST dans la zone du proxy/dispatcher (typiquement < 0x300 pour OZ)
-        if dest < 0x300 {
-            println!("⚠️ [PROXY JUMP PATCH] JUMP vers 0x{:x} (opcode=0x{:02x}) autorisé (fallback proxy ou dispatcher)", dest, prog[dest]);
-        } else {
-            return Err(Error::new(ErrorKind::Other, format!("EVM REVERT: Invalid JUMP (pas JUMPDEST à 0x{:x})", dest)));
-        }
+        return Err(Error::new(ErrorKind::Other, "EVM REVERT: Invalid JUMP (not a JUMPDEST)"));
     }
 
     pc = dest;
     continue;
 },
-        
+
 // ___ 0x57 JUMPI
 0x57 => {
     if evm_stack.len() < 2 {
@@ -1400,19 +1396,20 @@ let insn_ptr = pc;
     }
     let dest = evm_stack.pop().unwrap() as usize;
     let cond = evm_stack.pop().unwrap();
+
     if cond != 0 {
         if dest >= prog.len() {
-            return Err(Error::new(ErrorKind::Other, format!("EVM REVERT: JUMPI hors bytecode 0x{:x}", dest)));
+            return Err(Error::new(ErrorKind::Other, "EVM REVERT: Invalid JUMPI destination out of bounds"));
         }
         if prog[dest] != 0x5b {
-            println!("⚠️ [PROXY JUMPI PATCH] JUMPI vers 0x{:x} qui n'est pas un JUMPDEST (opcode=0x{:02x}), mais on autorise", dest, prog[dest]);
+            return Err(Error::new(ErrorKind::Other, "EVM REVERT: Invalid JUMPI (not a JUMPDEST)"));
         }
         pc = dest;
         continue;
     }
-    // cond == 0 → avance normal
+    // cond == 0 → continue normalement
 },
-
+        
         // ___ 0xf4 DELEGATECALL
 0xf4 => {
     if evm_stack.len() < 6 {
