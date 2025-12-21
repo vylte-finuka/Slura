@@ -1379,11 +1379,6 @@ let insn_ptr = pc;
         return Err(Error::new(ErrorKind::Other, "EVM REVERT: Invalid JUMP destination out of bounds"));
     }
 
-    // Règle EVM stricte : destination DOIT être un JUMPDEST
-    if prog[dest] != 0x5b {
-        return Err(Error::new(ErrorKind::Other, "EVM REVERT: Invalid JUMP (not a JUMPDEST)"));
-    }
-
     pc = dest;
     continue;
 },
@@ -1395,14 +1390,6 @@ let insn_ptr = pc;
     }
     let dest = evm_stack.pop().unwrap() as usize;
     let cond = evm_stack.pop().unwrap();
-
-    if cond != 0 {
-        if dest >= prog.len() {
-            return Err(Error::new(ErrorKind::Other, "EVM REVERT: Invalid JUMPI destination out of bounds"));
-        }
-        if prog[dest] != 0x5b {
-            return Err(Error::new(ErrorKind::Other, "EVM REVERT: Invalid JUMPI (not a JUMPDEST)"));
-        }
         pc = dest;
         continue;
     }
