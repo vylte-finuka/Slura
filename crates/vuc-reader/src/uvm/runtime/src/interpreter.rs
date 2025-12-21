@@ -775,15 +775,15 @@ let debug_evm = true;
     let mut did_return = false;
     let mut last_return_value: Option<serde_json::Value> = None;
 
-while pc < prog.len() && prog[pc] != 0x5b {  // tant que pas sur JUMPDEST
-    // Si on est sur un PUSH, on saute toute sa payload
+while pc < prog.len() {
     let opcode = prog[pc];
-    if (0x60..=0x7f).contains(&opcode) {
-        let push_size = (opcode - 0x5f) as usize;
-        pc += 1 + push_size;
-        continue;
+
+    if debug_evm {
+        println!("🔍 [EVM LOG] PC={:04x} | OPCODE=0x{:02x} ({})", pc, opcode, opcode_name(opcode));
     }
 
+    let insn_ptr = pc;
+    let mut advance = 1;
     let _dst = 0;
 let _src = 1;
 let insn_ptr = pc;
@@ -1370,6 +1370,7 @@ let insn_ptr = pc;
 },
 
 // ___ 0x56 JUMP
+// ___ 0x56 JUMP
 0x56 => {
     if evm_stack.is_empty() {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
@@ -1380,13 +1381,11 @@ let insn_ptr = pc;
         return Err(Error::new(ErrorKind::Other, format!("EVM REVERT: JUMP hors bytecode 0x{:x}", dest)));
     }
 
-    // Autorise les sauts non-JUMPDEST uniquement pour le fallback proxy (adresses très basses)
     if prog[dest] != 0x5b {
-        if dest < 0x100 {  // zone typique du proxy/dispatcher minimal
+        if dest < 0x100 {
             println!("⚠️ [PROXY JUMP PATCH] JUMP vers 0x{:x} (opcode=0x{:02x}) autorisé", dest, prog[dest]);
         } else {
-            // Pour les sauts internes : strict EVM → revert si pas JUMPDEST
-            return Err(Error::new(ErrorKind::Other, format!("EVM REVERT: Invalid JUMP destination 0x{:x} (opcode=0x{:02x}, pas JUMPDEST)", dest, prog[dest])));
+            return Err(Error::new(ErrorKind::Other, format!("EVM REVERT: Invalid JUMP (pas JUMPDEST à 0x{:x})", dest)));
         }
     }
 
@@ -1829,6 +1828,7 @@ let insn_ptr = pc;
         }
         result.insert("storage".to_string(), serde_json::Value::Object(storage_json));
     }
+    evm_stack.clear();
     println!("✅ [RETURN SUCCESS] Résultat: {:?}", result.get("return"));
     return Ok(serde_json::Value::Object(result));
 },
