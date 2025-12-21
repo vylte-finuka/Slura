@@ -1369,15 +1369,30 @@ let insn_ptr = pc;
     println!("💾 [SSTORE] slot={} <- value={}", slot, value);
 },
 
-// ___ 0x56 JUMP (patch : n'avance que de 1, jamais ailleurs)
+// ___ 0x56 JUMP
 0x56 => {
     if evm_stack.is_empty() {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
     }
     let _dest = evm_stack.pop().unwrap();
-    println!("[EVM PATCH] Ignoring JUMP (0x56): always continues to next PC, never jumping elsewhere!");
-    advance = 1; // AVANCE explicitement d'une instruction, crucial !!!
-    // pas de "continue" ici !
+    println!("[EVM PATCH] JUMP: always jumping to next JUMPDEST (0x5b) after PC={:04x}", pc);
+
+    let mut found = false;
+    let mut next_pc = pc + 1;
+    while next_pc < prog.len() {
+        if prog[next_pc] == 0x5b {
+            found = true;
+            break;
+        }
+        next_pc += 1;
+    }
+    if found {
+        pc = next_pc;
+        advance = 0;
+    } else {
+        return Err(Error::new(ErrorKind::Other, "No next JUMPDEST found after JUMP"));
+    }
+    continue;
 },
 
 // ___ 0x57 JUMPI
