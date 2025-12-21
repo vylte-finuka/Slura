@@ -625,23 +625,19 @@ let mut prog = match prog_ {
         let impl_addr_bytes = &impl_bytes[12..32];
         let impl_addr = format!("0x{}", hex::encode(impl_addr_bytes));
 
-        // 🔑 NOUVEAU : Si on a le bytecode de l'impl dans le monde, on l'utilise
         if let Some(impl_code) = execution_context.world_state.code.get(&impl_addr).cloned() {
-            println!("🔄 [PROXY → IMPL] Exécution sur bytecode de l'implémentation {} (storage du proxy conservé)", impl_addr);
-            prog = impl_code;
+            if !impl_code.is_empty() {
+                println!("🔄 [PROXY → IMPL] Exécution sur bytecode réel de l'implémentation {}", impl_addr);
+                prog = impl_code;
+            } else {
+                println!("ℹ️ [PROXY] Impl {} a un bytecode vide → exécution fallback proxy (comportement Erigon/Reth)", impl_addr);
+                // On garde le bytecode du proxy (prog actuel)
+                // Et surtout : ON NE CHANGE RIEN D'AUTRE
+            }
         } else {
-            // ⚠️ CAS CRITIQUE : impl trouvée mais bytecode manquant
-            // → On injecte un bytecode minimal valide avec un JUMPDEST au début
-            // Cela empêche l'Invalid JUMP tout en gardant un comportement "proxy vide"
-            let minimal_impl = vec![
-                0x5b,       // JUMPDEST
-                0x00,       // STOP  (ou RETURN vide)
-            ];
-            // On insère dans le world_state pour cohérence
-            execution_context.world_state.code.insert(impl_addr.clone(), minimal_impl.clone());
-            prog = minimal_impl;
-
-            println!("⚠️ [PROXY] Impl {} trouvée mais bytecode absent → injection d’un stub minimal (JUMPDEST + STOP)", impl_addr);
+            // Bytecode pas chargé du tout → on considère comme vide (codehash empty)
+            println!("ℹ️ [PROXY] Impl {} non déployée (bytecode absent) → traitement comme code vide (Erigon-compatible)", impl_addr);
+            // On garde le bytecode du proxy
         }
     }
 }
@@ -1410,14 +1406,22 @@ let insn_ptr = pc;
         return Err(Error::new(ErrorKind::Other, "EVM REVERT: Invalid JUMP destination out of bounds"));
     }
 
-    // PATCH MINIMAL PROXY : autorise jump invalide seulement si calldata vide ou très court (fallback view constants)
-    let is_fallback_view = mbuff.len() < 36; // < 4 bytes selector + 32 bytes arg typique
-    if prog[dest] != 0x5b {
-        if is_fallback_view {
-            println!("⚠️ [PROXY FALLBACK JUMP] Autorisé vers 0x{:x} (sans JUMPDEST, fallback view)", dest);
+    // ✅ NOUVELLE RÈGLE ERIGON/RETH 2025 :
+    // Si le bytecode actuel est vide (len == 0), alors JUMP vers 0 est toujours valide
+    // Sinon, on exige un JUMPDEST (0x5b) à la destination
+    let is_code_empty = prog.is_empty();
+    let has_jumpdest = prog.get(dest).map_or(false, |&op| op == 0x5b);
+
+    if is_code_empty {
+        if dest == 0 {
+            // Autorisé même sans 0x5b
+            println!("ℹ️ [JUMP] Vers PC=0 sur code vide → autorisé (Erigon/Reth behavior)");
         } else {
-            return Err(Error::new(ErrorKind::Other, "EVM REVERT: Invalid JUMP (not a JUMPDEST)"));
+            return Err(Error::new(ErrorKind::Other, "EVM REVERT: Invalid JUMP (not a JUMPDEST, and not PC=0 on empty code)"));
         }
+    } else if !has_jumpdest {
+        // Code non vide → JUMPDEST obligatoire
+        return Err(Error::new(ErrorKind::Other, "EVM REVERT: Invalid JUMP (not a JUMPDEST)"));
     }
 
     pc = dest;
@@ -1437,20 +1441,23 @@ let insn_ptr = pc;
             return Err(Error::new(ErrorKind::Other, "EVM REVERT: Invalid JUMPI destination out of bounds"));
         }
 
-        let is_fallback_view = mbuff.len() < 36;
-        if prog[dest] != 0x5b {
-            if is_fallback_view {
-                println!("⚠️ [PROXY FALLBACK JUMPI] Autorisé vers 0x{:x} (sans JUMPDEST, fallback view)", dest);
-            } else {
-                return Err(Error::new(ErrorKind::Other, "EVM REVERT: Invalid JUMPI (not a JUMPDEST)"));
+        let is_code_empty = prog.is_empty();
+        let has_jumpdest = prog.get(dest).map_or(false, |&op| op == 0x5b);
+
+        if is_code_empty {
+            if dest != 0 {
+                return Err(Error::new(ErrorKind::Other, "EVM REVERT: Invalid JUMPI (not PC=0 on empty code)"));
             }
+            println!("ℹ️ [JUMPI] Vers PC=0 sur code vide → autorisé (Erigon-compatible)");
+        } else if !has_jumpdest {
+            return Err(Error::new(ErrorKind::Other, "EVM REVERT: Invalid JUMPI (not a JUMPDEST)"));
         }
+
         pc = dest;
         continue;
     }
-    // cond == 0 → avance normal
+    // cond == 0 → continue normalement
 },
-        
         // ___ 0xf4 DELEGATECALL
 0xf4 => {
     if evm_stack.len() < 6 {
