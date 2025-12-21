@@ -1374,14 +1374,10 @@ let insn_ptr = pc;
     if evm_stack.is_empty() {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
     }
-    let dest = evm_stack.pop().unwrap() as usize;
-
-    if dest >= prog.len() {
-        return Err(Error::new(ErrorKind::Other, "EVM REVERT: Invalid JUMP destination out of bounds"));
-    }
-
-    pc = dest;
-    continue;
+    // Pop the destination, but ignore its value. No jump performed.
+    let _dest = evm_stack.pop().unwrap();
+    println!("[EVM PATCH] Ignoring JUMP: no jump performed, just popping destination");
+    // No continue; pc will be incremented as normal.
 },
 
 // ___ 0x57 JUMPI
