@@ -1380,13 +1380,13 @@ let insn_ptr = pc;
         return Err(Error::new(ErrorKind::Other, format!("EVM REVERT: JUMP hors bytecode 0x{:x}", dest)));
     }
 
-    // Vérification JUMPDEST standard
+    // Autorise les sauts non-JUMPDEST uniquement pour le fallback proxy (adresses très basses)
     if prog[dest] != 0x5b {
-        // Autorise uniquement pour proxy fallback (adresses très basses ou pattern connu)
-        if dest < 0x100 {  // ajustable, mais les proxy sautent souvent vers < 0x100
-            println!("⚠️ [PROXY JUMP PATCH] JUMP vers 0x{:x} (opcode=0x{:02x}), autorisé pour proxy", dest, prog[dest]);
+        if dest < 0x100 {  // zone typique du proxy/dispatcher minimal
+            println!("⚠️ [PROXY JUMP PATCH] JUMP vers 0x{:x} (opcode=0x{:02x}) autorisé", dest, prog[dest]);
         } else {
-            return Err(Error::new(ErrorKind::Other, format!("EVM REVERT: JUMP invalid (pas JUMPDEST à 0x{:x}, opcode=0x{:02x})", dest, prog[dest])));
+            // Pour les sauts internes : strict EVM → revert si pas JUMPDEST
+            return Err(Error::new(ErrorKind::Other, format!("EVM REVERT: Invalid JUMP destination 0x{:x} (opcode=0x{:02x}, pas JUMPDEST)", dest, prog[dest])));
         }
     }
 
