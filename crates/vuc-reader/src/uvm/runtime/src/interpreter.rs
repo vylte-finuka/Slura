@@ -782,7 +782,8 @@ while pc < prog.len() {
         println!("🔍 [EVM LOG] PC={:04x} | OPCODE=0x{:02x} ({})", pc, opcode, opcode_name(opcode));
     }
 
-
+    let insn_ptr = pc;
+    let mut advance = 1;
     let _dst = 0;
 let _src = 1;
 let insn_ptr = pc;
@@ -1390,6 +1391,7 @@ let insn_ptr = pc;
     }
     let dest = evm_stack.pop().unwrap() as usize;
     let cond = evm_stack.pop().unwrap();
+
         pc = dest;
         continue;
     }
