@@ -1375,23 +1375,23 @@ let insn_ptr = pc;
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
     }
     let dest = evm_stack.pop().unwrap() as usize;
+    // Priorité : si le prochain opcode est JUMPDEST, on avance dessus (PC + 1)
+    if pc + 1 < prog.len() && prog[pc + 1] == 0x5b {
+        println!("[EVM-PRIORITY] Advancing to next JUMPDEST at 0x{:04x}", pc + 1);
+        pc = pc + 1;
+        advance = 0;
+        continue;
+    }
 
-    // Cas normal : dest est un JUMPDEST
+    // Sinon, comportement standard : saute SEULEMENT si dest est JUMPDEST
     if dest < prog.len() && prog[dest] == 0x5b {
         pc = dest;
         advance = 0;
         continue;
     }
-    // Sinon, check "prochain" PC+1
-    if dest + 1 < prog.len() && prog[dest + 1] == 0x5b {
-        println!("[EVM extended] JUMP non-jumpdest, next is JUMPDEST at 0x{:04x}: jumping there.", dest + 1);
-        pc = dest + 1;
-        advance = 0;
-        continue;
-    }
-    // Sinon, revert EVM strict
+
     return Err(Error::new(ErrorKind::Other, format!(
-        "EVM REVERT: JUMP to non-JUMPDEST (0x{:02x}) at 0x{:04x}, and next isn't JUMPDEST", prog.get(dest).copied().unwrap_or(0xff), dest
+        "EVM REVERT: JUMP to non-JUMPDEST (0x{:02x}) at 0x{:04x}", prog.get(dest).copied().unwrap_or(0xff), dest
     )));
 },
 
@@ -1403,23 +1403,26 @@ let insn_ptr = pc;
     let dest = evm_stack.pop().unwrap() as usize;
     let cond = evm_stack.pop().unwrap();
     if cond != 0 {
+        // Priorité : si le prochain opcode est JUMPDEST, on avance dessus (PC + 1)
+        if pc + 1 < prog.len() && prog[pc + 1] == 0x5b {
+            println!("[EVM-PRIORITY] Advancing to next JUMPDEST at 0x{:04x}", pc + 1);
+            pc = pc + 1;
+            advance = 0;
+            continue;
+        }
+
+        // Sinon, saut EVM classique
         if dest < prog.len() && prog[dest] == 0x5b {
             pc = dest;
             advance = 0;
             continue;
         }
-        if dest + 1 < prog.len() && prog[dest + 1] == 0x5b {
-            println!("[EVM extended] JUMPI non-jumpdest, next is JUMPDEST at 0x{:04x}: jumping there.", dest + 1);
-            pc = dest + 1;
-            advance = 0;
-            continue;
-        }
         return Err(Error::new(ErrorKind::Other, format!(
-            "EVM REVERT: JUMPI to non-JUMPDEST (0x{:02x}) at 0x{:04x}, and next isn't JUMPDEST", prog.get(dest).copied().unwrap_or(0xff), dest
+            "EVM REVERT: JUMPI to non-JUMPDEST (0x{:02x}) at 0x{:04x}", prog.get(dest).copied().unwrap_or(0xff), dest
         )));
     }
-    // Si cond == 0, avance naturel
-}
+    // Si cond == 0, continue linéairement
+},
            
         // ___ 0xf4 DELEGATECALL
 0xf4 => {
