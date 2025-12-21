@@ -1371,12 +1371,36 @@ let insn_ptr = pc;
 
 // ___ 0x56 JUMP
 0x56 => {
-    
+    if evm_stack.is_empty() {
+        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
+    }
+    let dest = evm_stack.pop().unwrap() as usize;
+
+    if dest >= prog.len() {
+        return Err(Error::new(ErrorKind::Other, "EVM REVERT: Invalid JUMP destination out of bounds"));
+    }
+
+    pc = dest;
+    continue;
 },
 
 // ___ 0x57 JUMPI
 0x57 => {
+    if evm_stack.len() < 2 {
+        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMPI"));
+    }
+    let dest = evm_stack.pop().unwrap() as usize;
+    let cond = evm_stack.pop().unwrap();
+
+    if cond != 0 {
+        if dest >= prog.len() {
+            return Err(Error::new(ErrorKind::Other, "EVM REVERT: Invalid JUMPI destination out of bounds"));
+        }
     
+        pc = dest;
+        continue;
+    }
+    // cond == 0 → continue normalement
 },
         
         // ___ 0xf4 DELEGATECALL
