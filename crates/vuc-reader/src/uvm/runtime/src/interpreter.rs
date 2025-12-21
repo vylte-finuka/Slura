@@ -1371,20 +1371,38 @@ let insn_ptr = pc;
 
 // ___ 0x56 JUMP
 0x56 => {
+    // 1. Stack underflow check
     if evm_stack.is_empty() {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
     }
-    let dest = evm_stack.pop().unwrap() as usize;
-    // Vérifier que 'dest' est dans les bornes ET opcode JUMPDEST (0x5b)
-    if dest >= prog.len() {
-        return Err(Error::new(ErrorKind::Other, "EVM REVERT: JUMP destination out of bounds"));
+    // 2. Destination must be an absolute value (uint), matching offset in bytecode!
+    let dest = evm_stack.pop().unwrap();
+    let dest_usize = dest as usize;
+
+    // 3. LOG et debug (pour t'aider à tracer !)
+    println!(
+        "[VM-DEBUG] JUMP: destination=0x{:04x}, bytecode[dest]=0x{:02x}, pc=0x{:04x}",
+        dest_usize,
+        prog.get(dest_usize).copied().unwrap_or(0xff),
+        pc
+    );
+
+    // 4. Vérif des bornes
+    if dest_usize >= prog.len() {
+        return Err(Error::new(ErrorKind::Other, format!(
+            "EVM REVERT: JUMP destination out of bounds (0x{:04x})", dest_usize
+        )));
     }
-    if prog[dest] != 0x5b {
-        return Err(Error::new(ErrorKind::Other, format!("EVM REVERT: JUMP to non-JUMPDEST (0x{:02x})", prog[dest])));
+    // 5. Vérif le JUMPDEST demandé
+    if prog[dest_usize] != 0x5b {
+        return Err(Error::new(ErrorKind::Other, format!(
+            "EVM REVERT: JUMP to non-JUMPDEST (0x{:02x}) at 0x{:04x}", prog[dest_usize], dest_usize
+        )));
     }
-    pc = dest;
-    advance = 0; // car on positionne explicitement le PC (pas d’auto-incrément)
-    continue;    // Important : saute la ligne d’incrément
+    // 6. Exécution conforme : PC positionné!
+    pc = dest_usize;
+    advance = 0; // on a assigné pc explicitement, pas d'incrément
+    continue;
 }
 
 //___ 0x57 JUMPI
@@ -1392,22 +1410,34 @@ let insn_ptr = pc;
     if evm_stack.len() < 2 {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMPI"));
     }
-    let dest = evm_stack.pop().unwrap() as usize;
+    let dest = evm_stack.pop().unwrap();
     let cond = evm_stack.pop().unwrap();
     if cond != 0 {
-        if dest >= prog.len() {
-            return Err(Error::new(ErrorKind::Other, "EVM REVERT: JUMPI dest out of bounds"));
+        let dest_usize = dest as usize;
+        println!(
+            "[VM-DEBUG] JUMPI: destination=0x{:04x}, bytecode[dest]=0x{:02x}, pc=0x{:04x}",
+            dest_usize,
+            prog.get(dest_usize).copied().unwrap_or(0xff),
+            pc
+        );
+
+        if dest_usize >= prog.len() {
+            return Err(Error::new(ErrorKind::Other, format!(
+                "EVM REVERT: JUMPI destination out of bounds (0x{:04x})", dest_usize
+            )));
         }
-        if prog[dest] != 0x5b {
-            return Err(Error::new(ErrorKind::Other, format!("EVM REVERT: JUMPI to non-JUMPDEST (0x{:02x})", prog[dest])));
+        if prog[dest_usize] != 0x5b {
+            return Err(Error::new(ErrorKind::Other, format!(
+                "EVM REVERT: JUMPI to non-JUMPDEST (0x{:02x}) at 0x{:04x}", prog[dest_usize], dest_usize
+            )));
         }
-        pc = dest;
+        pc = dest_usize;
         advance = 0;
         continue;
     }
-    // Sinon, continue à l'instruction suivante (advance pas modifié)
+    // else: condition fausse, continue normalement
 }
-        
+           
         // ___ 0xf4 DELEGATECALL
 0xf4 => {
     if evm_stack.len() < 6 {
