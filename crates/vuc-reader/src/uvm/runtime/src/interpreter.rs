@@ -572,26 +572,36 @@ pub fn execute_program(
     const U32MAX: u64 = u32::MAX as u64;
     const SHIFT_MASK_64: u64 = 0x3f;
 
-// Détection proxy ERC-1967
-let impl_slot = "360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";
-let impl_bytes = get_storage(&execution_context.world_state, &interpreter_args.contract_address, impl_slot);
+    let mut prog = match prog_ {
+    Some(prog) => prog.to_vec(), // on passe en owned pour pouvoir modifier
+    None => return Err(Error::new(
+        ErrorKind::Other,
+        "Error: No program set, call prog_set() to load one",
+    )),
+};
 
-let mut actual_prog = prog.to_vec(); // par défaut le bytecode fourni
+// === DÉTECTION PROXY ERC-1967 & SWITCH AUTOMATIQUE VERS IMPLÉMENTATION ===
+{
+    let impl_slot = "360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";
+    let impl_bytes = get_storage(&execution_context.world_state, &interpreter_args.contract_address, impl_slot);
 
-if impl_bytes.len() == 32 && !impl_bytes.iter().all(|&b| b == 0) {
-    let impl_addr_bytes = &impl_bytes[12..32]; // 20 bytes address
-    let impl_addr = format!("0x{}", hex::encode(impl_addr_bytes));
+    if impl_bytes.len() == 32 && !impl_bytes.iter().all(|&b| b == 0) {
+        let impl_addr_bytes = &impl_bytes[12..32];
+        let impl_addr = format!("0x{}", hex::encode(impl_addr_bytes));
 
-    if let Some(impl_code) = execution_context.world_state.code.get(&impl_addr) {
-        println!("🔄 [PROXY DETECTED] Utilisation du bytecode implementation {} pour l'exécution (storage reste celui du proxy)", impl_addr);
-        actual_prog = impl_code.clone();
-    } else {
-        println!("⚠️ [PROXY] Implementation {} non chargée dans world_state.code → exécution sur proxy seul", impl_addr);
+        if let Some(impl_code) = execution_context.world_state.code.get(&impl_addr) {
+            println!("🔄 [PROXY DETECTED] Exécution sur bytecode de l'implementation {} (storage conservé du proxy {})", impl_addr, interpreter_args.contract_address);
+            prog = impl_code.clone();
+        } else {
+            println!("⚠️ [PROXY] Implementation {} trouvée dans storage mais bytecode non chargé dans world_state.code → exécution sur proxy seul (risque de revert sur view constants)", impl_addr);
+            // On garde le bytecode du proxy
+        }
     }
 }
 
-// Puis utilise actual_prog au lieu de prog dans la boucle
-let prog = &actual_prog;
+// Maintenant, prog est soit le bytecode proxy, soit celui de l'impl
+let prog = &prog; // on repasse en référence pour le reste de la boucle
+
     let default_stack_usage = StackUsage::new();
     let stack_usage = stack_usage.unwrap_or(&default_stack_usage);
 
