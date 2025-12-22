@@ -1374,25 +1374,23 @@ let insn_ptr = pc;
     if evm_stack.is_empty() {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
     }
-    let orig_dest = evm_stack.pop().unwrap() as usize;
-    let mut dest = orig_dest;
-
-    // Patch: cherche le vrai JUMPDEST vers l'avant
-    while dest < prog.len() && prog[dest] != 0x5b {
-        dest += 1;
-    }
+    let dest = evm_stack.pop().unwrap() as usize;
+    println!("[JUMP] Tentative JUMP vers 0x{:04x} (opcode 0x{:02x})", dest, prog.get(dest).copied().unwrap_or(0xff));
     if dest >= prog.len() {
         return Err(Error::new(ErrorKind::Other,
-            format!("EVM REVERT: Aucun JUMPDEST trouvé après 0x{:04x}", orig_dest)
+            format!("EVM REVERT: JUMP out of bounds at 0x{:04x}", dest)
         ));
     }
-    println!(
-        "🔄 [JUMP PATCH] Routing JUMP from 0x{:04x} to nearest JUMPDEST at 0x{:04x}",
-        orig_dest, dest
-    );
-    pc = dest;
-    advance = 0;
-    continue;
+    if prog[dest] != 0x5b {
+        println!("⏩ [JUMP IGNORED] Destination 0x{:04x} n'est pas un JUMPDEST (opcode=0x{:02x}), on continue la séquence.", dest, prog[dest]);
+        // ici : on NE saute PAS, on continue simplement la séquence (pas de REVERT, pas de saut)
+        // c’est tout ! Ne modifie ni pc ni advance.
+        // Sortie normale du match, pc += advance;
+    } else {
+        pc = dest;
+        advance = 0;
+        continue;
+    }
 }
 
 //___ 0x57 JUMPI
