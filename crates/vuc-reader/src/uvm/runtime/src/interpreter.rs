@@ -1372,31 +1372,24 @@ let insn_ptr = pc;
 //___ 0x56 JUMP
 0x56 => {
     if evm_stack.is_empty() {
-        // Canonique EVM : faute de pile = crash (option : log, ignore, continue ou return Err)
-        println!("⚠️ [EVM] STACK underflow on JUMP, instruction ignorée.");
-        // Option permissive :
-        // return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
-        // Option : just skip
-    } else {
-        let dest = evm_stack.pop().unwrap() as usize;
-        println!("[JUMP] Tentative JUMP vers 0x{:04x} (opcode 0x{:02x})", dest, prog.get(dest).copied().unwrap_or(0xff));
-
-        if dest >= prog.len() {
-            // Hors bytecode -> JUMP ignoré (ou REVERT sur VM stricte, ici permissive)
-            println!("⏩ [JUMP IGNORED] Destination 0x{:04x} hors bytecode.", dest);
-        } else if prog[dest] != 0x5b {
-            // Pas un JUMPDEST : JUMP ignoré (no NOP, pas d’auto-corrigé ni de REVERT ici)
-            println!("⏩ [JUMP IGNORED] Destination 0x{:04x} n'est pas un JUMPDEST (opcode=0x{:02x}).", dest, prog[dest]);
-        } else {
-            // Succès : saute exactement à l’offset donné !
-            pc = dest;
-            advance = 0;
-            continue;
-        }
-        // Si jump ignoré → pc += advance (comportement classique)
+        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
     }
-}
+    let dest = evm_stack.pop().unwrap() as usize;
+    println!("[JUMP] Tentative JUMP vers 0x{:04x} (opcode 0x{:02x})", dest, prog.get(dest).copied().unwrap_or(0xff));
 
+    if dest >= prog.len() {
+        println!("⏩ [JUMP IGNORED] Destination 0x{:04x} hors bytecode.", dest);
+        // Option stricte : return Err(Error::new(ErrorKind::Other, format!("EVM REVERT: JUMP out of bounds at 0x{:04x}", dest)));
+    } else if prog[dest] != 0x5b {
+        println!("⏩ [JUMP IGNORED] Destination 0x{:04x} n'est pas un JUMPDEST (opcode=0x{:02x})", dest, prog[dest]);
+        // Ne fait rien, juste avance (NOP)
+    } else {
+        // Saute exactement où le bytecode dit
+        pc = dest;
+        advance = 0;
+        continue;
+    }
+        
 //___ 0x57 JUMPI
 0x57 => {
     if evm_stack.len() < 2 {
