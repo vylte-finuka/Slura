@@ -1576,16 +1576,16 @@ let insn_ptr = pc;
     },
         
     //___ 0x60..=0x7f : PUSH1 à PUSH32
-0x60..=0x7f => {
+if (0x60..=0x7f).contains(&opcode) {
     let n = (opcode - 0x5f) as usize;
     if pc + n >= prog.len() {
-        return Err(Error::new(ErrorKind::Other, format!("EVM: PUSH out of bounds")));
+        return Err(Error::new(ErrorKind::Other, "EVM PUSHn out of bounds"));
     }
     let mut val: u128 = 0;
     for i in 0..n {
         val = (val << 8) | (prog[pc + 1 + i] as u128);
     }
-    evm_stack.push(val as u64); // ou u128/u256 si tu as besoin de plus large
+    evm_stack.push(val as u64); // ou u128 si ta stack gère plus large
     advance = 1 + n;
 }
     
