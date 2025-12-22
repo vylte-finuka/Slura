@@ -1369,13 +1369,21 @@ let insn_ptr = pc;
     println!("💾 [SSTORE] slot={} <- value={}", slot, value);
 },
 
-//___ 0x56 JUMP
+        //___ 0x56 JUMP
 0x56 => {
-    // JUMP: pop une valeur de la stack, qui doit être un offset avec opcode 0x5b
+    // Log pile AVANT tout
+    println!("[JUMP] Stack before JUMP: {:?}", evm_stack);
+
     if evm_stack.is_empty() {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
     }
     let dest = evm_stack.pop().unwrap() as usize;
+
+    // Consomme explicitement tous les résidus inutiles (ici, selector, etc)
+    if !evm_stack.is_empty() {
+        println!("[JUMP] Purge stack garbage: {:?}", evm_stack);
+        evm_stack.clear(); // ou .truncate(0), garde pile propre
+    }
 
     println!("[JUMP] Tentative JUMP vers 0x{:04x} (opcode 0x{:02x})", dest, prog.get(dest).copied().unwrap_or(0xff));
 
@@ -1384,33 +1392,26 @@ let insn_ptr = pc;
             format!("EVM REVERT: JUMP to non-JUMPDEST (0x{:02x}) at 0x{:04x}", prog.get(dest).copied().unwrap_or(0), dest)
         ));
     }
-    pc = dest;         // saute à la destination
-    advance = 0;       // ne pas avancer après un JUMP réussi !
-    continue;          // boucle: saute immédiatement à dest
-
-    // --- LOG AVANT UN JUMP ---
-if opcode == 0x56 {
-    println!("[DEBUG before JUMP] PC=0x{:04x}, STACK={:?}", pc, evm_stack);
-    if let Some(&dest) = evm_stack.last() {
-        let idx = dest as usize;
-        println!(
-            "[DEBUG before JUMP] candidate pc=0x{:04x}, opcode at pc=0x{:02x} ({})",
-            idx,
-            prog.get(idx).copied().unwrap_or(0xff),
-            if prog.get(idx).copied().unwrap_or(0) == 0x5b { "JUMPDEST" } else { "NO-JUMPDEST" }
-        );
-    }
-}
+    pc = dest;
+    advance = 0;
+    continue;
 }
 
 //___ 0x57 JUMPI
 0x57 => {
-    // JUMPI: pop deux valeurs (d'abord destination, ensuite condition bool)
+    println!("[JUMPI] Stack before JUMPI: {:?}", evm_stack);
+
     if evm_stack.len() < 2 {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMPI"));
     }
-    let dest = evm_stack.pop().unwrap() as usize; // destination d'abord
-    let cond = evm_stack.pop().unwrap();          // puis condition
+    let dest = evm_stack.pop().unwrap() as usize;
+    let cond = evm_stack.pop().unwrap();
+
+    // Si des résidus (selector, etc.) après JUMPI, purge-les
+    if !evm_stack.is_empty() {
+        println!("[JUMPI] Purge stack garbage after JUMPI: {:?}", evm_stack);
+        evm_stack.clear();
+    }
 
     println!("[JUMPI] Tentative JUMPI vers 0x{:04x} (opcode 0x{:02x}), cond={}", dest, prog.get(dest).copied().unwrap_or(0xff), cond);
 
@@ -1420,23 +1421,11 @@ if opcode == 0x56 {
                 format!("EVM REVERT: JUMPI to non-JUMPDEST (0x{:02x}) at 0x{:04x}", prog.get(dest).copied().unwrap_or(0), dest)
             ));
         }
-        pc = dest;   // saute à la destination (comme un JUMP normal)
+        pc = dest;
         advance = 0;
-        continue;    // saute immédiatement
+        continue;
     }
-    // condition fausse : on avance normalement à l'OP suivant
-    if opcode == 0x57 {
-    println!("[DEBUG before JUMPI] PC=0x{:04x}, STACK={:?}", pc, evm_stack);
-    if evm_stack.len() >= 2 {
-        let dest = evm_stack[evm_stack.len() - 2] as usize; // destination sera pop avant la condition
-        println!(
-            "[DEBUG before JUMPI] candidate pc=0x{:04x}, opcode at pc=0x{:02x} ({})",
-            dest,
-            prog.get(dest).copied().unwrap_or(0xff),
-            if prog.get(dest).copied().unwrap_or(0) == 0x5b { "JUMPDEST" } else { "NO-JUMPDEST" }
-        );
-    }
-    }
+    // sinon avance normalement
 }
            
         //___ 0xf4 DELEGATECALL
