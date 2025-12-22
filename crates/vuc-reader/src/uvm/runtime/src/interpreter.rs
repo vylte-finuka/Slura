@@ -1114,7 +1114,7 @@ let insn_ptr = pc;
             reg[0] = res;
         },
 
-    // ___ 0x1e CLZ
+    //___ 0x1e CLZ
     0x1e => {
         if evm_stack.is_empty() {
             return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on CLZ"));
@@ -1387,8 +1387,8 @@ let insn_ptr = pc;
     pc = dest;         // saute à la destination
     advance = 0;       // ne pas avancer après un JUMP réussi !
     continue;          // boucle: saute immédiatement à dest
-}
-        // --- LOG AVANT UN JUMP ---
+
+    // --- LOG AVANT UN JUMP ---
 if opcode == 0x56 {
     println!("[DEBUG before JUMP] PC=0x{:04x}, STACK={:?}", pc, evm_stack);
     if let Some(&dest) = evm_stack.last() {
@@ -1400,6 +1400,7 @@ if opcode == 0x56 {
             if prog.get(idx).copied().unwrap_or(0) == 0x5b { "JUMPDEST" } else { "NO-JUMPDEST" }
         );
     }
+}
 }
 
 //___ 0x57 JUMPI
@@ -1424,9 +1425,7 @@ if opcode == 0x56 {
         continue;    // saute immédiatement
     }
     // condition fausse : on avance normalement à l'OP suivant
-}
-
-if opcode == 0x57 {
+    if opcode == 0x57 {
     println!("[DEBUG before JUMPI] PC=0x{:04x}, STACK={:?}", pc, evm_stack);
     if evm_stack.len() >= 2 {
         let dest = evm_stack[evm_stack.len() - 2] as usize; // destination sera pop avant la condition
@@ -1436,6 +1435,7 @@ if opcode == 0x57 {
             prog.get(dest).copied().unwrap_or(0xff),
             if prog.get(dest).copied().unwrap_or(0) == 0x5b { "JUMPDEST" } else { "NO-JUMPDEST" }
         );
+    }
     }
 }
            
