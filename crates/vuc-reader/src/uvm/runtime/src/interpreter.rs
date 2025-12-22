@@ -791,13 +791,13 @@ let insn_ptr = pc;
 
      // ___ Pectra/EVM opcodes ___
     match opcode {
-        // ___ 0x00 STOP
+        //___ 0x00 STOP
         0x00 => {
             println!("[EVM] STOP encountered, halting execution.");
             break;
         },
 
-    // ___ 0x01 ADD
+    //___ 0x01 ADD
     0x01 => {
         if evm_stack.len() < 2 {
             return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on ADD"));
@@ -809,7 +809,7 @@ let insn_ptr = pc;
         reg[0] = res.low_u64();
     },
 
-    // ___ 0x02 MUL
+    //___ 0x02 MUL
     0x02 => {
         if evm_stack.len() < 2 {
             return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on MUL"));
@@ -821,7 +821,7 @@ let insn_ptr = pc;
         reg[0] = res.low_u64();
     },
 
-    // ___ 0x03 SUB
+    //___ 0x03 SUB
     0x03 => {
         if evm_stack.len() < 2 {
             return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on SUB"));
@@ -833,7 +833,7 @@ let insn_ptr = pc;
         reg[0] = res.low_u64();
     },
 
-    // ___ 0x04 DIV
+    //___ 0x04 DIV
     0x04 => {
         if evm_stack.len() < 2 {
             return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on DIV"));
@@ -845,7 +845,7 @@ let insn_ptr = pc;
         reg[0] = res.low_u64();
     },
 
-    // ___ 0x05 SDIV
+    //___ 0x05 SDIV
     0x05 => {
         if evm_stack.len() < 2 {
             return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on SDIV"));
@@ -857,7 +857,7 @@ let insn_ptr = pc;
         reg[0] = res.as_u64();
     },
 
-    // ___ 0x06 MOD
+    //___ 0x06 MOD
     0x06 => {
         if evm_stack.len() < 2 {
             return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on MOD"));
@@ -869,7 +869,7 @@ let insn_ptr = pc;
         reg[0] = res.low_u64();
     },
 
-    // ___ 0x07 SMOD
+    //___ 0x07 SMOD
     0x07 => {
         if evm_stack.len() < 2 {
             return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on SMOD"));
@@ -881,7 +881,7 @@ let insn_ptr = pc;
         reg[0] = res.as_u64();
     },
 
-    // ___ 0x08 ADDMOD
+    //___ 0x08 ADDMOD
     0x08 => {
         if evm_stack.len() < 3 {
             return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on ADDMOD"));
@@ -894,7 +894,7 @@ let insn_ptr = pc;
         reg[0] = res.low_u64();
     },
 
-    // ___ 0x09 MULMOD
+    //___ 0x09 MULMOD
     0x09 => {
         if evm_stack.len() < 3 {
             return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on MULMOD"));
@@ -907,7 +907,7 @@ let insn_ptr = pc;
         reg[0] = res.low_u64();
     },
 
-    // ___ 0x0a EXP
+    //___ 0x0a EXP
     0x0a => {
         if evm_stack.len() < 2 {
             return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on EXP"));
@@ -919,7 +919,7 @@ let insn_ptr = pc;
         reg[0] = res.low_u64();
     },
 
-    // ___ 0x0b SIGNEXTEND
+    //___ 0x0b SIGNEXTEND
     0x0b => {
         if evm_stack.len() < 2 {
             return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on SIGNEXTEND"));
@@ -1388,6 +1388,19 @@ let insn_ptr = pc;
     advance = 0;       // ne pas avancer après un JUMP réussi !
     continue;          // boucle: saute immédiatement à dest
 }
+        // --- LOG AVANT UN JUMP ---
+if opcode == 0x56 {
+    println!("[DEBUG before JUMP] PC=0x{:04x}, STACK={:?}", pc, evm_stack);
+    if let Some(&dest) = evm_stack.last() {
+        let idx = dest as usize;
+        println!(
+            "[DEBUG before JUMP] candidate pc=0x{:04x}, opcode at pc=0x{:02x} ({})",
+            idx,
+            prog.get(idx).copied().unwrap_or(0xff),
+            if prog.get(idx).copied().unwrap_or(0) == 0x5b { "JUMPDEST" } else { "NO-JUMPDEST" }
+        );
+    }
+}
 
 //___ 0x57 JUMPI
 0x57 => {
@@ -1411,6 +1424,19 @@ let insn_ptr = pc;
         continue;    // saute immédiatement
     }
     // condition fausse : on avance normalement à l'OP suivant
+}
+
+if opcode == 0x57 {
+    println!("[DEBUG before JUMPI] PC=0x{:04x}, STACK={:?}", pc, evm_stack);
+    if evm_stack.len() >= 2 {
+        let dest = evm_stack[evm_stack.len() - 2] as usize; // destination sera pop avant la condition
+        println!(
+            "[DEBUG before JUMPI] candidate pc=0x{:04x}, opcode at pc=0x{:02x} ({})",
+            dest,
+            prog.get(dest).copied().unwrap_or(0xff),
+            if prog.get(dest).copied().unwrap_or(0) == 0x5b { "JUMPDEST" } else { "NO-JUMPDEST" }
+        );
+    }
 }
            
         //___ 0xf4 DELEGATECALL
