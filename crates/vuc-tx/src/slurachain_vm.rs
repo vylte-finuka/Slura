@@ -311,6 +311,8 @@ impl OptimisticParallelEngine {
         validation_results
     }
 
+    
+
     /// ✅ Validation des conflits de concurrence
     async fn validate_transaction_conflicts(&self, tx: &ParallelTransaction) -> bool {
         // Vérifie si les versions lues sont encore valides
@@ -938,8 +940,80 @@ impl SlurachainVm {
         
                 Ok(vec![0u8; 4096])
             }
-        // ...existing code...
-    
+
+                /// ✅ NOUVEAU: Construction du storage dynamique depuis l'état du contrat
+ fn build_dynamic_storage_from_contract_state(&self, contract_address: &str) -> Result<Option<HashMap<String, HashMap<String, Vec<u8>>>>, String> {
+        if let Ok(accounts) = self.state.accounts.read() {
+            if let Some(account) = accounts.get(contract_address) {
+                let mut storage = HashMap::new();
+                let mut contract_storage = HashMap::new();
+                // Convertit les resources en storage bytes
+                for (key, value) in &account.resources {
+                    let storage_bytes = self.convert_resource_to_storage_bytes(value);
+                    contract_storage.insert(key.clone(), storage_bytes);
+                }
+                storage.insert(contract_address.to_string(), contract_storage);
+                return Ok(Some(storage));
+            }
+        }
+        Ok(None)
+    }
+
+             /// ✅ NOUVEAU: Détection automatique des fonctions d'un contrat
+  pub fn auto_detect_contract_functions(&mut self, contract_address: &str, bytecode: &[u8]) -> Result<(), String> {
+        println!("🔍 [AUTO-DETECT] Analyse du bytecode pour {}", contract_address);
+        let mut detected_functions = HashMap::new();
+        // Cherche les sélecteurs dans le bytecode
+        let mut i = 0;
+        while i + 4 < bytecode.len() {
+            if bytecode[i] == 0x63 { // PUSH4
+                let selector = u32::from_be_bytes([
+                    bytecode[i + 1], bytecode[i + 2], bytecode[i + 3], bytecode[i + 4]
+                ]);
+                if selector != 0 && selector != 0xffffffff {
+                    let function_name = format!("function_{:08x}", selector);
+                    let offset = Self::find_function_offset_in_bytecode(bytecode, selector)
+                        .unwrap_or(0);
+                    detected_functions.insert(function_name.clone(), FunctionMetadata {
+                        name: function_name,
+                        offset,
+                        args_count: 0,
+                        return_type: "bytes".to_string(),
+                        gas_limit: 100000,
+                        payable: false,
+                        mutability: "nonpayable".to_string(),
+                        selector,
+                        arg_types: vec![],
+                        modifiers: vec![],
+                    });
+                    println!("🎯 [AUTO-DETECT] Fonction détectée: 0x{:08x} @ offset {}", selector, i + 5);
+                }
+            }
+            i += 1;
+        }
+        // Crée ou met à jour le module
+        if let Some(module) = self.modules.get_mut(contract_address) {
+            module.functions.extend(detected_functions);
+        } else {
+            let module = Module {
+                name: contract_address.to_string(),
+                address: contract_address.to_string(),
+                bytecode: bytecode.to_vec(),
+                elf_buffer: vec![],
+                context: uvm_runtime::UbfContext::new(),
+                stack_usage: None,
+                functions: detected_functions,
+                gas_estimates: HashMap::new(),
+                storage_layout: HashMap::new(),
+                events: vec![],
+                constructor_params: vec![],
+            };
+            self.modules.insert(contract_address.to_string(), module);
+        }
+        println!("✅ [AUTO-DETECT] Module mis à jour avec {} fonctions", self.modules[contract_address].functions.len());
+        Ok(())
+    }
+
     /// ✅ NOUVEAU: Configuration du moteur parallèle
     pub fn with_parallel_engine(mut self, thread_count: usize, batch_size: usize) -> Self {
         let engine = Arc::new(OptimisticParallelEngine::new(thread_count, batch_size));
@@ -1175,35 +1249,29 @@ fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<us
     }
 
         /// ✅ NOUVEAU: Persistance immédiate du state après exécution
-    pub fn persist_contract_state_immediate(&mut self, contract_address: &str, execution_result: &serde_json::Value) -> Result<(), String> {
+ fn persist_contract_state_immediate(&mut self, contract_address: &str, execution_result: &serde_json::Value) -> Result<(), String> {
         if let Some(storage_manager) = &self.storage_manager {
             println!("💾 [PERSIST] Persistance immédiate du contrat: {}", contract_address);
-            
-            // ✅ ÉTAPE 1: Persistance du storage depuis le résultat
+            // ÉTAPE 1: Persistance du storage depuis le résultat
             if let Some(storage_obj) = execution_result.get("storage").and_then(|v| v.as_object()) {
                 for (slot_key, value_hex) in storage_obj {
-                    // mappe la clé logique vers un slot 32-bytes hex canonique
+                    // Mappe la clé logique vers un slot 32-bytes hex canonique
                     let canonical_slot = self.map_resource_key_to_slot(slot_key);
-                    
                     let storage_key = format!("storage:{}:{}", contract_address, canonical_slot);
-            
                     let value_bytes = if let Some(hex_str) = value_hex.as_str() {
-                        // accepte "0x..." ou raw hex string
+                        // Accepte "0x..." ou raw hex string
                         let hex_clean = hex_str.trim_start_matches("0x");
                         hex::decode(hex_clean).unwrap_or_else(|_| value_hex.to_string().into_bytes())
                     } else {
                         value_hex.to_string().into_bytes()
                     };
-            
                     println!("📝 [STORAGE WRITE] Contrat: {}, SlotKey: {}, CanonicalSlot: {}, Key: {}, Value (hex): {}, Value (bytes): {:02x?}",
                         contract_address, slot_key, canonical_slot, storage_key, value_hex, value_bytes);
-            
                     if let Err(e) = storage_manager.write(&storage_key, value_bytes.clone()) {
                         eprintln!("⚠️ Erreur persistance slot {}: {}", slot_key, e);
                     } else {
                         println!("✅ Slot persisté: {} -> {} bytes", canonical_slot, value_bytes.len());
                     }
-
                     // Met à jour également resources VM (clé = canonical slot hex préfixé 0x)
                     if let Ok(mut accounts) = self.state.accounts.write() {
                         if let Some(account) = accounts.get_mut(contract_address) {
@@ -1213,15 +1281,13 @@ fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<us
                     }
                 }
             }
-
-            // ✅ ÉTAPE 2: Si l'interpréteur a renvoyé des clés décodées, les expose explicitement
+            // ÉTAPE 2: Si l'interpréteur a renvoyé des clés décodées, les expose explicitement
             if let Some(decoded_obj) = execution_result.get("storage_decoded").and_then(|v| v.as_object()) {
                 for (key, decoded_val) in decoded_obj {
                     // Normalise la valeur et écris sous une clé logique
                     let logical_key = key.clone(); // déjà "implementation"/"admin"/slotHex/etc.
                     // Construit key DB logique
                     let logical_storage_key = format!("storage:{}:{}", contract_address, logical_key);
-
                     // Prépare bytes à écrire selon le type JSON (string hex/addr, number, bool)
                     let bytes_to_write: Vec<u8> = match decoded_val {
                         serde_json::Value::String(s) => {
@@ -1257,14 +1323,12 @@ fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<us
                         serde_json::Value::Bool(b) => vec![if *b { 1u8 } else { 0u8 }],
                         other => other.to_string().into_bytes(),
                     };
-
                     // Write logical key to DB (best-effort)
                     if let Err(e) = storage_manager.write(&logical_storage_key, bytes_to_write.clone()) {
                         eprintln!("⚠️ Erreur persistance logical key {}: {}", logical_storage_key, e);
                     } else {
                         println!("✅ Logical key persistée: {} -> {} bytes", logical_storage_key, bytes_to_write.len());
                     }
-
                     // And update VM resources with friendly value
                     if let Ok(mut accounts) = self.state.accounts.write() {
                         if let Some(account) = accounts.get_mut(contract_address) {
@@ -1275,29 +1339,27 @@ fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<us
                     }
                 }
             }
-
             println!("🎯 Contrat {} persisté avec succès après exécution", contract_address);
         } else {
             println!("⚠️ Pas de storage manager configuré pour la persistance");
         }
-        
         Ok(())
     }
 
 /// Mappe une clé logique (ex: "implementation", "admin") vers un slot 32 bytes hex canonique.
-    fn map_resource_key_to_slot(&self, key: &str) -> String {
-        // clés connues → slots ERC-1967
+   fn map_resource_key_to_slot(&self, key: &str) -> String {
+        // Clés connues → slots ERC-1967
         match key {
             "implementation" | "implementation_slot" => ERC1967_IMPLEMENTATION_SLOT.to_string(),
             "admin" | "admin_slot" => ERC1967_ADMIN_SLOT.to_string(),
             "beacon" | "beacon_slot" => ERC1967_BEACON_SLOT.to_string(),
             k => {
-                // si la clé ressemble déjà à un slot hex 64 chars (avec ou sans 0x) -> normalise
+                // Si la clé ressemble déjà à un slot hex 64 chars (avec ou sans 0x) -> normalise
                 let s = k.trim_start_matches("0x");
                 if s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()) {
                     return s.to_lowercase();
                 }
-                // fallback déterministe : keccak256(key) -> 32 bytes hex
+                // Fallback déterministe : keccak256(key) -> 32 bytes hex
                 let hash = Keccak256::digest(k.as_bytes());
                 hex::encode(hash)
             }
@@ -1386,13 +1448,26 @@ fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<us
     )?;
 
     // Vérifie si c'est un proxy UUPS/ERC1967
-    let impl_addr_opt = {
+  // ✅ DÉTECTION ET GESTION GÉNÉRIQUE DE TOUT PROXY ERC-1967
+  let impl_addr_opt = {
         let accounts = self.state.accounts.read().unwrap();
         accounts.get(&vyid)
             .and_then(|acc| acc.resources.get("implementation"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
     };
+
+        if let Some(ref impl_addr) = impl_addr_opt {
+        // Synchronise le bytecode de l'implémentation dans world_state.code
+        let accounts = self.state.accounts.read().unwrap();
+        if let Some(impl_account) = accounts.get(impl_addr) {
+            let mut world_state = self.state.world_state.write().unwrap();
+            world_state.code.insert(impl_addr.clone(), impl_account.contract_state.clone());
+            println!("✅ [ERC-1967] Bytecode de l'impl {} synchronisé dans world_state.code ({} bytes)", impl_addr, impl_account.contract_state.len());
+        } else {
+            println!("❌ [ERC-1967] Implémentation {} non trouvée dans accounts", impl_addr);
+        }
+    }
 
     if let Some(impl_addr) = impl_addr_opt {
         // Résout le selector et FunctionMetadata AVANT de prendre un emprunt sur impl_module
@@ -1481,23 +1556,20 @@ fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<us
 }
 
     /// ✅ NOUVEAU: Post-processing générique des résultats d'exécution
-    fn process_execution_result_generically(
+  fn process_execution_result_generically(
         &mut self,
         contract_address: &str,
         result: &serde_json::Value,
         function_meta: &FunctionMetadata,
     ) -> Result<(), String> {
         println!("🔄 [POST-PROCESS] Traitement du résultat pour {}", function_meta.name);
-
-        // ✅ Persistance immédiate si storage manager disponible
+        // Persistance immédiate si storage manager disponible
         if let Some(storage_manager) = &self.storage_manager {
             self.persist_result_to_storage(storage_manager, contract_address, result)?;
-            // ✅ NOUVEAU : persiste aussi le state logique/decoded dans RocksDB + met à jour resources VM
-            // assure que les clés décodées (storage_decoded) sont exposées comme clés logiques
+            // Persiste aussi le state logique/decoded dans RocksDB + met à jour resources VM
             self.persist_contract_state_immediate(contract_address, result)?;
         }
-
-        // ✅ Mise à jour des logs si nécessaire
+        // Mise à jour des logs si nécessaire
         if let Some(logs) = result.get("logs").and_then(|v| v.as_array()) {
             if let Ok(mut pending_logs) = self.state.pending_logs.write() {
                 for log in logs {
@@ -1509,7 +1581,6 @@ fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<us
                             .filter_map(|t| t.as_str())
                             .map(|s| s.to_string())
                             .collect();
-
                         pending_logs.push(UvmLog {
                             address: address.to_string(),
                             topics: topics_str,
@@ -1521,8 +1592,7 @@ fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<us
                 }
             }
         }
-
-        // ✅ Mise à jour du gas utilisé
+        // Mise à jour du gas utilisé
         if let Some(gas_used) = result.get("gas_used").and_then(|v| v.as_u64()) {
             if let Ok(mut accounts) = self.state.accounts.write() {
                 if let Some(account) = accounts.get_mut(contract_address) {
@@ -1530,98 +1600,15 @@ fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<us
                 }
             }
         }
-
         println!("✅ [POST-PROCESS] Traitement terminé pour {}", function_meta.name);
         Ok(())
     }
 
-    /// ✅ NOUVEAU: Détection automatique des fonctions d'un contrat
-    pub fn auto_detect_contract_functions(&mut self, contract_address: &str, bytecode: &[u8]) -> Result<(), String> {
-        println!("🔍 [AUTO-DETECT] Analyse du bytecode pour {}", contract_address);
-
-        let mut detected_functions = HashMap::new();
-
-        // ✅ Cherche les sélecteurs dans le bytecode
-        let mut i = 0;
-        while i + 4 < bytecode.len() {
-            if bytecode[i] == 0x63 { // PUSH4
-                let selector = u32::from_be_bytes([
-                    bytecode[i + 1], bytecode[i + 2], bytecode[i + 3], bytecode[i + 4]
-                ]);
-
-                if selector != 0 && selector != 0xffffffff {
-                    let function_name = format!("function_{:08x}", selector);
-                    
-                    let offset = Self::find_function_offset_in_bytecode(bytecode, selector)
-    .unwrap_or(0);
-
-detected_functions.insert(function_name.clone(), FunctionMetadata {
-    name: function_name,
-    offset,
-    args_count: 0,
-    return_type: "bytes".to_string(),
-    gas_limit: 100000,
-    payable: false,
-    mutability: "nonpayable".to_string(),
-    selector,
-    arg_types: vec![],
-    modifiers: vec![],
-});
-
-                    println!("🎯 [AUTO-DETECT] Fonction détectée: 0x{:08x} @ offset {}", selector, i + 5);
-                }
-            }
-            i += 1;
-        }
-
-        // ✅ Crée un module avec les fonctions détectées
-        let module = Module {
-            name: contract_address.to_string(),
-            address: contract_address.to_string(),
-            bytecode: bytecode.to_vec(),
-            elf_buffer: vec![],
-            context: uvm_runtime::UbfContext::new(),
-            stack_usage: None,
-            functions: detected_functions,
-            gas_estimates: HashMap::new(),
-            storage_layout: HashMap::new(),
-            events: vec![],
-            constructor_params: vec![],
-        };
-
-        self.modules.insert(contract_address.to_string(), module);
-        println!("✅ [AUTO-DETECT] Module créé avec {} fonctions", self.modules[contract_address].functions.len());
-
-        Ok(())
-    }
-
-    /// ✅ NOUVEAU: Construction du storage dynamique depuis l'état du contrat
-    fn build_dynamic_storage_from_contract_state(&self, contract_address: &str) -> Result<Option<HashMap<String, HashMap<String, Vec<u8>>>>, String> {
-        if let Ok(accounts) = self.state.accounts.read() {
-            if let Some(account) = accounts.get(contract_address) {
-                let mut storage = HashMap::new();
-                let mut contract_storage = HashMap::new();
-
-                // ✅ Convertit les resources en storage bytes
-                for (key, value) in &account.resources {
-                    let storage_bytes = self.convert_resource_to_storage_bytes(value);
-                    contract_storage.insert(key.clone(), storage_bytes);
-                }
-
-                storage.insert(contract_address.to_string(), contract_storage);
-                return Ok(Some(storage));
-            }
-        }
-
-        Ok(None)
-    }
-
     /// ✅ NOUVEAU: Conversion des resources en bytes de storage
-    fn convert_resource_to_storage_bytes(&self, value: &serde_json::Value) -> Vec<u8> {
+ fn convert_resource_to_storage_bytes(&self, value: &serde_json::Value) -> Vec<u8> {
         match value {
             serde_json::Value::String(s) => {
                 if s.starts_with("0x") && s.len() > 2 {
-                    // Décode hex
                     hex::decode(&s[2..]).unwrap_or_else(|_| s.as_bytes().to_vec())
                 } else {
                     s.as_bytes().to_vec()
@@ -1644,7 +1631,7 @@ detected_functions.insert(function_name.clone(), FunctionMetadata {
     }
 
     /// ✅ NOUVEAU: Préparation des arguments d'exécution génériques
-    fn prepare_generic_execution_args(
+   fn prepare_generic_execution_args(
         &self,
         contract_address: &str,
         function_name: &str,
@@ -1653,21 +1640,17 @@ detected_functions.insert(function_name.clone(), FunctionMetadata {
         function_meta: &FunctionMetadata,
         resolved_offset: usize,
     ) -> Result<uvm_runtime::interpreter::InterpreterArgs, String> {
-        
         let current_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-
         let block_number = self.state.block_info.read()
             .map(|b| b.number)
             .unwrap_or(1);
-
-        // ✅ Génère calldata avec sélecteur
+        // Génère calldata avec sélecteur
         let mut calldata = Vec::with_capacity(4 + args.len() * 32);
         calldata.extend_from_slice(&function_meta.selector.to_be_bytes());
-
-        // ✅ Encode les arguments de manière simplifiée
+        // Encode les arguments de manière simplifiée
         for arg in &args {
             match arg {
                 serde_json::Value::Number(n) => {
@@ -1699,7 +1682,6 @@ detected_functions.insert(function_name.clone(), FunctionMetadata {
                 }
             }
         }
-
         Ok(uvm_runtime::interpreter::InterpreterArgs {
             function_name: function_name.to_string(),
             contract_address: contract_address.to_string(),
@@ -1724,216 +1706,187 @@ detected_functions.insert(function_name.clone(), FunctionMetadata {
     }
 
     /// ✅ NOUVEAU: Persistance des résultats dans le storage
-    fn persist_result_to_storage(
+  fn persist_result_to_storage(
         &self,
         storage_manager: &Arc<dyn RocksDBManager>,
         contract_address: &str,
         result: &serde_json::Value,
     ) -> Result<(), String> {
-        
-        let result_key = format!("result:{}:{}", contract_address, 
+        let result_key = format!("result:{}:{}", contract_address,
                                 std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
                                 .unwrap_or_default().as_secs());
-        
         let result_bytes = serde_json::to_vec(result)
             .map_err(|e| format!("Erreur sérialisation résultat: {}", e))?;
-        
         storage_manager.write(&result_key, result_bytes)
             .map_err(|e| format!("Erreur persistance: {}", e))?;
-        
         println!("💾 [PERSIST] Résultat persisté: {}", result_key);
         Ok(())
     }
 
-/// ✅ NOUVEAU: Lookup générique dans les resources
-fn lookup_value_from_resources(&self, address: &str, key: &str) -> Result<NerenaValue, String> {
-    if let Ok(accounts) = self.state.accounts.read() {
-        if let Some(account) = accounts.get(address) {
-            
-            // ✅ Cherche directement la clé
-            if let Some(value) = account.resources.get(key) {
-                return Ok(value.clone());
-            }
-            
-            // ✅ Cherche des variantes de la clé
-            let key_variants = [
-                key.to_string(),
-                key.to_lowercase(),
-                format!("_{}", key),
-                format!("get{}", key),
-            ];
-            
-            for variant in &key_variants {
-                if let Some(value) = account.resources.get(variant) {
+/// ✅ Lookup générique dans les resources d'un compte
+    fn lookup_value_from_resources(&self, address: &str, key: &str) -> Result<NerenaValue, String> {
+        if let Ok(accounts) = self.state.accounts.read() {
+            if let Some(account) = accounts.get(address) {
+                // Cherche directement la clé
+                if let Some(value) = account.resources.get(key) {
                     return Ok(value.clone());
                 }
-            }
-            
-            // ✅ Cherche dans les slots de storage
-            if let Some(slot_value) = self.find_in_storage_slots(account, key) {
-                return Ok(slot_value);
+
+                // Cherche des variantes de la clé (case insensitive, préfixes)
+                let key_lower = key.to_lowercase();
+                for (res_key, res_val) in &account.resources {
+                    let res_lower = res_key.to_lowercase();
+                    if res_lower == key_lower || res_lower.contains(&key_lower) {
+                        return Ok(res_val.clone());
+                    }
+                }
+
+                // Cherche dans les slots de storage
+                if let Some(slot_value) = self.find_in_storage_slots(account, key) {
+                    return Ok(slot_value);
+                }
             }
         }
+        Ok(serde_json::Value::Null)
     }
-    
-    Ok(serde_json::Value::Null)
-}
 
 /// ✅ NOUVEAU: Recherche dans les slots de storage
 fn find_in_storage_slots(&self, account: &AccountState, key: &str) -> Option<NerenaValue> {
-    // Cherche dans tous les slots possibles
-    for (slot_key, slot_value) in &account.resources {
-        if slot_key.len() == 64 { // Slots de storage EVM
-            if let Some(decoded) = self.decode_storage_slot_generically(slot_value) {
-                if self.matches_key_semantics(key, &decoded) {
-                    return Some(decoded);
+        // Cherche dans tous les slots possibles
+        for (slot_key, slot_value) in &account.resources {
+            if slot_key.len() == 64 { // Slots de storage EVM
+                if let Some(decoded) = self.decode_storage_slot_generically(slot_value) {
+                    if self.matches_key_semantics(key, &decoded) {
+                        return Some(decoded);
+                    }
                 }
             }
         }
+        None
     }
-    None
-}
 
 /// ✅ NOUVEAU: Décodage générique des slots de storage
 fn decode_storage_slot_generically(&self, slot_value: &serde_json::Value) -> Option<NerenaValue> {
-    if let Some(hex_str) = slot_value.as_str() {
-        if let Ok(bytes) = hex::decode(hex_str) {
-            if bytes.len() >= 32 {
-                
-                // ✅ Essaie de décoder comme adresse (20 derniers bytes)
-                let addr_bytes = &bytes[12..32];
-                if !addr_bytes.iter().all(|&b| b == 0) {
-                    let addr = format!("0x{}", hex::encode(addr_bytes));
-                    if self.looks_like_address(&addr) {
-                        return Some(serde_json::json!(addr));
+        if let Some(hex_str) = slot_value.as_str() {
+            if let Ok(bytes) = hex::decode(hex_str) {
+                if bytes.len() >= 32 {
+                    // Essaie de décoder comme adresse (20 derniers bytes)
+                    let addr_bytes = &bytes[12..32];
+                    if !addr_bytes.iter().all(|&b| b == 0) {
+                        let addr = format!("0x{}", hex::encode(addr_bytes));
+                        if self.looks_like_address(&addr) {
+                            return Some(serde_json::json!(addr));
+                        }
                     }
-                }
-                
-                // ✅ Essaie de décoder comme uint256 (8 derniers bytes)
-                let uint_bytes = &bytes[24..32];
-                let value = u64::from_be_bytes([
-                    uint_bytes[0], uint_bytes[1], uint_bytes[2], uint_bytes[3],
-                    uint_bytes[4], uint_bytes[5], uint_bytes[6], uint_bytes[7]
-                ]);
-                
-                if value > 0 && value < 1_000_000_000 { // Valeur raisonnable
-                    return Some(serde_json::json!(value));
-               
-                }
-                
-                // ✅ Essaie de décoder comme string
-                if let Ok(text) = String::from_utf8(
-                    bytes.iter().cloned().filter(|&b| b != 0 && b >= 32 && b <= 126).collect()
-                ) {
-                    if !text.trim().is_empty() && text.len() > 2 {
-                        return Some(serde_json::json!(text.trim()));
+                    // Essaie de décoder comme uint256 (8 derniers bytes)
+                    let uint_bytes = &bytes[24..32];
+                    let value = u64::from_be_bytes([
+                        uint_bytes[0], uint_bytes[1], uint_bytes[2], uint_bytes[3],
+                        uint_bytes[4], uint_bytes[5], uint_bytes[6], uint_bytes[7]
+                    ]);
+                    if value > 0 && value < 1_000_000_000 { // Valeur raisonnable
+                        return Some(serde_json::json!(value));
+                    }
+                    // Essaie de décoder comme string
+                    if let Ok(text) = String::from_utf8(
+                        bytes.iter().cloned().filter(|&b| b != 0 && b >= 32 && b <= 126).collect()
+                    ) {
+                        if !text.trim().is_empty() && text.len() > 2 {
+                            return Some(serde_json::json!(text.trim()));
+                        }
                     }
                 }
             }
         }
+        None
     }
-    None
-}
 
-/// ✅ NOUVEAU: Vérifie si une valeur correspond sémantiquement à une clé
 fn matches_key_semantics(&self, key: &str, value: &serde_json::Value) -> bool {
-    let key_lower = key.to_lowercase();
-    
-    match value {
-        serde_json::Value::String(s) => {
-            if key_lower.contains("owner") || key_lower.contains("admin") {
-                s.starts_with("0x") && s.len() == 42
-            } else if key_lower.contains("name") {
-                s.len() > 2 && s.chars().all(|c| c.is_ascii_alphanumeric() || c.is_whitespace())
-            } else if key_lower.contains("symbol") {
-                s.len() >= 2 && s.len() <= 10 && s.chars().all(|c| c.is_ascii_uppercase())
-            } else {
-                true
-            }
-        },
-        serde_json::Value::Number(n) => {
-            if key_lower.contains("balance") || key_lower.contains("supply") || key_lower.contains("amount") {
-                n.as_u64().unwrap_or(0) >= 0
-            } else if key_lower.contains("decimals") {
-                let val = n.as_u64().unwrap_or(0);
-                val >= 0 && val <= 36
-            } else {
-                true
-            }
-        },
-        _ => true
+        let key_lower = key.to_lowercase();
+        match value {
+            serde_json::Value::String(s) => {
+                if key_lower.contains("owner") || key_lower.contains("admin") {
+                    s.starts_with("0x") && s.len() == 42
+                } else if key_lower.contains("name") {
+                    s.len() > 2 && s.chars().all(|c| c.is_ascii_alphanumeric() || c.is_whitespace())
+                } else if key_lower.contains("symbol") {
+                    s.len() >= 2 && s.len() <= 10 && s.chars().all(|c| c.is_ascii_uppercase())
+                } else {
+                    true
+                }
+            },
+            serde_json::Value::Number(n) => {
+                if key_lower.contains("balance") || key_lower.contains("supply") || key_lower.contains("amount") {
+                    n.as_u64().unwrap_or(0) >= 0
+                } else if key_lower.contains("decimals") {
+                    let val = n.as_u64().unwrap_or(0);
+                    val >= 0 && val <= 36
+                } else {
+                    true
+                }
+            },
+            _ => true
+        }
     }
-}
 
-/// ✅ NOUVEAU: Vérifie si une string ressemble à une adresse
 fn looks_like_address(&self, addr: &str) -> bool {
-    addr.starts_with("0x") && 
-    addr.len() == 42 && 
-    addr != "0x0000000000000000000000000000000000000000" &&
-    addr != "0x0000000000000000000000000000000000000040"
-}
+        addr.starts_with("0x") &&
+        addr.len() == 42 &&
+        addr != "0x0000000000000000000000000000000000000000" &&
+        addr != "0x0000000000000000000000000000000000000040"
+    }
 
     /// ✅ NOUVEAU: Trouve ou crée des métadonnées de fonction
-    fn find_or_create_function_metadata(
+ fn find_or_create_function_metadata(
         &mut self,
         contract_address: &str,
         function_name: &str,
         selector: u32,
         args: &[NerenaValue],
     ) -> Result<FunctionMetadata, String> {
-    
-    // ✅ Essaie de trouver dans les fonctions détectées
-    if let Some(module) = self.modules.get(contract_address) {
-        for (_, meta) in &module.functions {
-            if meta.selector == selector {
-                println!("✅ [META] Fonction trouvée par sélecteur: 0x{:08x}", selector);
-                return Ok(meta.clone());
+        // Essaie de trouver dans les fonctions détectées
+        if let Some(module) = self.modules.get(contract_address) {
+            for (_, meta) in &module.functions {
+                if meta.selector == selector {
+                    println!("✅ [META] Fonction trouvée par sélecteur: 0x{:08x}", selector);
+                    return Ok(meta.clone());
+                }
             }
         }
+        // Crée des métadonnées dynamiques
+        let gas_estimate = 200000;
+        let metadata = FunctionMetadata {
+            name: function_name.to_string(),
+            offset: 0, // Sera résolu plus tard
+            args_count: args.len(),
+            return_type: "bool".to_string(), // GÉNÉRIQUE
+            gas_limit: gas_estimate,
+            payable: false,
+            mutability: "nonpayable".to_string(),
+            selector,
+            arg_types: args.iter().map(|_| "uint256".to_string()).collect(),
+            modifiers: vec![],
+        };
+        // Ajoute à la collection de fonctions
+        if let Some(module) = self.modules.get_mut(contract_address) {
+            module.functions.insert(function_name.to_string(), metadata.clone());
+        }
+        println!("✅ [META] Métadonnées créées dynamiquement pour {}", function_name);
+        Ok(metadata)
     }
-
-    // ✅ Crée des métadonnées dynamiques
-    let bytecode = {
-        let accounts = self.state.accounts.read().unwrap();
-        accounts.get(contract_address).unwrap().contract_state.clone()
-    };
-
-    let gas_estimate = 200000;
-
-    let metadata = FunctionMetadata {
-        name: function_name.to_string(),
-        offset: 0, // Sera résolu plus tard
-        args_count: args.len(),
-        return_type: "bool".to_string(), // ✅ GÉNÉRIQUE
-        gas_limit: gas_estimate,
-        payable: false,
-        mutability: "nonpayable".to_string(),
-        selector,
-        arg_types: args.iter().map(|_| "uint256".to_string()).collect(),
-        modifiers: vec![],
-    };
-
-    // ✅ Ajoute à la collection de fonctions
-    if let Some(module) = self.modules.get_mut(contract_address) {
-        module.functions.insert(function_name.to_string(), metadata.clone());
-    }
-
-    println!("✅ [META] Métadonnées créées dynamiquement pour {}", function_name);
-    Ok(metadata)
-}
 
 /// ✅ NOUVEAU: Estimation générique de l'offset de fonction dans le bytecode
 fn estimate_generic_function_offset(bytecode: &[u8], selector: u32) -> usize {
-    // Heuristique simple : cherche le premier JUMPDEST après 10% du bytecode
-    let start = bytecode.len() / 10;
-    for i in start..bytecode.len() {
-        if bytecode[i] == 0x5b {
-            return i;
+        // Heuristique simple : cherche le premier JUMPDEST après 10% du bytecode
+        let start = bytecode.len() / 10;
+        for i in start..bytecode.len() {
+            if bytecode[i] == 0x5b {
+                return i;
+            }
         }
+        // Fallback : retourne 0
+        0
     }
-    // Fallback : retourne 0
-    0
-}
 
     pub fn new_with_cluster(cluster: &str) -> Self {
         let mut vm = SlurachainVm::new();
