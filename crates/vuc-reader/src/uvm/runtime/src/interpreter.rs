@@ -791,13 +791,13 @@ let insn_ptr = pc;
 
      // ___ Pectra/EVM opcodes ___
     match opcode {
-        // 0x00 STOP
+        // ___ 0x00 STOP
         0x00 => {
             println!("[EVM] STOP encountered, halting execution.");
             break;
         },
 
-    // 0x01 ADD
+    // ___ 0x01 ADD
     0x01 => {
         if evm_stack.len() < 2 {
             return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on ADD"));
@@ -809,7 +809,7 @@ let insn_ptr = pc;
         reg[0] = res.low_u64();
     },
 
-    // 0x02 MUL
+    // ___ 0x02 MUL
     0x02 => {
         if evm_stack.len() < 2 {
             return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on MUL"));
@@ -821,7 +821,7 @@ let insn_ptr = pc;
         reg[0] = res.low_u64();
     },
 
-    // 0x03 SUB
+    // ___ 0x03 SUB
     0x03 => {
         if evm_stack.len() < 2 {
             return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on SUB"));
@@ -833,7 +833,7 @@ let insn_ptr = pc;
         reg[0] = res.low_u64();
     },
 
-    // 0x04 DIV
+    // ___ 0x04 DIV
     0x04 => {
         if evm_stack.len() < 2 {
             return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on DIV"));
@@ -845,7 +845,7 @@ let insn_ptr = pc;
         reg[0] = res.low_u64();
     },
 
-    // 0x05 SDIV
+    // ___ 0x05 SDIV
     0x05 => {
         if evm_stack.len() < 2 {
             return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on SDIV"));
@@ -857,7 +857,7 @@ let insn_ptr = pc;
         reg[0] = res.as_u64();
     },
 
-    // 0x06 MOD
+    // ___ 0x06 MOD
     0x06 => {
         if evm_stack.len() < 2 {
             return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on MOD"));
@@ -869,7 +869,7 @@ let insn_ptr = pc;
         reg[0] = res.low_u64();
     },
 
-    // 0x07 SMOD
+    // ___ 0x07 SMOD
     0x07 => {
         if evm_stack.len() < 2 {
             return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on SMOD"));
@@ -881,7 +881,7 @@ let insn_ptr = pc;
         reg[0] = res.as_u64();
     },
 
-    // 0x08 ADDMOD
+    // ___ 0x08 ADDMOD
     0x08 => {
         if evm_stack.len() < 3 {
             return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on ADDMOD"));
@@ -894,7 +894,7 @@ let insn_ptr = pc;
         reg[0] = res.low_u64();
     },
 
-    // 0x09 MULMOD
+    // ___ 0x09 MULMOD
     0x09 => {
         if evm_stack.len() < 3 {
             return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on MULMOD"));
@@ -907,7 +907,7 @@ let insn_ptr = pc;
         reg[0] = res.low_u64();
     },
 
-    // 0x0a EXP
+    // ___ 0x0a EXP
     0x0a => {
         if evm_stack.len() < 2 {
             return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on EXP"));
@@ -919,7 +919,7 @@ let insn_ptr = pc;
         reg[0] = res.low_u64();
     },
 
-    // 0x0b SIGNEXTEND
+    // ___ 0x0b SIGNEXTEND
     0x0b => {
         if evm_stack.len() < 2 {
             return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on SIGNEXTEND"));
@@ -1114,7 +1114,7 @@ let insn_ptr = pc;
             reg[0] = res;
         },
 
-    // 0x1e CLZ
+    // ___ 0x1e CLZ
     0x1e => {
         if evm_stack.is_empty() {
             return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on CLZ"));
@@ -1375,27 +1375,22 @@ let insn_ptr = pc;
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
     }
     let dest = evm_stack.pop().unwrap() as usize;
-    // Priorité : si le prochain opcode est JUMPDEST, on avance dessus (PC + 1)
-    if pc + 1 < prog.len() && prog[pc + 1] == 0x5b {
-        println!("[EVM-PRIORITY] Advancing to next JUMPDEST at 0x{:04x}", pc + 1);
-        pc = pc + 1;
-        advance = 0;
-        continue;
+    if dest >= prog.len() {
+        return Err(Error::new(ErrorKind::Other,
+            format!("EVM REVERT: JUMP destination out of bounds (0x{:04x})", dest)
+        ));
     }
-
-    // Sinon, comportement standard : saute SEULEMENT si dest est JUMPDEST
-    if dest < prog.len() && prog[dest] == 0x5b {
-        pc = dest;
-        advance = 0;
-        continue;
+    if prog[dest] != 0x5b {
+        return Err(Error::new(ErrorKind::Other,
+            format!("EVM REVERT: JUMP to non-JUMPDEST (0x{:02x}) at 0x{:04x}", prog[dest], dest)
+        ));
     }
-
-    return Err(Error::new(ErrorKind::Other, format!(
-        "EVM REVERT: JUMP to non-JUMPDEST (0x{:02x}) at 0x{:04x}", prog.get(dest).copied().unwrap_or(0xff), dest
-    )));
+    pc = dest;
+    advance = 0;
+    continue;
 },
 
-// ___ 0x57 JUMPI
+// ____ 0x57 JUMPI
 0x57 => {
     if evm_stack.len() < 2 {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMPI"));
@@ -1403,25 +1398,21 @@ let insn_ptr = pc;
     let dest = evm_stack.pop().unwrap() as usize;
     let cond = evm_stack.pop().unwrap();
     if cond != 0 {
-        // Priorité : si le prochain opcode est JUMPDEST, on avance dessus (PC + 1)
-        if pc + 1 < prog.len() && prog[pc + 1] == 0x5b {
-            println!("[EVM-PRIORITY] Advancing to next JUMPDEST at 0x{:04x}", pc + 1);
-            pc = pc + 1;
-            advance = 0;
-            continue;
+        if dest >= prog.len() {
+            return Err(Error::new(ErrorKind::Other,
+                format!("EVM REVERT: JUMPI destination out of bounds (0x{:04x})", dest)
+            ));
         }
-
-        // Sinon, saut EVM classique
-        if dest < prog.len() && prog[dest] == 0x5b {
-            pc = dest;
-            advance = 0;
-            continue;
+        if prog[dest] != 0x5b {
+            return Err(Error::new(ErrorKind::Other,
+                format!("EVM REVERT: JUMPI to non-JUMPDEST (0x{:02x}) at 0x{:04x}", prog[dest], dest)
+            ));
         }
-        return Err(Error::new(ErrorKind::Other, format!(
-            "EVM REVERT: JUMPI to non-JUMPDEST (0x{:02x}) at 0x{:04x}", prog.get(dest).copied().unwrap_or(0xff), dest
-        )));
+        pc = dest;
+        advance = 0;
+        continue;
     }
-    // Si cond == 0, continue linéairement
+    // sinon, avance naturellement
 },
            
         // ___ 0xf4 DELEGATECALL
@@ -1528,24 +1519,24 @@ let insn_ptr = pc;
     consume_gas(&mut execution_context, 700)?; // coût approximatif
 },
     
-        //___ 0x58 PC
+        // ___ 0x58 PC
     0x58 => {
         reg[_dst] = (insn_ptr * ebpf::INSN_SIZE) as u64;
         //consume_gas(&mut execution_context, 2)?;
     },
 
-    //___ 0x5a GAS
+    // ___ 0x5a GAS
     0x5a => {
         reg[0] = execution_context.gas_remaining;
         //consume_gas(&mut execution_context, 2)?;
     },
 
-    //___ 0x5b JUMPDEST
+    // ___ 0x5b JUMPDEST
     0x5b => {
         //consume_gas(&mut execution_context, 1)?;
     },
 
-    //___ 0x5c TLOAD
+    // ___ 0x5c TLOAD
     0x5c => {
         let t_offset = reg[_dst] as usize;
         if t_offset < evm_stack.len() {
@@ -1556,7 +1547,7 @@ let insn_ptr = pc;
         //consume_gas(&mut execution_context, 2)?;
     }
 
-    //___ 0x5d TSTORE
+    // ___ 0x5d TSTORE
     0x5d => {
         let t_offset = reg[_dst] as usize;
         if t_offset < evm_stack.len() {
@@ -1569,7 +1560,7 @@ let insn_ptr = pc;
         //consume_gas(&mut execution_context, 2)?;
     },
 
-    //___ 0x5e MCOPY
+    // ___ 0x5e MCOPY
     0x5e => {
         let dst_offset = reg[_dst] as usize;
         let src_offset = reg[_src] as usize;
@@ -1586,13 +1577,13 @@ let insn_ptr = pc;
             consume_gas(&mut execution_context, 3 + 3 * ((len + 31) / 32) as u64)?;
     },
 
-    //___ 0x5f PUSH0
+    // ___ 0x5f PUSH0
     0x5f => {
         reg[_dst] = 0;
         consume_gas(&mut execution_context, 2)?;
     },
         
-    //___ 0x60..=0x7f : PUSH1 à PUSH32
+    // ___ 0x60..=0x7f : PUSH1 à PUSH32
         0x60..=0x7f => {
             let push_bytes = (opcode - 0x5f) as usize;
             let start = pc + 1;
@@ -1606,7 +1597,7 @@ let insn_ptr = pc;
             advance = 1 + push_bytes;
         }
     
-    //___ 0x80 → 0x8f : DUP1 à DUP16
+    // ___ 0x80 → 0x8f : DUP1 à DUP16
     (0x80..=0x8f) => {
         let depth = (opcode - 0x80) as usize;
         if evm_stack.len() <= depth {
@@ -1635,7 +1626,7 @@ let insn_ptr = pc;
         }
     },
 
-//___ 0xa0 LOG0
+// ___ 0xa0 LOG0
 0xa0 => {
     // LOG0(offset, size): Ajoute un log sans topic
     if evm_stack.len() < 2 {
@@ -1656,7 +1647,7 @@ let insn_ptr = pc;
     consume_gas(&mut execution_context, 375 + 8 * size as u64)?;
 },
 
-//___ 0xa1 LOG1
+// ___ 0xa1 LOG1
 0xa1 => {
     if evm_stack.len() < 3 {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on LOG1"));
@@ -1677,7 +1668,7 @@ let insn_ptr = pc;
     consume_gas(&mut execution_context, 750 + 8 * size as u64)?;
 },
 
-//____ 0xa2 LOG2
+// ____ 0xa2 LOG2
 0xa2 => {
     if evm_stack.len() < 4 {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on LOG2"));
@@ -1699,7 +1690,7 @@ let insn_ptr = pc;
     consume_gas(&mut execution_context, 1125 + 8 * size as u64)?;
 },
 
-//___ 0xa3 LOG3
+// ___ 0xa3 LOG3
 0xa3 => {
     if evm_stack.len() < 5 {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on LOG3"));
@@ -1722,7 +1713,7 @@ let insn_ptr = pc;
     consume_gas(&mut execution_context, 1500 + 8 * size as u64)?;
 },
 
-//___ 0xa4 LOG4
+// ___ 0xa4 LOG4
 0xa4 => {
     if evm_stack.len() < 6 {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on LOG4"));
@@ -1733,7 +1724,7 @@ let insn_ptr = pc;
     consume_gas(&mut execution_context, 100)?;
 },
 
-//___ 0xf5 CREATE2
+// ___ 0xf5 CREATE2
 0xf5 => {
     if evm_stack.len() < 4 {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on CREATE2"));
@@ -1747,7 +1738,7 @@ let insn_ptr = pc;
     consume_gas(&mut execution_context, 32000)?;
 },
 
-//___ 0xfa STATICCALL
+// ___ 0xfa STATICCALL
 0xfa => {
     if evm_stack.len() < 6 {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on STATICCALL"));
@@ -1763,7 +1754,7 @@ let insn_ptr = pc;
     consume_gas(&mut execution_context, 100)?;
 },
 
-      //___ 0xf3 RETURN — Version stricte EVM, sans hardcoding
+      // ___ 0xf3 RETURN — Version stricte EVM, sans hardcoding
 0xf3 => {
     let offset = reg[_dst] as usize;
     let len = reg[_src] as usize;
@@ -1844,70 +1835,27 @@ let insn_ptr = pc;
     return Ok(serde_json::Value::Object(result));
 },
 
-//___ 0xfd REVERT — DOIT STOPPER L'EXÉCUTION ET SIGNALER UNE ERREUR
+// ___ 0xfd REVERT
 0xfd => {
     let offset = reg[_dst] as usize;
     let len = reg[_src] as usize;
     let mut data = vec![0u8; len];
-    if len > 0 {
-        if offset + len <= global_mem.len() {
-            data.copy_from_slice(&global_mem[offset..offset + len]);
-        } else {
-            println!("⚠️ [REVERT] invalid offset/len: 0x{:x}/{}", reg[_dst], len);
-        }
+    if len > 0 && offset + len <= global_mem.len() {
+        data.copy_from_slice(&global_mem[offset..offset + len]);
     }
-
-    // 💸 Remboursement du solde au propriétaire (origin ou beneficiary)
-    let owner_addr = if !interpreter_args.beneficiary.is_empty() && interpreter_args.beneficiary != "{}" {
-        &interpreter_args.beneficiary
+    return Err(Error::new(ErrorKind::Other, if len == 0 {
+        "EVM REVERT (vide)".to_owned()
     } else {
-        &interpreter_args.origin
-    };
-    refund_contract_balance_to_owner(
-        &mut execution_context.world_state,
-        &interpreter_args.contract_address,
-        owner_addr,
-    );
-
-    // PATCH: décodage du message revert Solidity
-    let mut revert_msg = String::new();
-    if data.len() >= 4 && &data[0..4] == [0x08, 0xc3, 0x79, 0xa0] {
-        // Error(string) selector
-        if data.len() >= 68 {
-            let strlen = u32::from_be_bytes([data[36], data[37], data[38], data[39]]) as usize;
-            if data.len() >= 68 + strlen {
-                if let Ok(msg) = std::str::from_utf8(&data[68..68+strlen]) {
-                    revert_msg = msg.to_string();
-                }
-            }
-        }
-    }
-    if !revert_msg.is_empty() {
-        println!("❌ [REVERT Solidity] Message: {}", revert_msg);
-    } else if len == 0 {
-        println!("⚠️ [REVERT PATCH] REVERT vide (valeur reg[0]={})", reg[0]);
-    } else {
-        println!("⚠️ [REVERT] 0x{}", hex::encode(&data));
-    }
-
-    // STOPPE L'EXÉCUTION PAR UNE ERREUR (jamais return Ok)
-    return Err(Error::new(ErrorKind::Other,
-        if !revert_msg.is_empty() {
-            format!("EVM REVERT: {}", revert_msg)
-        } else if len == 0 {
-            "EVM REVERT (vide)".to_string()
-        } else {
-            format!("EVM REVERT: 0x{}", hex::encode(&data))
-        }
-    ));
+        format!("EVM REVERT: 0x{}", hex::encode(&data))
+    }));
 },
 
-    //___ 0xfe INVALID
+    // ___ 0xfe INVALID
     0xfe => {
         return Err(Error::new(ErrorKind::Other, "INVALID opcode"));
     },
 
-    //___ 0xff SELFDESTRUCT — EVM: stoppe l'exécution immédiatement
+    // ___ 0xff SELFDESTRUCT — EVM: stoppe l'exécution immédiatement
     0xff => {
         // 💸 Remboursement du solde au propriétaire (origin ou beneficiary)
         let owner_addr = if !interpreter_args.beneficiary.is_empty() && interpreter_args.beneficiary != "{}" {
