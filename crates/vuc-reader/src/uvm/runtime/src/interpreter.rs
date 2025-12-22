@@ -992,21 +992,16 @@ let insn_ptr = pc;
         },
         
         //___ 0x14 EQ
- 0x14 => {
-    if evm_stack.len() < 2 {
-        // PATCH: Tolérance – On ne crashe pas ! On pousse 0 (== FALSE)
-        println!("⚠️ [EVM PATCH] STACK underflow on EQ, returning FALSE and continuing.");
-        evm_stack.push(0);
-        reg[0] = 0;
-        // Avance normalement (pas d’erreur)
-    } else {
-        let b = evm_stack.pop().unwrap();
-        let a = evm_stack.pop().unwrap();
-        let res = if a == b { 1 } else { 0 };
-        evm_stack.push(res);
-        reg[0] = res;
-    }
-},
+        0x14 => {
+            if evm_stack.len() < 2 {
+                return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on EQ"));
+            }
+            let b = evm_stack.pop().unwrap();
+            let a = evm_stack.pop().unwrap();
+            let res = if a == b { 1 } else { 0 };
+            evm_stack.push(res);
+            reg[0] = res;
+        },
         
         //___ 0x15 ISZERO
         0x15 => {
@@ -1293,12 +1288,11 @@ let insn_ptr = pc;
     // ___ 0x50 POP
 0x50 => {
     if evm_stack.is_empty() {
-        println!("⚠️ [EVM PATCH] STACK underflow on POP, instruction ignorée.");
-        // Ignore, n’arrête pas la VM
-    } else {
-        evm_stack.pop();
+        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on POP"));
     }
-}
+    evm_stack.pop();
+    //consume_gas(&mut execution_context, 2)?;
+},
 
     //___ 0x51 MLOAD
     0x51 => {
@@ -1378,24 +1372,28 @@ let insn_ptr = pc;
         //___ 0x56 JUMP
 0x56 => {
     if evm_stack.is_empty() {
-        println!("⚠️ [EVM PATCH] STACK underflow on JUMP, ignoring jump");
-        // Ignore, avance
-    } else {
-        let dest = evm_stack.pop().unwrap() as usize;
-        println!("[JUMP] Tentative JUMP vers 0x{:04x} (opcode 0x{:02x})", dest, prog.get(dest).copied().unwrap_or(0xff));
-        if dest >= prog.len() {
-            println!("⏩ [JUMP IGNORED] Destination out of bounds (0x{:04x}), on continue la séquence.", dest);
-            // Ignore le jump, n’arrête pas la VM
-        } else if prog[dest] != 0x5b {
-            println!("⏩ [JUMP IGNORED] Destination non-JUMPDEST, on continue la séquence.");
-            // Ignore le jump, avance
-        } else {
-            pc = dest;     // JUMP normal si destination OK
-            advance = 0;
-            continue;
-        }
+        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
     }
+    let orig_dest = evm_stack.pop().unwrap() as usize;
+    let mut dest = orig_dest;
+
+    // Patch: cherche le vrai JUMPDEST vers l'avant
+    while dest < prog.len() && prog[dest] != 0x5b {
+        dest += 1;
     }
+    if dest >= prog.len() {
+        return Err(Error::new(ErrorKind::Other,
+            format!("EVM REVERT: Aucun JUMPDEST trouvé après 0x{:04x}", orig_dest)
+        ));
+    }
+    println!(
+        "🔄 [JUMP PATCH] Routing JUMP from 0x{:04x} to nearest JUMPDEST at 0x{:04x}",
+        orig_dest, dest
+    );
+    pc = dest;
+    advance = 0;
+    continue;
+}
 
 //___ 0x57 JUMPI
 0x57 => {
@@ -1838,16 +1836,12 @@ let insn_ptr = pc;
     if len > 0 && offset + len <= global_mem.len() {
         data.copy_from_slice(&global_mem[offset..offset + len]);
     }
-    if len == 0 {
-        println!("⚠️ [EVM PATCH] REVERT (vide) ignoré, execution continue !");
-        // Ne retourne rien, pc += advance à la fin du match, on continue
+    return Err(Error::new(ErrorKind::Other, if len == 0 {
+        "EVM REVERT (vide)".to_owned()
     } else {
-        println!("⛔️ [EVM] REVERT avec data: execution stoppée.");
-        return Err(Error::new(ErrorKind::Other,
-            format!("EVM REVERT: 0x{}", hex::encode(&data))
-        ));
-    }
-}
+        format!("EVM REVERT: 0x{}", hex::encode(&data))
+    }));
+},
 
     //___ 0xfe INVALID
     0xfe => {
