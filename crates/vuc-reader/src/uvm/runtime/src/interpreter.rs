@@ -1385,7 +1385,7 @@ let insn_ptr = pc;
     advance = 0;
     continue;
 }
-        
+
 //___ 0x57 JUMPI
 0x57 => {
     if evm_stack.len() < 2 {
@@ -1585,7 +1585,7 @@ let insn_ptr = pc;
     for i in 0..n {
         val = (val << 8) | (prog[pc + 1 + i] as u128);
     }
-    evm_stack.push(val as u64); // ou plus grand selon ta stack (u128/u256…)
+    evm_stack.push(val as u64); // ou u128/u256 si tu as besoin de plus large
     advance = 1 + n;
 }
     
