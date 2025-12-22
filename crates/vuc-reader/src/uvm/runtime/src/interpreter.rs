@@ -1371,22 +1371,11 @@ let insn_ptr = pc;
 
         //___ 0x56 JUMP
 0x56 => {
-    // Log pile AVANT tout
-    println!("[JUMP] Stack before JUMP: {:?}", evm_stack);
-
     if evm_stack.is_empty() {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
     }
     let dest = evm_stack.pop().unwrap() as usize;
-
-    // Consomme explicitement tous les résidus inutiles (ici, selector, etc)
-    if !evm_stack.is_empty() {
-        println!("[JUMP] Purge stack garbage: {:?}", evm_stack);
-        evm_stack.clear(); // ou .truncate(0), garde pile propre
-    }
-
     println!("[JUMP] Tentative JUMP vers 0x{:04x} (opcode 0x{:02x})", dest, prog.get(dest).copied().unwrap_or(0xff));
-
     if dest >= prog.len() || prog[dest] != 0x5b {
         return Err(Error::new(ErrorKind::Other,
             format!("EVM REVERT: JUMP to non-JUMPDEST (0x{:02x}) at 0x{:04x}", prog.get(dest).copied().unwrap_or(0), dest)
@@ -1397,24 +1386,14 @@ let insn_ptr = pc;
     continue;
 }
 
-//___ 0x57 JUMPI
+//___ 0x57 JUMPI (idem)
 0x57 => {
-    println!("[JUMPI] Stack before JUMPI: {:?}", evm_stack);
-
     if evm_stack.len() < 2 {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMPI"));
     }
     let dest = evm_stack.pop().unwrap() as usize;
     let cond = evm_stack.pop().unwrap();
-
-    // Si des résidus (selector, etc.) après JUMPI, purge-les
-    if !evm_stack.is_empty() {
-        println!("[JUMPI] Purge stack garbage after JUMPI: {:?}", evm_stack);
-        evm_stack.clear();
-    }
-
     println!("[JUMPI] Tentative JUMPI vers 0x{:04x} (opcode 0x{:02x}), cond={}", dest, prog.get(dest).copied().unwrap_or(0xff), cond);
-
     if cond != 0 {
         if dest >= prog.len() || prog[dest] != 0x5b {
             return Err(Error::new(ErrorKind::Other,
@@ -1425,7 +1404,7 @@ let insn_ptr = pc;
         advance = 0;
         continue;
     }
-    // sinon avance normalement
+    // sinon avance simplement
 }
            
         //___ 0xf4 DELEGATECALL
