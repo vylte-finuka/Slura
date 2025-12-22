@@ -1293,11 +1293,12 @@ let insn_ptr = pc;
     // ___ 0x50 POP
 0x50 => {
     if evm_stack.is_empty() {
-        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on POP"));
+        println!("⚠️ [EVM PATCH] STACK underflow on POP, instruction ignorée.");
+        // Ignore, n’arrête pas la VM
+    } else {
+        evm_stack.pop();
     }
-    evm_stack.pop();
-    //consume_gas(&mut execution_context, 2)?;
-},
+}
 
     //___ 0x51 MLOAD
     0x51 => {
@@ -1377,26 +1378,24 @@ let insn_ptr = pc;
         //___ 0x56 JUMP
 0x56 => {
     if evm_stack.is_empty() {
-        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
-    }
-    let dest = evm_stack.pop().unwrap() as usize;
-    println!("[JUMP] Tentative JUMP vers 0x{:04x} (opcode 0x{:02x})", dest, prog.get(dest).copied().unwrap_or(0xff));
-    if dest >= prog.len() {
-        return Err(Error::new(ErrorKind::Other,
-            format!("EVM REVERT: JUMP out of bounds at 0x{:04x}", dest)
-        ));
-    }
-    if prog[dest] != 0x5b {
-        println!("⏩ [JUMP IGNORED] Destination 0x{:04x} n'est pas un JUMPDEST (opcode=0x{:02x}), on continue la séquence.", dest, prog[dest]);
-        // ici : on NE saute PAS, on continue simplement la séquence (pas de REVERT, pas de saut)
-        // c’est tout ! Ne modifie ni pc ni advance.
-        // Sortie normale du match, pc += advance;
+        println!("⚠️ [EVM PATCH] STACK underflow on JUMP, ignoring jump");
+        // Ignore, avance
     } else {
-        pc = dest;
-        advance = 0;
-        continue;
+        let dest = evm_stack.pop().unwrap() as usize;
+        println!("[JUMP] Tentative JUMP vers 0x{:04x} (opcode 0x{:02x})", dest, prog.get(dest).copied().unwrap_or(0xff));
+        if dest >= prog.len() {
+            println!("⏩ [JUMP IGNORED] Destination out of bounds (0x{:04x}), on continue la séquence.", dest);
+            // Ignore le jump, n’arrête pas la VM
+        } else if prog[dest] != 0x5b {
+            println!("⏩ [JUMP IGNORED] Destination non-JUMPDEST, on continue la séquence.");
+            // Ignore le jump, avance
+        } else {
+            pc = dest;     // JUMP normal si destination OK
+            advance = 0;
+            continue;
+        }
     }
-}
+    }
 
 //___ 0x57 JUMPI
 0x57 => {
