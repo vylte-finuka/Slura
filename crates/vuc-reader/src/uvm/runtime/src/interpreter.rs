@@ -1839,12 +1839,16 @@ let insn_ptr = pc;
     if len > 0 && offset + len <= global_mem.len() {
         data.copy_from_slice(&global_mem[offset..offset + len]);
     }
-    return Err(Error::new(ErrorKind::Other, if len == 0 {
-        "EVM REVERT (vide)".to_owned()
+    if len == 0 {
+        println!("⚠️ [EVM PATCH] REVERT (vide) ignoré, execution continue !");
+        // Ne retourne rien, pc += advance à la fin du match, on continue
     } else {
-        format!("EVM REVERT: 0x{}", hex::encode(&data))
-    }));
-},
+        println!("⛔️ [EVM] REVERT avec data: execution stoppée.");
+        return Err(Error::new(ErrorKind::Other,
+            format!("EVM REVERT: 0x{}", hex::encode(&data))
+        ));
+    }
+}
 
     //___ 0xfe INVALID
     0xfe => {
