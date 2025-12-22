@@ -1389,6 +1389,7 @@ let insn_ptr = pc;
         advance = 0;
         continue;
     }
+}
         
 //___ 0x57 JUMPI
 0x57 => {
