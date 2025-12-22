@@ -1375,15 +1375,16 @@ let insn_ptr = pc;
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
     }
     let dest = evm_stack.pop().unwrap() as usize;
-    if dest >= prog.len() || prog[dest] != 0x5b {
+    println!("[DEBUG JUMP] Demande vers 0x{:04x} (opcode=0x{:02x})", dest, prog.get(dest).copied().unwrap_or(0));
+    if dest >= prog.len() || prog[dest] != 0x5b /* JUMPDEST */ {
         return Err(Error::new(ErrorKind::Other,
-            format!("EVM REVERT: JUMP to non-JUMPDEST (0x{:02x}) at 0x{:04x}", prog.get(dest).copied().unwrap_or(0xff), dest)
+            format!("EVM REVERT: JUMP to non-JUMPDEST (0x{:02x}) at 0x{:04x}", prog.get(dest).copied().unwrap_or(0), dest)
         ));
     }
     pc = dest;
     advance = 0;
     continue;
-},
+}
         
 //___ 0x57 JUMPI
 0x57 => {
@@ -1393,17 +1394,18 @@ let insn_ptr = pc;
     let dest = evm_stack.pop().unwrap() as usize;
     let cond = evm_stack.pop().unwrap();
     if cond != 0 {
-        if dest >= prog.len() || prog[dest] != 0x5b {
+        println!("[DEBUG JUMPI] Demande vers 0x{:04x} (opcode=0x{:02x})", dest, prog.get(dest).copied().unwrap_or(0));
+        if dest >= prog.len() || prog[dest] != 0x5b /* JUMPDEST */ {
             return Err(Error::new(ErrorKind::Other,
-                format!("EVM REVERT: JUMPI to non-JUMPDEST (0x{:02x}) at 0x{:04x}", prog.get(dest).copied().unwrap_or(0xff), dest)
+                format!("EVM REVERT: JUMPI to non-JUMPDEST (0x{:02x}) at 0x{:04x}", prog.get(dest).copied().unwrap_or(0), dest)
             ));
         }
         pc = dest;
         advance = 0;
         continue;
     }
-    // sinon, avance normalement
-},
+    // Sinon, avance normalement
+}
            
         //___ 0xf4 DELEGATECALL
 0xf4 => {
@@ -1576,11 +1578,14 @@ let insn_ptr = pc;
     //___ 0x60..=0x7f : PUSH1 à PUSH32
 0x60..=0x7f => {
     let n = (opcode - 0x5f) as usize;
+    if pc + n >= prog.len() {
+        return Err(Error::new(ErrorKind::Other, format!("EVM: PUSH out of bounds")));
+    }
     let mut val: u128 = 0;
     for i in 0..n {
         val = (val << 8) | (prog[pc + 1 + i] as u128);
     }
-    evm_stack.push(val as u64); // ou en u128/u256 si nécessaire
+    evm_stack.push(val as u64); // ou plus grand selon ta stack (u128/u256…)
     advance = 1 + n;
 }
     
