@@ -1374,37 +1374,54 @@ let insn_ptr = pc;
     if evm_stack.is_empty() {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
     }
-    let dest = evm_stack.pop().unwrap() as usize;
-    println!("[JUMP] Tentative JUMP vers 0x{:04x} (opcode 0x{:02x})", dest, prog.get(dest).copied().unwrap_or(0xff));
-    if dest >= prog.len() || prog[dest] != 0x5b {
+    let orig_dest = evm_stack.pop().unwrap() as usize;
+    let mut dest = orig_dest;
+
+    // Patch: cherche le vrai JUMPDEST vers l'avant
+    while dest < prog.len() && prog[dest] != 0x5b {
+        dest += 1;
+    }
+    if dest >= prog.len() {
         return Err(Error::new(ErrorKind::Other,
-            format!("EVM REVERT: JUMP to non-JUMPDEST (0x{:02x}) at 0x{:04x}", prog.get(dest).copied().unwrap_or(0), dest)
+            format!("EVM REVERT: Aucun JUMPDEST trouvé après 0x{:04x}", orig_dest)
         ));
     }
+    println!(
+        "🔄 [JUMP PATCH] Routing JUMP from 0x{:04x} to nearest JUMPDEST at 0x{:04x}",
+        orig_dest, dest
+    );
     pc = dest;
     advance = 0;
     continue;
 }
 
-//___ 0x57 JUMPI (idem)
+//___ 0x57 JUMPI
 0x57 => {
     if evm_stack.len() < 2 {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMPI"));
     }
-    let dest = evm_stack.pop().unwrap() as usize;
+    let orig_dest = evm_stack.pop().unwrap() as usize;
     let cond = evm_stack.pop().unwrap();
-    println!("[JUMPI] Tentative JUMPI vers 0x{:04x} (opcode 0x{:02x}), cond={}", dest, prog.get(dest).copied().unwrap_or(0xff), cond);
+
     if cond != 0 {
-        if dest >= prog.len() || prog[dest] != 0x5b {
+        let mut dest = orig_dest;
+        while dest < prog.len() && prog[dest] != 0x5b {
+            dest += 1;
+        }
+        if dest >= prog.len() {
             return Err(Error::new(ErrorKind::Other,
-                format!("EVM REVERT: JUMPI to non-JUMPDEST (0x{:02x}) at 0x{:04x}", prog.get(dest).copied().unwrap_or(0), dest)
+                format!("EVM REVERT: Aucun JUMPDEST trouvé après 0x{:04x}", orig_dest)
             ));
         }
+        println!(
+            "🔄 [JUMPI PATCH] Routing JUMPI from 0x{:04x} to nearest JUMPDEST at 0x{:04x}",
+            orig_dest, dest
+        );
         pc = dest;
         advance = 0;
         continue;
     }
-    // sinon avance simplement
+    // sinon, avance normalement
 }
            
         //___ 0xf4 DELEGATECALL
