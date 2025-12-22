@@ -1576,34 +1576,18 @@ let insn_ptr = pc;
     },
         
     //___ 0x60..=0x7f : PUSH1 à PUSH32
-if (0x60..=0x7f).contains(&opcode) {
+0x60..=0x7f => {
     let n = (opcode - 0x5f) as usize;
     if pc + n >= prog.len() {
-        return Err(Error::new(ErrorKind::Other, "EVM PUSHn out of bounds"));
+        return Err(Error::new(ErrorKind::Other, format!("EVM: PUSH out of bounds")));
     }
     let mut val: u128 = 0;
     for i in 0..n {
         val = (val << 8) | (prog[pc + 1 + i] as u128);
     }
-    evm_stack.push(val as u64); // ou u128 si ta stack gère plus large
+    evm_stack.push(val as u64);
     advance = 1 + n;
 }
-    
-    //___ 0x80 → 0x8f : DUP1 à DUP16
-    (0x80..=0x8f) => {
-        let depth = (opcode - 0x80) as usize;
-        if evm_stack.len() <= depth {
-            println!("⚠️ [EVM] Stack underflow sur DUP{} (stack size={})", depth + 1, evm_stack.len());
-            // On ignore l'instruction, pas de panic ni d'erreur
-        } else if evm_stack.len() >= 1024 {
-            println!("⚠️ [EVM] Stack overflow sur DUP{} (stack pleine, duplication ignorée)", depth + 1);
-        } else {
-            // EVM : DUPn duplique la n-ième valeur à partir du sommet (top = fin du Vec)
-            let value = evm_stack[evm_stack.len() - 1 - depth];
-            evm_stack.push(value);
-            // reg[_dst] = value; // Optionnel, selon ton usage
-        }
-    },
     
     //___ 0x90 → 0x9f : SWAP1 à SWAP16
     (0x90..=0x9f) => {
