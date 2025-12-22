@@ -1371,40 +1371,46 @@ let insn_ptr = pc;
 
 //___ 0x56 JUMP
 0x56 => {
+    // JUMP: pop une valeur de la stack, qui doit être un offset avec opcode 0x5b
     if evm_stack.is_empty() {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
     }
     let dest = evm_stack.pop().unwrap() as usize;
-    println!("[DEBUG JUMP] Demande vers 0x{:04x} (opcode=0x{:02x})", dest, prog.get(dest).copied().unwrap_or(0));
-    if dest >= prog.len() || prog[dest] != 0x5b /* JUMPDEST */ {
+
+    println!("[JUMP] Tentative JUMP vers 0x{:04x} (opcode 0x{:02x})", dest, prog.get(dest).copied().unwrap_or(0xff));
+
+    if dest >= prog.len() || prog[dest] != 0x5b {
         return Err(Error::new(ErrorKind::Other,
             format!("EVM REVERT: JUMP to non-JUMPDEST (0x{:02x}) at 0x{:04x}", prog.get(dest).copied().unwrap_or(0), dest)
         ));
     }
-    pc = dest;
-    advance = 0;
-    continue;
+    pc = dest;         // saute à la destination
+    advance = 0;       // ne pas avancer après un JUMP réussi !
+    continue;          // boucle: saute immédiatement à dest
 }
 
 //___ 0x57 JUMPI
 0x57 => {
+    // JUMPI: pop deux valeurs (d'abord destination, ensuite condition bool)
     if evm_stack.len() < 2 {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMPI"));
     }
-    let dest = evm_stack.pop().unwrap() as usize;
-    let cond = evm_stack.pop().unwrap();
+    let dest = evm_stack.pop().unwrap() as usize; // destination d'abord
+    let cond = evm_stack.pop().unwrap();          // puis condition
+
+    println!("[JUMPI] Tentative JUMPI vers 0x{:04x} (opcode 0x{:02x}), cond={}", dest, prog.get(dest).copied().unwrap_or(0xff), cond);
+
     if cond != 0 {
-        println!("[DEBUG JUMPI] Demande vers 0x{:04x} (opcode=0x{:02x})", dest, prog.get(dest).copied().unwrap_or(0));
-        if dest >= prog.len() || prog[dest] != 0x5b /* JUMPDEST */ {
+        if dest >= prog.len() || prog[dest] != 0x5b {
             return Err(Error::new(ErrorKind::Other,
                 format!("EVM REVERT: JUMPI to non-JUMPDEST (0x{:02x}) at 0x{:04x}", prog.get(dest).copied().unwrap_or(0), dest)
             ));
         }
-        pc = dest;
+        pc = dest;   // saute à la destination (comme un JUMP normal)
         advance = 0;
-        continue;
+        continue;    // saute immédiatement
     }
-    // Sinon, avance normalement
+    // condition fausse : on avance normalement à l'OP suivant
 }
            
         //___ 0xf4 DELEGATECALL
