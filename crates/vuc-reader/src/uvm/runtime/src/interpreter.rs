@@ -1375,22 +1375,17 @@ let insn_ptr = pc;
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
     }
     let dest = evm_stack.pop().unwrap() as usize;
-    if dest >= prog.len() {
+    if dest >= prog.len() || prog[dest] != 0x5b {
         return Err(Error::new(ErrorKind::Other,
-            format!("EVM REVERT: JUMP destination out of bounds (0x{:04x})", dest)
-        ));
-    }
-    if prog[dest] != 0x5b {
-        return Err(Error::new(ErrorKind::Other,
-            format!("EVM REVERT: JUMP to non-JUMPDEST (0x{:02x}) at 0x{:04x}", prog[dest], dest)
+            format!("EVM REVERT: JUMP to non-JUMPDEST (0x{:02x}) at 0x{:04x}", prog.get(dest).copied().unwrap_or(0xff), dest)
         ));
     }
     pc = dest;
     advance = 0;
     continue;
 },
-
-//____ 0x57 JUMPI
+        
+//___ 0x57 JUMPI
 0x57 => {
     if evm_stack.len() < 2 {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMPI"));
@@ -1398,21 +1393,16 @@ let insn_ptr = pc;
     let dest = evm_stack.pop().unwrap() as usize;
     let cond = evm_stack.pop().unwrap();
     if cond != 0 {
-        if dest >= prog.len() {
+        if dest >= prog.len() || prog[dest] != 0x5b {
             return Err(Error::new(ErrorKind::Other,
-                format!("EVM REVERT: JUMPI destination out of bounds (0x{:04x})", dest)
-            ));
-        }
-        if prog[dest] != 0x5b {
-            return Err(Error::new(ErrorKind::Other,
-                format!("EVM REVERT: JUMPI to non-JUMPDEST (0x{:02x}) at 0x{:04x}", prog[dest], dest)
+                format!("EVM REVERT: JUMPI to non-JUMPDEST (0x{:02x}) at 0x{:04x}", prog.get(dest).copied().unwrap_or(0xff), dest)
             ));
         }
         pc = dest;
         advance = 0;
         continue;
     }
-    // sinon, avance naturellement
+    // sinon, avance normalement
 },
            
         //___ 0xf4 DELEGATECALL
@@ -1584,17 +1574,13 @@ let insn_ptr = pc;
     },
         
     //___ 0x60..=0x7f : PUSH1 à PUSH32
-        0x60..=0x7f => {
+0x60..=0x7f => {
     let n = (opcode - 0x5f) as usize;
-    if pc + n >= prog.len() {
-        return Err(Error::new(ErrorKind::Other, format!("EVM: PUSH out of bounds")));
-    }
-    let mut val = 0u128;
+    let mut val: u128 = 0;
     for i in 0..n {
         val = (val << 8) | (prog[pc + 1 + i] as u128);
     }
-    println!("[DEBUG] PUSH{} 0x{:x} ({} bytes)", n, val, n);
-    evm_stack.push(val as u64);
+    evm_stack.push(val as u64); // ou en u128/u256 si nécessaire
     advance = 1 + n;
 }
     
