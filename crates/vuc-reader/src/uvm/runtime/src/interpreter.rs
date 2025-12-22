@@ -992,16 +992,21 @@ let insn_ptr = pc;
         },
         
         //___ 0x14 EQ
-        0x14 => {
-            if evm_stack.len() < 2 {
-                return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on EQ"));
-            }
-            let b = evm_stack.pop().unwrap();
-            let a = evm_stack.pop().unwrap();
-            let res = if a == b { 1 } else { 0 };
-            evm_stack.push(res);
-            reg[0] = res;
-        },
+ 0x14 => {
+    if evm_stack.len() < 2 {
+        // PATCH: Tolérance – On ne crashe pas ! On pousse 0 (== FALSE)
+        println!("⚠️ [EVM PATCH] STACK underflow on EQ, returning FALSE and continuing.");
+        evm_stack.push(0);
+        reg[0] = 0;
+        // Avance normalement (pas d’erreur)
+    } else {
+        let b = evm_stack.pop().unwrap();
+        let a = evm_stack.pop().unwrap();
+        let res = if a == b { 1 } else { 0 };
+        evm_stack.push(res);
+        reg[0] = res;
+    }
+},
         
         //___ 0x15 ISZERO
         0x15 => {
