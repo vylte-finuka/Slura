@@ -1369,30 +1369,31 @@ let insn_ptr = pc;
     println!("💾 [SSTORE] slot={} <- value={}", slot, value);
 },
 
-        //___ 0x56 JUMP
+//___ 0x56 JUMP
 0x56 => {
     if evm_stack.is_empty() {
+        // STACK vide : erreur canonique EVM
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
     }
-    let orig_dest = evm_stack.pop().unwrap() as usize;
-    let mut dest = orig_dest;
+    let dest = evm_stack.pop().unwrap() as usize;
+    println!("[JUMP] Tentative JUMP vers 0x{:04x} (opcode 0x{:02x})", dest, prog.get(dest).copied().unwrap_or(0xff));
 
-    // Patch: cherche le vrai JUMPDEST vers l'avant
-    while dest < prog.len() && prog[dest] != 0x5b {
-        dest += 1;
-    }
+    // ---- Correction canonique : ne saute que si la destination est bien un JUMPDEST du bytecode ----
     if dest >= prog.len() {
         return Err(Error::new(ErrorKind::Other,
-            format!("EVM REVERT: Aucun JUMPDEST trouvé après 0x{:04x}", orig_dest)
+            format!("EVM REVERT: JUMP out of bounds at 0x{:04x}", dest)
         ));
     }
-    println!(
-        "🔄 [JUMP PATCH] Routing JUMP from 0x{:04x} to nearest JUMPDEST at 0x{:04x}",
-        orig_dest, dest
-    );
-    pc = dest;
-    advance = 0;
-    continue;
+    if prog[dest] != 0x5b {
+        // PATCH : JUMP ignoré, continue la séquence sans crash ni REVERT
+        println!("⏩ [JUMP IGNORED] Destination 0x{:04x} n'est pas un JUMPDEST (opcode=0x{:02x}).", dest, prog[dest]);
+        // ne modifie ni pc ni advance, exécution pc += advance comme un NOP
+    } else {
+        // Le jump est valide : saute à l'offset demandé
+        pc = dest;
+        advance = 0;
+        continue;
+    }
 }
 
 //___ 0x57 JUMPI
