@@ -3128,8 +3128,6 @@ mod tests {
     }
 }
 
-use std::env;
-
 // Define the Network enum for cluster selection
 #[derive(Clone, Debug)]
 enum Network {
