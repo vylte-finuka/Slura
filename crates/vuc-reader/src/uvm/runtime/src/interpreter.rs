@@ -839,9 +839,9 @@ let insn_ptr = 0;
             if evm_stack.len() < 2 {
                 return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on SDIV"));
             }
-            let b = I256::from(evm_stack.pop().unwrap());
-            let a = I256::from(evm_stack.pop().unwrap());
-            let res = if b == I256::from(0) { I256::from(0) } else { a / b };
+            let b = U256::from(evm_stack.pop().unwrap());
+            let a = U256::from(evm_stack.pop().unwrap());
+            let res = if b == U256::from(0) { U256::from(0) } else { a / b };
             let val = res.as_u64();
             evm_stack.push(safe_u256_to_u64(&res));
             reg[0] = safe_u256_to_u64(&res);
@@ -865,9 +865,9 @@ let insn_ptr = 0;
             if evm_stack.len() < 2 {
                 return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on SMOD"));
             }
-            let b = I256::from(evm_stack.pop().unwrap());
-            let a = I256::from(evm_stack.pop().unwrap());
-            let res = if b == I256::from(0) { I256::from(0) } else { a % b };
+            let b = U256::from(evm_stack.pop().unwrap());
+            let a = U256::from(evm_stack.pop().unwrap());
+            let res = if b == U256::from(0) { U256::from(0) } else { a % b };
             let val = res.as_u64();
             evm_stack.push(safe_u256_to_u64(&res));
             reg[0] = safe_u256_to_u64(&res);
@@ -971,7 +971,7 @@ let insn_ptr = 0;
         }
         let b = evm_stack.pop().unwrap();
         let a = evm_stack.pop().unwrap();
-        let res = if I256::from(a) < I256::from(b) { 1 } else { 0 };
+        let res = if U256::from(a) < U256::from(b) { 1 } else { 0 };
         evm_stack.push(res);
         reg[0] = res;
         last_return_value = Some(serde_json::Value::Number(serde_json::Number::from(reg[0])));
@@ -984,7 +984,7 @@ let insn_ptr = 0;
         }
         let b = evm_stack.pop().unwrap();
         let a = evm_stack.pop().unwrap();
-        let res = if I256::from(a) > I256::from(b) { 1 } else { 0 };
+        let res = if U256::from(a) > U256::from(b) { 1 } else { 0 };
         evm_stack.push(res);
         reg[0] = res;
         last_return_value = Some(serde_json::Value::Number(serde_json::Number::from(reg[0])));
