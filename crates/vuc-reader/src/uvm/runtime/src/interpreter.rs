@@ -653,16 +653,39 @@ reg[54] = interpreter_args.call_depth as u64;           // Profondeur d'appel
     };
 
        let mut evm_stack: Vec<u64> = Vec::with_capacity(1024);
-
-if let Some(init) = &interpreter_args.evm_stack_init {
-    for &v in init {
-        evm_stack.push(v);
+        
+   if let Some(init) = &interpreter_args.evm_stack_init {
+    // PATCH: Si la pile ne commence pas par le selector, on le force
+    let expected_selector = real_selector as u64;
+    if init.is_empty() || init[0] != expected_selector {
+        evm_stack.push(expected_selector);
+        for &v in init {
+            evm_stack.push(v);
+        }
+    } else {
+        for &v in init {
+            evm_stack.push(v);
+        }
     }
-    println!("PILE INIT: pushed from evm_stack_init ({} items)", evm_stack.len());
-} else if interpreter_args.function_name != "fallback" && interpreter_args.function_name != "receive" {
-    evm_stack.push(real_selector as u64);
-    println!("PILE INIT: selector only (1 item)");
-}
+    while evm_stack.len() < 16 {
+        evm_stack.push(0);
+    }
+    println!("PILE INIT: forced selector 0x{:08x} ({} items)", expected_selector, evm_stack.len());
+} else {
+        // PATCH: dispatcher EVM → push le selector en premier
+        let selector = {
+            use tiny_keccak::Hasher;
+            let sig = &interpreter_args.function_name;
+            let mut keccak = Keccak::v256();
+            Hasher::update(&mut keccak, sig.as_bytes());
+            let mut hash = [0u8; 32];
+            keccak.finalize(&mut hash);
+            u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]])
+        };
+        evm_stack.push(selector as u64);
+        for _ in 0..15 { evm_stack.push(0); }
+        println!("PILE INIT: selector dispatcher mode ({} items, selector=0x{:08x})", evm_stack.len(), selector);
+    }
 
 let mut insn_ptr: usize = 0;
 let selector_hex = format!("{:08x}", real_selector);
