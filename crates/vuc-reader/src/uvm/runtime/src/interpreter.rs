@@ -383,6 +383,23 @@ fn transfer_value(world_state: &mut UvmWorldState, from: &str, to: &str, amount:
     Ok(())
 }
 
+fn safe_u256_to_u64(val: &U256) -> u64 {
+    if val.bits() > 64 {
+        u64::MAX
+    } else {
+        val.low_u64()
+    }
+}
+
+fn safe_i256_to_u64(val: &I256) -> u64 {
+    let v = val.as_u128();
+    if v > u64::MAX as u128 {
+        u64::MAX
+    } else {
+        v as u64
+    }
+}
+
 fn get_storage(world_state: &UvmWorldState, contract: &str, slot: &str) -> Vec<u8> {
     world_state.storage.get(contract)
         .and_then(|contract_storage| contract_storage.get(slot))
@@ -801,8 +818,8 @@ let insn_ptr = 0;
             let a = ethereum_types::U256::from(evm_stack.pop().unwrap());
             let res = a.overflowing_add(b).0;
             let val = res.as_u64();
-            evm_stack.push(val);
-            reg[0] = val;
+            evm_stack.push(safe_i256_to_u64(&res));
+            reg[0] = safe_i256_to_u64(&res);
         },
     
         // ___ 0x02 MUL
@@ -814,8 +831,8 @@ let insn_ptr = 0;
             let a = ethereum_types::U256::from(evm_stack.pop().unwrap());
             let res = a.overflowing_mul(b).0;
             let val = res.as_u64();
-            evm_stack.push(val);
-            reg[0] = val;
+            evm_stack.push(safe_i256_to_u64(&res));
+            reg[0] = safe_i256_to_u64(&res);
         },
     
         // 0x03 SUB
@@ -827,8 +844,8 @@ let insn_ptr = 0;
             let a = ethereum_types::U256::from(evm_stack.pop().unwrap());
             let res = a.overflowing_sub(b).0;
             let val = res.as_u64();
-            evm_stack.push(val);
-            reg[0] = val;
+            evm_stack.push(safe_i256_to_u64(&res));
+            reg[0] = safe_i256_to_u64(&res);
         },
     
         // ___ 0x04 DIV
@@ -840,8 +857,8 @@ let insn_ptr = 0;
             let a = ethereum_types::U256::from(evm_stack.pop().unwrap());
             let res = if b.is_zero() { ethereum_types::U256::zero() } else { a / b };
             let val = res.low_u64();
-            evm_stack.push(val);
-            reg[0] = val;
+            evm_stack.push(safe_i256_to_u64(&res));
+            reg[0] = safe_i256_to_u64(&res);
         },
     
         // ___ 0x05 SDIV
@@ -853,8 +870,8 @@ let insn_ptr = 0;
             let a = I256::from(evm_stack.pop().unwrap());
             let res = if b == I256::from(0) { I256::from(0) } else { a / b };
             let val = res.as_u64();
-            evm_stack.push(val);
-            reg[0] = val;
+            evm_stack.push(safe_i256_to_u64(&res));
+            reg[0] = safe_i256_to_u64(&res);
         },
     
         // ___ 0x06 MOD
@@ -879,8 +896,8 @@ let insn_ptr = 0;
             let a = I256::from(evm_stack.pop().unwrap());
             let res = if b == I256::from(0) { I256::from(0) } else { a % b };
             let val = res.as_u64();
-            evm_stack.push(val);
-            reg[0] = val;
+            evm_stack.push(safe_i256_to_u64(&res));
+            reg[0] = safe_i256_to_u64(&res);
         },
     
         // ___ 0x08 ADDMOD
@@ -893,8 +910,8 @@ let insn_ptr = 0;
             let a = ethereum_types::U256::from(evm_stack.pop().unwrap());
             let res = if n.is_zero() { ethereum_types::U256::zero() } else { (a + b) % n };
             let val = res.low_u64();
-            evm_stack.push(val);
-            reg[0] = val;
+            evm_stack.push(safe_i256_to_u64(&res));
+            reg[0] = safe_i256_to_u64(&res);
         },
     
         // ___ 0x09 MULMOD
@@ -907,8 +924,8 @@ let insn_ptr = 0;
             let a = ethereum_types::U256::from(evm_stack.pop().unwrap());
             let res = if n.is_zero() { ethereum_types::U256::zero() } else { (a * b) % n };
             let val = res.low_u64();
-            evm_stack.push(val);
-            reg[0] = val;
+            evm_stack.push(safe_i256_to_u64(&res));
+            reg[0] = safe_i256_to_u64(&res);
         },
     
         // ___ 0x0a EXP
@@ -920,8 +937,8 @@ let insn_ptr = 0;
             let base = ethereum_types::U256::from(evm_stack.pop().unwrap());
             let res = base.overflowing_pow(exponent.low_u32().into()).0;
             let val = res.low_u64();
-            evm_stack.push(val);
-            reg[0] = val;
+            evm_stack.push(safe_i256_to_u64(&res));
+            reg[0] = safe_i256_to_u64(&res);
         },
     
         // ___ 0x0b SIGNEXTEND
@@ -947,7 +964,6 @@ let insn_ptr = 0;
             evm_stack.push(res);
             reg[0] = res;
         },
-    // ...existing code...
         
         //___ 0x10 LT
         0x10 => {
