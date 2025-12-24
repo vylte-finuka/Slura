@@ -734,53 +734,15 @@ if let Some(init) = &interpreter_args.evm_stack_init {
     for &v in init {
         evm_stack.push(v);
     }
-    // Patch: complète à 16 éléments si besoin
-    while evm_stack.len() < 16 {
-        evm_stack.push(0);
-    }
     println!("PILE INIT: pushed from evm_stack_init ({} items)", evm_stack.len());
 } else if interpreter_args.function_name != "fallback" && interpreter_args.function_name != "receive" {
     evm_stack.push(real_selector as u64);
-    // Patch : remplir la pile avec 15 zéros pour éviter les underflow sur DUP15
-    for _ in 0..15 {
-        evm_stack.push(0);
-    }
-    println!("PILE INIT: selector + 15 zeros (16 items)");
+    println!("PILE INIT: selector only (1 item)");
 }
 
 let mut insn_ptr: usize = 0;
 let selector_hex = format!("{:08x}", real_selector);
     
-        // === DISPATCHER EVM-STYLE : scan à partir de l’offset 0x421 (VEZ) ===
-        let mut found_offset: Option<usize> = None;
-        let dispatcher_offset = 0x421;
-        let mut i = dispatcher_offset;
-        let insn_size = get_insn_size(prog);
-        while i + 8 < prog.len() {
-            // Pattern PUSH4 <selector> EQ PUSH2 <offset> JUMPI
-            if prog[i] == 0x63
-                && format!("{:02x}{:02x}{:02x}{:02x}", prog[i+1], prog[i+2], prog[i+3], prog[i+4]) == selector_hex
-                && prog[i+5] == 0x14 // EQ
-                && prog[i+6] == 0x61 // PUSH2
-                && prog[i+9] == 0x57 // JUMPI
-            {
-                let offset = ((prog[i+7] as usize) << 8) | (prog[i+8] as usize);
-                found_offset = Some(offset);
-                println!("🟢 [DISPATCHER] Handler trouvé pour selector 0x{} à offset 0x{:04x}", selector_hex, offset);
-                break;
-            }
-            i += 1;
-        }
-        // --- Correction de tous les accès critiques ---
-        // 1. Dispatcher : démarre toujours sur un index aligné
-        if let Some(byte_offset) = found_offset {
-            insn_ptr = byte_offset; // <-- PAS de division par insn_size ici pour EVM
-            println!("🟢 [DISPATCHER] Démarrage à offset handler pour selector 0x{} à offset {} (byte offset 0x{:x})",
-                selector_hex, insn_ptr, byte_offset);
-        } else {
-            panic!("❌ [INTERPRETER] Aucun handler trouvé pour selector 0x{}. Le bytecode est invalide ou mal compilé.", selector_hex);
-        }
-
            // Ajoute ces deux variables AVANT la boucle principale
     let mut did_return = false;
     // Initialise last_return_value avec reg[0] dès le début
@@ -796,14 +758,14 @@ let selector_hex = format!("{:08x}", real_selector);
         0
     };
 
-    let mut pc: usize = found_offset.unwrap_or(0);
+    let mut pc: usize = 0;
 while pc < prog.len() {
     let opcode = prog[pc];
 
 
     let _dst = 0;
 let _src = 1;
-let insn_ptr = pc;
+let insn_ptr = 0;
             // --- PATCH: synchroniser reg[0] avec le sommet de la pile EVM
     // avant d'exécuter toute instruction (donc avant d'atteindre un éventuel REVERT).
     if !evm_stack.is_empty() {
@@ -1676,20 +1638,34 @@ let insn_ptr = pc;
          consume_gas(&mut execution_context, 2)?;
     },
     
-    //___ 0x60..=0x7f : PUSH1 à PUSH32
+  //___ 0x60..=0x7f : PUSH1 à PUSH32
     0x60..=0x7f => {
-        let push_bytes = (opcode - 0x5f) as usize;
+        // PUSHn: push n bytes as a value on the stack (right-aligned, big-endian)
+        let n = (opcode - 0x5f) as usize;
         let start = pc + 1;
-        let end = start + push_bytes;
-        let mut value = [0u8; 32];
+        let end = start + n;
+        let mut value = 0u64;
+        // On ne gère ici que les PUSH jusqu'à 8 bytes (pour u64), au-delà, tronqué
         if end <= prog.len() {
-            value[32 - push_bytes..].copy_from_slice(&prog[start..end]);
+            let mut bytes = [0u8; 8];
+            let copy_len = n.min(8);
+            if start + copy_len <= prog.len() {
+                bytes[8 - copy_len..].copy_from_slice(&prog[start..start + copy_len]);
+                value = u64::from_be_bytes(bytes);
+            } else {
+                println!("⚠️ [EVM] PUSH{} dépasse la taille du bytecode, valeur ignorée", n);
+            }
+        } else {
+            println!("⚠️ [EVM] PUSH{} dépasse la taille du bytecode, valeur ignorée", n);
         }
-        let push_value = u256::from_big_endian(&value).low_u64();
-        evm_stack.push(push_value);
-        advance = 1 + push_bytes;
-        // NE PAS modifier reg[_dst] ni last_return_value ici !
-    }
+        if evm_stack.len() >= 1024 {
+            println!("⚠️ [EVM] Stack overflow sur PUSH{} (stack pleine, valeur ignorée)", n);
+        } else {
+            evm_stack.push(value);
+        }
+        reg[0] = value;
+        advance = n + 1; // Avance le PC de n+1 octets
+    },
     
     //___ 0x80 → 0x8f : DUP1 à DUP16
     (0x80..=0x8f) => {
