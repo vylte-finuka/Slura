@@ -687,6 +687,20 @@ reg[54] = interpreter_args.call_depth as u64;           // Profondeur d'appel
         println!("PILE INIT: selector dispatcher mode ({} items, selector=0x{:08x})", evm_stack.len(), selector);
     }
 
+    let mut pc: usize = if let Some(off) = interpreter_args.function_offset {
+        off // déjà en bytes
+    } else {
+        0
+    };
+
+    // --- AJOUT: flag pour forcer un pas unique juste après un JUMP/JUMPI
+    let mut force_single_step_after_jump = false;
+
+    // Ajoute ces deux variables AVANT la boucle principale
+    let mut did_return = false;
+    let mut last_return_value: Option<serde_json::Value> = None;
+
+
 let mut insn_ptr: usize = 0;
 let selector_hex = format!("{:08x}", real_selector);
     
