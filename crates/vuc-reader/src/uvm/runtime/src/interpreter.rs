@@ -1478,34 +1478,19 @@ let insn_ptr = 0;
          consume_gas(&mut execution_context, 2)?;
     },
     
-  //___ 0x60..=0x7f : PUSH1 à PUSH32
-    0x60..=0x7f => {
-        // PUSHn: push n bytes as a value on the stack (right-aligned, big-endian)
-        let n = (opcode - 0x5f) as usize;
-        let start = pc + 1;
-        let end = start + n;
-        let mut value = 0u64;
-        // On ne gère ici que les PUSH jusqu'à 8 bytes (pour u64), au-delà, tronqué
-        if end <= prog.len() {
-            let mut bytes = [0u8; 8];
-            let copy_len = n.min(8);
-            if start + copy_len <= prog.len() {
-                bytes[8 - copy_len..].copy_from_slice(&prog[start..start + copy_len]);
-                value = u64::from_be_bytes(bytes);
-            } else {
-                println!("⚠️ [EVM] PUSH{} dépasse la taille du bytecode, valeur ignorée", n);
+//___ 0x60..=0x7f : PUSH1 à PUSH32
+        0x60..=0x7f => {
+            let push_bytes = (opcode - 0x5f) as usize;
+            let start = pc + 1;
+            let end = start + push_bytes;
+            let mut value = [0u8; 32];
+            if end <= prog.len() {
+                value[32 - push_bytes..].copy_from_slice(&prog[start..end]);
             }
-        } else {
-            println!("⚠️ [EVM] PUSH{} dépasse la taille du bytecode, valeur ignorée", n);
+            let push_value = u256::from_big_endian(&value).low_u64();
+            evm_stack.push(push_value);
+            advance = 1 + push_bytes;
         }
-        if evm_stack.len() >= 1024 {
-            println!("⚠️ [EVM] Stack overflow sur PUSH{} (stack pleine, valeur ignorée)", n);
-        } else {
-            evm_stack.push(value);
-        }
-        reg[0] = value;
-        advance = n + 1; // Avance le PC de n+1 octets
-    },
     
     //___ 0x80 → 0x8f : DUP1 à DUP16
    (0x80..=0x8f) => {
