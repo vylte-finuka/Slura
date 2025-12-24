@@ -351,7 +351,7 @@ fn calculate_gas_cost(opcode: u8) -> u64 {
     }
 }
 
-fn safe_u256_to_u64(val: &U256) -> u64 {
+fn safe_u256_to_u64(val: &u256) -> u64 {
     if val.bits() > 64 {
         u64::MAX
     } else {
