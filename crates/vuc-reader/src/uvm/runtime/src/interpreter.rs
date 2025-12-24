@@ -383,14 +383,6 @@ fn transfer_value(world_state: &mut UvmWorldState, from: &str, to: &str, amount:
     Ok(())
 }
 
-fn safe_u256_to_u64(val: &U256) -> u64 {
-    if val.bits() > 64 {
-        u64::MAX
-    } else {
-        val.low_u64()
-    }
-}
-
 fn get_storage(world_state: &UvmWorldState, contract: &str, slot: &str) -> Vec<u8> {
     world_state.storage.get(contract)
         .and_then(|contract_storage| contract_storage.get(slot))
