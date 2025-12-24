@@ -14,7 +14,7 @@ use std::hash::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use tiny_keccak::{Keccak, Hasher as _};
 use ethereum_types::U256 as u256;
-use i256::I256;
+use i256::{I256, U256;
 use serde_json::Value as JsonValue;
 use std::str;
 
