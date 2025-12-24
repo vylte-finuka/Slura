@@ -728,30 +728,67 @@ reg[54] = interpreter_args.call_depth as u64;           // Profondeur d'appel
         u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]])
     };
 
-     // === SÉLECTEUR RÉEL KECCAK256 (SOLIDITY-COMPATIBLE) ===
-    let real_selector = if let Some(init) = &interpreter_args.evm_stack_init {
-        // Si on a déjà poussé via args (recommandé)
-        init.get(0).copied().unwrap_or(0) as u32
-    } else {
+       let mut evm_stack: Vec<u64> = Vec::with_capacity(1024);
 
-        use tiny_keccak::Hasher;
-        // Use the function name as the signature string for selector calculation
-        let sig = &interpreter_args.function_name;
-        let mut keccak = Keccak::v256();
-        Hasher::update(&mut keccak, sig.as_bytes());
-        let mut hash = [0u8; 32];
-        keccak.finalize(&mut hash);
-        u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]])
-    };
-
-    let mut evm_stack: Vec<u64> = Vec::with_capacity(1024);
+if let Some(init) = &interpreter_args.evm_stack_init {
+    for &v in init {
+        evm_stack.push(v);
+    }
+    // Patch: complète à 16 éléments si besoin
     while evm_stack.len() < 16 {
         evm_stack.push(0);
     }
+    println!("PILE INIT: pushed from evm_stack_init ({} items)", evm_stack.len());
+} else if interpreter_args.function_name != "fallback" && interpreter_args.function_name != "receive" {
+    evm_stack.push(real_selector as u64);
+    // Patch : remplir la pile avec 15 zéros pour éviter les underflow sur DUP15
+    for _ in 0..15 {
+        evm_stack.push(0);
+    }
+    println!("PILE INIT: selector + 15 zeros (16 items)");
+}
 
-// ✅ AJOUT: Flag pour logs EVM détaillés
-let debug_evm = true;
+let mut insn_ptr: usize = 0;
+let selector_hex = format!("{:08x}", real_selector);
+    
+        // === DISPATCHER EVM-STYLE : scan à partir de l’offset 0x421 (VEZ) ===
+        let mut found_offset: Option<usize> = None;
+        let dispatcher_offset = 0x421;
+        let mut i = dispatcher_offset;
+        let insn_size = get_insn_size(prog);
+        while i + 8 < prog.len() {
+            // Pattern PUSH4 <selector> EQ PUSH2 <offset> JUMPI
+            if prog[i] == 0x63
+                && format!("{:02x}{:02x}{:02x}{:02x}", prog[i+1], prog[i+2], prog[i+3], prog[i+4]) == selector_hex
+                && prog[i+5] == 0x14 // EQ
+                && prog[i+6] == 0x61 // PUSH2
+                && prog[i+9] == 0x57 // JUMPI
+            {
+                let offset = ((prog[i+7] as usize) << 8) | (prog[i+8] as usize);
+                found_offset = Some(offset);
+                println!("🟢 [DISPATCHER] Handler trouvé pour selector 0x{} à offset 0x{:04x}", selector_hex, offset);
+                break;
+            }
+            i += 1;
+        }
+        // --- Correction de tous les accès critiques ---
+        // 1. Dispatcher : démarre toujours sur un index aligné
+        if let Some(byte_offset) = found_offset {
+            insn_ptr = byte_offset; // <-- PAS de division par insn_size ici pour EVM
+            println!("🟢 [DISPATCHER] Démarrage à offset handler pour selector 0x{} à offset {} (byte offset 0x{:x})",
+                selector_hex, insn_ptr, byte_offset);
+        } else {
+            panic!("❌ [INTERPRETER] Aucun handler trouvé pour selector 0x{}. Le bytecode est invalide ou mal compilé.", selector_hex);
+        }
 
+           // Ajoute ces deux variables AVANT la boucle principale
+    let mut did_return = false;
+    // Initialise last_return_value avec reg[0] dès le début
+    let mut last_return_value: Option<serde_json::Value> = Some(serde_json::Value::Number(serde_json::Number::from(reg[0])));
+
+    // ✅ AJOUT: Flag pour logs EVM détaillés
+    let debug_evm = true; // ← CHANGEMENT ICI : toujours true
+    let mut executed_opcodes: Vec<u8> = Vec::new();
 // Initialise insn_ptr UNE SEULE FOIS ici, en tenant compte du runtime_offset
  let mut pc: usize = if let Some(off) = interpreter_args.function_offset {
         off // déjà en bytes
@@ -759,24 +796,31 @@ let debug_evm = true;
         0
     };
 
-    // --- AJOUT: flag pour forcer un pas unique juste après un JUMP/JUMPI
-    let mut force_single_step_after_jump = false;
-
-    // Ajoute ces deux variables AVANT la boucle principale
-    let mut did_return = false;
-    let mut last_return_value: Option<serde_json::Value> = None;
-
+    let mut pc: usize = found_offset.unwrap_or(0);
 while pc < prog.len() {
     let opcode = prog[pc];
-    if debug_evm {
-        println!("🔍 [EVM LOG] PC={:04x} | OPCODE=0x{:02x} ({})", pc, opcode, opcode_name(opcode));
-    }
+
 
     let _dst = 0;
 let _src = 1;
 let insn_ptr = pc;
-    let mut advance = 1;
+            // --- PATCH: synchroniser reg[0] avec le sommet de la pile EVM
+    // avant d'exécuter toute instruction (donc avant d'atteindre un éventuel REVERT).
+    if !evm_stack.is_empty() {
+        reg[0] = *evm_stack.last().unwrap();
+    }
 
+    let debug_evm = true; // ← CHANGEMENT ICI : toujours true
+
+    // Log EVM
+    if debug_evm {
+        println!("🔍 [EVM LOG] PC={:04x} | OPCODE=0x{:02x} ({})", pc, opcode, opcode_name(opcode));
+        println!("🔍 [EVM STATE] REG[0-7]: {:?}", &reg[0..8]);
+        if !evm_stack.is_empty() {
+            println!("🔍 [EVM STACK] Top 5: {:?}", evm_stack.iter().rev().take(5).collect::<Vec<_>>());
+        }
+    }
+    let mut advance = 1;
 
      // ___ Pectra/Charène opcodes ___
     match opcode {
@@ -1503,7 +1547,6 @@ let insn_ptr = pc;
     },
     
 // ___ 0x56 JUMP
-// ___ 0x56 JUMP
 0x56 => {
     if evm_stack.is_empty() {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
@@ -1513,13 +1556,11 @@ let insn_ptr = pc;
     // --- SYNC: s'assurer que reg[0] reflète le sommet de pile APRÈS le pop
     reg[0] = evm_stack.last().copied().unwrap_or(reg[0]);
 
-    // Exception: fallback classique
-    if dest == 0x0000 {
-        println!("ℹ️ [EVM EXCEPTION] Saut autorisé vers 0x0000 (fallback classique, pas de JUMPDEST requis) | reg[0]={}", reg[0]);
-        pc = dest;
-        advance = 0;
-        continue;
-    }
+    // PATCH: SUPPRIME le court-circuit STOP/JUMP 0x0000 → on exécute bien le code à 0x0000
+    // if dest == 0x0000 {
+    //     println!("ℹ️ [EVM PATCH] JUMP vers 0x0000 → STOP (fin normale, pas de REVERT)");
+    //     break; // <-- À SUPPRIMER
+    // }
 
     // Correction automatique: saute à la JUMPDEST la plus proche si besoin
     let jumpdest = if dest >= prog.len() || prog[dest] != 0x5b {
@@ -1538,6 +1579,7 @@ let insn_ptr = pc;
     advance = 0;
     continue;
 },
+// ...existing code...
 
 // ___ 0x57 JUMPI
 0x57 => {
@@ -1631,61 +1673,6 @@ let insn_ptr = pc;
     //___ 0x5f PUSH0
     0x5f => {
         reg[_dst] = 0;
-         // --- SYNC: toujours actualiser reg[0] depuis la pile AVANT traitement du REVERT
-        reg[0] = evm_stack.last().copied().unwrap_or(reg[0]);
-        
-        // PATCH: Intercepte le pattern JUMPDEST + PUSH0 + PUSH0 + REVERT (EVM revert "sec" sans message)
-        // et retourne reg[0] comme un RETURN uint256 si reg[0] != 0
-        if pc >= 3
-            && prog[pc - 3] == 0x5b // JUMPDEST
-            && prog[pc - 2] == 0x5f // PUSH0
-            && prog[pc - 1] == 0x5f // PUSH0
-            && prog[pc] == 0xfd     // REVERT
-            && reg[0] != 0
-        {
-            // encode reg[0] as 32 bytes BE into global_mem at mem_write_offset
-            let ret_off = mem_write_offset;
-            let need = ret_off + 32;
-            if need > global_mem.len() {
-                global_mem.resize(need, 0);
-            }
-            let mut buf = [0u8; 32];
-            buf[24..32].copy_from_slice(&reg[0].to_be_bytes());
-            global_mem[ret_off..ret_off + 32].copy_from_slice(&buf);
-        
-            // build formatted_result like RETURN handler
-            let value = u256::from_big_endian(&global_mem[ret_off..ret_off + 32]);
-            let formatted_result = if value.bits() <= 64 {
-                serde_json::Value::Number(serde_json::Number::from(value.low_u64()))
-            } else {
-                serde_json::Value::String(format!("0x{}", hex::encode(&global_mem[ret_off..ret_off + 32])))
-            };
-        
-            // stop execution and return success with storage (identique au RETURN)
-            let final_storage = execution_context.world_state.storage
-                .get(&interpreter_args.contract_address)
-                .cloned()
-                .unwrap_or_default();
-            let mut result = serde_json::Map::new();
-            result.insert("return".to_string(), formatted_result);
-            if !final_storage.is_empty() {
-                let mut storage_json = serde_json::Map::new();
-                for (slot, bytes) in final_storage {
-                    storage_json.insert(slot, serde_json::Value::String(hex::encode(bytes)));
-                }
-                result.insert("storage".to_string(), serde_json::Value::Object(storage_json));
-            }
-            println!("🟢 [INTERCEPT] JUMPDEST+PUSH0+PUSH0+REVERT détecté → RETURN reg[0]={}", reg[0]);
-            return Ok(serde_json::Value::Object(result));
-        }
-        
-        // Conserver comportement existant (mais maintenant reg[0] est fiable)
-        if evm_stack.is_empty() {
-            evm_stack.push(reg[0]);
-        } else {
-            let top = evm_stack.len() - 1;
-            evm_stack[top] = reg[0];
-        }
          consume_gas(&mut execution_context, 2)?;
     },
     
@@ -1946,15 +1933,7 @@ let insn_ptr = pc;
     // --- SYNC: toujours actualiser reg[0] depuis la pile AVANT traitement du REVERT
     reg[0] = evm_stack.last().copied().unwrap_or(reg[0]);
 
-    // PATCH : Si reg[0] != 0, on ignore le REVERT et on laisse router le bytecode (pas d'erreur, pas de retour)
-    if reg[0] != 0 {
-        println!("🟢 [REVERT BYPASS] reg[0]={} ≠ 0 → on laisse router le bytecode (aucun REVERT, aucun retour)", reg[0]);
-        // On saute simplement cette instruction, comme si le REVERT n'existait pas
-        pc += 1;
-        continue;
-    }
-
-    // Comportement REVERT standard si reg[0] == 0 (vide)
+    // Conserver comportement existant (mais maintenant reg[0] est fiable)
     if evm_stack.is_empty() {
         evm_stack.push(reg[0]);
     } else {
