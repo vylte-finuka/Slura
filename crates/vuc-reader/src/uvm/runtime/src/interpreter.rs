@@ -792,263 +792,162 @@ let insn_ptr = 0;
             break;
         },
 
-    // 0x01 ADD
-    0x01 => {
-        if evm_stack.len() < 2 {
-            return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on ADD"));
-        }
-        let a = ethereum_types::U256::from(evm_stack.pop().unwrap());
-        let b = ethereum_types::U256::from(evm_stack.pop().unwrap());
-        let res = a.overflowing_add(b).0;
-        evm_stack.push(res.as_u64());
-        reg[0] = res.as_u64();
-        // Synchronisation pile <-> reg[0]
-        if evm_stack.is_empty() {
-            evm_stack.push(reg[0]);
-        } else {
-            let top = evm_stack.len() - 1;
-            evm_stack[top] = reg[0];
-        }
-        evm_stack.push(res.as_u64());
-        // Synchronisation EVM-like
-        if let Some(top) = evm_stack.last() {
-            reg[0] = *top;
-        }
-    },
-
-    // 0x02 MUL
-    0x02 => {
-        if evm_stack.len() < 2 {
-            return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on MUL"));
-        }
-        let a = ethereum_types::U256::from(evm_stack.pop().unwrap());
-        let b = ethereum_types::U256::from(evm_stack.pop().unwrap());
-        let res = a.overflowing_mul(b).0;
-        evm_stack.push(res.as_u64());
-        reg[0] = res.as_u64();
-        // Synchronisation pile <-> reg[0]
-        if evm_stack.is_empty() {
-            evm_stack.push(reg[0]);
-        } else {
-            let top = evm_stack.len() - 1;
-            evm_stack[top] = reg[0];
-        }
-        evm_stack.push(res.as_u64());
-        // Synchronisation EVM-like
-        if let Some(top) = evm_stack.last() {
-            reg[0] = *top;
-        }
-    },
-
-    // 0x03 SUB
-    0x03 => {
-        if evm_stack.len() < 2 {
-            return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on SUB"));
-        }
-        let a = ethereum_types::U256::from(evm_stack.pop().unwrap());
-        let b = ethereum_types::U256::from(evm_stack.pop().unwrap());
-        let res = a.overflowing_sub(b).0;
-        evm_stack.push(res.as_u64());
-        reg[0] = res.as_u64();
-        // Synchronisation pile <-> reg[0]
-        if evm_stack.is_empty() {
-            evm_stack.push(reg[0]);
-        } else {
-            let top = evm_stack.len() - 1;
-            evm_stack[top] = reg[0];
-        }
-        evm_stack.push(res.as_u64());
-        // Synchronisation EVM-like
-        if let Some(top) = evm_stack.last() {
-            reg[0] = *top;
-        }
-    },
-
-    // 0x04 DIV
-    0x04 => {
-        if evm_stack.len() < 2 {
-            return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on DIV"));
-        }
-        let a = ethereum_types::U256::from(evm_stack.pop().unwrap());
-        let b = ethereum_types::U256::from(evm_stack.pop().unwrap());
-        let res = if b.is_zero() { ethereum_types::U256::zero() } else { a / b };
-        evm_stack.push(res.low_u64());
-        reg[0] = res.low_u64();
-        // Synchronisation pile <-> reg[0]
-        if evm_stack.is_empty() {
-            evm_stack.push(reg[0]);
-        } else {
-            let top = evm_stack.len() - 1;
-            evm_stack[top] = reg[0];
-        }
-        evm_stack.push(res.low_u64());
-        // Synchronisation EVM-like
-        if let Some(top) = evm_stack.last() {
-            reg[0] = *top;
-        }
-    },
-
-    // 0x05 SDIV
-    0x05 => {
-        if evm_stack.len() < 2 {
-            return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on SDIV"));
-        }
-        let a = I256::from(evm_stack.pop().unwrap());
-        let b = I256::from(evm_stack.pop().unwrap());
-        let res = if b == I256::from(0) { I256::from(0) } else { a / b };
-        evm_stack.push(res.as_u64());
-        reg[0] = res.as_u64();
-        // Synchronisation pile <-> reg[0]
-        if evm_stack.is_empty() {
-            evm_stack.push(reg[0]);
-        } else {
-            let top = evm_stack.len() - 1;
-            evm_stack[top] = reg[0];
-        }
-        evm_stack.push(res.as_u64());
-        // Synchronisation EVM-like
-        if let Some(top) = evm_stack.last() {
-            reg[0] = *top;
-        }    },
-
-    // 0x06 MOD
-    0x06 => {
-        if evm_stack.len() < 2 {
-            return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on MOD"));
-        }
-        let a = ethereum_types::U256::from(evm_stack.pop().unwrap());
-        let b = ethereum_types::U256::from(evm_stack.pop().unwrap());
-        let res = if b.is_zero() { ethereum_types::U256::zero() } else { a % b };
-        evm_stack.push(res.low_u64());
-        reg[0] = res.low_u64();
-        // Synchronisation pile <-> reg[0]
-        if evm_stack.is_empty() {
-            evm_stack.push(reg[0]);
-        } else {
-            let top = evm_stack.len() - 1;
-            evm_stack[top] = reg[0];
-        }
-        evm_stack.push(res.low_u64());
-        // Synchronisation EVM-like
-        if let Some(top) = evm_stack.last() {
-            reg[0] = *top;
-        }
-    },
-
-    // 0x07 SMOD
-    0x07 => {
-        if evm_stack.len() < 2 {
-            return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on SMOD"));
-        }
-        let a = I256::from(evm_stack.pop().unwrap());
-        let b = I256::from(evm_stack.pop().unwrap());
-        let res = if b == I256::from(0) { I256::from(0) } else { a % b };
-        evm_stack.push(res.as_u64());
-        reg[0] = res.as_u64();
-        // Synchronisation pile <-> reg[0]
-        if evm_stack.is_empty() {
-            evm_stack.push(reg[0]);
-        } else {
-            let top = evm_stack.len() - 1;
-            evm_stack[top] = reg[0];
-        }
-        evm_stack.push(res.as_u64());
-        // Synchronisation EVM-like
-        if let Some(top) = evm_stack.last() {
-            reg[0] = *top;
-        }
-    },
-
-    // 0x08 ADDMOD
-    0x08 => {
-        if evm_stack.len() < 3 {
-            return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on ADDMOD"));
-        }
-        let a = ethereum_types::U256::from(evm_stack.pop().unwrap());
-        let b = ethereum_types::U256::from(evm_stack.pop().unwrap());
-        let n = ethereum_types::U256::from(evm_stack.pop().unwrap());
-        let res = if n.is_zero() { ethereum_types::U256::zero() } else { (a + b) % n };
-        evm_stack.push(res.low_u64());
-        reg[0] = res.low_u64();
-        // Synchronisation pile <-> reg[0]
-        if evm_stack.is_empty() {
-            evm_stack.push(reg[0]);
-        } else {
-            let top = evm_stack.len() - 1;
-            evm_stack[top] = reg[0];
-        }
-        evm_stack.push(res.low_u64());
-        // Synchronisation EVM-like
-        if let Some(top) = evm_stack.last() {
-            reg[0] = *top;
-        }
-    },
-
-    // 0x09 MULMOD
-    0x09 => {
-        if evm_stack.len() < 3 {
-            return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on MULMOD"));
-        }
-        let a = ethereum_types::U256::from(evm_stack.pop().unwrap());
-        let b = ethereum_types::U256::from(evm_stack.pop().unwrap());
-        let n = ethereum_types::U256::from(evm_stack.pop().unwrap());
-        let res = if n.is_zero() { ethereum_types::U256::zero() } else { (a * b) % n };
-        evm_stack.push(res.low_u64());
-        reg[0] = res.low_u64();
-        // Synchronisation pile <-> reg[0]
-        if evm_stack.is_empty() {
-            evm_stack.push(reg[0]);
-        } else {
-            let top = evm_stack.len() - 1;
-            evm_stack[top] = reg[0];
-        }
-        last_return_value = Some(serde_json::Value::Number(serde_json::Number::from(reg[0])));
-    },
-
-    // 0x0a EXP
-    0x0a => {
-        if evm_stack.len() < 2 {
-            return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on EXP"));
-        }
-        let base = ethereum_types::U256::from(evm_stack.pop().unwrap());
-        let exponent = ethereum_types::U256::from(evm_stack.pop().unwrap());
-        let res = base.overflowing_pow(exponent.low_u32().into()).0;
-        evm_stack.push(res.low_u64());
-        reg[0] = res.low_u64();
-        // Synchronisation pile <-> reg[0]
-        if evm_stack.is_empty() {
-            evm_stack.push(reg[0]);
-        } else {
-            let top = evm_stack.len() - 1;
-            evm_stack[top] = reg[0];
-        }
-        last_return_value = Some(serde_json::Value::Number(serde_json::Number::from(reg[0])));
-    },
-
-    // 0x0b SIGNEXTEND
-    0x0b => {
-        if evm_stack.len() < 2 {
-            return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on SIGNEXTEND"));
-        }
-        let b = evm_stack.pop().unwrap();
-        let x = evm_stack.pop().unwrap();
-        let res = if b < 32 {
-            let bit = 8 * (b as usize + 1) - 1;
-            let mask = (1u128 << bit) - 1;
-            let sign_bit = 1u128 << bit;
-            let x128 = x as u128;
-            if (x128 & sign_bit) != 0 {
-                (x128 | !mask) as u64
-            } else {
-                (x128 & mask) as u64
+    // ___ 0x01 ADD
+        0x01 => {
+            if evm_stack.len() < 2 {
+                return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on ADD"));
             }
-        } else {
-            x
-        };
-        evm_stack.push(res);
-        reg[0] = res;
-        last_return_value = Some(serde_json::Value::Number(serde_json::Number::from(reg[0])));
-    },
+            let b = ethereum_types::U256::from(evm_stack.pop().unwrap());
+            let a = ethereum_types::U256::from(evm_stack.pop().unwrap());
+            let res = a.overflowing_add(b).0;
+            let val = res.as_u64();
+            evm_stack.push(val);
+            reg[0] = val;
+        },
+    
+        // ___ 0x02 MUL
+        0x02 => {
+            if evm_stack.len() < 2 {
+                return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on MUL"));
+            }
+            let b = ethereum_types::U256::from(evm_stack.pop().unwrap());
+            let a = ethereum_types::U256::from(evm_stack.pop().unwrap());
+            let res = a.overflowing_mul(b).0;
+            let val = res.as_u64();
+            evm_stack.push(val);
+            reg[0] = val;
+        },
+    
+        // 0x03 SUB
+        0x03 => {
+            if evm_stack.len() < 2 {
+                return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on SUB"));
+            }
+            let b = ethereum_types::U256::from(evm_stack.pop().unwrap());
+            let a = ethereum_types::U256::from(evm_stack.pop().unwrap());
+            let res = a.overflowing_sub(b).0;
+            let val = res.as_u64();
+            evm_stack.push(val);
+            reg[0] = val;
+        },
+    
+        // ___ 0x04 DIV
+        0x04 => {
+            if evm_stack.len() < 2 {
+                return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on DIV"));
+            }
+            let b = ethereum_types::U256::from(evm_stack.pop().unwrap());
+            let a = ethereum_types::U256::from(evm_stack.pop().unwrap());
+            let res = if b.is_zero() { ethereum_types::U256::zero() } else { a / b };
+            let val = res.low_u64();
+            evm_stack.push(val);
+            reg[0] = val;
+        },
+    
+        // ___ 0x05 SDIV
+        0x05 => {
+            if evm_stack.len() < 2 {
+                return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on SDIV"));
+            }
+            let b = I256::from(evm_stack.pop().unwrap());
+            let a = I256::from(evm_stack.pop().unwrap());
+            let res = if b == I256::from(0) { I256::from(0) } else { a / b };
+            let val = res.as_u64();
+            evm_stack.push(val);
+            reg[0] = val;
+        },
+    
+        // ___ 0x06 MOD
+        0x06 => {
+            if evm_stack.len() < 2 {
+                return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on MOD"));
+            }
+            let b = ethereum_types::U256::from(evm_stack.pop().unwrap());
+            let a = ethereum_types::U256::from(evm_stack.pop().unwrap());
+            let res = if b.is_zero() { ethereum_types::U256::zero() } else { a % b };
+            let val = res.low_u64();
+            evm_stack.push(val);
+            reg[0] = val;
+        },
+    
+        // ___ 0x07 SMOD
+        0x07 => {
+            if evm_stack.len() < 2 {
+                return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on SMOD"));
+            }
+            let b = I256::from(evm_stack.pop().unwrap());
+            let a = I256::from(evm_stack.pop().unwrap());
+            let res = if b == I256::from(0) { I256::from(0) } else { a % b };
+            let val = res.as_u64();
+            evm_stack.push(val);
+            reg[0] = val;
+        },
+    
+        // ___ 0x08 ADDMOD
+        0x08 => {
+            if evm_stack.len() < 3 {
+                return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on ADDMOD"));
+            }
+            let n = ethereum_types::U256::from(evm_stack.pop().unwrap());
+            let b = ethereum_types::U256::from(evm_stack.pop().unwrap());
+            let a = ethereum_types::U256::from(evm_stack.pop().unwrap());
+            let res = if n.is_zero() { ethereum_types::U256::zero() } else { (a + b) % n };
+            let val = res.low_u64();
+            evm_stack.push(val);
+            reg[0] = val;
+        },
+    
+        // ___ 0x09 MULMOD
+        0x09 => {
+            if evm_stack.len() < 3 {
+                return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on MULMOD"));
+            }
+            let n = ethereum_types::U256::from(evm_stack.pop().unwrap());
+            let b = ethereum_types::U256::from(evm_stack.pop().unwrap());
+            let a = ethereum_types::U256::from(evm_stack.pop().unwrap());
+            let res = if n.is_zero() { ethereum_types::U256::zero() } else { (a * b) % n };
+            let val = res.low_u64();
+            evm_stack.push(val);
+            reg[0] = val;
+        },
+    
+        // ___ 0x0a EXP
+        0x0a => {
+            if evm_stack.len() < 2 {
+                return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on EXP"));
+            }
+            let exponent = ethereum_types::U256::from(evm_stack.pop().unwrap());
+            let base = ethereum_types::U256::from(evm_stack.pop().unwrap());
+            let res = base.overflowing_pow(exponent.low_u32().into()).0;
+            let val = res.low_u64();
+            evm_stack.push(val);
+            reg[0] = val;
+        },
+    
+        // ___ 0x0b SIGNEXTEND
+        0x0b => {
+            if evm_stack.len() < 2 {
+                return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on SIGNEXTEND"));
+            }
+            let b = evm_stack.pop().unwrap();
+            let x = evm_stack.pop().unwrap();
+            let res = if b < 32 {
+                let bit = 8 * (b as usize + 1) - 1;
+                let mask = (1u128 << bit) - 1;
+                let sign_bit = 1u128 << bit;
+                let x128 = x as u128;
+                if (x128 & sign_bit) != 0 {
+                    (x128 | !mask) as u64
+                } else {
+                    (x128 & mask) as u64
+                }
+            } else {
+                x
+            };
+            evm_stack.push(res);
+            reg[0] = res;
+        },
+    // ...existing code...
         
         //___ 0x10 LT
         0x10 => {
@@ -1429,7 +1328,7 @@ let insn_ptr = 0;
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on POP"));
     }
     evm_stack.pop();
-    //consume_gas(&mut execution_context, 2)?;
+    reg[0] = evm_stack.last().copied().unwrap_or(0);
 },
 
     //___ 0x51 MLOAD
@@ -1461,52 +1360,48 @@ let insn_ptr = 0;
 },
     
     //___ 0x54 SLOAD
-    0x54 => {
-        // Slot EVM : sommet de la pile (EVM) ou reg[_dst]
-        let slot_u256 = if !evm_stack.is_empty() {
-            u256::from(evm_stack.pop().unwrap())
-        } else {
-            u256::from(reg[_dst])
-        };
-        let slot = format!("{:064x}", slot_u256);
-    
-        println!("🔍 [SLOAD DEBUG] slot={}", slot);
-    
-        let mut loaded_value = 0u64;
-        if let Some(contract_storage) = execution_context.world_state.storage.get(&interpreter_args.contract_address) {
-            if let Some(stored_bytes) = contract_storage.get(&slot) {
-                let storage_val = safe_u256_to_u64(&u256::from_big_endian(stored_bytes));
-                loaded_value = storage_val;
-            }
+  0x54 => {
+    // Slot EVM : sommet de la pile (EVM) ou reg[_dst]
+    let slot_u256 = if !evm_stack.is_empty() {
+        u256::from(evm_stack.pop().unwrap())
+    } else {
+        u256::from(reg[_dst])
+    };
+    let slot = format!("{:064x}", slot_u256);
+
+    println!("🔍 [SLOAD DEBUG] slot={}", slot);
+
+    let mut loaded_value = 0u64;
+    if let Some(contract_storage) = execution_context.world_state.storage.get(&interpreter_args.contract_address) {
+        if let Some(stored_bytes) = contract_storage.get(&slot) {
+            let storage_val = safe_u256_to_u64(&u256::from_big_endian(stored_bytes));
+            loaded_value = storage_val;
         }
-        evm_stack.push(loaded_value);
-        reg[_dst] = loaded_value;
-        reg[0] = loaded_value;
-        evm_stack.push(loaded_value);
-        // Synchronisation EVM-like
-        if let Some(top) = evm_stack.last() {
-            reg[0] = *top;
-        }
-        println!("🎯 [SLOAD] slot={}, loaded_value={}", slot, loaded_value);
-    },
+    }
+    evm_stack.push(loaded_value);
+    reg[_dst] = loaded_value;
+    reg[0] = loaded_value;
+    // Supprime le double push et la synchronisation superflue
+    println!("🎯 [SLOAD] slot={}, loaded_value={}", slot, loaded_value);
+},
     
     // ___ 0x55 SSTORE
-    0x55 => {
-        // Slot EVM : sommet-1 de la pile, valeur : sommet
-        if evm_stack.len() < 2 {
-            return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on SSTORE"));
-        }
-        let value = evm_stack.pop().unwrap();
-        let slot_u256 = u256::from(evm_stack.pop().unwrap());
-        let slot = format!("{:064x}", slot_u256);
-        let value_u256 = u256::from(value);
-        let bytes = value_u256.to_big_endian();
-        set_storage(&mut execution_context.world_state, &interpreter_args.contract_address, &slot, bytes.to_vec());
-        println!("💾 [SSTORE] slot={} <- value={}", slot, value);
-        reg[_dst] = value;
-        reg[0] = value;
-        last_return_value = Some(serde_json::Value::Number(serde_json::Number::from(reg[0])));
-    },
+  0x55 => {
+    // Slot EVM : sommet-1 de la pile, valeur : sommet
+    if evm_stack.len() < 2 {
+        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on SSTORE"));
+    }
+    let value = evm_stack.pop().unwrap();
+    let slot_u256 = u256::from(evm_stack.pop().unwrap());
+    let slot = format!("{:064x}", slot_u256);
+    let value_u256 = u256::from(value);
+    let bytes = value_u256.to_big_endian();
+    set_storage(&mut execution_context.world_state, &interpreter_args.contract_address, &slot, bytes.to_vec());
+    println!("💾 [SSTORE] slot={} <- value={}", slot, value);
+    reg[_dst] = value;
+    reg[0] = value;
+    last_return_value = Some(serde_json::Value::Number(serde_json::Number::from(reg[0])));
+},
     
 // ___ 0x56 JUMP
 0x56 => {
@@ -1668,34 +1563,34 @@ let insn_ptr = 0;
     },
     
     //___ 0x80 → 0x8f : DUP1 à DUP16
-    (0x80..=0x8f) => {
-        let depth = (opcode - 0x80) as usize;
-        if evm_stack.len() <= depth {
-            println!("⚠️ [EVM] Stack underflow sur DUP{} (stack size={})", depth + 1, evm_stack.len());
-            // On ignore l'instruction, pas de panic ni d'erreur
-        } else if evm_stack.len() >= 1024 {
-            println!("⚠️ [EVM] Stack overflow sur DUP{} (stack pleine, duplication ignorée)", depth + 1);
-        } else {
-            // EVM : DUPn duplique la n-ième valeur à partir du sommet (top = fin du Vec)
-            let value = evm_stack[evm_stack.len() - 1 - depth];
-            evm_stack.push(value);
-            // reg[_dst] = value; // Optionnel, selon ton usage
-        }
-        last_return_value = Some(serde_json::Value::Number(serde_json::Number::from(reg[_dst])));
-    },
+   (0x80..=0x8f) => {
+    let depth = (opcode - 0x80) as usize;
+    if evm_stack.len() <= depth {
+        println!("⚠️ [EVM] Stack underflow sur DUP{} (stack size={})", depth + 1, evm_stack.len());
+        // On ignore l'instruction, pas de panic ni d'erreur
+    } else if evm_stack.len() >= 1024 {
+        println!("⚠️ [EVM] Stack overflow sur DUP{} (stack pleine, duplication ignorée)", depth + 1);
+    } else {
+        // EVM : DUPn duplique la n-ième valeur à partir du sommet (top = fin du Vec)
+        let value = evm_stack[evm_stack.len() - 1 - depth];
+        evm_stack.push(value);
+        reg[0] = value;
+    }
+    last_return_value = Some(serde_json::Value::Number(serde_json::Number::from(reg[0])));
+},
     
     // ___ 0x90 → 0x9f : SWAP1 à SWAP16
-    (0x90..=0x9f) => {
-        let depth = (opcode - 0x90 + 1) as usize;
-        if evm_stack.len() <= depth {
-            println!("⚠️ [EVM] Stack underflow sur SWAP{} (stack size={})", depth, evm_stack.len());
-            // On ignore l'instruction, pas de panic ni d'erreur
-        } else {
-            let top = evm_stack.len() - 1;
-            evm_stack.swap(top, top - depth);
-            // reg[_dst] = evm_stack[top]; // Optionnel, selon ton usage
-        }
-    },
+(0x90..=0x9f) => {
+    let depth = (opcode - 0x90 + 1) as usize;
+    if evm_stack.len() <= depth {
+        println!("⚠️ [EVM] Stack underflow sur SWAP{} (stack size={})", depth, evm_stack.len());
+        // On ignore l'instruction, pas de panic ni d'erreur
+    } else {
+        let top = evm_stack.len() - 1;
+        evm_stack.swap(top, top - depth);
+        reg[0] = evm_stack[top];
+    }
+},
 
 //___ 0xa0 LOG0
 0xa0 => {
