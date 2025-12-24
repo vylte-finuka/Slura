@@ -686,13 +686,13 @@ reg[54] = interpreter_args.call_depth as u64;           // Profondeur d'appel
         for _ in 0..15 { evm_stack.push(0); }
         println!("PILE INIT: selector dispatcher mode ({} items, selector=0x{:08x})", evm_stack.len(), selector);
     }
-let mut advance = 1;
     let mut pc: usize = if let Some(off) = interpreter_args.function_offset {
         off // déjà en bytes
     } else {
         0
     };
 
+    let mut advance = pc;    
     // --- AJOUT: flag pour forcer un pas unique juste après un JUMP/JUMPI
     let mut force_single_step_after_jump = false;
 
