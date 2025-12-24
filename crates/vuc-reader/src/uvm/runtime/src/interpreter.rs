@@ -798,16 +798,15 @@ let insn_ptr = 0;
     
         // ___ 0x02 MUL
         0x02 => {
-            if evm_stack.len() < 2 {
-                return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on MUL"));
-            }
-            let b = ethereum_types::U256::from(evm_stack.pop().unwrap());
-            let a = ethereum_types::U256::from(evm_stack.pop().unwrap());
-            let res = a.overflowing_mul(b).0;
-            let val = res.as_u64();
-            evm_stack.push(safe_u256_to_u64(&res));
-            reg[0] = safe_u256_to_u64(&res);
-        },
+    if evm_stack.len() < 2 {
+        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on MUL"));
+    }
+    let b = ethereum_types::U256::from(evm_stack.pop().unwrap());
+    let a = ethereum_types::U256::from(evm_stack.pop().unwrap());
+    let res = a.overflowing_mul(b).0;
+    evm_stack.push(safe_u256_to_u64(&res));
+    reg[0] = safe_u256_to_u64(&res);
+},
     
         // 0x03 SUB
         0x03 => {
