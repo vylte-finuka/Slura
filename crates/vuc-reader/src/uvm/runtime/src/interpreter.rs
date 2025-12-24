@@ -351,6 +351,14 @@ fn calculate_gas_cost(opcode: u8) -> u64 {
     }
 }
 
+fn safe_u256_to_u64(val: &U256) -> u64 {
+    if val.bits() > 64 {
+        u64::MAX
+    } else {
+        val.low_u64()
+    }
+}
+
 // ✅ AJOUT: Helpers pour interaction avec l'état mondial
 fn get_balance(world_state: &UvmWorldState, address: &str) -> u64 {
     world_state.accounts.get(address)
