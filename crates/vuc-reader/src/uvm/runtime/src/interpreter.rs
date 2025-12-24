@@ -13,8 +13,8 @@ use core::ops::Range;
 use std::hash::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use tiny_keccak::{Keccak, Hasher as _};
-use ethereum_types::U256 as u256;
-use i256::{I256, U256};
+use ethereum_types::U256;
+use i256::{I256, U256 as u256};
 use serde_json::Value as JsonValue;
 use std::str;
 
@@ -1363,7 +1363,7 @@ let insn_ptr = 0;
     let mut loaded_value = 0u64;
     if let Some(contract_storage) = execution_context.world_state.storage.get(&interpreter_args.contract_address) {
         if let Some(stored_bytes) = contract_storage.get(&slot) {
-            let storage_val = safe_u256_to_u64(i256::U256::from_big_endian(stored_bytes));
+            let storage_val = safe_u256_to_u64(&u256::from_big_endian(stored_bytes));
             loaded_value = storage_val;
         }
     }
