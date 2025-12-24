@@ -690,46 +690,58 @@ reg[54] = interpreter_args.call_depth as u64;           // Profondeur d'appel
 let mut insn_ptr: usize = 0;
 let selector_hex = format!("{:08x}", real_selector);
     
-           // Ajoute ces deux variables AVANT la boucle principale
-    let mut did_return = false;
-    // Initialise last_return_value avec reg[0] dès le début
-    let mut last_return_value: Option<serde_json::Value> = Some(serde_json::Value::Number(serde_json::Number::from(reg[0])));
+        // === DISPATCHER EVM-STYLE : scan à partir de l’offset 0x421 (VEZ) ===
+        let mut found_offset: Option<usize> = None;
+        let dispatcher_offset = 0x421;
+        let mut i = dispatcher_offset;
+        let insn_size = get_insn_size(prog);
+        while i + 8 < prog.len() {
+            // Pattern PUSH4 <selector> EQ PUSH2 <offset> JUMPI
+            if prog[i] == 0x63
+                && format!("{:02x}{:02x}{:02x}{:02x}", prog[i+1], prog[i+2], prog[i+3], prog[i+4]) == selector_hex
+                && prog[i+5] == 0x14 // EQ
+                && prog[i+6] == 0x61 // PUSH2
+                && prog[i+9] == 0x57 // JUMPI
+            {
+                let offset = ((prog[i+7] as usize) << 8) | (prog[i+8] as usize);
+                found_offset = Some(offset);
+                println!("🟢 [DISPATCHER] Handler trouvé pour selector 0x{} à offset 0x{:04x}", selector_hex, offset);
+                break;
+            }
+            i += 1;
+        }
+        // --- Correction de tous les accès critiques ---
+        // 1. Dispatcher : démarre toujours sur un index aligné
+        if let Some(byte_offset) = found_offset {
+            insn_ptr = byte_offset; // <-- PAS de division par insn_size ici pour EVM
+            println!("🟢 [DISPATCHER] Démarrage à offset handler pour selector 0x{} à offset {} (byte offset 0x{:x})",
+                selector_hex, insn_ptr, byte_offset);
+        } else {
+            panic!("❌ [INTERPRETER] Aucun handler trouvé pour selector 0x{}. Le bytecode est invalide ou mal compilé.", selector_hex);
+        }
 
     // ✅ AJOUT: Flag pour logs EVM détaillés
     let debug_evm = true; // ← CHANGEMENT ICI : toujours true
     let mut executed_opcodes: Vec<u8> = Vec::new();
-// Initialise insn_ptr UNE SEULE FOIS ici, en tenant compte du runtime_offset
- let mut pc: usize = if let Some(off) = interpreter_args.function_offset {
-        off // déjà en bytes
-    } else {
-        0
-    };
 
-    let mut pc: usize = 0;
-while pc < prog.len() {
-    let opcode = prog[pc];
-
-
-    let _dst = 0;
-let _src = 1;
-let insn_ptr = 0;
-            // --- PATCH: synchroniser reg[0] avec le sommet de la pile EVM
-    // avant d'exécuter toute instruction (donc avant d'atteindre un éventuel REVERT).
-    if !evm_stack.is_empty() {
-        reg[0] = *evm_stack.last().unwrap();
-    }
+    // === NOUVELLE BOUCLE PRINCIPALE EVM-BYTECODE ===
+let mut insn_ptr: usize = found_offset.unwrap_or(0);
+while insn_ptr < prog.len() {
+    let opcode = prog[insn_ptr];
+    let insn = ebpf::get_insn(prog, insn_ptr);
+        let _dst = insn.dst as usize;
+        let _src = insn.src as usize;
 
     let debug_evm = true; // ← CHANGEMENT ICI : toujours true
 
     // Log EVM
     if debug_evm {
-        println!("🔍 [EVM LOG] PC={:04x} | OPCODE=0x{:02x} ({})", pc, opcode, opcode_name(opcode));
+        println!("🔍 [EVM LOG] PC={:04x} | OPCODE=0x{:02x} ({})", insn_ptr, opcode, opcode_name(opcode));
         println!("🔍 [EVM STATE] REG[0-7]: {:?}", &reg[0..8]);
         if !evm_stack.is_empty() {
             println!("🔍 [EVM STACK] Top 5: {:?}", evm_stack.iter().rev().take(5).collect::<Vec<_>>());
         }
     }
-    let mut advance = 1;
 
      // ___ Pectra/Charène opcodes ___
     match opcode {
