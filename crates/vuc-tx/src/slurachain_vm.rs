@@ -806,20 +806,6 @@ impl SlurachainVm {
                     Some(m) => m,
                     None => return Err("Aucun storage_manager configuré".to_string()),
                 };
-
-                // Dans load_complete_contract_state, après la boucle logical_names :
-let impl_slot_key = format!("storage:{}:{}", contract_address, ERC1967_IMPLEMENTATION_SLOT);
-if let Some(bytes) = try_read_storage(storage_manager, &impl_slot_key) {
-    let impl_addr = format!("0x{}", hex::encode(&bytes));
-    account.resources.insert(ERC1967_IMPLEMENTATION_SLOT.to_string(), serde_json::Value::String(impl_addr.clone()));
-    if &bytes == &vec![0u8; 32] || impl_addr == "0x0000000000000000000000000000000000000000" {
-        println!("‼️ [PROXY FATAL] Implementation slot vide pour {} → toutes les calls feront STOP silencieux !", contract_address);
-    } else {
-        println!("✅ [PROXY] Implementation chargée : {}", impl_addr);
-    }
-} else {
-    println!("⚠️ [PROXY] Slot implementation non trouvé pour {}", contract_address);
-}
         
                 // assure qu'il y a un AccountState pour remplir
                 let mut account = {
@@ -972,16 +958,6 @@ if let Some(bytes) = try_read_storage(storage_manager, &impl_slot_key) {
         }
         Ok(None)
     }
-
-     // Avant le bloc if let Some(ref impl_addr) = impl_addr_opt {
-if let Some(impl_val) = accounts.get(&vyid)
-    .and_then(|acc| acc.resources.get(ERC1967_IMPLEMENTATION_SLOT))
-    .and_then(|v| v.as_str())
-{
-    if impl_val == "0x0000000000000000000000000000000000000000" || impl_val.is_empty() {
-        return Err(format!("‼️ PROXY MAL INITIALISÉ : implementation slot vide (0x0) sur {}. Redéploie le proxy correctement.", vyid));
-    }
-}
 
              /// ✅ NOUVEAU: Détection automatique des fonctions d'un contrat
   pub fn auto_detect_contract_functions(&mut self, contract_address: &str, bytecode: &[u8]) -> Result<(), String> {
@@ -1318,6 +1294,23 @@ fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<us
                             if s.starts_with("0x") && s.len() > 2 && s.chars().all(|c| c == 'x' || c.is_ascii_hexdigit() || c == '0') == false {
                                 // s is likely human string (name/symbol) -> store utf8
                                 s.as_bytes().to_vec()
+                            } else if s.starts_with("0x") {
+                                hex::decode(s.trim_start_matches("0x")).unwrap_or_else(|_| s.as_bytes().to_vec())
+                            } else if self.looks_like_address(s) {
+                                // ensure 0x prefixed address -> store as 32 bytes right-aligned
+                                let clean = s.trim_start_matches("0x");
+                                if let Ok(addr_bytes) = hex::decode(clean) {
+                                    let mut buf = vec![0u8; 12];
+                                    buf.extend_from_slice(&addr_bytes);
+                                    buf
+                                } else {
+                                    s.as_bytes().to_vec()
+                                }
+                            } else {
+                                s.as_bytes().to_vec()
+                            }
+                        },
+                            
 /// ✅ Persistance immédiate du state après exécution
 /// - Persiste tous les changements de storage (logiques + canoniques)
 /// - Gère particulièrement les slots ERC-1967 (implementation, admin, beacon)
@@ -1455,8 +1448,8 @@ fn persist_contract_state_immediate(&mut self, contract_address: &str, execution
 
     println!("🎉 [PERSIST IMMEDIATE] Persistance terminée avec succès pour {}", contract_address);
     Ok(())
-}
-                            
+                        }
+
 /// Mappe une clé logique (ex: "implementation", "admin") vers un slot 32 bytes hex canonique.
    fn map_resource_key_to_slot(&self, key: &str) -> String {
         // Clés connues → slots ERC-1967
@@ -2019,4 +2012,4 @@ fn normalize_storage_json_value(value: &serde_json::Value) -> serde_json::Value 
     }
     // sinon on renvoie la valeur originale
     value.clone()
-}
+}}
