@@ -806,6 +806,20 @@ impl SlurachainVm {
                     Some(m) => m,
                     None => return Err("Aucun storage_manager configuré".to_string()),
                 };
+
+                // Dans load_complete_contract_state, après la boucle logical_names :
+let impl_slot_key = format!("storage:{}:{}", contract_address, ERC1967_IMPLEMENTATION_SLOT);
+if let Some(bytes) = try_read_storage(storage_manager, &impl_slot_key) {
+    let impl_addr = format!("0x{}", hex::encode(&bytes));
+    account.resources.insert(ERC1967_IMPLEMENTATION_SLOT.to_string(), serde_json::Value::String(impl_addr.clone()));
+    if &bytes == &vec![0u8; 32] || impl_addr == "0x0000000000000000000000000000000000000000" {
+        println!("‼️ [PROXY FATAL] Implementation slot vide pour {} → toutes les calls feront STOP silencieux !", contract_address);
+    } else {
+        println!("✅ [PROXY] Implementation chargée : {}", impl_addr);
+    }
+} else {
+    println!("⚠️ [PROXY] Slot implementation non trouvé pour {}", contract_address);
+}
         
                 // assure qu'il y a un AccountState pour remplir
                 let mut account = {
@@ -958,6 +972,16 @@ impl SlurachainVm {
         }
         Ok(None)
     }
+
+     // Avant le bloc if let Some(ref impl_addr) = impl_addr_opt {
+if let Some(impl_val) = accounts.get(&vyid)
+    .and_then(|acc| acc.resources.get(ERC1967_IMPLEMENTATION_SLOT))
+    .and_then(|v| v.as_str())
+{
+    if impl_val == "0x0000000000000000000000000000000000000000" || impl_val.is_empty() {
+        return Err(format!("‼️ PROXY MAL INITIALISÉ : implementation slot vide (0x0) sur {}. Redéploie le proxy correctement.", vyid));
+    }
+}
 
              /// ✅ NOUVEAU: Détection automatique des fonctions d'un contrat
   pub fn auto_detect_contract_functions(&mut self, contract_address: &str, bytecode: &[u8]) -> Result<(), String> {
@@ -1294,58 +1318,145 @@ fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<us
                             if s.starts_with("0x") && s.len() > 2 && s.chars().all(|c| c == 'x' || c.is_ascii_hexdigit() || c == '0') == false {
                                 // s is likely human string (name/symbol) -> store utf8
                                 s.as_bytes().to_vec()
-                            } else if s.starts_with("0x") {
-                                hex::decode(s.trim_start_matches("0x")).unwrap_or_else(|_| s.as_bytes().to_vec())
-                            } else if self.looks_like_address(s) {
-                                // ensure 0x prefixed address -> store as 32 bytes right-aligned
-                                let clean = s.trim_start_matches("0x");
-                                if let Ok(addr_bytes) = hex::decode(clean) {
-                                    let mut buf = vec![0u8; 12];
-                                    buf.extend_from_slice(&addr_bytes);
-                                    buf
-                                } else {
-                                    s.as_bytes().to_vec()
-                                }
-                            } else {
-                                s.as_bytes().to_vec()
-                            }
-                        },
-                        serde_json::Value::Number(n) => {
-                            if let Some(u) = n.as_u64() {
-                                // encode as 32-bytes big endian
-                                let mut buf = [0u8; 32];
-                                buf[24..32].copy_from_slice(&u.to_be_bytes());
-                                buf.to_vec()
-                            } else {
-                                decoded_val.to_string().into_bytes()
-                            }
-                        },
-                        serde_json::Value::Bool(b) => vec![if *b { 1u8 } else { 0u8 }],
-                        other => other.to_string().into_bytes(),
-                    };
-                    // Write logical key to DB (best-effort)
-                    if let Err(e) = storage_manager.write(&logical_storage_key, bytes_to_write.clone()) {
-                        eprintln!("⚠️ Erreur persistance logical key {}: {}", logical_storage_key, e);
+/// ✅ Persistance immédiate du state après exécution
+/// - Persiste tous les changements de storage (logiques + canoniques)
+/// - Gère particulièrement les slots ERC-1967 (implementation, admin, beacon)
+/// - Met à jour les resources de l'AccountState pour affichage/debug
+/// - Supporte les valeurs décodées (storage_decoded dans le résultat)
+fn persist_contract_state_immediate(&mut self, contract_address: &str, execution_result: &serde_json::Value) -> Result<(), String> {
+    let storage_manager = match &self.storage_manager {
+        Some(m) => m,
+        None => {
+            println!("⚠️ Pas de storage manager configuré pour la persistance (persist_contract_state_immediate)");
+            return Ok(());
+        }
+    };
+
+    println!("💾 [PERSIST IMMEDIATE] Début persistance état contrat: {}", contract_address);
+
+    // === ÉTAPE 1 : Persistance du storage brut (storage object) ===
+    if let Some(storage_obj) = execution_result.get("storage").and_then(|v| v.as_object()) {
+        for (slot_key, value_json) in storage_obj {
+            // Mappe clé logique → slot canonique ERC-1967 si applicable
+            let canonical_slot = self.map_resource_key_to_slot(slot_key);
+
+            // Clé DB pour le slot canonique
+            let canonical_storage_key = format!("storage:{}:{}", contract_address, canonical_slot);
+
+            // Conversion JSON → bytes bruts (32 bytes padded pour uint/address, raw pour string)
+            let value_bytes = match value_json {
+                serde_json::Value::String(s) => {
+                    if s.starts_with("0x") {
+                        // Hex string → bytes
+                        hex::decode(s.trim_start_matches("0x")).unwrap_or_else(|_| s.as_bytes().to_vec())
+                    } else if self.looks_like_address(s) {
+                        // Adresse sans 0x → pad left à 32 bytes
+                        let clean = s.trim_start_matches("0x");
+                        let mut padded = vec![0u8; 32];
+                        let decoded = hex::decode(clean).unwrap_or_default();
+                        let offset = 32.saturating_sub(decoded.len());
+                        padded[offset..].copy_from_slice(&decoded);
+                        padded
                     } else {
-                        println!("✅ Logical key persistée: {} -> {} bytes", logical_storage_key, bytes_to_write.len());
-                    }
-                    // And update VM resources with friendly value
-                    if let Ok(mut accounts) = self.state.accounts.write() {
-                        if let Some(account) = accounts.get_mut(contract_address) {
-                            // prefer to insert human-friendly typed value (string/number/bool)
-                            account.resources.insert(logical_key.clone(), decoded_val.clone());
-                            println!("🔄 Resource VM mise à jour (logical): {} = {:?}", logical_key, decoded_val);
-                        }
+                        // String UTF-8 brute
+                        s.as_bytes().to_vec()
                     }
                 }
+                serde_json::Value::Number(n) => {
+                    let mut buf = [0u8; 32];
+                    if let Some(u) = n.as_u64() {
+                        buf[24..32].copy_from_slice(&u.to_be_bytes());
+                    }
+                    buf.to_vec()
+                }
+                serde_json::Value::Bool(b) => {
+                    vec![if *b { 1u8 } else { 0u8 }; 32]
+                }
+                _ => value_json.to_string().into_bytes(),
+            };
+
+            // Persistance canonique
+            if let Err(e) = storage_manager.write(&canonical_storage_key, value_bytes.clone()) {
+                eprintln!("⚠️ Erreur persistance canonique slot {}: {}", canonical_slot, e);
+            } else {
+                println!("✅ Slot canonique persisté: {} -> {} bytes", canonical_slot, value_bytes.len());
             }
-            println!("🎯 Contrat {} persisté avec succès après exécution", contract_address);
-        } else {
-            println!("⚠️ Pas de storage manager configuré pour la persistance");
+
+            // Mise à jour resources VM (valeur hex préfixée 0x pour slots)
+            if let Ok(mut accounts) = self.state.accounts.write() {
+                if let Some(account) = accounts.get_mut(contract_address) {
+                    let display_val = if value_bytes.len() == 32 {
+                        // Format standard pour slots 32 bytes
+                        format!("0x{}", hex::encode(&value_bytes))
+                    } else {
+                        // Raw pour strings longues
+                        String::from_utf8_lossy(&value_bytes).to_string()
+                    };
+                    account.resources.insert(canonical_slot.clone(), serde_json::Value::String(display_val));
+                }
+            }
+
+            // === ALERTE SPÉCIALE SI IMPLEMENTATION SLOT VIDE ===
+            if canonical_slot == ERC1967_IMPLEMENTATION_SLOT {
+                let is_zero = value_bytes.iter().all(|&b| b == 0);
+                if is_zero {
+                    println!("‼️ [PROXY FATAL] Implementation slot vide (0x0) pour {} → toutes les calls feront STOP silencieux ! Redéploie le proxy.", contract_address);
+                } else {
+                    let impl_addr = format!("0x{}", hex::encode(&value_bytes[12..32])); // 20 derniers bytes
+                    println!("✅ [PROXY OK] Implementation valide: {} pour {}", impl_addr, contract_address);
+                }
+            }
         }
-        Ok(())
     }
 
+    // === ÉTAPE 2 : Persistance des valeurs décodées (storage_decoded) pour debug/UX ===
+    if let Some(decoded_obj) = execution_result.get("storage_decoded").and_then(|v| v.as_object()) {
+        for (logical_key, decoded_val) in decoded_obj {
+            let logical_storage_key = format!("storage:{}:{}", contract_address, logical_key);
+
+            let bytes_to_write: Vec<u8> = match decoded_val {
+                serde_json::Value::String(s) => {
+                    if s.starts_with("0x") && self.looks_like_address(s) {
+                        // Adresse → 32 bytes padded
+                        let clean = s.trim_start_matches("0x");
+                        let mut buf = vec![0u8; 32];
+                        if let Ok(decoded) = hex::decode(clean) {
+                            buf[12..32].copy_from_slice(&decoded);
+                        }
+                        buf
+                    } else {
+                        s.as_bytes().to_vec()
+                    }
+                }
+                serde_json::Value::Number(n) => {
+                    let mut buf = [0u8; 32];
+                    if let Some(u) = n.as_u64() {
+                        buf[24..32].copy_from_slice(&u.to_be_bytes());
+                    }
+                    buf.to_vec()
+                }
+                serde_json::Value::Bool(b) => vec![if *b { 1u8 } else { 0u8 }; 32],
+                other => other.to_string().into_bytes(),
+            };
+
+            // Persistance logique (best-effort)
+            storage_manager.write(&logical_storage_key, bytes_to_write.clone()).ok();
+            println!("✅ Clé logique persistée: {} -> {} bytes", logical_storage_key, bytes_to_write.len());
+
+            // Mise à jour resources VM avec valeur humaine
+            if let Ok(mut accounts) = self.state.accounts.write() {
+                if let Some(account) = accounts.get_mut(contract_address) {
+                    account.resources.insert(logical_key.clone(), decoded_val.clone());
+                    println!("🔄 Resource VM (décodée) mise à jour: {} = {:?}", logical_key, decoded_val);
+                }
+            }
+        }
+    }
+
+    println!("🎉 [PERSIST IMMEDIATE] Persistance terminée avec succès pour {}", contract_address);
+    Ok(())
+}
+                            
 /// Mappe une clé logique (ex: "implementation", "admin") vers un slot 32 bytes hex canonique.
    fn map_resource_key_to_slot(&self, key: &str) -> String {
         // Clés connues → slots ERC-1967
