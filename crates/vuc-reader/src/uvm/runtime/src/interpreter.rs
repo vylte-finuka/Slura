@@ -1315,7 +1315,7 @@ while insn_ptr < prog.len() {
         //consume_gas(&mut execution_context, 3)?;
 },
 
-0x54//___ 0x54 SLOAD
+//___ 0x54 SLOAD
   0x54 => {
     // Slot EVM : sommet de la pile (EVM) ou reg[_dst]
     let slot_u256 = if !evm_stack.is_empty() {
