@@ -741,7 +741,7 @@ reg[54] = interpreter_args.call_depth as u64;           // Profondeur d'appel
 
     // === INIT PILE EVM ===
     let mut evm_stack: Vec<u64> = Vec::with_capacity(1024);
-
+let mut last_return_value: Option<serde_json::Value> = Some(serde_json::Value::Number(serde_json::Number::from(reg[0])));
 if let Some(init) = &interpreter_args.evm_stack_init {
     for &v in init {
         evm_stack.push(v);
