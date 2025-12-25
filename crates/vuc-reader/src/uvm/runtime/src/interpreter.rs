@@ -1917,7 +1917,12 @@ while insn_ptr < prog.len() {
         }
     }
 
-    pc += advance;
+    let mut advance = 1;
+    if (0x60..=0x7f).contains(&opcode) || opcode == 0x68 {
+        let push_bytes = if opcode == 0x68 { 9 } else { (opcode - 0x5f) as usize };
+        advance = 1 + push_bytes;
+    }
+    insn_ptr = insn_ptr.wrapping_add(advance);
 }
 if !did_return {
     // Si aucun RETURN ou REVERT n'a été traité, on retourne la valeur de reg[0]
