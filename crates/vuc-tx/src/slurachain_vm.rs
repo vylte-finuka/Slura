@@ -1261,15 +1261,15 @@ fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<us
                     let value_bytes = if let Some(hex_str) = value_hex.as_str() {
                         // Accepte "0x..." ou raw hex string
                         let hex_clean = hex_str.trim_start_matches("0x");
-                        if slot_key == "implementation" {
-    let canonical_key = format!("storage:{}:{}", contract_address, ERC1967_IMPLEMENTATION_SLOT);
-    storage_manager.write(&canonical_key, value_bytes.clone()).ok();
-    println!("✅ [PROXY] Slot implementation persisté au format canonique EIP-1967");
-                        }
                         hex::decode(hex_clean).unwrap_or_else(|_| value_hex.to_string().into_bytes())
                     } else {
                         value_hex.to_string().into_bytes()
                     };
+                    if slot_key == "implementation" {
+    let canonical_key = format!("storage:{}:{}", contract_address, ERC1967_IMPLEMENTATION_SLOT);
+    storage_manager.write(&canonical_key, value_bytes.clone()).ok();
+    println!("✅ [PROXY] Slot implementation persisté au format canonique EIP-1967");
+                    }
                     println!("📝 [STORAGE WRITE] Contrat: {}, SlotKey: {}, CanonicalSlot: {}, Key: {}, Value (hex): {}, Value (bytes): {:02x?}",
                         contract_address, slot_key, canonical_slot, storage_key, value_hex, value_bytes);
                     if let Err(e) = storage_manager.write(&storage_key, value_bytes.clone()) {
