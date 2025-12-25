@@ -1375,70 +1375,30 @@ while insn_ptr < prog.len() {
 },
     
 // ___ 0x56 JUMP
-0x56 => {
-    if evm_stack.is_empty() {
-        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
-    }
-    let dest = evm_stack.pop().unwrap() as usize;
-
-    // --- SYNC: s'assurer que reg[0] reflète le sommet de pile APRÈS le pop
-    reg[0] = evm_stack.last().copied().unwrap_or(reg[0]);
-
-    // PATCH: SUPPRIME le court-circuit STOP/JUMP 0x0000 → on exécute bien le code à 0x0000
-    // if dest == 0x0000 {
-    //     println!("ℹ️ [EVM PATCH] JUMP vers 0x0000 → STOP (fin normale, pas de REVERT)");
-    //     break; // <-- À SUPPRIMER
-    // }
-
-    // Correction automatique: saute à la JUMPDEST la plus proche si besoin
-    let jumpdest = if dest >= prog.len() || prog[dest] != 0x5b {
-        if let Some(new_dest) = find_valid_jumpdest(prog, dest) {
-            println!("🩹 [AUTO-JUMP] Correction JUMP vers 0x{:04x} → 0x{:04x} | reg[0]={}", dest, new_dest, reg[0]);
-            new_dest
-        } else {
-            return Err(Error::new(ErrorKind::Other,
-                format!("EVM REVERT: JUMP vers 0x{:04x} sans JUMPDEST | reg0={}", dest, reg[0])
-            ));
+    0x56 => {
+        if evm_stack.is_empty() {
+            return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
         }
-    } else {
-        dest
-    };
-    pc = jumpdest;
-    advance = 0;
-    continue;
-},
-// ...existing code...
-
-// ___ 0x57 JUMPI
-0x57 => {
-    if evm_stack.len() < 2 {
-        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMPI"));
-    }
-    let dest = evm_stack.pop().unwrap() as usize;
-    let cond = evm_stack.pop().unwrap();
-
-    // --- SYNC: mettre reg[0] à jour après les pops
-    reg[0] = evm_stack.last().copied().unwrap_or(reg[0]);
-
-    if cond != 0 {
-        let jumpdest = if dest >= prog.len() || prog[dest] != 0x5b {
-            if let Some(new_dest) = find_valid_jumpdest(prog, dest) {
-                println!("🩹 [AUTO-JUMPI] Correction JUMPI vers 0x{:04x} → 0x{:04x} | reg[0]={}", dest, new_dest, reg[0]);
-                new_dest
-            } else {
-                return Err(Error::new(ErrorKind::Other,
-                    format!("EVM REVERT: JUMPI vers 0x{:04x} sans JUMPDEST | reg0={}", dest, reg[0])
-                ));
-            }
-        } else {
-            dest
-        };
-        pc = jumpdest;
-        advance = 0;
+        let dest = evm_stack.pop().unwrap() as usize;
+        // SUPPRIMER la vérification JUMPDEST ici !
+        insn_ptr = dest;
         continue;
-    }
-    // sinon, avance normalement
-},
+    },
+    
+    // ___ 0x57 JUMPI
+    0x57 => {
+        if evm_stack.len() < 2 {
+            return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMPI"));
+        }
+        let dest = evm_stack.pop().unwrap() as usize;
+        let cond = evm_stack.pop().unwrap();
+        if cond != 0 {
+            // SUPPRIMER la vérification JUMPDEST ici !
+            insn_ptr = dest;
+            continue;
+        }
+        // sinon, on avance normalement (pas de saut)
+    },
     
         //___ 0x58 PC
     0x58 => {
