@@ -1315,17 +1315,15 @@ while insn_ptr < prog.len() {
         //consume_gas(&mut execution_context, 3)?;
 },
 
-    //___ 0x54 SLOAD
-0x54 => {
-    let original_dst = reg[_dst];
-
-    // --- PATCH: mapping slot detection ---
-    let slot = if interpreter_args.function_name == "balanceOf" && !interpreter_args.args.is_empty() {
-        // balanceOf(address): mapping(address => uint256) at slot 0
-        compute_mapping_slot(0, &interpreter_args.args)
+0x54//___ 0x54 SLOAD
+  0x54 => {
+    // Slot EVM : sommet de la pile (EVM) ou reg[_dst]
+    let slot_u256 = if !evm_stack.is_empty() {
+        u256::from(evm_stack.pop().unwrap())
     } else {
-        format!("{:064x}", reg[_dst])
+        u256::from(reg[_dst])
     };
+    let slot = format!("{:064x}", slot_u256);
 
     println!("🔍 [SLOAD DEBUG] slot={}", slot);
 
@@ -1336,23 +1334,29 @@ while insn_ptr < prog.len() {
             loaded_value = storage_val;
         }
     }
+    evm_stack.push(loaded_value);
     reg[_dst] = loaded_value;
     reg[0] = loaded_value;
+    // Supprime le double push et la synchronisation superflue
     println!("🎯 [SLOAD] slot={}, loaded_value={}", slot, loaded_value);
 },
-
-// ___ 0x55 SSTORE
-0x55 => {
-    let slot = if interpreter_args.function_name == "balanceOf" && !interpreter_args.args.is_empty() {
-        compute_mapping_slot(0, &interpreter_args.args)
-    } else {
-        format!("{:064x}", reg[_dst])
-    };
-    let value = reg[_src];
+    
+    // ___ 0x55 SSTORE
+  0x55 => {
+    // Slot EVM : sommet-1 de la pile, valeur : sommet
+    if evm_stack.len() < 2 {
+        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on SSTORE"));
+    }
+    let value = evm_stack.pop().unwrap();
+    let slot_u256 = u256::from(evm_stack.pop().unwrap());
+    let slot = format!("{:064x}", slot_u256);
     let value_u256 = u256::from(value);
-    let bytes = value_u256.to_big_endian(); // <-- Sans argument
+    let bytes = value_u256.to_big_endian();
     set_storage(&mut execution_context.world_state, &interpreter_args.contract_address, &slot, bytes.to_vec());
     println!("💾 [SSTORE] slot={} <- value={}", slot, value);
+    reg[_dst] = value;
+    reg[0] = value;
+    last_return_value = Some(serde_json::Value::Number(serde_json::Number::from(reg[0])));
 },
     
     // ___ 0x56 JUMP
