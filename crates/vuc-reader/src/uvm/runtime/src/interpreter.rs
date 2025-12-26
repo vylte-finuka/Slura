@@ -1760,9 +1760,9 @@ while insn_ptr < prog.len() {
         return Ok(serde_json::json!("SELFDESTRUCT"));
     },
 
-    //___ Tout le reste → crash clair
     _ => {
-        println!("🟢 [NOP] Opcode inconnu 0x{:02x} ignoré à PC {}", opcode, insn_ptr);
+            reg[reg_idx] = 0;
+        }
     }
     }
 
