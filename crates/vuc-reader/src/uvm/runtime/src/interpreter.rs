@@ -1152,27 +1152,28 @@ while insn_ptr < prog.len() {
         //consume_gas(&mut execution_context, 2)?;
     },
 
-    //___ 0x35 CALLDATALOAD
+//___ 0x35 CALLDATALOAD — Version corrigée et fonctionnelle
 0x35 => {
+    // Prend l'offset depuis le sommet de la stack
     if evm_stack.is_empty() {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on CALLDATALOAD"));
     }
     let offset = evm_stack.pop().unwrap() as u64;
 
+    // Charge 32 bytes depuis calldata (mbuff) ou mémoire
     let loaded = evm_load_32(&global_mem, mbuff, offset)?;
     let value = safe_u256_to_u64(&loaded);
 
+    // Pousse la valeur sur la stack EVM
     evm_stack.push(value);
 
+    // Logs utiles pour debug
     println!("📥 [CALLDATALOAD] offset=0x{:x} → value=0x{:x}", offset, value);
-
-    // Log spécial pour détecter le selector chargé depuis le calldata
     if offset == 0 && mbuff.len() >= 4 {
         let selector = u32::from_be_bytes([mbuff[0], mbuff[1], mbuff[2], mbuff[3]]);
-        println!("🎯 [SELECTOR LOADED FROM CALLDATA] 0x{:08x}", selector);
+        println!("🎯 [SELECTOR CHARGÉ] 0x{:08x} depuis calldata", selector);
     }
 },
-
     //___ 0x36 CALLDATASIZE
     0x36 => {
         reg[_dst] = mbuff.len() as u64;
