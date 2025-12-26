@@ -1767,15 +1767,17 @@ while insn_ptr < prog.len() {
     }
     }
 
-    // Avancement correct du PC en tenant compte des PUSH (0x60-0x7f)
+    // Avancement correct du PC (gestion complète des PUSH 0x60-0x7f)
     if !skip_advance {
-        let mut advance = 1;
+        let mut advance = 1; // l'opcode
         if opcode >= 0x60 && opcode <= 0x7f {
-            advance += (opcode - 0x5f) as usize; // 1 pour l'opcode + n pour les données
+            let push_bytes = (opcode - 0x5f) as usize; // 1 à 32
+            advance += push_bytes;
+            println!("📏 [PUSH] Avance de {} bytes supplémentaires (total: {})", push_bytes, advance);
         }
         insn_ptr += advance;
     } else {
-        println!("🚀 [JUMP/JUMPI] Saut pris vers PC=0x{:04x}", insn_ptr);
+        println!("🚀 [JUMP/JUMPI] Saut pris → PC=0x{:04x}", insn_ptr);
     }
 }
 
