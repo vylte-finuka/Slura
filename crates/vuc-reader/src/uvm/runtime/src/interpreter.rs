@@ -738,7 +738,7 @@ reg[54] = interpreter_args.call_depth as u64;           // Profondeur d'appel
         keccak.finalize(&mut hash);
         u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]])
     };
-
+    let mut pc: usize = 0;
     // initialise la pile EVM
     let mut evm_stack: Vec<u64> = Vec::with_capacity(1024);
     let mut last_return_value: Option<serde_json::Value> = Some(serde_json::Value::Number(serde_json::Number::from(reg[0])));
