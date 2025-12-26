@@ -737,6 +737,23 @@ reg[54] = interpreter_args.call_depth as u64;           // Profondeur d'appel
         let mut hash = [0u8; 32];
         keccak.finalize(&mut hash);
         u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]])
+    };
+
+    // initialise la pile EVM
+    let mut evm_stack: Vec<u64> = Vec::with_capacity(1024);
+    let mut last_return_value: Option<serde_json::Value> = Some(serde_json::Value::Number(serde_json::Number::from(reg[0])));
+    
+    let selector_hex = format!("{:08x}", real_selector);
+    
+    // ✅ AJOUT: Flag pour logs EVM détaillés
+    let debug_evm = true;
+    
+    // Initialise insn_ptr UNE SEULE FOIS ici, en tenant compte du runtime_offset
+    let mut insn_ptr: usize = interpreter_args.function_offset.unwrap_or(0);
+    
+    // PATCH: Sécurité EVM — si on démarre à 0, il ne faut pas exécuter à 0 sauf si c'est un JUMPDEST
+    if insn_ptr == 0 && (prog.is_empty() || prog[0] != 0x5b) {
+        return Err(Error::new(ErrorKind::Other, "Erreur : tentative d'exécution à l'offset 0 sans JUMPDEST (fonction non trouvée dans le bytecode)"));
     }
     
 while insn_ptr < prog.len() {
