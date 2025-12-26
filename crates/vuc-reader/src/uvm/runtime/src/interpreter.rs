@@ -737,40 +737,6 @@ reg[54] = interpreter_args.call_depth as u64;           // Profondeur d'appel
         let mut hash = [0u8; 32];
         keccak.finalize(&mut hash);
         u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]])
-    };
-
-    // initialise la pile EVM
-    let mut evm_stack: Vec<u64> = Vec::with_capacity(1024);
-    let mut last_return_value: Option<serde_json::Value> = Some(serde_json::Value::Number(serde_json::Number::from(reg[0])));
-    if let Some(init) = &interpreter_args.evm_stack_init {
-        for &v in init {
-            evm_stack.push(v);
-        }
-        // Patch: complète à 16 éléments si besoin
-        while evm_stack.len() < 16 {
-            evm_stack.push(0);
-        }
-        println!("PILE INIT: pushed from evm_stack_init ({} items)", evm_stack.len());
-    } else if interpreter_args.function_name != "fallback" && interpreter_args.function_name != "receive" {
-        evm_stack.push(real_selector as u64);
-        // Patch : remplir la pile avec 15 zéros pour éviter les underflow sur DUP15
-        for _ in 0..15 {
-            evm_stack.push(0);
-        }
-        println!("PILE INIT: selector + 15 zeros (16 items)");
-    }
-    
-    let selector_hex = format!("{:08x}", real_selector);
-    
-    // ✅ AJOUT: Flag pour logs EVM détaillés
-    let debug_evm = true;
-    
-    // Initialise insn_ptr UNE SEULE FOIS ici, en tenant compte du runtime_offset
-    let mut insn_ptr: usize = interpreter_args.function_offset.unwrap_or(0);
-    
-    // PATCH: Sécurité EVM — si on démarre à 0, il ne faut pas exécuter à 0 sauf si c'est un JUMPDEST
-    if insn_ptr == 0 && (prog.is_empty() || prog[0] != 0x5b) {
-        return Err(Error::new(ErrorKind::Other, "Erreur : tentative d'exécution à l'offset 0 sans JUMPDEST (fonction non trouvée dans le bytecode)"));
     }
     
 while insn_ptr < prog.len() {
