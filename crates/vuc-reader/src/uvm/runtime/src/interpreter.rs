@@ -145,7 +145,6 @@ pub struct InterpreterArgs {
     pub base_fee: Option<u64>,
     pub blob_base_fee: Option<u64>,
     pub blob_hash: Option<[u8; 32]>,
-    pub evm_stack_init: core::option::Option,
 }
 impl Default for InterpreterArgs {
     fn default() -> Self {
@@ -167,7 +166,6 @@ impl Default for InterpreterArgs {
             caller: "{}".to_string(),
             origin: "{}".to_string(),
             beneficiary:"{}".to_string(),
-            evm_stack_init: core::option::Option,
             function_offset: None,
             base_fee: Some(0),
             blob_base_fee: Some(0),
