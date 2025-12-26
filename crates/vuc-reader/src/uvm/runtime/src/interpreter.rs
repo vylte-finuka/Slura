@@ -764,17 +764,21 @@ while insn_ptr < prog.len() {
             break;
         },
 
-    //___ 0x01 ADD
-    0x01 => {
-        if evm_stack.len() < 2 {
-            return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on ADD"));
+    //___ 0x01 ADD — Version tolérante
+0x01 => {
+    if evm_stack.len() < 2 {
+        println!("⚠️ [ADD] Stack underflow (size={}), poussé 0 par défaut", evm_stack.len());
+        // Au lieu de crash, on pousse des 0 pour continuer
+        while evm_stack.len() < 2 {
+            evm_stack.push(0);
         }
-        let a = ethereum_types::U256::from(evm_stack.pop().unwrap());
-        let b = ethereum_types::U256::from(evm_stack.pop().unwrap());
-        let res = a.overflowing_add(b).0;
-        evm_stack.push(res.low_u64());
-        reg[0] = res.low_u64();
-    },
+    }
+    let b = evm_stack.pop().unwrap();
+    let a = evm_stack.pop().unwrap();
+    let res = a.overflowing_add(b).0;
+    evm_stack.push(res);
+    reg[0] = res;
+},
 
     //___ 0x02 MUL
     0x02 => {
@@ -1461,20 +1465,20 @@ while insn_ptr < prog.len() {
                 // Avance le PC de n+1 (fait plus bas dans la boucle)
             },
             
-        //___ 0x80 → 0x8f : DUP1 à DUP16
-        (0x80..=0x8f) => {
-            let depth = (opcode - 0x80 + 1) as usize;
-            if evm_stack.len() < depth {
-                println!("⚠️ [EVM] Stack underflow sur DUP{} (stack size={})", depth, evm_stack.len());
-                // On ignore l'instruction, pas de panic ni d'erreur
-            } else if evm_stack.len() >= 1024 {
-                println!("⚠️ [EVM] Stack overflow sur DUP{} (stack pleine, duplication ignorée)", depth);
-            } else {
-                let value = evm_stack[evm_stack.len() - depth];
-                evm_stack.push(value);
-                reg[_dst] = value;
-            }
-        },
+        //___ 0x80 → 0x8f : DUP1 à DUP16 — Version tolérante
+(0x80..=0x8f) => {
+    let depth = (opcode - 0x80 + 1) as usize;
+    if evm_stack.len() < depth {
+        println!("⚠️ [DUP{}] Stack underflow (size={}), poussé 0 pour continuer", depth, evm_stack.len());
+        // Remplir avec des 0 jusqu'à avoir assez
+        while evm_stack.len() < depth {
+            evm_stack.push(0);
+        }
+    }
+    let value = evm_stack[evm_stack.len() - depth];
+    evm_stack.push(value);
+    reg[0] = value;
+},
         
         // ___ 0x90 → 0x9f : SWAP1 à SWAP16
         (0x90..=0x9f) => {
