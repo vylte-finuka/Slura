@@ -214,7 +214,7 @@ impl Default for UvmWorldState {
                 blob_hash: [0u8; 32],
                 prev_randao: [0u8; 32],
             },
-            chain_id: 1,
+            chain_id: 45056,
         }
     }
 }
@@ -666,7 +666,7 @@ reg[54] = interpreter_args.call_depth as u64;           // Profondeur d'appel
                 arg_offset += len + 1;
             },
             serde_json::Value::Bool(b) => {
-                reg[reg_idx] = if *b { 1 } else { 0 };
+                reg[reg_idx] = if b { 1 } else { 0 };
                 println!("📝 [ARGS] Argument bool: {} (as u64: {})", b, reg[reg_idx]);
             },
             _ => reg[reg_idx] = 0,
