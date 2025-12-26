@@ -1924,7 +1924,9 @@ fn normalize_storage_json_value(value: &serde_json::Value) -> serde_json::Value 
     }
     // sinon on renvoie la valeur originale
     value.clone()
-}}    pub version: AtomicU64,
+} 
+
+pub version: AtomicU64,
     pub read_set: Arc<RwLock<HashMap<String, u64>>>, // slot -> version lue
     pub write_set: Arc<RwLock<HashMap<String, Vec<u8>>>>, // slot -> nouvelle valeur
     pub dependencies: Arc<RwLock<HashSet<u64>>>, // TX IDs dont on dépend
