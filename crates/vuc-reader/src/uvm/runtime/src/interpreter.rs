@@ -1355,10 +1355,18 @@ while insn_ptr < prog.len() {
         let dest = evm_stack.pop().unwrap() as usize;
         let cond = evm_stack.pop().unwrap();
         if cond != 0 {
-            insn_ptr = dest;
-           skip_advance = true;
+            // ✅ CORRECTION CRITIQUE : certains contrats ont un padding byte avant JUMPDEST
+            let mut adjusted_dest = dest;
+            if adjusted_dest < prog.len() && prog[adjusted_dest] != 0x5b {
+                adjusted_dest += 1; // saute un éventuel byte parasite
+                if adjusted_dest < prog.len() && prog[adjusted_dest] != 0x5b {
+                    adjusted_dest += 1; // rare, mais au cas où
+                }
+            }
+            insn_ptr = adjusted_dest;
+            skip_advance = true;
+            println!("🚀 [JUMPI] Saut pris → PC=0x{:04x} (ajusté à 0x{:04x})", dest, adjusted_dest);
         }
-        // sinon, on avance normalement (pas de saut)
     },
     
         //___ 0x58 PC
