@@ -1158,10 +1158,23 @@ while insn_ptr < prog.len() {
 
     //___ 0x35 CALLDATALOAD
 0x35 => {
-    let addr = if evm_stack.is_empty() { 0 } else { evm_stack.pop().unwrap() as u64 };
-    let loaded_value = safe_u256_to_u64(&evm_load_32(&global_mem, mbuff, addr)?);
-    evm_stack.push(loaded_value);
-    println!("📥 [CALLDATALOAD] addr=0x{:x} → value=0x{:x}", addr, loaded_value);
+    if evm_stack.is_empty() {
+        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on CALLDATALOAD"));
+    }
+    let offset = evm_stack.pop().unwrap() as u64;
+
+    let loaded = evm_load_32(&global_mem, mbuff, offset)?;
+    let value = safe_u256_to_u64(&loaded);
+
+    evm_stack.push(value);
+
+    println!("📥 [CALLDATALOAD] offset=0x{:x} → value=0x{:x} (calldata len={})", offset, value, mbuff.len());
+
+    // Log spécial pour le selector (offset 0)
+    if offset == 0 && mbuff.len() >= 4 {
+        let selector = u32::from_be_bytes([mbuff[0], mbuff[1], mbuff[2], mbuff[3]]);
+        println!("🎯 [SELECTOR LOADED] 0x{:08x} (fonction détectée)", selector);
+    }
 },
 
     //___ 0x36 CALLDATASIZE
