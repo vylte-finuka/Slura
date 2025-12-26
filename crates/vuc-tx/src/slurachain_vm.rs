@@ -1717,8 +1717,6 @@ fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<us
             base_fee: Some(0),
             blob_base_fee: Some(0),
             blob_hash: Some([0u8; 32]),
-            evm_stack_init: Some(vec![function_meta.selector as u64]),
-        })
     }
 
     /// ✅ NOUVEAU: Persistance des résultats dans le storage
