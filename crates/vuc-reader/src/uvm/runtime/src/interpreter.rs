@@ -145,7 +145,7 @@ pub struct InterpreterArgs {
     pub base_fee: Option<u64>,
     pub blob_base_fee: Option<u64>,
     pub blob_hash: Option<[u8; 32]>,
-    pub evm_stack_init: None,
+    pub evm_stack_init: core::option::Option,
 }
 impl Default for InterpreterArgs {
     fn default() -> Self {
@@ -167,7 +167,7 @@ impl Default for InterpreterArgs {
             caller: "{}".to_string(),
             origin: "{}".to_string(),
             beneficiary:"{}".to_string(),
-            evm_stack_init: None,
+            evm_stack_init: core::option::Option,
             function_offset: None,
             base_fee: Some(0),
             blob_base_fee: Some(0),
@@ -666,7 +666,7 @@ reg[54] = interpreter_args.call_depth as u64;           // Profondeur d'appel
                 arg_offset += len + 1;
             },
             serde_json::Value::Bool(b) => {
-                reg[reg_idx] = if b { 1 } else { 0 };
+                reg[reg_idx] = if *b { 1 } else { 0 };
                 println!("📝 [ARGS] Argument bool: {} (as u64: {})", b, reg[reg_idx]);
             },
             _ => reg[reg_idx] = 0,
