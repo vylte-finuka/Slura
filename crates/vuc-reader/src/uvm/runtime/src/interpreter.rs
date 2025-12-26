@@ -1768,14 +1768,11 @@ while insn_ptr < prog.len() {
 
     // Avancement du PC (PUSHN inclus)
     if !skip_advance {
-        let mut advance = 1;
-        if (0x60..=0x7f).contains(&opcode) {
-            let push_bytes = (opcode - 0x5f) as usize;
-            advance = 1 + push_bytes;
-        }
-        insn_ptr = insn_ptr.wrapping_add(advance);
-    } else if debug_evm {
-        println!("🔁 [EVM] PC positionné par handler, pas d'avancement automatique -> PC={}", insn_ptr);
+    let mut advance = 1;
+    if opcode >= 0x60 && opcode <= 0x7f {
+        advance += (opcode - 0x5f) as usize;
+    }
+    insn_ptr += advance;
     }
 }
 
