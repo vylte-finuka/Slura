@@ -3813,4 +3813,4 @@ fn normalize_storage_json_value(value: &serde_json::Value) -> serde_json::Value 
     }
     // sinon on renvoie la valeur originale
     value.clone()
-}}
+}
