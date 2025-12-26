@@ -125,13 +125,13 @@ fn refund_contract_balance_to_owner(
 }
 
 
-#[derive(Clone)]
+##[derive(Clone)]
 pub struct InterpreterArgs {
     pub function_name: String,
     pub contract_address: String,
     pub sender_address: String,
     pub args: Vec<serde_json::Value>,
-    pub state_data: Vec<u8>,
+    pub state_data: Vec<u8>, // calldata complet
     pub gas_limit: u64,
     pub gas_price: u64,
     pub value: u64,
@@ -139,13 +139,13 @@ pub struct InterpreterArgs {
     pub block_number: u64,
     pub timestamp: u64,
     pub caller: String,
-    pub evm_stack_init: Option<Vec<u64>>,
     pub origin: String,
-    pub beneficiary: String, // <-- Added field
+    pub beneficiary: String,
     pub function_offset: Option<usize>,
     pub base_fee: Option<u64>,
     pub blob_base_fee: Option<u64>,
-    pub blob_hash: Option<[u8; 32]>,        // EIP-4844 BLOBHASH (simplifié, voir note)
+    pub blob_hash: Option<[u8; 32]>,
+    // ✅ SUPPRIMÉ : evm_stack_init → causait le conflit avec le dispatcher Solidity
 }
 impl Default for InterpreterArgs {
     fn default() -> Self {
@@ -167,7 +167,7 @@ impl Default for InterpreterArgs {
             caller: "{}".to_string(),
             origin: "{}".to_string(),
             beneficiary:"{}".to_string(),
-            evm_stack_init: None,
+            //evm_stack_init: None,
             function_offset: None,
             base_fee: Some(0),
             blob_base_fee: Some(0),
@@ -343,26 +343,22 @@ fn evm_load_32(global_mem: &[u8], mbuff: &[u8], addr: u64) -> Result<u256, Error
     Ok(u256::zero())
 }
 
-fn evm_store_32(global_mem: &mut Vec<u8>, addr: u64, value: u256) -> Result<(), Error> {
+fn evm_load_32(global_mem: &[u8], calldata: &[u8], addr: u64) -> Result<u256, Error> {
     let offset = addr as usize;
-
-    // === LE TRUC QUE TOUT LE MONDE FAIT EN 2025 ===
-    // Si offset > 4 GiB → c’est du fake memory de proxy EOF → on ignore
-    if offset > 4_294_967_296 {  // 4 GiB
-        return Ok(());
+    // Priorité au calldata (mbuff)
+    if offset + 32 <= calldata.len() {
+        let mut bytes = [0u8; 32];
+        bytes.copy_from_slice(&calldata[offset..offset + 32]);
+        return Ok(u256::from_big_endian(&bytes));
     }
-
-    // Sinon on étend la mémoire réelle (max 256 Mo)
-    if offset + 32 > global_mem.len() {
-        let new_size = (offset + 32).next_power_of_two().min(256 * 1024 * 1024);
-        global_mem.resize(new_size, 0);
+    // Sinon mémoire globale
+    if offset + 32 <= global_mem.len() {
+        let mut bytes = [0u8; 32];
+        bytes.copy_from_slice(&global_mem[offset..offset + 32]);
+        return Ok(u256::from_big_endian(&bytes));
     }
-
-    // CORRECT : to_big_endian() remplit un [u8; 32] directement
-    let bytes = value.to_big_endian();  // ← C’EST ÇA LA BONNE MÉTHODE
-    global_mem[offset..offset + 32].copy_from_slice(&bytes);
-
-    Ok(())
+    // EVM : lecture hors borne → 0
+    Ok(u256::zero())
 }
 
 fn calculate_gas_cost(opcode: u8) -> u64 {
@@ -723,38 +719,16 @@ reg[54] = interpreter_args.call_depth as u64;           // Profondeur d'appel
     println!("   Gas limit: {}", interpreter_args.gas_limit);
     println!("   Valeur: {}", interpreter_args.value);
 
-    // === SÉLECTEUR RÉEL KECCAK256 (SOLIDITY-COMPATIBLE) ===
-    let real_selector = if let Some(init) = &interpreter_args.evm_stack_init {
-        // Si on a déjà poussé via args (recommandé)
-        init.get(0).copied().unwrap_or(0) as u32
-    } else {
-
-        use tiny_keccak::Hasher;
-        // Use the function name as the signature string for selector calculation
-        let sig = &interpreter_args.function_name;
-        let mut keccak = Keccak::v256();
-        Hasher::update(&mut keccak, sig.as_bytes());
-        let mut hash = [0u8; 32];
-        keccak.finalize(&mut hash);
-        u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]])
-    };
     let mut pc: usize = 0;
     // initialise la pile EVM
     let mut evm_stack: Vec<u64> = Vec::with_capacity(1024);
     let mut last_return_value: Option<serde_json::Value> = Some(serde_json::Value::Number(serde_json::Number::from(reg[0])));
-    
-    let selector_hex = format!("{:08x}", real_selector);
     
     // ✅ AJOUT: Flag pour logs EVM détaillés
     let debug_evm = true;
     
     // Initialise insn_ptr UNE SEULE FOIS ici, en tenant compte du runtime_offset
     let mut insn_ptr: usize = interpreter_args.function_offset.unwrap_or(0);
-    
-    // PATCH: Sécurité EVM — si on démarre à 0, il ne faut pas exécuter à 0 sauf si c'est un JUMPDEST
-    if insn_ptr == 0 && (prog.is_empty() || prog[0] != 0x5b) {
-        return Err(Error::new(ErrorKind::Other, "Erreur : tentative d'exécution à l'offset 0 sans JUMPDEST (fonction non trouvée dans le bytecode)"));
-    }
     
 while insn_ptr < prog.len() {
     let opcode = prog[insn_ptr];
@@ -977,15 +951,16 @@ while insn_ptr < prog.len() {
         },
         
         //___ 0x14 EQ
-        0x14 => {
-            if evm_stack.len() < 2 {
-                return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on EQ"));
-            }
-            let b = evm_stack.pop().unwrap();
-            let a = evm_stack.pop().unwrap();
-            evm_stack.push(if a == b { 1 } else { 0 });
-            pc += 1;
-        },
+0x14 => {
+    if evm_stack.len() < 2 {
+        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on EQ"));
+    }
+    let b = evm_stack.pop().unwrap();
+    let a = evm_stack.pop().unwrap();
+    let res = if a == b { 1 } else { 0 };
+    evm_stack.push(res);
+    println!("🔍 [EQ] {} == {} → {}", a, b, res);
+},
         
         //___ 0x15 ISZERO
         0x15 => {
@@ -1178,20 +1153,12 @@ while insn_ptr < prog.len() {
     },
 
     //___ 0x35 CALLDATALOAD
-    0x35 => {
-        let addr = reg[_dst] as u64;
-        let loaded_value = safe_u256_to_u64(&evm_load_32(&global_mem, mbuff, addr)?);
-        reg[_dst] = loaded_value;
-        
-        // ✅ DEBUG SPÉCIAL POUR ARGUMENTS
-        println!("📥 [CALLDATALOAD DEBUG] PC={:04x}, addr={}, loaded_value={}, mbuff.len()={}", 
-                 insn_ptr * ebpf::INSN_SIZE, addr, loaded_value, mbuff.len());
-        
-        if mbuff.len() > 0 {
-            println!("📥 [CALLDATA HEX] Premier 32 bytes: {}", 
-                     hex::encode(&mbuff[..std::cmp::min(32, mbuff.len())]));
-        }
-    },
+0x35 => {
+    let addr = if evm_stack.is_empty() { 0 } else { evm_stack.pop().unwrap() as u64 };
+    let loaded_value = safe_u256_to_u64(&evm_load_32(&global_mem, mbuff, addr)?);
+    evm_stack.push(loaded_value);
+    println!("📥 [CALLDATALOAD] addr=0x{:x} → value=0x{:x}", addr, loaded_value);
+},
 
     //___ 0x36 CALLDATASIZE
     0x36 => {
