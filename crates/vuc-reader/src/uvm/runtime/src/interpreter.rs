@@ -983,9 +983,8 @@ while insn_ptr < prog.len() {
             }
             let b = evm_stack.pop().unwrap();
             let a = evm_stack.pop().unwrap();
-            let res = if a == b { 1 } else { 0 };
-            evm_stack.push(res);
-            reg[0] = res;
+            evm_stack.push(if a == b { 1 } else { 0 });
+            pc += 1;
         },
         
         //___ 0x15 ISZERO
