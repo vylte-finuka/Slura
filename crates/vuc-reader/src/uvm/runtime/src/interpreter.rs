@@ -145,7 +145,7 @@ pub struct InterpreterArgs {
     pub base_fee: Option<u64>,
     pub blob_base_fee: Option<u64>,
     pub blob_hash: Option<[u8; 32]>,
-    // ✅ SUPPRIMÉ : evm_stack_init → causait le conflit avec le dispatcher Solidity
+    pub evm_stack_init,
 }
 impl Default for InterpreterArgs {
     fn default() -> Self {
@@ -167,7 +167,7 @@ impl Default for InterpreterArgs {
             caller: "{}".to_string(),
             origin: "{}".to_string(),
             beneficiary:"{}".to_string(),
-            //evm_stack_init: None,
+            evm_stack_init: None,
             function_offset: None,
             base_fee: Some(0),
             blob_base_fee: Some(0),
