@@ -145,7 +145,7 @@ pub struct InterpreterArgs {
     pub base_fee: Option<u64>,
     pub blob_base_fee: Option<u64>,
     pub blob_hash: Option<[u8; 32]>,
-    pub evm_stack_init,
+    pub evm_stack_init: None,
 }
 impl Default for InterpreterArgs {
     fn default() -> Self {
