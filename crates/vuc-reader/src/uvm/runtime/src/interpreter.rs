@@ -125,7 +125,7 @@ fn refund_contract_balance_to_owner(
 }
 
 
-##[derive(Clone)]
+#[derive(Clone)]
 pub struct InterpreterArgs {
     pub function_name: String,
     pub contract_address: String,
