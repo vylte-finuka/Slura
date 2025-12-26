@@ -675,9 +675,7 @@ reg[54] = interpreter_args.call_depth as u64;           // Profondeur d'appel
                 reg[reg_idx] = if *b { 1 } else { 0 };
                 println!("📝 [ARGS] Argument bool: {} (as u64: {})", b, reg[reg_idx]);
             },
-            _ => {
-            reg[reg_idx] = 0;
-            }
+            _ => reg[reg_idx] = 0,
         }
     }
 
@@ -1955,5 +1953,4 @@ fn compute_mapping_slot(base_slot: u64, keys: &[serde_json::Value]) -> String {
     let mut hash = [0u8; 32];
     hasher.finalize(&mut hash);
     hex::encode(hash)
-}
 }
