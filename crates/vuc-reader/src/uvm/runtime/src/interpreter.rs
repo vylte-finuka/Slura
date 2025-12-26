@@ -328,19 +328,15 @@ fn find_next_opcode(prog: &[u8], mut offset: usize) -> Option<(usize, u8)> {
 fn evm_store_32(global_mem: &mut Vec<u8>, addr: u64, value: u256) -> Result<(), Error> {
     let offset = addr as usize;
 
-    // === Protection contre les offsets absurdes (proxy EOF ou bug) ===
-    if offset > 4_294_967_296 {  // 4 GiB
-        // On ignore silencieusement les écritures hors mémoire réelle (comportement EVM-like)
+    if offset > 4_294_967_296 {
         return Ok(());
     }
 
-    // Extension de la mémoire si nécessaire (max 256 Mo)
     if offset + 32 > global_mem.len() {
         let new_size = (offset + 32).next_power_of_two().min(256 * 1024 * 1024);
         global_mem.resize(new_size, 0);
     }
 
-    // Écriture effective
     let bytes = value.to_big_endian();
     global_mem[offset..offset + 32].copy_from_slice(&bytes);
 
