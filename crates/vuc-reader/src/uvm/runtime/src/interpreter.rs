@@ -1362,9 +1362,9 @@ while insn_ptr < prog.len() {
     
         //___ 0x58 PC
     0x58 => {
-        reg[_dst] = (insn_ptr * ebpf::INSN_SIZE) as u64;
-        //consume_gas(&mut execution_context, 2)?;
-    },
+    evm_stack.push(insn_ptr as u64);
+    println!("🔍 [PC] Pushed current PC = 0x{:x}", insn_ptr);
+},
 
     //___ 0x5a GAS
     0x5a => {
@@ -1768,15 +1768,11 @@ while insn_ptr < prog.len() {
 
     // Avancement du PC (PUSHN inclus)
     if !skip_advance {
-        let mut advance = 1;
-        if (0x60..=0x7f).contains(&opcode) {
-            let push_bytes = (opcode - 0x5f) as usize;
-            advance = 1 + push_bytes;
-        }
-        insn_ptr = insn_ptr.wrapping_add(advance);
-    } else if debug_evm {
-        println!("🔁 [EVM] PC positionné par handler, pas d'avancement automatique -> PC={}", insn_ptr);
+    let mut advance = 1;
+    if opcode >= 0x60 && opcode <= 0x7f {
+        advance += (opcode - 0x5f) as usize;
     }
+    insn_ptr += advance;
 }
 
 // Si on sort de la boucle sans STOP/RETURN/REVERT
