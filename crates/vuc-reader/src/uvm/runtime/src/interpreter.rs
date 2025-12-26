@@ -954,7 +954,7 @@ while insn_ptr < prog.len() {
             reg[0] = res;
         },
         
-        //___ 0x14 EQ
+//___ 0x14 EQ
 0x14 => {
     if evm_stack.len() < 2 {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on EQ"));
@@ -963,7 +963,7 @@ while insn_ptr < prog.len() {
     let a = evm_stack.pop().unwrap();
     let res = if a == b { 1 } else { 0 };
     evm_stack.push(res);
-    println!("🔍 [EQ] {} == {} → {}", a, b, res);
+    println!("🔍 [EQ] 0x{:x} == 0x{:x} → {}", a, b, res);
 },
         
         //___ 0x15 ISZERO
@@ -1168,12 +1168,12 @@ while insn_ptr < prog.len() {
 
     evm_stack.push(value);
 
-    println!("📥 [CALLDATALOAD] offset=0x{:x} → value=0x{:x} (calldata len={})", offset, value, mbuff.len());
+    println!("📥 [CALLDATALOAD] offset=0x{:x} → value=0x{:x}", offset, value);
 
-    // Log spécial pour le selector (offset 0)
+    // Log spécial pour détecter le selector chargé depuis le calldata
     if offset == 0 && mbuff.len() >= 4 {
         let selector = u32::from_be_bytes([mbuff[0], mbuff[1], mbuff[2], mbuff[3]]);
-        println!("🎯 [SELECTOR LOADED] 0x{:08x} (fonction détectée)", selector);
+        println!("🎯 [SELECTOR LOADED FROM CALLDATA] 0x{:08x}", selector);
     }
 },
 
