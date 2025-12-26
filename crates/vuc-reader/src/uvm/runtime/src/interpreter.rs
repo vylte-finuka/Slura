@@ -739,35 +739,40 @@ reg[54] = interpreter_args.call_depth as u64;           // Profondeur d'appel
         u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]])
     };
 
-    // === INIT PILE EVM ===
+    // initialise la pile EVM
     let mut evm_stack: Vec<u64> = Vec::with_capacity(1024);
-let mut last_return_value: Option<serde_json::Value> = Some(serde_json::Value::Number(serde_json::Number::from(reg[0])));
-if let Some(init) = &interpreter_args.evm_stack_init {
-    for &v in init {
-        evm_stack.push(v);
+    let mut last_return_value: Option<serde_json::Value> = Some(serde_json::Value::Number(serde_json::Number::from(reg[0])));
+    if let Some(init) = &interpreter_args.evm_stack_init {
+        for &v in init {
+            evm_stack.push(v);
+        }
+        // Patch: complète à 16 éléments si besoin
+        while evm_stack.len() < 16 {
+            evm_stack.push(0);
+        }
+        println!("PILE INIT: pushed from evm_stack_init ({} items)", evm_stack.len());
+    } else if interpreter_args.function_name != "fallback" && interpreter_args.function_name != "receive" {
+        evm_stack.push(real_selector as u64);
+        // Patch : remplir la pile avec 15 zéros pour éviter les underflow sur DUP15
+        for _ in 0..15 {
+            evm_stack.push(0);
+        }
+        println!("PILE INIT: selector + 15 zeros (16 items)");
     }
-    // Patch: complète à 16 éléments si besoin
-    while evm_stack.len() < 16 {
-        evm_stack.push(0);
+    
+    let selector_hex = format!("{:08x}", real_selector);
+    
+    // ✅ AJOUT: Flag pour logs EVM détaillés
+    let debug_evm = true;
+    
+    // Initialise insn_ptr UNE SEULE FOIS ici, en tenant compte du runtime_offset
+    let mut insn_ptr: usize = interpreter_args.function_offset.unwrap_or(0);
+    
+    // PATCH: Sécurité EVM — si on démarre à 0, il ne faut pas exécuter à 0 sauf si c'est un JUMPDEST
+    if insn_ptr == 0 && (prog.is_empty() || prog[0] != 0x5b) {
+        return Err(Error::new(ErrorKind::Other, "Erreur : tentative d'exécution à l'offset 0 sans JUMPDEST (fonction non trouvée dans le bytecode)"));
     }
-    println!("PILE INIT: pushed from evm_stack_init ({} items)", evm_stack.len());
-} else if interpreter_args.function_name != "fallback" && interpreter_args.function_name != "receive" {
-    evm_stack.push(real_selector as u64);
-    // Patch : remplir la pile avec 15 zéros pour éviter les underflow sur DUP15
-    for _ in 0..15 {
-        evm_stack.push(0);
-    }
-    println!("PILE INIT: selector + 15 zeros (16 items)");
-}
-
-let selector_hex = format!("{:08x}", real_selector);
-
-// ✅ AJOUT: Flag pour logs EVM détaillés
-let debug_evm = true;
-
-// Initialise insn_ptr UNE SEULE FOIS ici, en tenant compte du runtime_offset
-let mut insn_ptr: usize = 0;
-
+    
 while insn_ptr < prog.len() {
     let opcode = prog[insn_ptr];
     let insn = ebpf::get_insn(prog, insn_ptr);
@@ -786,7 +791,7 @@ while insn_ptr < prog.len() {
     // initialise directement le flag (plus de loop imbriquée)
     let mut skip_advance = false;
 
-     // ___ Pectra/EVM opcodes ___
+     //___ Pectra/EVM opcodes ___
     match opcode {
         // 0x00 STOP
         0x00 => {
@@ -794,7 +799,7 @@ while insn_ptr < prog.len() {
             break;
         },
 
-    // 0x01 ADD
+    //___ 0x01 ADD
     0x01 => {
         if evm_stack.len() < 2 {
             return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on ADD"));
@@ -806,7 +811,7 @@ while insn_ptr < prog.len() {
         reg[0] = res.low_u64();
     },
 
-    // 0x02 MUL
+    //___ 0x02 MUL
     0x02 => {
         if evm_stack.len() < 2 {
             return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on MUL"));
@@ -818,7 +823,7 @@ while insn_ptr < prog.len() {
         reg[0] = res.low_u64();
     },
 
-    // 0x03 SUB
+    //___ 0x03 SUB
     0x03 => {
         if evm_stack.len() < 2 {
             return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on SUB"));
@@ -830,7 +835,7 @@ while insn_ptr < prog.len() {
         reg[0] = res.low_u64();
     },
 
-    // 0x04 DIV
+    //___ 0x04 DIV
     0x04 => {
         if evm_stack.len() < 2 {
             return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on DIV"));
@@ -842,7 +847,7 @@ while insn_ptr < prog.len() {
         reg[0] = res.low_u64();
     },
 
-    // 0x05 SDIV
+    //___ 0x05 SDIV
     0x05 => {
         if evm_stack.len() < 2 {
             return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on SDIV"));
@@ -854,7 +859,7 @@ while insn_ptr < prog.len() {
         reg[0] = res.as_u64();
     },
 
-    // 0x06 MOD
+    //___ 0x06 MOD
     0x06 => {
         if evm_stack.len() < 2 {
             return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on MOD"));
@@ -866,7 +871,7 @@ while insn_ptr < prog.len() {
         reg[0] = res.low_u64();
     },
 
-    // 0x07 SMOD
+    //___ 0x07 SMOD
     0x07 => {
         if evm_stack.len() < 2 {
             return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on SMOD"));
@@ -878,7 +883,7 @@ while insn_ptr < prog.len() {
         reg[0] = res.as_u64();
     },
 
-    // 0x08 ADDMOD
+    //___ 0x08 ADDMOD
     0x08 => {
         if evm_stack.len() < 3 {
             return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on ADDMOD"));
@@ -891,7 +896,7 @@ while insn_ptr < prog.len() {
         reg[0] = res.low_u64();
     },
 
-    // 0x09 MULMOD
+    // ___ 0x09 MULMOD
     0x09 => {
         if evm_stack.len() < 3 {
             return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on MULMOD"));
@@ -904,7 +909,7 @@ while insn_ptr < prog.len() {
         reg[0] = res.low_u64();
     },
 
-    // 0x0a EXP
+    //___ 0x0a EXP
     0x0a => {
         if evm_stack.len() < 2 {
             return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on EXP"));
@@ -916,7 +921,7 @@ while insn_ptr < prog.len() {
         reg[0] = res.low_u64();
     },
 
-    // 0x0b SIGNEXTEND
+    //___ 0x0b SIGNEXTEND
     0x0b => {
         if evm_stack.len() < 2 {
             return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on SIGNEXTEND"));
@@ -1805,47 +1810,70 @@ while insn_ptr < prog.len() {
 
 // Si on sort de la boucle sans STOP/RETURN/REVERT
 {
-        // Pour les autres, retourne la valeur du registre 0 + storage si présent
-        let final_storage = execution_context.world_state.storage
-            .get(&interpreter_args.contract_address)
-            .cloned()
-            .unwrap_or_default();
+    let final_storage = execution_context.world_state.storage
+        .get(&interpreter_args.contract_address)
+        .cloned()
+        .unwrap_or_default();
 
-        let mut result_with_storage = serde_json::Map::new();
-        result_with_storage.insert("return".to_string(), serde_json::Value::Number(
-            serde_json::Number::from(reg[0])
-        ));
-        
-        if !final_storage.is_empty() {
-            let mut storage_json = serde_json::Map::new();
-            for (slot, bytes) in final_storage {
-                storage_json.insert(slot, serde_json::Value::String(hex::encode(bytes)));
-            }
-            result_with_storage.insert("storage".to_string(), serde_json::Value::Object(storage_json));
-        }
-if let Some(contract_storage) = execution_context.world_state.storage.get(&interpreter_args.contract_address) {
-    println!("📦 [STORAGE FINAL] Contrat {}:", &interpreter_args.contract_address);
-    for (slot, bytes) in contract_storage.iter().take(20) {
-        let hexv = hex::encode(bytes);
-        // essaie d'afficher aussi une valeur u64 si raisonnable
-        let maybe_u64 = {
-            let u = u256::from_big_endian(bytes);
-            if u.bits() <= 64 { Some(u.low_u64()) } else { None }
-        };
-        if let Some(v) = maybe_u64 {
-            println!("   - slot {}: {} (hex: 0x{})", slot, v, hexv);
-        } else {
-            // si ressemble à adresse (dernier 20 bytes non nuls) affiche address
-            if bytes.len() >= 32 && bytes[12..32].iter().any(|&b| b != 0) {
-                println!("   - slot {}: address-like 0x{} (hex: 0x{})", slot, hex::encode(&bytes[12..32]), hexv);
+    let mut result_with_storage = serde_json::Map::new();
+
+    // 1. Si la pile EVM n'est pas vide, retourne le sommet de pile (cas getter simple)
+    if !evm_stack.is_empty() {
+        let top = evm_stack.last().copied().unwrap_or(0);
+        result_with_storage.insert(
+            "return".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(top))
+        );
+    } else {
+        // 2. Sinon, tente de retrouver la dernière valeur lue dans le storage (SLOAD)
+        // On prend le premier slot du storage du contrat (souvent le cas pour decimals, totalSupply, etc.)
+        if let Some((slot, bytes)) = final_storage.iter().next() {
+            let value = u256::from_big_endian(bytes);
+            let formatted = if value.bits() <= 64 {
+                serde_json::Value::Number(serde_json::Number::from(value.low_u64()))
             } else {
-                println!("   - slot {}: hex=0x{}", slot, hexv);
+                serde_json::Value::String(format!("0x{:064x}", value))
+            };
+            result_with_storage.insert("return".to_string(), formatted);
+        } else {
+            // 3. Fallback : retourne 0
+            result_with_storage.insert(
+                "return".to_string(),
+                serde_json::Value::Number(serde_json::Number::from(0))
+            );
+        }
+    }
+
+    // Ajoute le storage complet pour debug
+    if !final_storage.is_empty() {
+        let mut storage_json = serde_json::Map::new();
+        for (slot, bytes) in final_storage {
+            storage_json.insert(slot, serde_json::Value::String(hex::encode(bytes)));
+        }
+        result_with_storage.insert("storage".to_string(), serde_json::Value::Object(storage_json));
+    }
+
+    if let Some(contract_storage) = execution_context.world_state.storage.get(&interpreter_args.contract_address) {
+        println!("📦 [STORAGE FINAL] Contrat {}:", &interpreter_args.contract_address);
+        for (slot, bytes) in contract_storage.iter().take(20) {
+            let hexv = hex::encode(bytes);
+            let maybe_u64 = {
+                let u = u256::from_big_endian(bytes);
+                if u.bits() <= 64 { Some(u.low_u64()) } else { None }
+            };
+            if let Some(v) = maybe_u64 {
+                println!("   - slot {}: {} (hex: 0x{})", slot, v, hexv);
+            } else {
+                if bytes.len() >= 32 && bytes[12..32].iter().any(|&b| b != 0) {
+                    println!("   - slot {}: address-like 0x{} (hex: 0x{})", slot, hex::encode(&bytes[12..32]), hexv);
+                } else {
+                    println!("   - slot {}: hex=0x{}", slot, hexv);
+                }
             }
         }
     }
+    return Ok(serde_json::Value::Object(result_with_storage));
 }
-        return Ok(serde_json::Value::Object(result_with_storage));
-    }
 }
 
 /// ✅ AJOUT: Helper pour noms des opcodes

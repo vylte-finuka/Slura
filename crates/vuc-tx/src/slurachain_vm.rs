@@ -1296,23 +1296,20 @@ fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<us
                     // Prépare bytes à écrire selon le type JSON (string hex/addr, number, bool)
                     let bytes_to_write: Vec<u8> = match decoded_val {
                         serde_json::Value::String(s) => {
-                            if s.starts_with("0x") && s.len() > 2 && s.chars().all(|c| c == 'x' || c.is_ascii_hexdigit() || c == '0') == false {
-                                // s is likely human string (name/symbol) -> store utf8
-                                s.as_bytes().to_vec()
-                            } else if s.starts_with("0x") {
-                                hex::decode(s.trim_start_matches("0x")).unwrap_or_else(|_| s.as_bytes().to_vec())
-                            } else if self.looks_like_address(s) {
-                                // ensure 0x prefixed address -> store as 32 bytes right-aligned
-                                let clean = s.trim_start_matches("0x");
-                                if let Ok(addr_bytes) = hex::decode(clean) {
-                                    let mut buf = vec![0u8; 12];
-                                    buf.extend_from_slice(&addr_bytes);
-                                    buf
-                                } else {
-                                    s.as_bytes().to_vec()
+                            if s.starts_with("0x") && s.len() == 42 {
+                                // Adresse
+                                let mut bytes = [0u8; 32];
+                                if let Ok(addr_bytes) = hex::decode(&s[2..]) {
+                                    bytes[12..32].copy_from_slice(&addr_bytes);
                                 }
+                                bytes.to_vec()
                             } else {
-                                s.as_bytes().to_vec()
+                                // String -> hash ou padding
+                                let mut bytes = [0u8; 32];
+                                let str_bytes = s.as_bytes();
+                                let len = std::cmp::min(str_bytes.len(), 32);
+                                bytes[32-len..].copy_from_slice(&str_bytes[..len]);
+                                bytes.to_vec()
                             }
                         },
                         serde_json::Value::Number(n) => {
@@ -1444,17 +1441,17 @@ fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<us
         function_meta.offset
     };
 
-    // ✅ ÉTAPE 6: Préparation du storage complètement dynamique
-    let initial_storage = self.build_dynamic_storage_from_contract_state(&vyid)?;
-
-    // ✅ ÉTAPE 7: Exécution générique avec interpréteur
-    let mut interpreter_args = self.prepare_generic_execution_args(
-        &vyid, function_name, args.clone(), &sender, &function_meta, resolved_offset
-    )?;
+    // === PATCH: Refuse l'exécution à l'offset 0 si la fonction n'est pas trouvée ===
+    if resolved_offset == 0 {
+        return Err(format!(
+            "Erreur : fonction '{}' (selector 0x{:08x}) introuvable dans le bytecode du contrat {}. Aucun offset valide détecté.",
+            function_name, function_meta.selector, vyid
+        ));
+    }
 
     // Vérifie si c'est un proxy UUPS/ERC1967
-  // ✅ DÉTECTION ET GESTION GÉNÉRIQUE DE TOUT PROXY ERC-1967
-  let impl_addr_opt = {
+    // ✅ DÉTECTION ET GESTION GÉNÉRIQUE DE TOUT PROXY ERC-1967
+    let impl_addr_opt = {
         let accounts = self.state.accounts.read().unwrap();
         accounts.get(&vyid)
             .and_then(|acc| acc.resources.get("implementation"))
@@ -1462,7 +1459,7 @@ fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<us
             .map(|s| s.to_string())
     };
 
-        if let Some(ref impl_addr) = impl_addr_opt {
+    if let Some(ref impl_addr) = impl_addr_opt {
         // Synchronise le bytecode de l'implémentation dans world_state.code
         let accounts = self.state.accounts.read().unwrap();
         if let Some(impl_account) = accounts.get(impl_addr) {
@@ -1504,6 +1501,14 @@ fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<us
                 impl_function_meta.offset
             };
 
+            // === PATCH: Refuse l'exécution à l'offset 0 si la fonction n'est pas trouvée dans l'implémentation ===
+            if impl_resolved_offset == 0 {
+                return Err(format!(
+                    "Erreur : fonction '{}' (selector 0x{:08x}) introuvable dans le bytecode de l'implémentation {}. Aucun offset valide détecté.",
+                    function_name, impl_function_meta.selector, impl_addr
+                ));
+            }
+
             // Prépare les args pour l'implémentation (offset correct)
             let interpreter_args = self.prepare_generic_execution_args(
                 &vyid, function_name, args.clone(), &sender, &impl_function_meta, impl_resolved_offset
@@ -1526,6 +1531,12 @@ fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<us
     }
 
     // ✅ ÉTAPE 8: Exécution réelle du programme avec l'interpréteur
+    let interpreter_args = self.prepare_generic_execution_args(
+        &vyid, function_name, args.clone(), &sender, &function_meta, resolved_offset
+    )?;
+    // Build initial_storage from contract state
+    let initial_storage = self.build_dynamic_storage_from_contract_state(&vyid)?;
+
     let result = {
         let mut interpreter = self.interpreter.lock()
             .map_err(|e| format!("Erreur lock interpréteur: {}", e))?;
@@ -1794,6 +1805,7 @@ fn decode_storage_slot_generically(&self, slot_value: &serde_json::Value) -> Opt
                     }
                     // Essaie de décoder comme string
                     if let Ok(text) = String::from_utf8(
+
                         bytes.iter().cloned().filter(|&b| b != 0 && b >= 32 && b <= 126).collect()
                     ) {
                         if !text.trim().is_empty() && text.len() > 2 {
