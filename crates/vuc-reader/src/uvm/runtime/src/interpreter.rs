@@ -722,6 +722,14 @@ reg[54] = interpreter_args.call_depth as u64;           // Profondeur d'appel
     let mut pc: usize = 0;
     // initialise la pile EVM
     let mut evm_stack: Vec<u64> = Vec::with_capacity(1024);
+    // ✅ CORRECTION CRITIQUE : Charger le selector depuis calldata avant le dispatcher
+if mbuff.len() >= 4 {
+    let selector = u32::from_be_bytes([mbuff[0], mbuff[1], mbuff[2], mbuff[3]]);
+    evm_stack.push(selector as u64);
+    println!("🎯 [SELECTOR FORCÉ] 0x{:08x} chargé sur la stack avant dispatcher", selector);
+} else {
+    evm_stack.push(0);
+}
     let mut last_return_value: Option<serde_json::Value> = Some(serde_json::Value::Number(serde_json::Number::from(reg[0])));
     
     // ✅ AJOUT: Flag pour logs EVM détaillés
@@ -1354,9 +1362,9 @@ while insn_ptr < prog.len() {
     
         //___ 0x58 PC
     0x58 => {
-        reg[_dst] = (insn_ptr * ebpf::INSN_SIZE) as u64;
-        //consume_gas(&mut execution_context, 2)?;
-    },
+    evm_stack.push(insn_ptr as u64);
+    println!("🔍 [PC] Pushed current PC = 0x{:x}", insn_ptr);
+},
 
     //___ 0x5a GAS
     0x5a => {
@@ -1752,23 +1760,19 @@ while insn_ptr < prog.len() {
         return Ok(serde_json::json!("SELFDESTRUCT"));
     },
 
-    //___ Tout le reste → crash clair
     _ => {
-        println!("🟢 [NOP] Opcode inconnu 0x{:02x} ignoré à PC {}", opcode, insn_ptr);
+            reg[reg_idx] = 0;
+        }
     }
     }
 
     // Avancement du PC (PUSHN inclus)
     if !skip_advance {
-        let mut advance = 1;
-        if (0x60..=0x7f).contains(&opcode) {
-            let push_bytes = (opcode - 0x5f) as usize;
-            advance = 1 + push_bytes;
-        }
-        insn_ptr = insn_ptr.wrapping_add(advance);
-    } else if debug_evm {
-        println!("🔁 [EVM] PC positionné par handler, pas d'avancement automatique -> PC={}", insn_ptr);
+    let mut advance = 1;
+    if opcode >= 0x60 && opcode <= 0x7f {
+        advance += (opcode - 0x5f) as usize;
     }
+    insn_ptr += advance;
 }
 
 // Si on sort de la boucle sans STOP/RETURN/REVERT
