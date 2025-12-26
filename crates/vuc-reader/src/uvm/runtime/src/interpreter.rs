@@ -1148,11 +1148,12 @@ while insn_ptr < prog.len() {
         //consume_gas(&mut execution_context, 2)?;
     },
 
-    //___ 0x33 CALLER
-    0x33 => {
-        reg[_dst] = encode_address_to_u64(&interpreter_args.caller);
-        //consume_gas(&mut execution_context, 2)?;
-    },
+    //___ 0x33 CALLER — msg.sender (critique pour onlyOwner)
+0x33 => {
+    let caller_u64 = encode_address_to_u64(&interpreter_args.caller);
+    evm_stack.push(caller_u64);
+    println!("📞 [CALLER] msg.sender = {} → 0x{:x}", interpreter_args.caller, caller_u64);
+},
 
     //___ 0x34 CALLVALUE
     0x34 => {
@@ -1766,13 +1767,15 @@ while insn_ptr < prog.len() {
     }
     }
 
-    // Avancement du PC (PUSHN inclus)
+    // Avancement correct du PC en tenant compte des PUSH (0x60-0x7f)
     if !skip_advance {
-    let mut advance = 1;
-    if opcode >= 0x60 && opcode <= 0x7f {
-        advance += (opcode - 0x5f) as usize;
-    }
-    insn_ptr += advance;
+        let mut advance = 1;
+        if opcode >= 0x60 && opcode <= 0x7f {
+            advance += (opcode - 0x5f) as usize; // 1 pour l'opcode + n pour les données
+        }
+        insn_ptr += advance;
+    } else {
+        println!("🚀 [JUMP/JUMPI] Saut pris vers PC=0x{:04x}", insn_ptr);
     }
 }
 
