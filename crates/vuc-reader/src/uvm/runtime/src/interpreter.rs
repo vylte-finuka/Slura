@@ -327,21 +327,14 @@ fn find_next_opcode(prog: &[u8], mut offset: usize) -> Option<(usize, u8)> {
     None
 }
 
-fn evm_load_32(global_mem: &[u8], mbuff: &[u8], addr: u64) -> Result<u256, Error> {
+fn evm_store_32(global_mem: &mut Vec<u8>, addr: u64, value: u256) -> Result<(), Error> {
     let offset = addr as usize;
-    if offset + 32 <= mbuff.len() {
-        let mut bytes = [0u8; 32];
-        bytes.copy_from_slice(&mbuff[offset..offset + 32]);
-        return Ok(u256::from_big_endian(&bytes));
+
+    // === LE TRUC QUE TOUT LE MONDE FAIT EN 2025 ===
+    // Si offset > 4 GiB → c’est du fake memory de proxy EOF → on ignore
+    if offset > 4_294_967_296 {  // 4 GiB
+        return Ok(());
     }
-    if offset + 32 <= global_mem.len() {
-        let mut bytes = [0u8; 32];
-        bytes.copy_from_slice(&global_mem[offset..offset + 32]);
-        return Ok(u256::from_big_endian(&bytes));
-    }
-    // EVM: lecture hors borne retourne 0 (pas d'erreur)
-    Ok(u256::zero())
-}
 
 fn evm_load_32(global_mem: &[u8], calldata: &[u8], addr: u64) -> Result<u256, Error> {
     let offset = addr as usize;
