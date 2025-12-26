@@ -722,6 +722,14 @@ reg[54] = interpreter_args.call_depth as u64;           // Profondeur d'appel
     let mut pc: usize = 0;
     // initialise la pile EVM
     let mut evm_stack: Vec<u64> = Vec::with_capacity(1024);
+    // ✅ CORRECTION CRITIQUE : Charger le selector depuis calldata avant le dispatcher
+if mbuff.len() >= 4 {
+    let selector = u32::from_be_bytes([mbuff[0], mbuff[1], mbuff[2], mbuff[3]]);
+    evm_stack.push(selector as u64);
+    println!("🎯 [SELECTOR FORCÉ] 0x{:08x} chargé sur la stack avant dispatcher", selector);
+} else {
+    evm_stack.push(0);
+}
     let mut last_return_value: Option<serde_json::Value> = Some(serde_json::Value::Number(serde_json::Number::from(reg[0])));
     
     // ✅ AJOUT: Flag pour logs EVM détaillés
