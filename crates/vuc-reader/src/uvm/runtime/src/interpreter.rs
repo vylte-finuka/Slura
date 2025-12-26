@@ -335,7 +335,8 @@ fn evm_store_32(global_mem: &mut Vec<u8>, addr: u64, value: u256) -> Result<(), 
     if offset > 4_294_967_296 {  // 4 GiB
         return Ok(());
     }
-
+}
+    
 fn evm_load_32(global_mem: &[u8], calldata: &[u8], addr: u64) -> Result<u256, Error> {
     let offset = addr as usize;
     // Priorité au calldata (mbuff)
