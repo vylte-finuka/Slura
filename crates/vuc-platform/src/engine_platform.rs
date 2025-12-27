@@ -3701,7 +3701,7 @@ async fn validate_system_integrity(vm: &Arc<TokioRwLock<SlurachainVm>>, validato
     Ok(())
 }
 
-/// ✅ pub async fn deploy_vez_contract_evm(
+pub async fn deploy_vez_contract_evm(
     &self,
     vm: &mut SlurachainVm,
     validator_address: &str,
