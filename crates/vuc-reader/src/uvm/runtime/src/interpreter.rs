@@ -1845,6 +1845,8 @@ while insn_ptr < prog.len() {
     // Ajoute le storage complet pour debug
     if !final_storage.is_empty() {
         let mut storage_json = serde_json::Map::new();
+        for (slot, bytes) in final_storage {
+            storage_json.insert(slot, serde_json::Value::String(hex::encode(bytes)));
 // Si on sort de la boucle sans STOP/RETURN/REVERT → comportement EVM standard
 {
     let final_storage = execution_context.world_state.storage
