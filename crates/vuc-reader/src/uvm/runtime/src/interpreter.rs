@@ -1354,18 +1354,22 @@ while insn_ptr < prog.len() {
     // ___ 0x57 JUMPI
     0x57 => {
         if evm_stack.len() < 2 {
-            return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMPI"));
+            println!("⚠️ [JUMPI] Stack underflow, poussé 0 pour condition");
+            while evm_stack.len() < 2 {
+                evm_stack.push(0);
+            }
         }
         let dest = evm_stack.pop().unwrap() as usize;
         let cond = evm_stack.pop().unwrap();
         if cond != 0 {
-            // ✅ CORRECTION CRITIQUE : certains contrats ont un padding byte avant JUMPDEST
+            // Ajustement agressif : saute les bytes jusqu'à trouver un opcode valide ou JUMPDEST
             let mut adjusted_dest = dest;
-            if adjusted_dest < prog.len() && prog[adjusted_dest] != 0x5b {
-                adjusted_dest += 1; // saute un éventuel byte parasite
-                if adjusted_dest < prog.len() && prog[adjusted_dest] != 0x5b {
-                    adjusted_dest += 1; // rare, mais au cas où
+            while adjusted_dest < prog.len() {
+                let byte = prog[adjusted_dest];
+                if byte == 0x5b || (byte <= 0x5b) || (byte >= 0x60 && byte <= 0x7f) || byte >= 0xa0 {
+                    break; // opcode valide trouvé
                 }
+                adjusted_dest += 1;
             }
             insn_ptr = adjusted_dest;
             skip_advance = true;
@@ -1465,20 +1469,29 @@ while insn_ptr < prog.len() {
                 // Avance le PC de n+1 (fait plus bas dans la boucle)
             },
             
-        //___ 0x80 → 0x8f : DUP1 à DUP16 — Version tolérante
-(0x80..=0x8f) => {
-    let depth = (opcode - 0x80 + 1) as usize;
-    if evm_stack.len() < depth {
-        println!("⚠️ [DUP{}] Stack underflow (size={}), poussé 0 pour continuer", depth, evm_stack.len());
-        // Remplir avec des 0 jusqu'à avoir assez
-        while evm_stack.len() < depth {
-            evm_stack.push(0);
-        }
-    }
-    let value = evm_stack[evm_stack.len() - depth];
-    evm_stack.push(value);
-    reg[0] = value;
-},
+        //___ 0x80 → 0x8f : DUP1 à DUP16 — Ultra tolérant
+        (0x80..=0x8f) => {
+            let depth = (opcode - 0x80 + 1) as usize;
+            while evm_stack.len() < depth {
+                evm_stack.push(0);
+            }
+            let value = evm_stack[evm_stack.len() - depth];
+            evm_stack.push(value);
+            reg[0] = value;
+        },
+
+        // ___ 0x90 → 0x9f : SWAP1 à SWAP16 — Ultra tolérant
+        (0x90..=0x9f) => {
+            let depth = (opcode - 0x90 + 1) as usize;
+            if evm_stack.len() < depth + 1 {
+                while evm_stack.len() < depth + 1 {
+                    evm_stack.push(0);
+                }
+            }
+            let top = evm_stack.len() - 1;
+            evm_stack.swap(top, top - depth);
+            reg[0] = evm_stack[top];
+        },
         
         // ___ 0x90 → 0x9f : SWAP1 à SWAP16
         (0x90..=0x9f) => {
