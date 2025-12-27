@@ -2004,3 +2004,4 @@ fn compute_mapping_slot(base_slot: u64, keys: &[serde_json::Value]) -> String {
     hasher.finalize(&mut hash);
     hex::encode(hash)
 }
+    }
