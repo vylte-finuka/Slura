@@ -1845,32 +1845,49 @@ while insn_ptr < prog.len() {
     // Ajoute le storage complet pour debug
     if !final_storage.is_empty() {
         let mut storage_json = serde_json::Map::new();
-        for (slot, bytes) in final_storage {
-            storage_json.insert(slot, serde_json::Value::String(hex::encode(bytes)));
-        }
-        result_with_storage.insert("storage".to_string(), serde_json::Value::Object(storage_json));
+// Si on sort de la boucle sans STOP/RETURN/REVERT → comportement EVM standard
+{
+    let final_storage = execution_context.world_state.storage
+        .get(&interpreter_args.contract_address)
+        .cloned()
+        .unwrap_or_default();
+
+    let mut result = serde_json::Map::new();
+
+    // === COMPORTEMENT GÉNÉRIQUE COMME ERIGON/GETH ===
+    // 1. Si la stack n'est pas vide → c'est très probablement le retour d'une view function
+    if !evm_stack.is_empty() {
+        let top = evm_stack.last().copied().unwrap_or(0);
+        // Retour uint256 standard (padé à 32 bytes dans le JSON-RPC, mais on retourne le nombre brut)
+        result.insert(
+            "return".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(top))
+        );
+        println!("✅ [FALLBACK RETURN] Valeur depuis stack = {}", top);
+    } 
+    // 2. Sinon, si aucune valeur sur stack mais storage modifié → souvent une mutation réussie sans retour
+    else if !final_storage.is_empty() {
+        result.insert("return".to_string(), serde_json::Value::Bool(true));
+        println!("✅ [FALLBACK RETURN] Mutation réussie (storage modifié)");
+    } 
+    // 3. Sinon → succès sans données (ex: transfer réussi, initialize réussi)
+    else {
+        result.insert("return".to_string(), serde_json::Value::Bool(true));
+        println!("✅ [FALLBACK RETURN] Succès silencieux");
     }
 
-    if let Some(contract_storage) = execution_context.world_state.storage.get(&interpreter_args.contract_address) {
-        println!("📦 [STORAGE FINAL] Contrat {}:", &interpreter_args.contract_address);
-        for (slot, bytes) in contract_storage.iter().take(20) {
-            let hexv = hex::encode(bytes);
-            let maybe_u64 = {
-                let u = u256::from_big_endian(bytes);
-                if u.bits() <= 64 { Some(u.low_u64()) } else { None }
-            };
-            if let Some(v) = maybe_u64 {
-                println!("   - slot {}: {} (hex: 0x{})", slot, v, hexv);
-            } else {
-                if bytes.len() >= 32 && bytes[12..32].iter().any(|&b| b != 0) {
-                    println!("   - slot {}: address-like 0x{} (hex: 0x{})", slot, hex::encode(&bytes[12..32]), hexv);
-                } else {
-                    println!("   - slot {}: hex=0x{}", slot, hexv);
-                }
-            }
+    // Ajoute toujours le storage modifié (très utile pour debug et vérification)
+    if !final_storage.is_empty() {
+        let mut storage_json = serde_json::Map::new();
+        for (slot, bytes) in &final_storage {
+            let decoded = decode_bytes_heuristic(bytes)
+                .unwrap_or_else(|| JsonValue::String(format!("0x{}", hex::encode(bytes))));
+            storage_json.insert(slot.clone(), decoded);
         }
+        result.insert("storage".to_string(), serde_json::Value::Object(storage_json));
     }
-    return Ok(serde_json::Value::Object(result_with_storage));
+
+    return Ok(serde_json::Value::Object(result));
 }
 }
 
