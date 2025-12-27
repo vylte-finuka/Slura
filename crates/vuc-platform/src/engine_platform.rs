@@ -3701,16 +3701,7 @@ async fn validate_system_integrity(vm: &Arc<TokioRwLock<SlurachainVm>>, validato
     Ok(())
 }
 
-// ✅ CORRECTION 2: Fonction helper pour calculer les sélecteurs (à ajouter avant deploy_vez_contract_with_bytecode)
-fn calculate_function_selector(function_name: &str) -> u32 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    
-    let mut hasher = DefaultHasher::new();
-    function_name.hash(&mut hasher);
-    (hasher.finish() & 0xFFFFFFFF) as u32
-
-/// ✅ CORRECTION TOTALE: Détection 100% dynamique depuis le bytecode uniquement
+/// ✅ CORRECTION TOTALE: Détection 100% dynamique depuis le bytecode uniquement¹
 pub async fn deploy_vez_contract_evm(
     &self,
     vm: &mut SlurachainVm,
