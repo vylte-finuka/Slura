@@ -3763,8 +3763,7 @@ async fn deploy_vez_contract_evm(vm: &mut SlurachainVm, validator_address: &str)
         "value": "0x0",
         "data": format!("0x{}", hex::encode(&init_calldata))
     });
-    // Si EnginePlatform/trait, adapte :
-    // let receipt_init = self.send_transaction(init_tx).await.map_err(|e| format!("Tx initialize failed: {e}"))?;
+   let receipt_init = self.send_transaction(init_tx).await.map_err(|e| format!("Tx initialize failed: {e}"))?;
     println!("⏳ Envoi de initialize(address) ...");
     // TODO : exécute la tx via VM ici
 
@@ -3780,8 +3779,7 @@ async fn deploy_vez_contract_evm(vm: &mut SlurachainVm, validator_address: &str)
         "data": format!("0x{}", hex::encode(&mint_calldata))
     });
     println!("⏳ Envoi de mint(address,uint256)...");
-    // TODO : exécute la tx via VM ici
-    // let receipt_mint = self.send_transaction(mint_tx).await.map_err(|e| format!("Tx mint failed: {e}"))?;
+    let receipt_mint = self.send_transaction(mint_tx).await.map_err(|e| format!("Tx mint failed: {e}"))?;
 
     // // Tu peux (optionnel) attendre, décoder, logguer tx/résultat...
     println!("✅ Appels initialize + mint envoyés (sur {vez_contract_addr})");
@@ -4644,4 +4642,4 @@ impl EnginePlatform {
         };
         Ok(contract_address)
     }
-}
+}}
