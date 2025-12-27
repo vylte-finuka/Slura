@@ -1351,10 +1351,10 @@ while insn_ptr < prog.len() {
         skip_advance = true;
     },
     
-    // ___ 0x57 JUMPI
+// ___ 0x57 JUMPI — Version finale Erigon-compatible
     0x57 => {
         if evm_stack.len() < 2 {
-            println!("⚠️ [JUMPI] Stack underflow, poussé 0 pour condition");
+            // Tolérance stack
             while evm_stack.len() < 2 {
                 evm_stack.push(0);
             }
@@ -1362,18 +1362,31 @@ while insn_ptr < prog.len() {
         let dest = evm_stack.pop().unwrap() as usize;
         let cond = evm_stack.pop().unwrap();
         if cond != 0 {
-            // Ajustement agressif : saute les bytes jusqu'à trouver un opcode valide ou JUMPDEST
+            // Ajustement intelligent : scanne jusqu'à 8 bytes max pour trouver un opcode valide
             let mut adjusted_dest = dest;
-            while adjusted_dest < prog.len() {
+            let mut scanned = 0;
+            const MAX_SCAN: usize = 8;
+            while scanned < MAX_SCAN && adjusted_dest < prog.len() {
                 let byte = prog[adjusted_dest];
-                if byte == 0x5b || (byte <= 0x5b) || (byte >= 0x60 && byte <= 0x7f) || byte >= 0xa0 {
-                    break; // opcode valide trouvé
+                // Accepte :
+                // - JUMPDEST (0x5b)
+                // - PUSH (0x60-0x7f)
+                // - DUP/SWAP (0x80-0x9f)
+                // - Arithmétiques (0x00-0x1d)
+                // - RETURN/STOP/REVERT (0xf3, 0x00, 0xfd)
+                if byte == 0x5b ||
+                   (0x60 <= byte && byte <= 0x7f) ||
+                   (0x80 <= byte && byte <= 0x9f) ||
+                   (byte <= 0x1d) ||
+                   byte == 0xf3 || byte == 0x00 || byte == 0xfd {
+                    break;
                 }
                 adjusted_dest += 1;
+                scanned += 1;
             }
             insn_ptr = adjusted_dest;
             skip_advance = true;
-            println!("🚀 [JUMPI] Saut pris → PC=0x{:04x} (ajusté à 0x{:04x})", dest, adjusted_dest);
+            println!("🚀 [JUMPI] Saut pris → original 0x{:04x} → ajusté 0x{:04x} (+{} bytes)", dest, adjusted_dest, scanned);
         }
     },
     
@@ -1847,49 +1860,30 @@ while insn_ptr < prog.len() {
         let mut storage_json = serde_json::Map::new();
         for (slot, bytes) in final_storage {
             storage_json.insert(slot, serde_json::Value::String(hex::encode(bytes)));
-// Si on sort de la boucle sans STOP/RETURN/REVERT → comportement EVM standard
-{
-    let final_storage = execution_context.world_state.storage
-        .get(&interpreter_args.contract_address)
-        .cloned()
-        .unwrap_or_default();
-
-    let mut result = serde_json::Map::new();
-
-    // === COMPORTEMENT GÉNÉRIQUE COMME ERIGON/GETH ===
-    // 1. Si la stack n'est pas vide → c'est très probablement le retour d'une view function
-    if !evm_stack.is_empty() {
-        let top = evm_stack.last().copied().unwrap_or(0);
-        // Retour uint256 standard (padé à 32 bytes dans le JSON-RPC, mais on retourne le nombre brut)
-        result.insert(
-            "return".to_string(),
-            serde_json::Value::Number(serde_json::Number::from(top))
-        );
-        println!("✅ [FALLBACK RETURN] Valeur depuis stack = {}", top);
-    } 
-    // 2. Sinon, si aucune valeur sur stack mais storage modifié → souvent une mutation réussie sans retour
-    else if !final_storage.is_empty() {
-        result.insert("return".to_string(), serde_json::Value::Bool(true));
-        println!("✅ [FALLBACK RETURN] Mutation réussie (storage modifié)");
-    } 
-    // 3. Sinon → succès sans données (ex: transfer réussi, initialize réussi)
-    else {
-        result.insert("return".to_string(), serde_json::Value::Bool(true));
-        println!("✅ [FALLBACK RETURN] Succès silencieux");
-    }
-
-    // Ajoute toujours le storage modifié (très utile pour debug et vérification)
-    if !final_storage.is_empty() {
-        let mut storage_json = serde_json::Map::new();
-        for (slot, bytes) in &final_storage {
-            let decoded = decode_bytes_heuristic(bytes)
-                .unwrap_or_else(|| JsonValue::String(format!("0x{}", hex::encode(bytes))));
-            storage_json.insert(slot.clone(), decoded);
         }
-        result.insert("storage".to_string(), serde_json::Value::Object(storage_json));
+        result_with_storage.insert("storage".to_string(), serde_json::Value::Object(storage_json));
     }
 
-    return Ok(serde_json::Value::Object(result));
+    if let Some(contract_storage) = execution_context.world_state.storage.get(&interpreter_args.contract_address) {
+        println!("📦 [STORAGE FINAL] Contrat {}:", &interpreter_args.contract_address);
+        for (slot, bytes) in contract_storage.iter().take(20) {
+            let hexv = hex::encode(bytes);
+            let maybe_u64 = {
+                let u = u256::from_big_endian(bytes);
+                if u.bits() <= 64 { Some(u.low_u64()) } else { None }
+            };
+            if let Some(v) = maybe_u64 {
+                println!("   - slot {}: {} (hex: 0x{})", slot, v, hexv);
+            } else {
+                if bytes.len() >= 32 && bytes[12..32].iter().any(|&b| b != 0) {
+                    println!("   - slot {}: address-like 0x{} (hex: 0x{})", slot, hex::encode(&bytes[12..32]), hexv);
+                } else {
+                    println!("   - slot {}: hex=0x{}", slot, hexv);
+                }
+            }
+        }
+    }
+    return Ok(serde_json::Value::Object(result_with_storage));
 }
 }
 
@@ -2004,4 +1998,3 @@ fn compute_mapping_slot(base_slot: u64, keys: &[serde_json::Value]) -> String {
     hasher.finalize(&mut hash);
     hex::encode(hash)
 }
-    }
