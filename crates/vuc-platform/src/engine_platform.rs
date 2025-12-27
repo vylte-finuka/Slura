@@ -3265,7 +3265,7 @@ async fn main() {
 
         // ✅ DÉPLOIEMENT DU CONTRAT VEZ avec bytecode spécifique
         println!("🪙 Deploying VEZ contract with bytecode...");
-        if let Err(e) = deploy_vez_contract_evm(&mut vm_guard, &validator_address_generated).await {
+        if let Err(e) = deploy_vez_contract_evm(&mut vm_guard, &mut SlurachainVm, &validator_address_generated).await {
             eprintln!("❌ Failed to deploy VEZ contract: {}", e);
         } else {
             println!("✅ VEZ contract deployed successfully with bytecode");
