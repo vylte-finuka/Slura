@@ -1773,6 +1773,7 @@ pub async fn deploy_vez_contract_evm(
     use sha3::{Digest, Keccak256};
     use std::collections::BTreeMap;
     use hex;
+    use tokio::time::{sleep, Duration};
 
     println!("🪙 [EVM] Déploiement du contrat VEZ (implémentation + proxy)...");
 
@@ -1828,6 +1829,17 @@ pub async fn deploy_vez_contract_evm(
     accounts.insert(proxy_address.to_string(), proxy_account);
     drop(accounts);
 
+    println!("✅ Bytecodes déployés en mémoire :");
+    println!("   • Implémentation : {}", impl_address);
+    println!("   • Proxy          : {}", proxy_address);
+    println!("⏳ Attente de 20 secondes avant d'envoyer initialize et mint...");
+    println!("   → Tu peux vérifier avec eth_getCode ou dans MetaMask pendant ce temps.");
+
+    // 🔥 DÉLAI DE 20 SECONDES
+    sleep(Duration::from_secs(20)).await;
+
+    println!("⏰ 20 secondes écoulées. Envoi des transactions d'initialisation...");
+
     // Appels initialize + mint via send_transaction
     let sender = validator_address.to_lowercase();
     let calldata_init = hex::decode("8129fc1c00000000000000000000000053ae54b11251d5003e9aa51422405bc35a2ef32d").unwrap();
@@ -1856,7 +1868,7 @@ pub async fn deploy_vez_contract_evm(
     println!("✅ VEZ déployé et initialisé (proxy: {})", proxy_address);
     Ok(())
 }
-
+    
     /// ✅ Récupération d'un reçu de transaction
         pub async fn get_transaction_receipt(&self, input_hash: String) -> Result<serde_json::Value, String> {
         let hash = self.normalize_tx_hash(&input_hash);
