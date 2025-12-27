@@ -630,48 +630,42 @@ impl EnginePlatform {
         
         /// ✅ CORRECTION: get_account_balance appelle balanceOf du contrat VEZ via la VM
         pub async fn get_account_balance(&self, address: &str) -> Result<u128, String> {
-            let addr_lc = address.to_lowercase();
-            let vez_contract_addr = "0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448";
-        
-            // Appel direct balanceOf via la VM
-            let args = vec![serde_json::Value::String(addr_lc.clone())];
-            let mut vm = self.vm.write().await;
-            let result = vm.execute_module(
-                vez_contract_addr,
-                "balanceOf",
-                args,
-                Some(address),
-            );
-        
-            match result {
-                Ok(val) => {
-                    // Tente de parser le résultat comme u128
-                    if let Some(bal) = val.as_u64() {
-                        Ok(bal as u128)
-                    } else if let Some(bal) = val.as_str().and_then(|s| s.parse::<u128>().ok()) {
-                        Ok(bal)
-                    // as_u128() does not exist, try parsing as string
-                    } else if let Some(bal) = val.as_str().and_then(|s| s.parse::<u128>().ok()) {
-                        Ok(bal)
-                    } else {
-                        // Si le résultat est un hex string
-                        if let Some(s) = val.as_str() {
-                            if s.starts_with("0x") {
-                                u128::from_str_radix(s.trim_start_matches("0x"), 16).map_err(|_| "Format hex invalide".to_string())
-                            } else {
-                                Err("Format de balance inconnu".to_string())
-                            }
-                        } else {
-                            Err("Type de retour balanceOf inconnu".to_string())
-                        }
-                    }
-                }
-                Err(e) => {
-                    // Si la VM échoue, retourne 0
-                    println!("⚠️ Appel balanceOf échoué: {}", e);
-                    Ok(0)
-                }
+    let addr = address.trim_start_matches("0x").to_lowercase();
+    let vez_contract_addr = "0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448";
+
+    // Prépare le calldata ABI pour balanceOf(address)
+    // selector : 0x70a08231
+    let mut data = hex::decode("70a08231").unwrap();
+    let mut arg = vec![0u8; 12];
+    arg.extend_from_slice(&hex::decode(addr.clone()).map_err(|_| "Adresse invalide".to_string())?);
+    data.extend_from_slice(&arg);
+
+    let call = serde_json::json!({
+        "to": vez_contract_addr,
+        "from": address,
+        "data": format!("0x{}", hex::encode(&data)),
+    });
+
+    // Appel canonique (eth_call-like)
+    let result = self.eth_call(call).await;
+
+    match result {
+        Ok(raw) => {
+            // La réponse canonique EVM est un hex (32 bytes, uint256)
+            // Ex: "0x0000000000000000000000000000000000000000000000000000000034d54b40"
+            let clean = raw.trim_start_matches("0x");
+            if clean.len() == 64 {
+                u128::from_str_radix(clean, 16)
+                    .map_err(|_| "balanceOf : decode hex fail".to_string())
+            } else {
+                Err("Format balanceOf inattendu".to_string())
             }
+        }
+        Err(e) => {
+            println!("⚠️ Appel balanceOf échoué: {}", e);
+            Ok(0)
+        }
+    }
         }
 
            pub async fn get_block_by_hash(&self, block_hash: &str, include_txs: bool) -> Result<serde_json::Value, String> {
