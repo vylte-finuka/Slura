@@ -630,50 +630,43 @@ impl EnginePlatform {
         
         /// ✅ CORRECTION: get_account_balance appelle balanceOf du contrat VEZ via la VM
         pub async fn get_account_balance(&self, address: &str) -> Result<u128, String> {
-            let addr_lc = address.to_lowercase();
-            let vez_contract_addr = "0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448";
-        
-            // Appel direct balanceOf via la VM
-            let args = vec![serde_json::Value::String(addr_lc.clone())];
-            let mut vm = self.vm.write().await;
-            let result = vm.execute_module(
-                vez_contract_addr,
-                "balanceOf",
-                args,
-                Some(address),
-            );
-        
-            match result {
-                Ok(val) => {
-                    // Tente de parser le résultat comme u128
-                    if let Some(bal) = val.as_u64() {
-                        Ok(bal as u128)
-                    } else if let Some(bal) = val.as_str().and_then(|s| s.parse::<u128>().ok()) {
-                        Ok(bal)
-                    // as_u128() does not exist, try parsing as string
-                    } else if let Some(bal) = val.as_str().and_then(|s| s.parse::<u128>().ok()) {
-                        Ok(bal)
-                    } else {
-                        // Si le résultat est un hex string
-                        if let Some(s) = val.as_str() {
-                            if s.starts_with("0x") {
-                                u128::from_str_radix(s.trim_start_matches("0x"), 16).map_err(|_| "Format hex invalide".to_string())
-                            } else {
-                                Err("Format de balance inconnu".to_string())
-                            }
-                        } else {
-                            Err("Type de retour balanceOf inconnu".to_string())
-                        }
-                    }
-                }
-                Err(e) => {
-                    // Si la VM échoue, retourne 0
-                    println!("⚠️ Appel balanceOf échoué: {}", e);
-                    Ok(0)
-                }
+    let addr = address.trim_start_matches("0x").to_lowercase();
+    let vez_contract_addr = "0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448";
+
+    // Prépare le calldata ABI pour balanceOf(address)
+    // selector : 0x70a08231
+    let mut data = hex::decode("70a08231").unwrap();
+    let mut arg = vec![0u8; 12];
+    arg.extend_from_slice(&hex::decode(addr.clone()).map_err(|_| "Adresse invalide".to_string())?);
+    data.extend_from_slice(&arg);
+
+    let call = serde_json::json!({
+        "to": vez_contract_addr,
+        "from": address,
+        "data": format!("0x{}", hex::encode(&data)),
+    });
+
+    // Appel canonique (eth_call-like)
+    let result = self.eth_call(call).await;
+
+    match result {
+        Ok(raw) => {
+            // La réponse canonique EVM est un hex (32 bytes, uint256)
+            // Ex: "0x0000000000000000000000000000000000000000000000000000000034d54b40"
+            let clean = raw.trim_start_matches("0x");
+            if clean.len() == 64 {
+                u128::from_str_radix(clean, 16)
+                    .map_err(|_| "balanceOf : decode hex fail".to_string())
+            } else {
+                Err("Format balanceOf inattendu".to_string())
             }
         }
-
+        Err(e) => {
+            println!("⚠️ Appel balanceOf échoué: {}", e);
+            Ok(0)
+        }
+    }
+        }
            pub async fn get_block_by_hash(&self, block_hash: &str, include_txs: bool) -> Result<serde_json::Value, String> {
             println!("🔎 Recherche du bloc avec hash: {}", block_hash);
             let all_hashes = self.rpc_service.lurosonie_manager.get_all_block_hashes().await;
@@ -3658,11 +3651,6 @@ async fn save_system_state(
     let accounts = vm_read.state.accounts.read().unwrap();
     
     // ✅ Sauvegarde du contrat VEZ et des comptes système
-   
-   
-
-   
-   
     for (address, account) in accounts.iter() {
         if account.is_contract || address == validator_address || address.starts_with("*") {
             let account_data = serde_json::to_vec(account)
@@ -3721,88 +3709,97 @@ fn calculate_function_selector(function_name: &str) -> u32 {
     let mut hasher = DefaultHasher::new();
     function_name.hash(&mut hasher);
     (hasher.finish() & 0xFFFFFFFF) as u32
-}
-
 
 /// ✅ CORRECTION TOTALE: Détection 100% dynamique depuis le bytecode uniquement
-async fn deploy_vez_contract_evm(vm: &mut SlurachainVm, validator_address: &str) -> Result<(), String> {
-    use vuc_tx::slurachain_vm::AccountState;
+pub async fn deploy_vez_contract_evm(
+    &self,
+    vm: &mut SlurachainVm,
+    validator_address: &str,
+) -> Result<(), String> {
     use sha3::{Digest, Keccak256};
     use std::collections::BTreeMap;
+    use hex;
 
     println!("🪙 [EVM] Déploiement du contrat VEZ (implémentation + proxy)...");
 
-    // 1) Déployer l'implémentation VEZ
+    // 1. Préparation du code
     let impl_bytecode_hex = include_str!("../../../vez_bytecode.hex");
-    let impl_bytecode = hex::decode(impl_bytecode_hex.trim()).map_err(|e| format!("Bytecode decode error: {}", e))?;
-
-    // Adresse déterministe de l'implémentation
+    let impl_bytecode = hex::decode(impl_bytecode_hex.trim())
+        .map_err(|e| format!("Bytecode decode error: {}", e))?;
     let mut hasher = Keccak256::new();
     hasher.update(&impl_bytecode);
     let impl_hash = hasher.finalize();
     let impl_address = format!("0x{}", hex::encode(&impl_hash)[..40].to_string()).to_lowercase();
 
-    // Lecture ABI VEZ
-    let abi_json = std::fs::read_to_string("VEZABI.json").map_err(|e| format!("VEZABI.json manquant: {}", e))?;
-    let abi: serde_json::Value = serde_json::from_str(&abi_json).map_err(|e| format!("VEZABI.json invalide: {}", e))?;
+    // 2. (RAM only) Insert impl & proxy as modules & accounts in VM
+    let mut accounts = vm.state.accounts.write().unwrap();
+    let impl_account = vuc_tx::slurachain_vm::AccountState {
+        address: impl_address.clone(),
+        balance: 0,
+        contract_state: impl_bytecode.clone(),
+        resources: BTreeMap::new(),
+        state_version: 1,
+        last_block_number: 0,
+        nonce: 0,
+        code_hash: "vez_impl_evm".to_string(),
+        storage_root: "vez_impl_root".to_string(),
+        is_contract: true,
+        gas_used: 0,
+    };
+    accounts.insert(impl_address.clone(), impl_account);
 
-    // Lecture ABI proxy
-    let proxy_abi_json = std::fs::read_to_string("vezcurproxycore.json").map_err(|e| format!("vezcurproxycore.json manquant: {}", e))?;
-    let proxy_abi: serde_json::Value = serde_json::from_str(&proxy_abi_json).map_err(|e| format!("vezcurproxycore.json invalide: {}", e))?;
+    let proxy_address = "0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448".to_string();
+    let proxy_bytecode_hex = include_str!("../../../vezcurpoxycore_bytecode.hex");
+    let proxy_bytecode = hex::decode(proxy_bytecode_hex.trim())
+        .map_err(|e| format!("Proxy bytecode decode error: {}", e))?;
+    let mut proxy_resources = BTreeMap::new();
+    proxy_resources.insert("implementation".to_string(), serde_json::Value::String(impl_address.clone()));
+    proxy_resources.insert("initialized".to_string(), serde_json::Value::Bool(false));
+    let proxy_account = vuc_tx::slurachain_vm::AccountState {
+        address: proxy_address.clone(),
+        balance: 0,
+        contract_state: proxy_bytecode.clone(),
+        resources: proxy_resources,
+        state_version: 1,
+        last_block_number: 0,
+        nonce: 0,
+        code_hash: "vez_proxy_core".to_string(),
+        storage_root: "vez_proxy_root".to_string(),
+        is_contract: true,
+        gas_used: 0,
+    };
+    accounts.insert(proxy_address.clone(), proxy_account);
+    drop(accounts);
 
-    // Fusionne les deux ABI
-    let mut full_abi = Vec::new();
-    if let Some(arr) = abi.as_array() {
-        full_abi.extend(arr.clone());
-    }
-    if let Some(arr) = proxy_abi.as_array() {
-        full_abi.extend(arr.clone());
-    }
+    // 3. Appels EVM ABI: initialize et mint
+    let sender = validator_address.to_lowercase();
+    let vez_to = "0x53ae54b11251d5003e9aa51422405bc35a2ef32d";
+    let calldata_init = hex::decode("8129fc1c00000000000000000000000053ae54b11251d5003e9aa51422405bc35a2ef32d").unwrap();
+    let calldata_mint = hex::decode("40c10f1900000000000000000000000053ae54b11251d5003e9aa51422405bc35a2ef32d0000000000000000000000000000000000000000000000000000000034d54b40").unwrap();
 
-    // Détection des fonctions pour l'implémentation + proxy
-    let mut impl_functions = hashbrown::HashMap::new();
-    for item in &full_abi {
-        if item.get("type").and_then(|v| v.as_str()) == Some("function") {
-            let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let inputs_vec = item.get("inputs").and_then(|v| v.as_array()).cloned().unwrap_or_else(Vec::new);
-            let mut types = Vec::new();
-            for inp in &inputs_vec {
-                if let Some(t) = inp.get("type").and_then(|v| v.as_str()) {
-                    types.push(t.to_string());
-                }
-            }
-            if name == "initialize" && types.is_empty() {
-                println!("✅ Correction: initialize() détectée avec 0 argument");
-            }
-            let signature = format!("{}({})", name, types.join(","));
-            let mut hasher = Keccak256::new();
-            hasher.update(signature.as_bytes());
-            let selector_bytes = hasher.finalize();
-            let selector = u32::from_be_bytes([selector_bytes[0], selector_bytes[1], selector_bytes[2], selector_bytes[3]]);
-            // --- AJOUT : calcul offset réel ---
-            let offset = find_function_offset_in_bytecode(&impl_bytecode, selector).unwrap_or(0);
+    let init_tx = serde_json::json!({
+        "to": proxy_address,
+        "from": sender,
+        "gas": "0x4c4b40",
+        "value": "0x0",
+        "data": format!("0x{}", hex::encode(&calldata_init))
+    });
+    println!("⏳ Envoi de initialize(address)...");
+    let _ = self.send_transaction(init_tx).await;
 
-            impl_functions.insert(name.clone(), vuc_tx::slurachain_vm::FunctionMetadata {
-                name,
-                offset, // <-- offset correct ici !
-                args_count: types.len(),
-                arg_types: types.clone(),
-                return_type: item.get("outputs")
-                    .and_then(|v| v.as_array())
-                    .and_then(|arr| arr.get(0))
-                    .and_then(|out| out.get("type"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown")
-                    .to_string(),
-                gas_limit: 50000,
-                payable: item.get("stateMutability").and_then(|v| v.as_str()) == Some("payable"),
-                mutability: item.get("stateMutability").and_then(|v| v.as_str()).unwrap_or("nonpayable").to_string(),
-                selector,
-                modifiers: vec![],
-            });
-        }
-    }
+    let mint_tx = serde_json::json!({
+        "to": proxy_address,
+        "from": sender,
+        "gas": "0x4c4b40",
+        "value": "0x0",
+        "data": format!("0x{}", hex::encode(&calldata_mint))
+    });
+    println!("⏳ Envoi de mint(address,uint256)...");
+    let _ = self.send_transaction(mint_tx).await;
 
+    println!("✅ Appels initialize + mint envoyés sur proxy ({})", proxy_address);
+    Ok(())
+}
     
     /// Finds the offset of a function selector in EVM bytecode (looks for PUSH4 + selector pattern).
     fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<usize> {
