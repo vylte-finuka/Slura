@@ -720,23 +720,20 @@ reg[54] = interpreter_args.call_depth as u64;           // Profondeur d'appel
     println!("   Valeur: {}", interpreter_args.value);
 
     let mut pc: usize = 0;
-    // initialise la pile EVM
     let mut evm_stack: Vec<u64> = Vec::with_capacity(1024);
-    // ✅ CORRECTION CRITIQUE : Charger le selector depuis calldata avant le dispatcher
-if mbuff.len() >= 4 {
-    let selector = u32::from_be_bytes([mbuff[0], mbuff[1], mbuff[2], mbuff[3]]);
-    evm_stack.push(selector as u64);
-    println!("🎯 [SELECTOR FORCÉ] 0x{:08x} chargé sur la stack avant dispatcher", selector);
-} else {
-    evm_stack.push(0);
-}
-    let mut last_return_value: Option<serde_json::Value> = Some(serde_json::Value::Number(serde_json::Number::from(reg[0])));
-    
+
+// Pile EVM vide au démarrage, comme sur Ethereum
+println!("🟢 [EVM INIT] Pile EVM vide (comportement EVM réel)");
+
+    // RIEN D'AUTRE — pas de push d'arguments
     // ✅ AJOUT: Flag pour logs EVM détaillés
     let debug_evm = true;
     
     // Initialise insn_ptr UNE SEULE FOIS ici, en tenant compte du runtime_offset
-    let mut insn_ptr: usize = interpreter_args.function_offset.unwrap_or(0);
+    let mut insn_ptr: usize = interpreter_args.function_offset.unwrap_or_else(|| {
+    // Cherche le premier JUMPDEST
+    prog.iter().position(|&b| b == 0x5b).unwrap_or(0)
+});
     
 while insn_ptr < prog.len() {
     let opcode = prog[insn_ptr];
@@ -756,7 +753,7 @@ while insn_ptr < prog.len() {
     // initialise directement le flag (plus de loop imbriquée)
     let mut skip_advance = false;
 
-     //___ Pectra/EVM opcodes ___
+     //___ Pectra/Charène opcodes ___
     match opcode {
         // 0x00 STOP
         0x00 => {
@@ -764,14 +761,10 @@ while insn_ptr < prog.len() {
             break;
         },
 
-    //___ 0x01 ADD — Version tolérante
+    //___ 0x01 ADD
 0x01 => {
     if evm_stack.len() < 2 {
-        println!("⚠️ [ADD] Stack underflow (size={}), poussé 0 par défaut", evm_stack.len());
-        // Au lieu de crash, on pousse des 0 pour continuer
-        while evm_stack.len() < 2 {
-            evm_stack.push(0);
-        }
+        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on ADD"));
     }
     let b = evm_stack.pop().unwrap();
     let a = evm_stack.pop().unwrap();
@@ -910,6 +903,7 @@ while insn_ptr < prog.len() {
         } else {
             x
         };
+        evm_stack.push(res);
         evm_stack.push(res);
         reg[0] = res;
     },
@@ -1165,7 +1159,7 @@ while insn_ptr < prog.len() {
         //consume_gas(&mut execution_context, 2)?;
     },
 
-//___ 0x35 CALLDATALOAD — Version corrigée et fonctionnelle
+//___ 0x35 CALLDATALOAD
 0x35 => {
     // Prend l'offset depuis le sommet de la stack
     if evm_stack.is_empty() {
@@ -1268,7 +1262,6 @@ while insn_ptr < prog.len() {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on POP"));
     }
     evm_stack.pop();
-    //consume_gas(&mut execution_context, 2)?;
 },
 
     //___ 0x51 MLOAD
@@ -1337,7 +1330,6 @@ while insn_ptr < prog.len() {
     println!("💾 [SSTORE] slot={} <- value={}", slot, value);
     reg[_dst] = value;
     reg[0] = value;
-    last_return_value = Some(serde_json::Value::Number(serde_json::Number::from(reg[0])));
 },
     
     // ___ 0x56 JUMP
@@ -1351,43 +1343,33 @@ while insn_ptr < prog.len() {
         skip_advance = true;
     },
     
-//___ 0x57 JUMPI — Version Erigon-exact pour OpenZeppelin ERC20
-    0x57 => {
-        if evm_stack.len() < 2 {
-            while evm_stack.len() < 2 {
-                evm_stack.push(0);
-            }
+//___ 0x57 JUMPI — STRICT
+0x57 => {
+    if evm_stack.len() < 2 {
+        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMPI"));
+    }
+    let mut dest = evm_stack.pop().unwrap() as usize;
+    let cond = evm_stack.pop().unwrap();
+
+    if cond != 0 {
+        // Scan en avant jusqu'au premier JUMPDEST (0x5b)
+        let mut pc = dest;
+        while pc < prog.len() && prog[pc] != 0x5b {
+            pc += 1;
         }
-        let mut dest = evm_stack.pop().unwrap() as usize;
-        let cond = evm_stack.pop().unwrap();
-        if cond != 0 {
-            // Scan max 20 bytes pour trouver le vrai début : JUMPDEST (0x5b) suivi d'un PUSH1 petit (probablement 0x12 pour decimals)
-            let mut best_dest = dest;
-            let mut found_jumpdest = false;
-            for offset in 0..20 {
-                let pc = dest + offset;
-                if pc + 1 >= prog.len() { break; }
-                if prog[pc] == 0x5b { // JUMPDEST
-                    found_jumpdest = true;
-                    best_dest = pc;
-                    // Bonus : si le byte suivant est PUSH1 0x12 → c'est decimals !
-                    if pc + 2 < prog.len() && prog[pc + 1] == 0x60 && prog[pc + 2] == 0x12 {
-                        best_dest = pc;
-                        println!("🎯 [DECIMALS DETECTED] JUMPDEST + PUSH1 0x12 trouvé à 0x{:04x}", pc);
-                        break;
-                    }
-                }
-            }
-            if found_jumpdest {
-                dest = best_dest;
-            }
-            insn_ptr = dest;
-            skip_advance = true;
-            println!("🚀 [JUMPI] Saut corrigé → original 0x{:04x} → vrai début 0x{:04x}", dest - (dest - best_dest), dest);
+        if pc < prog.len() && prog[pc] == 0x5b {
+            dest = pc;
+            println!("🚀 [JUMPI] Saut corrigé vers vrai JUMPDEST à PC=0x{:04x}", dest);
+        } else {
+            println!("⚠️ Pas de JUMPDEST trouvé après offset, saut à dest");
         }
-    },
-    
-        //___ 0x58 PC
+
+        insn_ptr = dest;
+        skip_advance = true;
+    }
+},
+
+    //___ 0x58 PC
     0x58 => {
         reg[_dst] = (insn_ptr * ebpf::INSN_SIZE) as u64;
         //consume_gas(&mut execution_context, 2)?;
@@ -1450,75 +1432,50 @@ while insn_ptr < prog.len() {
         consume_gas(&mut execution_context, 2)?;
     },
     
-    //___ 0x60..=0x7f : PUSH1 à PUSH32
-            0x60..=0x7f => {
-                // PUSHn: push n bytes as a value on the stack (right-aligned, big-endian)
-                let n = (opcode - 0x5f) as usize;
-                let start = insn_ptr + 1;
-                let end = start + n;
-                let mut value = 0u64;
-                // On ne gère ici que les PUSH jusqu'à 8 bytes (pour u64), au-delà, tronqué
-                if end <= prog.len() {
-                    let mut bytes = [0u8; 8];
-                    let copy_len = n.min(8);
-                    if start + copy_len <= prog.len() {
-                        bytes[8 - copy_len..].copy_from_slice(&prog[start..start + copy_len]);
-                        value = u64::from_be_bytes(bytes);
-                    } else {
-                        println!("⚠️ [EVM] PUSH{} dépasse la taille du bytecode, valeur ignorée", n);
-                    }
-                } else {
-                    println!("⚠️ [EVM] PUSH{} dépasse la taille du bytecode, valeur ignorée", n);
-                }
-                if evm_stack.len() >= 1024 {
-                    println!("⚠️ [EVM] Stack overflow sur PUSH{} (stack pleine, valeur ignorée)", n);
-                } else {
-                    evm_stack.push(value);
-                }
-                reg[0] = value;
-                // Avance le PC de n+1 (fait plus bas dans la boucle)
-            },
-            
-        //___ 0x80 → 0x8f : DUP1 à DUP16 — Ultra tolérant
+    //___ 0x60..=0x7f : PUSH1 à PUSH32 — STRICT
+0x60..=0x7f => {
+    let n = (opcode - 0x5f) as usize;
+    let start = insn_ptr + 1;
+    let end = start + n;
+    let mut value = 0u64;
+    if end > prog.len() {
+        return Err(Error::new(ErrorKind::Other, format!("EVM PUSH{} out of bounds", n)));
+    }
+    let mut bytes = [0u8; 8];
+    let copy_len = n.min(8);
+    bytes[8 - copy_len..].copy_from_slice(&prog[start..start + copy_len]);
+    value = u64::from_be_bytes(bytes);
+    if evm_stack.len() >= 1024 {
+        return Err(Error::new(ErrorKind::Other, "EVM STACK overflow on PUSH"));
+    }
+    evm_stack.push(value);
+    reg[0] = value;
+    // PC advance handled below
+},
+
+        //___ 0x80 → 0x8f : DUP1 à DUP16 — STRICT
         (0x80..=0x8f) => {
             let depth = (opcode - 0x80 + 1) as usize;
-            while evm_stack.len() < depth {
-                evm_stack.push(0);
+            if evm_stack.len() < depth {
+                return Err(Error::new(ErrorKind::Other, format!("EVM STACK underflow on DUP{}", depth)));
             }
             let value = evm_stack[evm_stack.len() - depth];
+            if evm_stack.len() >= 1024 {
+                return Err(Error::new(ErrorKind::Other, "EVM STACK overflow on DUP"));
+            }
             evm_stack.push(value);
             reg[0] = value;
         },
 
-        // ___ 0x90 → 0x9f : SWAP1 à SWAP16 — Ultra tolérant
+        // ___ 0x90 → 0x9f : SWAP1 à SWAP16 — STRICT
         (0x90..=0x9f) => {
             let depth = (opcode - 0x90 + 1) as usize;
             if evm_stack.len() < depth + 1 {
-                while evm_stack.len() < depth + 1 {
-                    evm_stack.push(0);
-                }
+                return Err(Error::new(ErrorKind::Other, format!("EVM STACK underflow on SWAP{}", depth)));
             }
             let top = evm_stack.len() - 1;
             evm_stack.swap(top, top - depth);
             reg[0] = evm_stack[top];
-        },
-        
-        // ___ 0x90 → 0x9f : SWAP1 à SWAP16
-        (0x90..=0x9f) => {
-            let depth = (opcode - 0x90 + 1) as usize;
-            if evm_stack.len() < depth + 1 {
-                println!("⚠️ [EVM] Stack underflow sur SWAP{} (stack size={})", depth, evm_stack.len());
-                // On ignore l'instruction, pas de panic ni d'erreur
-            } else {
-                let top = evm_stack.len() - 1;
-                // Protection anti-overflow :
-                if top < depth {
-                    println!("⚠️ [EVM] SWAP{} overflow (top={}, depth={})", depth, top, depth);
-                } else {
-                    evm_stack.swap(top, top - depth);
-                    reg[_dst] = evm_stack[top];
-                }
-            }
         },
 
 //___ 0xa0 LOG0
@@ -1693,6 +1650,7 @@ while insn_ptr < prog.len() {
                 if let Ok(s) = std::str::from_utf8(str_bytes) {
                     serde_json::Value::String(s.to_string())
                 } else {
+
                     serde_json::Value::String(hex::encode(str_bytes))
                 }
             } else {
@@ -1775,6 +1733,7 @@ while insn_ptr < prog.len() {
 },
 
     //___ 0xfe INVALID
+   
     0xfe => {
         return Err(Error::new(ErrorKind::Other, "INVALID opcode"));
     },

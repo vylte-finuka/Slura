@@ -1647,7 +1647,7 @@ fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<us
     }
 
     /// ✅ NOUVEAU: Préparation des arguments d'exécution génériques
-   fn prepare_generic_execution_args(
+    fn prepare_generic_execution_args(
         &self,
         contract_address: &str,
         function_name: &str,
@@ -1663,41 +1663,31 @@ fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<us
         let block_number = self.state.block_info.read()
             .map(|b| b.number)
             .unwrap_or(1);
-        // Génère calldata avec sélecteur
-        let mut calldata = Vec::with_capacity(4 + args.len() * 32);
-        calldata.extend_from_slice(&function_meta.selector.to_be_bytes());
-        // Encode les arguments de manière simplifiée
+
+        // ✅ CALDATA ABI 100% CORRECT ET GÉNÉRIQUE (selector UNE SEULE FOIS)
+             let mut calldata = Vec::with_capacity(4 + args.len() * 32);
+        calldata.extend_from_slice(&function_meta.selector.to_be_bytes()); // UNE SEULE FOIS
+
         for arg in &args {
             match arg {
-                serde_json::Value::Number(n) => {
-                    let mut bytes = [0u8; 32];
-                    let value = n.as_u64().unwrap_or(0);
-                    bytes[24..32].copy_from_slice(&value.to_be_bytes());
-                    calldata.extend_from_slice(&bytes);
-                },
-                serde_json::Value::String(s) => {
-                    if s.starts_with("0x") && s.len() == 42 {
-                        // Adresse
-                        let mut bytes = [0u8; 32];
-                        if let Ok(addr_bytes) = hex::decode(&s[2..]) {
-                            bytes[12..32].copy_from_slice(&addr_bytes);
-                        }
-                        calldata.extend_from_slice(&bytes);
-                    } else {
-                        // String -> hash ou padding
-                        let mut bytes = [0u8; 32];
-                        let str_bytes = s.as_bytes();
-                        let len = std::cmp::min(str_bytes.len(), 32);
-                        bytes[32-len..].copy_from_slice(&str_bytes[..len]);
-                        calldata.extend_from_slice(&bytes);
+                serde_json::Value::String(s) if s.starts_with("0x") && s.len() == 42 => {
+                    let mut padded = [0u8; 32];
+                    if let Ok(bytes) = hex::decode(&s[2..]) {
+                        padded[12..32].copy_from_slice(&bytes);
                     }
-                },
-                _ => {
-                    // Fallback: padding zero
-                    calldata.extend_from_slice(&[0u8; 32]);
+                    calldata.extend_from_slice(&padded);
                 }
+                serde_json::Value::Number(n) => {
+                    let mut padded = [0u8; 32];
+                    if let Some(u) = n.as_u64() {
+                        padded[24..32].copy_from_slice(&u.to_be_bytes());
+                    }
+                    calldata.extend_from_slice(&padded);
+                }
+                _ => calldata.extend_from_slice(&[0u8; 32]),
             }
         }
+
         Ok(uvm_runtime::interpreter::InterpreterArgs {
             function_name: function_name.to_string(),
             contract_address: contract_address.to_string(),
