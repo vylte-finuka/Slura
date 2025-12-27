@@ -1351,42 +1351,39 @@ while insn_ptr < prog.len() {
         skip_advance = true;
     },
     
-// ___ 0x57 JUMPI — Version finale Erigon-compatible
+//___ 0x57 JUMPI — Version Erigon-exact pour OpenZeppelin ERC20
     0x57 => {
         if evm_stack.len() < 2 {
-            // Tolérance stack
             while evm_stack.len() < 2 {
                 evm_stack.push(0);
             }
         }
-        let dest = evm_stack.pop().unwrap() as usize;
+        let mut dest = evm_stack.pop().unwrap() as usize;
         let cond = evm_stack.pop().unwrap();
         if cond != 0 {
-            // Ajustement intelligent : scanne jusqu'à 8 bytes max pour trouver un opcode valide
-            let mut adjusted_dest = dest;
-            let mut scanned = 0;
-            const MAX_SCAN: usize = 8;
-            while scanned < MAX_SCAN && adjusted_dest < prog.len() {
-                let byte = prog[adjusted_dest];
-                // Accepte :
-                // - JUMPDEST (0x5b)
-                // - PUSH (0x60-0x7f)
-                // - DUP/SWAP (0x80-0x9f)
-                // - Arithmétiques (0x00-0x1d)
-                // - RETURN/STOP/REVERT (0xf3, 0x00, 0xfd)
-                if byte == 0x5b ||
-                   (0x60 <= byte && byte <= 0x7f) ||
-                   (0x80 <= byte && byte <= 0x9f) ||
-                   (byte <= 0x1d) ||
-                   byte == 0xf3 || byte == 0x00 || byte == 0xfd {
-                    break;
+            // Scan max 20 bytes pour trouver le vrai début : JUMPDEST (0x5b) suivi d'un PUSH1 petit (probablement 0x12 pour decimals)
+            let mut best_dest = dest;
+            let mut found_jumpdest = false;
+            for offset in 0..20 {
+                let pc = dest + offset;
+                if pc + 1 >= prog.len() { break; }
+                if prog[pc] == 0x5b { // JUMPDEST
+                    found_jumpdest = true;
+                    best_dest = pc;
+                    // Bonus : si le byte suivant est PUSH1 0x12 → c'est decimals !
+                    if pc + 2 < prog.len() && prog[pc + 1] == 0x60 && prog[pc + 2] == 0x12 {
+                        best_dest = pc;
+                        println!("🎯 [DECIMALS DETECTED] JUMPDEST + PUSH1 0x12 trouvé à 0x{:04x}", pc);
+                        break;
+                    }
                 }
-                adjusted_dest += 1;
-                scanned += 1;
             }
-            insn_ptr = adjusted_dest;
+            if found_jumpdest {
+                dest = best_dest;
+            }
+            insn_ptr = dest;
             skip_advance = true;
-            println!("🚀 [JUMPI] Saut pris → original 0x{:04x} → ajusté 0x{:04x} (+{} bytes)", dest, adjusted_dest, scanned);
+            println!("🚀 [JUMPI] Saut corrigé → original 0x{:04x} → vrai début 0x{:04x}", dest - (dest - best_dest), dest);
         }
     },
     
