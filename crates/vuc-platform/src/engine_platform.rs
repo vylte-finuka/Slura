@@ -3441,6 +3441,7 @@ async fn main() {
     let validator_address_clone = validator_address_generated.clone();
     let lurosonie_manager_clone = Arc::clone(&lurosonie_manager);
 
+    let value = engine_platform.clone();
     tokio::spawn(async move {
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(1)).await; // ⏳ poll ou branche sur ton event de bloc !
@@ -3448,7 +3449,7 @@ async fn main() {
         if block_number == 1 {
             println!("🪙 Block #1 produit — déploiement du contrat VEZ...");
             let mut vm_guard = vm_clone.write().await;
-            match engine_platform.deploy_vez_contract_evm().await {
+            match value.engine_platform.deploy_vez_contract_evm().await {
                 Ok(_) => println!("✅ VEZ contract deployed at 0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448"),
                 Err(e) => eprintln!("❌ Failed to deploy VEZ contract at block 1: {}", e),
             }
