@@ -3441,22 +3441,6 @@ async fn main() {
     let validator_address_clone = validator_address_generated.clone();
     let lurosonie_manager_clone = Arc::clone(&lurosonie_manager);
 
-  println!("🪙 Bloc #1 détecté ! Déploiement du contrat VEZ en cours...");
-
-let deploy_handle = tokio::spawn(async move -> Result<(), String> {
-    engine_clone.deploy_vez_contract_evm().await?;
-    Ok(())
-});
-
-// Plus tard, si tu veux attendre :
-match deploy_handle.await {
-    Ok(Ok(())) => println!("Déploiement VEZ réussi"),
-    Ok(Err(e)) => eprintln!("Déploiement VEZ échoué : {}", e),
-    Err(join_err) => eprintln!("Tâche annulée : {}", join_err),
-}
-
-    println!("🏁 Tâche d'attente et déploiement VEZ terminée.");
-    
     // ✅ Démarrage des services...
     let lurosonie_consensus = lurosonie_manager.clone();
     let consensus_handle = tokio::spawn(async move {
@@ -3468,6 +3452,14 @@ match deploy_handle.await {
     let server_handle = tokio::spawn(async move {
         engine_clone.start_server().await;
     });
+
+    // Acquire a write lock on vm to get vm_guard before deploying the contract
+    {
+        let mut vm_guard = vm.write().await;
+        engine_platform.deploy_vez_contract_evm(&mut vm_guard, &validator_address_generated).await.expect("Failed to deploy VEZ contract");
+    }
+    println!("✅ VEZ contract deployed at 0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448");
+
 
     // ✅ Tasks de monitoring...
     let cleanup_manager = lurosonie_manager.clone();
