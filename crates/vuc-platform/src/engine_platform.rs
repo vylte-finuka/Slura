@@ -3382,7 +3382,7 @@ async fn main() {
             let mut vm_guard = vm_clone.write().await;
             let _ = deploy_vez_contract_evm(&mut vm_guard, &validator_address_clone).await;
 
-    println!("🏁 Tâche d'attente et déploiement VEZ terminée.")
+    println!("🏁 Tâche d'attente et déploiement VEZ terminée.");
     
     // ✅ Démarrage des services...
     let lurosonie_consensus = lurosonie_manager.clone();
