@@ -3399,7 +3399,7 @@ async fn main() {
 
             deploy_vez_contract_evm(&mut vm_guard, &validator_address_clone).await;
             break; // on sort après tentative
-        }}
+        }
     });
 
     // ✅ Démarrage des services...
