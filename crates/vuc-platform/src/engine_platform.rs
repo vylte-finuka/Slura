@@ -3437,6 +3437,8 @@ println!("✅ Bloc genesis Lurosonie ajouté: {:?}", genesis_block);
 
     println!("🏁 Tâche VEZ terminée.");
 });
+
+}
     
     // ✅ Démarrage des services...
     let lurosonie_consensus = lurosonie_manager.clone();
