@@ -3268,15 +3268,7 @@ async fn main() {
                     panic!("Impossible de générer l'adresse du validateur !");
                 }
             }
-        };
-
-        // ✅ DÉPLOIEMENT DU CONTRAT VEZ avec bytecode spécifique
-        println!("🪙 Deploying VEZ contract with bytecode...");
-        if let Err(e) = deploy_vez_contract_evm(&mut vm_guard, &validator_address_generated).await {
-            eprintln!("❌ Failed to deploy VEZ contract: {}", e);
-        } else {
-            println!("✅ VEZ contract deployed successfully with bytecode");
-        }
+        };..¾
 
         // ✅ VÉRIFICATION QUE LE MODULE EST BIEN ENREGISTRÉ
         if vm_guard.modules.contains_key("0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448") {
@@ -3395,7 +3387,6 @@ async fn main() {
             Err(e) => {
                 eprintln!("⚠️ Erreur lors de la récupération du block height : {}", e);
                 continue; // réessayer au prochain tour
-            }
         };
 
         println!("⏳ Block height actuel : {}", block_number);
