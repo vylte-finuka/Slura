@@ -3402,7 +3402,7 @@ async fn main() {
         if block_number >= 1 {
             println!("🪙 Bloc #1 détecté — Initialisation VEZ via send_transaction (calldata brut)");
 
-            if let Err(e) = deploy_vez_contract_evm().await {
+            if let Err(e) = deploy_vez_contract_evm(&mut vm_guard, &validator_address_generated).await {
                 eprintln!("❌ Erreur lors du déploiement/mint du contrat VEZ : {}", e);
                 // Tu peux choisir de continuer la boucle ou de paniquer selon ton besoin
                 // continue; // ← décommente si tu veux réessayer indéfiniment en cas d'erreur
