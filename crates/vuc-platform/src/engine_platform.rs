@@ -3263,14 +3263,6 @@ async fn main() {
             }
         };
 
-        // ✅ DÉPLOIEMENT DU CONTRAT VEZ avec bytecode spécifique
-        println!("🪙 Deploying VEZ contract with bytecode...");
-        if let Err(e) = deploy_vez_contract_evm(&mut vm_guard, &validator_address_generated).await {
-            eprintln!("❌ Failed to deploy VEZ contract: {}", e);
-        } else {
-            println!("✅ VEZ contract deployed successfully with bytecode");
-        }
-
         // ✅ VÉRIFICATION QUE LE MODULE EST BIEN ENREGISTRÉ
         if vm_guard.modules.contains_key("0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448") {
             println!("✅ VEZ module correctly registered");
@@ -3384,7 +3376,9 @@ async fn main() {
 
     lurosonie_manager.add_block_to_chain(genesis_block.clone(), None).await;
     println!("✅ Bloc genesis Lurosonie ajouté: {:?}", genesis_block);
-
+    let mut vm_guard = vm.write().await;
+    deploy_vez_contract_evm(&mut vm_guard, &validator_address_generated).await
+    
     // ✅ Démarrage des services...
     let lurosonie_consensus = lurosonie_manager.clone();
     let consensus_handle = tokio::spawn(async move {
@@ -3710,7 +3704,6 @@ fn calculate_function_selector(function_name: &str) -> u32 {
     function_name.hash(&mut hasher);
     (hasher.finish() & 0xFFFFFFFF) as u32
 
-/// ✅ CORRECTION TOTALE: Détection 100% dynamique depuis le bytecode uniquement
 pub async fn deploy_vez_contract_evm(
     &self,
     vm: &mut SlurachainVm,
