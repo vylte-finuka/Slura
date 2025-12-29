@@ -2893,12 +2893,6 @@ module.register_async_method("eth_getCode", move |params, _meta, _| {
 }
 
 impl EnginePlatform {
-
-    fn pad_hash_64(hex: &str) -> String {
-    let cleaned = hex.trim().strip_prefix("0x").unwrap_or(hex);
-    format!("0x{:0>64}", cleaned.to_lowercase())
-}
-    
     pub async fn get_latest_block_info(&self) -> (u64, String) {
         let height = self.rpc_service.lurosonie_manager.get_block_height().await;
         let hash = self.rpc_service.lurosonie_manager.get_last_block_hash().await
@@ -3275,15 +3269,6 @@ async fn main() {
                 }
             }
         };
-
-        // ✅ VÉRIFICATION QUE LE MODULE EST BIEN ENREGISTRÉ
-        if vm_guard.modules.contains_key("0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448") {
-            println!("✅ VEZ module correctly registered");
-            println!("   • Functions available: {:?}", 
-                   vm_guard.modules["0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448"].functions.keys().collect::<Vec<_>>());
-        } else {
-            eprintln!("❌ VEZ module NOT registered - initialization will fail");
-        }
         
         // ✅ CRÉATION DES COMPTES INITIAUX avec VEZ
         println!("👥 Creating initial accounts...");
@@ -3390,52 +3375,37 @@ let genesis_block = TimestampRelease {
 lurosonie_manager.add_block_to_chain(genesis_block.clone(), None).await;
 println!("✅ Bloc genesis Lurosonie ajouté: {:?}", genesis_block);
 
+// ✅ TOUT AU MÊME ENDROIT : Attente du bloc #1 + Déploiement VEZ
 {
     let vm_clone = Arc::clone(&vm);
     let validator_address_clone = validator_address_generated.clone();
     let lurosonie_manager_clone = Arc::clone(&lurosonie_manager);
 
     tokio::spawn(async move {
-    println!("⏳ Attente du bloc #1 pour déployer le contrat VEZ...");
-
     loop {
         tokio::time::sleep(Duration::from_secs(1)).await;
 
+        // ✅ Match correctement fermé
         let block_number = match lurosonie_manager_clone.get_block_height().await {
             Ok(height) => height,
             Err(e) => {
-                eprintln!("⚠️ Erreur get_block_height : {}", e);
-                continue;
+                eprintln!("⚠️ Erreur lors de la récupération du block height : {}", e);
+                continue; // réessayer au prochain tour
             }
         };
 
-        if block_number < 1 {
-            continue;
-        }
+        println!("⏳ Block height actuel : {}", block_number);
 
-        println!("🪙 Bloc #1 atteint ! Déploiement du contrat VEZ...");
+        if block_number >= 1 {
+            println!("🪙 Bloc #1 détecté ! Déploiement du contrat VEZ en cours...");
 
-        // Anti-doublon
-        {
-            let vm_read = vm_clone.read().await;
-            let accounts = vm_read.state.accounts.read().unwrap();
-            let vez_addr = "0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448";
-            if accounts.contains_key(vez_addr) {
-                println!("ℹ️ VEZ déjà déployé → rien à faire.");
-                break;
-            }
-        }
-        {
-        // Déploiement
+            // Prendre le lock sur la VM ici
             let mut vm_guard = vm_clone.write().await;
-         deploy_vez_contract_evm(&mut vm_guard, &validator_address_clone).await {
-                eprintln!("❌ Échec déploiement VEZ : {}", e);
+
+            deploy_vez_contract_evm(&mut vm_guard, &validator_address_clone).await;
+            break; // on sort après tentative
         }
-
-        break;
     }
-
-    println!("🏁 Tâche VEZ terminée.");
 });
     
     // ✅ Démarrage des services...
@@ -3704,10 +3674,6 @@ async fn save_system_state(
     let accounts = vm_read.state.accounts.read().unwrap();
     
     // ✅ Sauvegarde du contrat VEZ et des comptes système
-   
-   
-
-   
    
     for (address, account) in accounts.iter() {
         if account.is_contract || address == validator_address || address.starts_with("*") {
@@ -4030,9 +3996,7 @@ fn extract_token_symbol_from_bytecode(bytecode: &[u8]) -> Option<String> {
            string.chars().all(|c| c.is_ascii_uppercase()) &&
            !string.chars().all(|c| c.is_numeric()) {
             
-            // Priorité aux symboles contenant "VEZ", "EUR", etc.
-            if string.contains("VEZ") || string.contains("EUR") || 
-               string.contains("TOK") || string.contains("ERC") {
+            {
                 return Some(string.clone());
             }
         }
@@ -4704,4 +4668,4 @@ impl EnginePlatform {
         };
         Ok(contract_address)
     }
-                    }
+}
