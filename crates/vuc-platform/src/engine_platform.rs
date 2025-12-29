@@ -7166,15 +7166,26 @@ async fn main() {
     loop {
         tokio::time::sleep(Duration::from_secs(1)).await;
 
-        let block_number = lurosonie_manager_clone.get_block_height().await;
+        let block_number = match lurosonie_manager_clone.get_block_height().await {
+            Ok(height) => height,
+            Err(e) => {
+                eprintln!("Erreur lors de la récupération du block height : {}", e);
+                continue; // on réessaie au tour suivant
+            }
+        };
+
         if block_number >= 1 {
             println!("🪙 Bloc #1 détecté — Initialisation VEZ via send_transaction (calldata brut)");
-            engine_platform.deploy_vez_contract_evm().await;
-            println!("❌ Erreur envoi mint: {}", e),
+
+            if let Err(e) = engine_platform.deploy_vez_contract_evm().await {
+                eprintln!("❌ Erreur lors du déploiement/mint du contrat VEZ : {}", e);
+                // Tu peux choisir de continuer la boucle ou de paniquer selon ton besoin
+                // continue; // ← décommente si tu veux réessayer indéfiniment en cas d'erreur
+            } else {
+                println!("🎉 Contrat VEZ initialisé et minté via transactions réelles (traçables, persistantes) !");
             }
 
-            println!("🎉 Contrat VEZ initialisé et minté via transactions réelles (traçables, persistantes) !");
-            break;
+            break; // on sort de la boucle dans tous les cas (succès ou erreur gérée)
         }
     }
 });
@@ -9279,4 +9290,4 @@ impl EnginePlatform {
         };
         Ok(contract_address)
     }
-}
+                    }
