@@ -3386,7 +3386,7 @@ tokio::spawn(async move {
         // ✅ Sans match : on récupère la hauteur ou on continue en cas d'erreur
         let block_number = lurosonie_manager_clone.get_block_height();
 
-        println!("⏳ Block height actuel : {}", block_number);
+        println!("⏳ Block height actuel : {:?}", block_number);
 
         if block_number >= 1 {
             println!("🪙 Bloc #1 détecté ! Déploiement du contrat VEZ en cours...");
