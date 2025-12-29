@@ -2893,6 +2893,10 @@ module.register_async_method("eth_getCode", move |params, _meta, _| {
 }
 
 impl EnginePlatform {
+    fn pad_hash_64(hex: &str) -> String {
+    let cleaned = hex.trim().strip_prefix("0x").unwrap_or(hex);
+    format!("0x{:0>64}", cleaned.to_lowercase())
+    }
     pub async fn get_latest_block_info(&self) -> (u64, String) {
         let height = self.rpc_service.lurosonie_manager.get_block_height().await;
         let hash = self.rpc_service.lurosonie_manager.get_last_block_hash().await
