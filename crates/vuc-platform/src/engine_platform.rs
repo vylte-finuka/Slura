@@ -3384,7 +3384,7 @@ tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(1)).await;
 
         // ✅ Sans match : on récupère la hauteur ou on continue en cas d'erreur
-        let block_number = lurosonie_manager_clone.get_block_height().
+        let block_number = lurosonie_manager_clone.get_block_height();
 
         println!("⏳ Block height actuel : {}", block_number);
 
