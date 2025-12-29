@@ -3443,8 +3443,17 @@ async fn main() {
 
   println!("🪙 Bloc #1 détecté ! Déploiement du contrat VEZ en cours...");
 
-            let mut vm_guard = vm_clone.write().await;
-            engine_platform.deploy_vez_contract_evm().await;
+let deploy_handle = tokio::spawn(async move -> Result<(), String> {
+    engine_clone.deploy_vez_contract_evm().await?;
+    Ok(())
+});
+
+// Plus tard, si tu veux attendre :
+match deploy_handle.await {
+    Ok(Ok(())) => println!("Déploiement VEZ réussi"),
+    Ok(Err(e)) => eprintln!("Déploiement VEZ échoué : {}", e),
+    Err(join_err) => eprintln!("Tâche annulée : {}", join_err),
+}
 
     println!("🏁 Tâche d'attente et déploiement VEZ terminée.");
     
