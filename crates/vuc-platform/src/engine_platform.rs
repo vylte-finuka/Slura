@@ -3425,15 +3425,11 @@ println!("✅ Bloc genesis Lurosonie ajouté: {:?}", genesis_block);
                 break;
             }
         }
-
-        // Déploiement
         {
+        // Déploiement
             let mut vm_guard = vm_clone.write().await;
-            if let Err(e) = deploy_vez_contract_evm(&mut vm_guard, &validator_address_clone).await {
+         deploy_vez_contract_evm(&mut vm_guard, &validator_address_clone).await {
                 eprintln!("❌ Échec déploiement VEZ : {}", e);
-            } else {
-                println!("🎉 Contrat VEZ déployé avec succès !");
-            }
         }
 
         break;
