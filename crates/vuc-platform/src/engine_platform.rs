@@ -3448,7 +3448,7 @@ async fn main() {
         if block_number == 1 {
             println!("🪙 Block #1 produit — déploiement du contrat VEZ...");
             let mut vm_guard = vm_clone.write().await;
-            match engine_platform_clone.deploy_vez_contract_evm(&mut vm_guard, &validator_addr_clone).await {
+            match engine_platform.deploy_vez_contract_evm(&mut vm_guard, &validator_addr_clone).await {
                 Ok(_) => println!("✅ VEZ contract deployed at 0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448"),
                 Err(e) => eprintln!("❌ Failed to deploy VEZ contract at block 1: {}", e),
             }
