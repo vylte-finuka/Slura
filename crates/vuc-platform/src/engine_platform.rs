@@ -3158,236 +3158,7 @@ enum Network {
     Devnet,
 }
 
-#[tokio::main]
-async fn main() {
-    dotenv::dotenv().ok();
-    tracing_subscriber::fmt::init();
-    println!("🚀 Starting Slurachain network with Lurosonie consensus...");
-
-    // ✅ Ouvre RocksDB UNE SEULE FOIS et partage l'Arc partout
-    let storage: Arc<RocksDBManagerImpl> = Arc::new(RocksDBManagerImpl::new());
-
-    // ✅ Initialisation de la VM Slurachain
-    let vm = Arc::new(TokioRwLock::new(SlurachainVm::new()));
-    let mut validator_address_generated = String::new();
-    
-    {
-        let mut vm_guard = vm.write().await;
-        vm_guard.set_storage_manager(storage.clone());
-        
-        // ✅ CRÉATION DU COMPTE SYSTÈME
-        println!("🏛️ Creating system account...");
-        validator_address_generated = {
-            match assign_private_key_to_system_account(&mut vm_guard) {
-                Ok(privkey_hex) => {
-                    let accounts = vm_guard.state.accounts.read().unwrap();
-                    accounts.iter()
-                        .find(|(_, acc)| acc.resources.get("private_key").map(|v| v.as_str().unwrap_or("")) == Some(privkey_hex.as_str()))
-                        .map(|(addr, _)| addr.clone())
-                        .unwrap_or_else(|| {
-                            panic!("Adresse liée à la clé privée non trouvée !");
-                        })
-                }
-                Err(e) => {
-                    eprintln!("❌ Erreur lors de la génération de la clé privée du validateur: {}", e);
-                    panic!("Impossible de générer l'adresse du validateur !");
-                }
-            }
-        };
-
-        // ✅ VÉRIFICATION QUE LE MODULE EST BIEN ENREGISTRÉ
-        if vm_guard.modules.contains_key("0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448") {
-            println!("✅ VEZ module correctly registered");
-            println!("   • Functions available: {:?}", 
-                   vm_guard.modules["0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448"].functions.keys().collect::<Vec<_>>());
-        } else {
-            eprintln!("❌ VEZ module NOT registered - initialization will fail");
-        }
-        
-        // ✅ CRÉATION DES COMPTES INITIAUX avec VEZ
-        println!("👥 Creating initial accounts...");
-        if let Err(e) = create_initial_accounts_with_vez(&mut vm_guard, &validator_address_generated).await {
-            eprintln!("❌ Failed to create initial accounts: {}", e);
-        } else {
-            println!("✅ Initial accounts created with VEZ");
-        }
-        
-        println!("✅ VM Slurachain fully initialized with VEZ ecosystem");
-    }
-
-    // ✅ Canal pour les blocs
-    let (block_sender, block_receiver) = mpsc::channel(100);
-
-    // ✅ Manager Lurosonie avec storage
-    let lurosonie_manager = Arc::new(LurosonieManager::new_with_storage(
-        storage.clone(),
-        vm.clone(),
-        block_sender.clone()
-    ).await);
-
-    println!("✅ Manager Lurosonie initialisé");
-
-    // ✅ Service RPC Slurachain
-    let slurachain_service = Arc::new(tokio::sync::Mutex::new(SlurEthService::new()));
-    let rpc_service = slurachainRpcService::new(
-        8080, 
-        "http://0.0.0.0:8080".to_string(), 
-        "ws://0.0.0.0:8080".to_string(), 
-        slurachain_service.clone(), 
-        storage.clone(), 
-        block_receiver, 
-        lurosonie_manager.clone()
-    );
-
-    println!("✅ Service RPC Slurachain initialisé sur le port 8080");
-
-    let validator_address = validator_address_generated.clone();
-    // Define the cluster variable here (choose the appropriate variant)
-    let cluster = Network::Mainnet; // Or use Mainnet/Testnet as needed
-
-    let cluster_str = match cluster {
-        Network::Mainnet => "mainnet",
-        Network::Testnet => "testnet",
-        Network::Devnet  => "devnet",
-    };
-    
-    // ✅ VM initialisée avec le cluster
-    let vm = Arc::new(TokioRwLock::new(SlurachainVm::new_with_cluster(cluster_str)));
-    
-    // ✅ EnginePlatform reçoit aussi le cluster
-    let engine_platform = Arc::new(EnginePlatform::new(
-        "vyft_slurachain".to_string(),
-        vec![],
-        rpc_service,
-        vm.clone(),
-        validator_address,
-        cluster_str.to_string(),
-    ));
-
-    // ✅ Initialisation de la VM Slurachain
-    let vm = Arc::new(TokioRwLock::new(SlurachainVm::new()));
-    let mut validator_address_generated = String::new();
-    
-    {
-        let mut vm_guard = vm.write().await;
-        vm_guard.set_storage_manager(storage.clone());
-        
-        // ✅ CRÉATION DU COMPTE SYSTÈME
-        println!("🏛️ Creating system account...");
-        validator_address_generated = {
-            match assign_private_key_to_system_account(&mut vm_guard) {
-                Ok(privkey_hex) => {
-                    let accounts = vm_guard.state.accounts.read().unwrap();
-                    accounts.iter()
-                        .find(|(_, acc)| acc.resources.get("private_key").map(|v| v.as_str().unwrap_or("")) == Some(privkey_hex.as_str()))
-                        .map(|(addr, _)| addr.clone())
-                        .unwrap_or_else(|| {
-                            panic!("Adresse liée à la clé privée non trouvée !");
-                        })
-                }
-                Err(e) => {
-                    eprintln!("❌ Erreur lors de la génération de la clé privée du validateur: {}", e);
-                    panic!("Impossible de générer l'adresse du validateur !");
-                }
-            }
-        };
-
-        // ✅ VÉRIFICATION QUE LE MODULE EST BIEN ENREGISTRÉ
-        if vm_guard.modules.contains_key("0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448") {
-            println!("✅ VEZ module correctly registered");
-            println!("   • Functions available: {:?}", 
-                   vm_guard.modules["0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448"].functions.keys().collect::<Vec<_>>());
-        } else {
-            eprintln!("❌ VEZ module NOT registered - initialization will fail");
-        }
-        
-        // ✅ CRÉATION DES COMPTES INITIAUX avec VEZ
-        println!("👥 Creating initial accounts...");
-        if let Err(e) = create_initial_accounts_with_vez(&mut vm_guard, &validator_address_generated).await {
-            eprintln!("❌ Failed to create initial accounts: {}", e);
-        } else {
-            println!("✅ Initial accounts created with VEZ");
-        }
-        
-        println!("✅ VM Slurachain fully initialized with VEZ ecosystem");
-    }
-
-    // ✅ Canal pour les blocs
-    let (block_sender, block_receiver) = mpsc::channel(100);
-
-    // ✅ Manager Lurosonie avec storage
-    let lurosonie_manager = Arc::new(LurosonieManager::new_with_storage(
-        storage.clone(),
-        vm.clone(),
-        block_sender.clone()
-    ).await);
-
-    println!("✅ Manager Lurosonie initialisé");
-
-    // ✅ Service RPC Slurachain
-    let slurachain_service = Arc::new(tokio::sync::Mutex::new(SlurEthService::new()));
-    let rpc_service = slurachainRpcService::new(
-        8080, 
-        "http://0.0.0.0:8080".to_string(), 
-        "ws://0.0.0.0:8080".to_string(), 
-        slurachain_service.clone(), 
-        storage.clone(), 
-        block_receiver, 
-        lurosonie_manager.clone()
-    );
-
-    println!("✅ Service RPC Slurachain initialisé sur le port 8080");
-
-    let validator_address = validator_address_generated.clone();
-
-    // ✅ Engine Platform
-    let engine_platform = Arc::new(EnginePlatform::new(
-        "vyft_slurachain".to_string(),
-        vec![],
-        rpc_service.clone(),
-        vm.clone(),
-        validator_address.clone(),
-        match cluster.clone() {
-            Network::Mainnet => "mainnet".to_string(),
-            Network::Testnet => "testnet".to_string(),
-            Network::Devnet => "devnet".to_string(),
-        },
-    ));
-
-    // ✅ NOUVEAU: SAUVEGARDE PÉRIODIQUE (toutes les 60 secondes)  
-    let engine_clone_persist = Arc::clone(&engine_platform);
-    let persistence_handle = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(60));
-        loop {
-            interval.tick().await;
-            
-            // ✅ APPEL DIRECT SANS CAPTURE DE VARIABLES NON-SEND
-            if let Err(e) = engine_clone_persist.persist_all_state().await {
-                eprintln!("⚠️ Échec sauvegarde périodique: {}", e);
-            } else {
-                println!("💾 Sauvegarde périodique réussie");
-            }
-        }
-    });
-    
-    // ✅ MODE INSTANT-FINALITY POUR DEV LOCAL (MetaMask UX parfaite)
-    let engine_clone = Arc::clone(&engine_platform);
-    let lurosonie_manager_clone = Arc::clone(&lurosonie_manager);
-    tokio::spawn(async move {
-        let mut rx = lurosonie_manager_clone.mempool_tx_receiver().await;
-        while let Some(tx_request) = rx.recv().await {
-            let block_number = {
-                let height = lurosonie_manager_clone.get_block_height().await;
-                height + 1
-            };
-        
-            let tx_hashes = vec![tx_request.hash.clone()];
-            let _ = engine_clone.block_finalized_tx.send(tx_hashes.clone());
-            println!("INSTANT BLOCK #{} avec tx {}", block_number, tx_request.hash);
-        }
-    });
-
-    println!("✅ Engine Platform initialisé");
+"✅ Engine Platform initialisé");
 
     // ✅ Créer et émettre le bloc genesis Lurosonie
     println!("📦 Creating Lurosonie genesis block...");
@@ -3413,12 +3184,26 @@ async fn main() {
         engine_clone.start_server().await;
     });
 
-    // Acquire a write lock on vm to get vm_guard before deploying the contract
-    {
-        let mut vm_guard = vm.write().await;
-        engine_platform.deploy_vez_contract_evm(&mut vm_guard, &validator_address_generated).await.expect("Failed to deploy VEZ contract");
+let engine_platform_clone = engine_platform.clone();
+let vm_clone = vm.clone();
+let validator_addr_clone = validator_address_generated.clone();
+let lurosonie_manager_clone = lurosonie_manager.clone();
+
+tokio::spawn(async move {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await; // ⏳ poll ou branche sur ton event de bloc !
+        let block_number = lurosonie_manager_clone.get_block_height().await;
+        if block_number == 1 {
+            println!("🪙 Block #1 produit — déploiement du contrat VEZ...");
+            let mut vm_guard = vm_clone.write().await;
+            match engine_platform_clone.deploy_vez_contract_evm(&mut vm_guard, &validator_addr_clone).await {
+                Ok(_) => println!("✅ VEZ contract deployed at 0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448"),
+                Err(e) => eprintln!("❌ Failed to deploy VEZ contract at block 1: {}", e),
+            }
+            break;
+        }
     }
-    println!("✅ VEZ contract deployed at 0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448");
+});
 
     // ✅ Tasks de monitoring...
     let cleanup_manager = lurosonie_manager.clone();
