@@ -1765,107 +1765,80 @@ pub async fn verify_contract_deployment(&self, contract_address: &str) -> Result
     }
 
     /// ✅ Déploiement du contrat VEZ (impl + proxy) avec appels initialize + mint
-pub async fn deploy_vez_contract_evm(
+/// Version SYNCHRONE du déploiement VEZ — à appeler en tenant déjà le lock write sur la VM
+pub fn deploy_vez_contract_evm_sync(
     &self,
     vm: &mut SlurachainVm,
     validator_address: &str,
 ) -> Result<(), String> {
     use sha3::{Digest, Keccak256};
     use std::collections::BTreeMap;
-    use hex;
-    use tokio::time::{sleep, Duration};
 
-    println!("🪙 [EVM] Déploiement du contrat VEZ (implémentation + proxy)...");
+    println!("🪙 [EVM] Déploiement SYNCHRONE du contrat VEZ (impl + proxy)...");
 
+    // Bytecode de l'implémentation
     let impl_bytecode_hex = include_str!("../../../vez_bytecode.hex");
     let impl_bytecode = hex::decode(impl_bytecode_hex.trim())
-        .map_err(|e| format!("Bytecode decode error: {}", e))?;
+        .map_err(|e| format!("Erreur décodage bytecode impl: {}", e))?;
+
+    // Calcul de l'adresse de l'implémentation (déterministe)
     let mut hasher = Keccak256::new();
     hasher.update(&impl_bytecode);
     let impl_hash = hasher.finalize();
-    let impl_address = format!("0x{}", hex::encode(&impl_hash[..20].to_vec()).to_lowercase());
+    let impl_address = format!("0x{}", hex::encode(&impl_hash[..20]));
 
-    let mut accounts = vm.state.accounts.write().unwrap();
-
-    // Implémentation
-    let impl_account = vuc_tx::slurachain_vm::AccountState {
-        address: impl_address.clone(),
-        balance: 0,
-        contract_state: impl_bytecode.clone(),
-        resources: BTreeMap::new(),
-        state_version: 1,
-        last_block_number: 0,
-        nonce: 0,
-        code_hash: "vez_impl_evm".to_string(),
-        storage_root: "vez_impl_root".to_string(),
-        is_contract: true,
-        gas_used: 0,
-    };
-    accounts.insert(impl_address.clone(), impl_account);
-
-    // Proxy
+    // Bytecode du proxy
     let proxy_address = "0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448";
     let proxy_bytecode_hex = include_str!("../../../vezcurpoxycore_bytecode.hex");
     let proxy_bytecode = hex::decode(proxy_bytecode_hex.trim())
-        .map_err(|e| format!("Proxy bytecode decode error: {}", e))?;
+        .map_err(|e| format!("Erreur décodage bytecode proxy: {}", e))?;
 
+    let mut accounts = vm.state.accounts.write().unwrap();
+
+    // 1. Déploiement de l'implémentation
+    accounts.insert(
+        impl_address.clone(),
+        vuc_tx::slurachain_vm::AccountState {
+            address: impl_address.clone(),
+            balance: 0,
+            contract_state: impl_bytecode,
+            resources: BTreeMap::new(),
+            state_version: 1,
+            last_block_number: 0,
+            nonce: 0,
+            code_hash: "vez_impl_evm".to_string(),
+            storage_root: "vez_impl_root".to_string(),
+            is_contract: true,
+            gas_used: 0,
+        },
+    );
+
+    // 2. Déploiement du proxy à l'adresse fixe
     let mut proxy_resources = BTreeMap::new();
-    proxy_resources.insert("implementation".to_string(), serde_json::Value::String(impl_address.clone()));
+    proxy_resources.insert("implementation".to_string(), serde_json::Value::String(impl_address));
     proxy_resources.insert("initialized".to_string(), serde_json::Value::Bool(false));
 
-    let proxy_account = vuc_tx::slurachain_vm::AccountState {
-        address: proxy_address.to_string(),
-        balance: 0,
-        contract_state: proxy_bytecode.clone(),
-        resources: proxy_resources,
-        state_version: 1,
-        last_block_number: 0,
-        nonce: 0,
-        code_hash: "vez_proxy_core".to_string(),
-        storage_root: "vez_proxy_root".to_string(),
-        is_contract: true,
-        gas_used: 0,
-    };
-    accounts.insert(proxy_address.to_string(), proxy_account);
-    drop(accounts);
+    accounts.insert(
+        proxy_address.to_string(),
+        vuc_tx::slurachain_vm::AccountState {
+            address: proxy_address.to_string(),
+            balance: 0,
+            contract_state: proxy_bytecode,
+            resources: proxy_resources,
+            state_version: 1,
+            last_block_number: 0,
+            nonce: 0,
+            code_hash: "vez_proxy_core".to_string(),
+            storage_root: "vez_proxy_root".to_string(),
+            is_contract: true,
+            gas_used: 0,
+        },
+    );
 
-    println!("✅ Bytecodes déployés en mémoire :");
+    println!("✅ Contrats VEZ déployés en mémoire :");
     println!("   • Implémentation : {}", impl_address);
-    println!("   • Proxy          : {}", proxy_address);
-    println!("⏳ Attente de 20 secondes avant d'envoyer initialize et mint...");
-    println!("   → Tu peux vérifier avec eth_getCode ou dans MetaMask pendant ce temps.");
+    println!("   • Proxy (adresse fixe) : {}", proxy_address);
 
-    // 🔥 DÉLAI DE 20 SECONDES
-    sleep(Duration::from_secs(20)).await;
-
-    println!("⏰ 20 secondes écoulées. Envoi des transactions d'initialisation...");
-
-    // Appels initialize + mint via send_transaction
-    let sender = validator_address.to_lowercase();
-    let calldata_init = hex::decode("8129fc1c00000000000000000000000053ae54b11251d5003e9aa51422405bc35a2ef32d").unwrap();
-    let calldata_mint = hex::decode("40c10f1900000000000000000000000053ae54b11251d5003e9aa51422405bc35a2ef32d0000000000000000000000000000000000000000000000000000000034d54b40").unwrap();
-
-    let init_tx = serde_json::json!({
-        "to": proxy_address,
-        "from": sender,
-        "gas": "0x4c4b40",
-        "value": "0x0",
-        "data": format!("0x{}", hex::encode(&calldata_init))
-    });
-    println!("⏳ Envoi de initialize(address)...");
-    let _ = self.send_transaction(init_tx).await;
-
-    let mint_tx = serde_json::json!({
-        "to": proxy_address,
-        "from": sender,
-        "gas": "0x4c4b40",
-        "value": "0x0",
-        "data": format!("0x{}", hex::encode(&calldata_mint))
-    });
-    println!("⏳ Envoi de mint(address,uint256)...");
-    let _ = self.send_transaction(mint_tx).await;
-
-    println!("✅ VEZ déployé et initialisé (proxy: {})", proxy_address);
     Ok(())
 }
     
@@ -3485,11 +3458,11 @@ async fn main() {
         engine_clone.start_server().await;
     });
 
-    let engine_platform_clone = engine_platform.clone();
 let vm_clone = vm.clone();
+let engine_platform_clone = engine_platform.clone();
 let validator_addr_clone = validator_address_generated.clone();
 let lurosonie_manager_clone = lurosonie_manager.clone();
-    
+
 tokio::spawn(async move {
     loop {
         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -3498,17 +3471,16 @@ tokio::spawn(async move {
         if block_number >= 1 {
             println!("🪙 Block #{} produit — déploiement du contrat VEZ...", block_number);
 
-            // ✅ Étape 1 : On récupère une référence mutable à la VM, mais ON NE FAIT RIEN D'ASYNC ICI
+            // ✅ On acquiert le lock, on fait le déploiement SYNCHRONE, on relâche immédiatement
             let deploy_result = {
                 let mut vm_guard = vm_clone.write().await;
 
-                // Appel SYNCHRONE (pas .await ici !)
-                // Ta fonction deploy_vez_contract_evm doit être modifiée pour être synchrone
-                engine_platform_clone.deploy_vez_contract_evm(&mut vm_guard, &validator_addr_clone)
+                // Version SYNCHRONE du déploiement (voir plus bas)
+                engine_platform_clone.deploy_vez_contract_evm_sync(&mut vm_guard, &validator_addr_clone)
             };
 
-            // ✅ Étape 2 : On traite le résultat APRÈS avoir relâché le lock
-            match deploy_result.await {
+            // ✅ On traite le résultat APRÈS avoir relâché le lock
+            match deploy_result {
                 Ok(_) => println!("✅ VEZ contract deployed at 0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448"),
                 Err(e) => eprintln!("❌ Failed to deploy VEZ contract at block 1: {}", e),
             }
@@ -3517,7 +3489,7 @@ tokio::spawn(async move {
         }
     }
 });
-
+    
     // ✅ Tasks de monitoring...
     let cleanup_manager = lurosonie_manager.clone();
     let cleanup_handle = tokio::spawn(async move {
