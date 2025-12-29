@@ -2893,18 +2893,6 @@ module.register_async_method("eth_getCode", move |params, _meta, _| {
 }
 
 impl EnginePlatform {
-    fn pad_hash_64(hex: &str) -> String {
-    let cleaned = hex.trim().strip_prefix("0x").unwrap_or(hex);
-    format!("0x{:0>64}", cleaned.to_lowercase())
-    }
-    pub async fn get_latest_block_info(&self) -> (u64, String) {
-        let height = self.rpc_service.lurosonie_manager.get_block_height().await;
-        let hash = self.rpc_service.lurosonie_manager.get_last_block_hash().await
-            .unwrap_or_else(|| format!("0x{:064x}", height));
-        (height, hash)
-    }
-}
-
 /// Génère une clé privée secp256k1 et l'associe à l'adresse système aléatoire
 pub fn assign_private_key_to_system_account(vm: &mut SlurachainVm) -> Result<String, anyhow::Error> {
     use k256::ecdsa::SigningKey;
@@ -4646,6 +4634,11 @@ fn pad_hash_64(hex: &str) -> String {
 
 // Add this method to the EnginePlatform impl block:
 impl EnginePlatform {
+fn pad_hash_64(hex: &str) -> String {
+    let cleaned = hex.trim().strip_prefix("0x").unwrap_or(hex);
+    format!("0x{:0>64}", cleaned.to_lowercase())
+}
+    
     /// Déploie un contrat via l'opcode EVM CREATE (0xf0)
     pub async fn deploy_contract_evm_create(&self, bytecode_hex: &str, from: &str, value: u64) -> Result<String, String> {
         let bytecode = if bytecode_hex.starts_with("0x") {
