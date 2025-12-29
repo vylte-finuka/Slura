@@ -3377,30 +3377,39 @@ async fn main() {
     let validator_address_clone = validator_address_generated.clone();
     let lurosonie_manager_clone = Arc::clone(&lurosonie_manager);
 
-    tokio::spawn(async move {
+tokio::spawn(async move {
     loop {
         tokio::time::sleep(Duration::from_secs(1)).await;
 
-        // ✅ Match correctement fermé
+        // ✅ Match correctement fermé avec accolade fermante
         let block_number = match lurosonie_manager_clone.get_block_height().await {
             Ok(height) => height,
             Err(e) => {
                 eprintln!("⚠️ Erreur lors de la récupération du block height : {}", e);
-                continue; // réessayer au prochain tour
-        };
+                continue; // on recommence la boucle immédiatement
+            } // ← accolade fermante du bloc Err
+        }; // ← point-virgule obligatoire ici car c'est une expression let
 
         println!("⏳ Block height actuel : {}", block_number);
 
         if block_number >= 1 {
             println!("🪙 Bloc #1 détecté ! Déploiement du contrat VEZ en cours...");
 
-            // Prendre le lock sur la VM ici
+            // Prise du lock write sur la VM
             let mut vm_guard = vm_clone.write().await;
 
-            deploy_vez_contract_evm(&mut vm_guard, &validator_address_clone).await;
-            break; // on sort après tentative
+            // Déploiement (on ignore le Result pour l'instant, ou tu peux gérer l'erreur)
+            let _ = deploy_vez_contract_evm(&mut vm_guard, &validator_address_clone).await;
+
+            // Optionnel : log de succès/erreur
+            println!("🎉 Tentative de déploiement VEZ effectuée.");
+
+            break; // on sort de la boucle après le déploiement
         }
-    } });
+    }
+
+    println!("🏁 Tâche d'attente et déploiement VEZ terminée.");
+});
 
     // ✅ Démarrage des services...
     let lurosonie_consensus = lurosonie_manager.clone();
