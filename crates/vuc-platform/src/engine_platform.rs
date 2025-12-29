@@ -2029,6 +2029,70 @@ pub async fn verify_contract_deployment(&self, contract_address: &str) -> Result
             Err(e) => Err(format!("Erreur VM transfer: {}", e)),
         }
     }
+
+    /// Déploie et initialise le contrat VEZ (implémentation + appels initialize/mint)
+pub async fn deploy_vez_contract_evm(&self) -> Result<(), String> {
+    use sha3::{Digest, Keccak256};
+    use hex;
+
+    println!("🪙 [EVM] Déploiement du contrat VEZ (implémentation + proxy)...");
+
+    // 1. Bytecode runtime de l'implémentation VEZ
+    let impl_bytecode_hex = include_str!("../../../vez_bytecode.hex");
+    let impl_bytecode = hex::decode(impl_bytecode_hex.trim())
+        .map_err(|e| format!("Bytecode decode error: {}", e))?;
+
+    // Adresse déterministe : Keccak256(bytecode)[12..32] → adresse Ethereum-style
+    let mut hasher = Keccak256::new();
+    hasher.update(&impl_bytecode);
+    let hash = hasher.finalize();
+    let vez_contract_addr = format!("0x{}", hex::encode(&hash[12..32])).to_lowercase();
+
+    println!("📍 Adresse déterministe du contrat VEZ : {}", vez_contract_addr);
+
+    // 2. Transaction initialize(address)
+    let init_calldata = hex::decode("8129fc1c00000000000000000000000053ae54b11251d5003e9aa51422405bc35a2ef32d")
+        .map_err(|e| format!("Invalid init calldata: {}", e))?;
+
+    let init_tx = serde_json::json!({
+        "to": vez_contract_addr,
+        "from": self.validator_address,
+        "gas": "0x4c4b40",
+        "value": "0x0",
+        "data": format!("0x{}", hex::encode(&init_calldata))
+    });
+
+    println!("⏳ Envoi de initialize(...) ...");
+    // Ici on sait que send_transaction retourne Result<String, String>
+    let init_tx_hash: String = self.send_transaction(init_tx).await
+        .map_err(|e| format!("Échec transaction initialize: {}", e))?;
+
+    println!("✅ Transaction initialize envoyée → hash: {}", init_tx_hash);
+
+    // 3. Transaction mint(address,uint256)
+    let mint_calldata = hex::decode("40c10f1900000000000000000000000053ae54b11251d5003e9aa51422405bc35a2ef32d0000000000000000000000000000000000000000000000000000000034d54b40")
+        .map_err(|e| format!("Invalid mint calldata: {}", e))?;
+
+    let mint_tx = serde_json::json!({
+        "to": vez_contract_addr,
+        "from": self.validator_address,
+        "gas": "0x4c4b40",
+        "value": "0x0",
+        "data": format!("0x{}", hex::encode(&mint_calldata))
+    });
+
+    println!("⏳ Envoi de mint(...) ...");
+    let mint_tx_hash: String = self.send_transaction(mint_tx).await
+        .map_err(|e| format!("Échec transaction mint: {}", e))?;
+
+    println!("✅ Transaction mint envoyée → hash: {}", mint_tx_hash);
+
+    println!("🎉 Contrat VEZ déployé et initialisé avec succès à l'adresse : {}", vez_contract_addr);
+    println!("   • initialize tx: {}", init_tx_hash);
+    println!("   • mint tx:       {}", mint_tx_hash);
+
+    Ok(())
+}
     
         /// ✅ Estimation du gas
     pub async fn estimate_gas(&self) -> u64 {
@@ -3715,70 +3779,6 @@ fn calculate_function_selector(function_name: &str) -> u32 {
     let mut hasher = DefaultHasher::new();
     function_name.hash(&mut hasher);
     (hasher.finish() & 0xFFFFFFFF) as u32
-}
-
-/// Déploie et initialise le contrat VEZ (implémentation + appels initialize/mint)
-pub async fn deploy_vez_contract_evm(&self) -> Result<(), String> {
-    use sha3::{Digest, Keccak256};
-    use hex;
-
-    println!("🪙 [EVM] Déploiement du contrat VEZ (implémentation + proxy)...");
-
-    // 1. Bytecode runtime de l'implémentation VEZ
-    let impl_bytecode_hex = include_str!("../../../vez_bytecode.hex");
-    let impl_bytecode = hex::decode(impl_bytecode_hex.trim())
-        .map_err(|e| format!("Bytecode decode error: {}", e))?;
-
-    // Adresse déterministe : Keccak256(bytecode)[12..32] → adresse Ethereum-style
-    let mut hasher = Keccak256::new();
-    hasher.update(&impl_bytecode);
-    let hash = hasher.finalize();
-    let vez_contract_addr = format!("0x{}", hex::encode(&hash[12..32])).to_lowercase();
-
-    println!("📍 Adresse déterministe du contrat VEZ : {}", vez_contract_addr);
-
-    // 2. Transaction initialize(address)
-    let init_calldata = hex::decode("8129fc1c00000000000000000000000053ae54b11251d5003e9aa51422405bc35a2ef32d")
-        .map_err(|e| format!("Invalid init calldata: {}", e))?;
-
-    let init_tx = serde_json::json!({
-        "to": vez_contract_addr,
-        "from": self.validator_address,
-        "gas": "0x4c4b40",
-        "value": "0x0",
-        "data": format!("0x{}", hex::encode(&init_calldata))
-    });
-
-    println!("⏳ Envoi de initialize(...) ...");
-    // Ici on sait que send_transaction retourne Result<String, String>
-    let init_tx_hash: String = self.send_transaction(init_tx).await
-        .map_err(|e| format!("Échec transaction initialize: {}", e))?;
-
-    println!("✅ Transaction initialize envoyée → hash: {}", init_tx_hash);
-
-    // 3. Transaction mint(address,uint256)
-    let mint_calldata = hex::decode("40c10f1900000000000000000000000053ae54b11251d5003e9aa51422405bc35a2ef32d0000000000000000000000000000000000000000000000000000000034d54b40")
-        .map_err(|e| format!("Invalid mint calldata: {}", e))?;
-
-    let mint_tx = serde_json::json!({
-        "to": vez_contract_addr,
-        "from": self.validator_address,
-        "gas": "0x4c4b40",
-        "value": "0x0",
-        "data": format!("0x{}", hex::encode(&mint_calldata))
-    });
-
-    println!("⏳ Envoi de mint(...) ...");
-    let mint_tx_hash: String = self.send_transaction(mint_tx).await
-        .map_err(|e| format!("Échec transaction mint: {}", e))?;
-
-    println!("✅ Transaction mint envoyée → hash: {}", mint_tx_hash);
-
-    println!("🎉 Contrat VEZ déployé et initialisé avec succès à l'adresse : {}", vez_contract_addr);
-    println!("   • initialize tx: {}", init_tx_hash);
-    println!("   • mint tx:       {}", mint_tx_hash);
-
-    Ok(())
 }
     
 /// ✅ NOUVELLE FONCTION: Extraction du symbole token depuis le bytecode
