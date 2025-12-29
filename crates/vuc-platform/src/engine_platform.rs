@@ -3444,9 +3444,7 @@ async fn main() {
   println!("🪙 Bloc #1 détecté ! Déploiement du contrat VEZ en cours...");
 
             let mut vm_guard = vm_clone.write().await;
-            engine_platform.deploy_vez_contract_evm().await.map_err(|e| {
-    eprintln!("❌ Échec déploiement VEZ: {}", e);
-})?;
+            engine_platform.deploy_vez_contract_evm().await;
 
     println!("🏁 Tâche d'attente et déploiement VEZ terminée.");
     
