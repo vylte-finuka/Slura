@@ -3381,7 +3381,6 @@ async fn main() {
     println!("✅ Engine Platform initialisé");
 
 // ✅ TOUT AU MÊME ENDROIT : Attente du bloc #1 + Déploiement VEZ
-{
     let vm_clone = Arc::clone(&vm);
     let validator_address_clone = validator_address_generated.clone();
     let lurosonie_manager_clone = Arc::clone(&lurosonie_manager);
@@ -3410,8 +3409,7 @@ async fn main() {
             deploy_vez_contract_evm(&mut vm_guard, &validator_address_clone).await;
             break; // on sort après tentative
         }
-    }
-});
+    };
 
     // ✅ Démarrage des services...
     let lurosonie_consensus = lurosonie_manager.clone();
