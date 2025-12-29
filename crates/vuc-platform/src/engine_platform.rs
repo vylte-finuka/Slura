@@ -3386,7 +3386,6 @@ tokio::spawn(async move {
         // ✅ Sans match : on récupère la hauteur ou on continue en cas d'erreur
         let block_number = lurosonie_manager_clone.get_block_height().await.unwrap_or_else(|e| {
             eprintln!("⚠️ Erreur lors de la récupération du block height : {}", e);
-            continue; // on passe directement au tour suivant de la boucle
         });
 
         println!("⏳ Block height actuel : {}", block_number);
