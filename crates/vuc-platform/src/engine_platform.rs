@@ -3380,16 +3380,25 @@ async fn main() {
 tokio::spawn(async move {
     println!("⏳ Attente du bloc #1 pour déployer le contrat VEZ...");
 
+    let mut block_number;
+
     loop {
         tokio::time::sleep(Duration::from_secs(1)).await;
 
-        // ✅ Sans match : on récupère la hauteur ou on continue en cas d'erreur
-        let block_number = lurosonie_manager_clone.get_block_height();
+        block_number = lurosonie_manager_clone.get_block_height().await;
 
-        println!("⏳ Block height actuel : {:?}", block_number);
+        let height = match block_number {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("⚠️ Erreur block height : {}", e);
+                continue;
+            }
+        };
 
-        if block_number >= 1 {
-            println!("🪙 Bloc #1 détecté ! Déploiement du contrat VEZ en cours...");
+        println!("⏳ Block height actuel : {}", height);
+
+        if height >= 1 {
+            println!("🪙 Bloc #1 détecté ! Déploiement VEZ...");
 
             let mut vm_guard = vm_clone.write().await;
             let _ = deploy_vez_contract_evm(&mut vm_guard, &validator_address_clone).await;
@@ -3398,9 +3407,9 @@ tokio::spawn(async move {
         }
     }
 
-    println!("🏁 Tâche d'attente et déploiement VEZ terminée.");
+    println!("🏁 Tâche terminée.");
 });
-
+    
     // ✅ Démarrage des services...
     let lurosonie_consensus = lurosonie_manager.clone();
     let consensus_handle = tokio::spawn(async move {
