@@ -8407,35 +8407,6 @@ fn pad_hash_64(hex: &str) -> String {
 
 // Add this method to the EnginePlatform impl block:
 impl EnginePlatform {
-    /// Déploie un contrat via l'opcode EVM CREATE (0xf0)
-    pub async fn deploy_contract_evm_create(&self, bytecode_hex: &str, from: &str, value: u64) -> Result<String, String> {
-        let bytecode = if bytecode_hex.starts_with("0x") {
-            hex::decode(&bytecode_hex[2..]).map_err(|e| format!("Invalid hex: {}", e))?
-        } else {
-            hex::decode(bytecode_hex).map_err(|e| format!("Invalid hex: {}", e))?
-        };
-
-        // Appel VM avec une transaction de déploiement (to = None)
-        let mut vm = self.vm.write().await;
-        let deploy_args = vec![
-            serde_json::Value::String(hex::encode(&bytecode)), // data
-            serde_json::Value::Number(serde_json::Number::from(value)),
-        ];
-        // Convention : module_path = "evm", function_name = "deploy"
-        let result = vm.execute_module("evm", "deploy", deploy_args, Some(from))
-            .map_err(|e| format!("VM deploy error: {}", e))?;
-
-        // L’adresse du contrat est retournée par l’opcode CREATE (dans r0)
-        let contract_address = match result {
-            serde_json::Value::String(addr) => addr,
-            serde_json::Value::Number(n) => format!("0x{:x}", n.as_u64().unwrap_or(0)),
-            _ => return Err("Invalid deploy result".to_string()),
-        };
-        Ok(contract_address)
-    }
-}
-
-    
     /// Finds the offset of a function selector in EVM bytecode (looks for PUSH4 + selector pattern).
     fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<usize> {
         // EVM PUSH4 opcode is 0x63, followed by 4 bytes (the selector)
