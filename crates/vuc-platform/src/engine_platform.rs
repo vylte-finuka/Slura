@@ -4678,5 +4678,5 @@ impl EnginePlatform {
             _ => return Err("Invalid deploy result".to_string()),
         };
         Ok(contract_address)
-    }
+    }}
 }
