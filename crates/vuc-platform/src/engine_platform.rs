@@ -2893,6 +2893,12 @@ module.register_async_method("eth_getCode", move |params, _meta, _| {
 }
 
 impl EnginePlatform {
+
+    fn pad_hash_64(hex: &str) -> String {
+    let cleaned = hex.trim().strip_prefix("0x").unwrap_or(hex);
+    format!("0x{:0>64}", cleaned.to_lowercase())
+}
+    
     pub async fn get_latest_block_info(&self) -> (u64, String) {
         let height = self.rpc_service.lurosonie_manager.get_block_height().await;
         let hash = self.rpc_service.lurosonie_manager.get_last_block_hash().await
@@ -3391,61 +3397,60 @@ println!("✅ Bloc genesis Lurosonie ajouté: {:?}", genesis_block);
     let lurosonie_manager_clone = Arc::clone(&lurosonie_manager);
 
     tokio::spawn(async move {
-    println!("⏳ Tâche unique lancée : attente du bloc #1 pour déployer le contrat VEZ...");
+        println!("⏳ Tâche unique lancée : attente du bloc #1 pour déployer le contrat VEZ...");
 
-    loop {
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
 
-        // ✅ CORRECTION CLÉ : le match est bien fermé grâce au `continue`
-        let block_number = match lurosonie_manager_clone.get_block_height().await {
-            Ok(height) => height,
-            Err(e) => {
-                eprintln!("⚠️ Erreur lors de la récupération du block height : {}", e);
-                continue; // ← on recommence la boucle sans assigner de valeur
-            }
-        };
-
-        println!("⏳ Block height actuel : {}", block_number);
-
-        if block_number < 1 {
-            continue;
-        }
-
-        println!("🪙 Bloc #1 détecté (height = {}) — Initialisation du contrat VEZ", block_number);
-
-        // Vérification anti-doublon
-        {
-            let vm_read = vm_clone.read().await;
-            let accounts = vm_read.state.accounts.read().unwrap();
-            let vez_address = "0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448";
-
-            if accounts.contains_key(vez_address) {
-                println!("ℹ️ Contrat VEZ déjà déployé — déploiement sauté.");
-                break;
-            }
-        }
-
-        // Déploiement
-        {
-            let mut vm_guard = vm_clone.write().await;
-
-            match deploy_vez_contract_evm(&mut vm_guard, &validator_address_clone).await {
-                Ok(_) => {
-                    println!("🎉 Contrat VEZ déployé, initialisé et minté avec succès !");
-                    println!("   Adresse publique : 0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448");
-                }
+            let block_number = match lurosonie_manager_clone.get_block_height().await {
+                Ok(height) => height,
                 Err(e) => {
-                    eprintln!("❌ Erreur lors du déploiement VEZ : {}", e);
-                    // Option : continue; pour réessayer plus tard
+                    eprintln!("⚠️ Erreur lors de la récupération du block height : {}", e);
+                    continue;
+                }
+            };
+
+            println!("⏳ Block height actuel : {}", block_number);
+
+            if block_number < 1 {
+                continue;
+            }
+
+            println!("🪙 Bloc #1 détecté (height = {}) — Initialisation du contrat VEZ", block_number);
+
+            // Vérification anti-doublon
+            {
+                let vm_read = vm_clone.read().await;
+                let accounts = vm_read.state.accounts.read().unwrap();
+                let vez_address = "0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448";
+
+                if accounts.contains_key(vez_address) {
+                    println!("ℹ️ Contrat VEZ déjà déployé — déploiement sauté.");
+                    break;
                 }
             }
+
+            // Déploiement
+            {
+                let mut vm_guard = vm_clone.write().await;
+
+                match deploy_vez_contract_evm(&mut vm_guard, &validator_address_clone).await {
+                    Ok(_) => {
+                        println!("🎉 Contrat VEZ déployé, initialisé et minté avec succès !");
+                        println!("   Adresse publique : 0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448");
+                    }
+                    Err(e) => {
+                        eprintln!("❌ Erreur lors du déploiement VEZ : {}", e);
+                    }
+                }
+            }
+
+            break;
         }
 
-        break; // on sort après la tentative
-    }
-
-    println!("🏁 Tâche d'initialisation VEZ terminée.");
-});
+        println!("🏁 Tâche d'initialisation VEZ terminée.");
+    });
+}
     
     // ✅ Démarrage des services...
     let lurosonie_consensus = lurosonie_manager.clone();
