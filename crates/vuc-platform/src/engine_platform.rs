@@ -3364,17 +3364,83 @@ async fn main() {
     println!("✅ Engine Platform initialisé");
 
     // ✅ Créer et émettre le bloc genesis Lurosonie
-    println!("📦 Creating Lurosonie genesis block...");
-    let genesis_block = TimestampRelease {
-        timestamp: Utc::now(),
-        log: "Lurosonie Genesis Block - Slurachain Network Initialized with VEZ Token".to_string(),
-        block_number: 0,
-        vyfties_id: "lurosonie_genesis".to_string(),
-    };
+println!("📦 Creating Lurosonie genesis block...");
+let genesis_block = TimestampRelease {
+    timestamp: Utc::now(),
+    log: "Lurosonie Genesis Block - Slurachain Network Initialized with VEZ Token".to_string(),
+    block_number: 0,
+    vyfties_id: "lurosonie_genesis".to_string(),
+};
 
-    lurosonie_manager.add_block_to_chain(genesis_block.clone(), None).await;
-    println!("✅ Bloc genesis Lurosonie ajouté: {:?}", genesis_block);
+lurosonie_manager.add_block_to_chain(genesis_block.clone(), None).await;
+println!("✅ Bloc genesis Lurosonie ajouté: {:?}", genesis_block);
 
+// ✅ TOUT AU MÊME ENDROIT : Attente du bloc #1 + Déploiement VEZ
+{
+    let vm_clone = Arc::clone(&vm);
+    let validator_address_clone = validator_address_generated.clone();
+    let lurosonie_manager_clone = Arc::clone(&lurosonie_manager);
+
+    tokio::spawn(async move {
+        println!("⏳ Tâche unique lancée : attente du bloc #1 pour déployer le contrat VEZ...");
+
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+
+            let block_number = match lurosonie_manager_clone.get_block_height().await {
+                Ok(height) => height,
+                Err(e) => {
+                    eprintln!("⚠️ Erreur récupération block height : {}", e);
+                    continue;
+                }
+            };
+
+            // Optionnel : afficher la progression
+            if block_number < 1 {
+                println!("⏳ Block height actuel : {} — attente du bloc #1...", block_number);
+                continue;
+            }
+
+            // === BLOC #1 DÉTECTÉ ===
+            println!("🪙 Bloc #1 détecté (height = {}) — Initialisation du contrat VEZ", block_number);
+
+            // Vérification rapide : déjà déployé ?
+            {
+                let vm_read = vm_clone.read().await;
+                let accounts = vm_read.state.accounts.read().unwrap();
+                let vez_address = "0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448";
+
+                if accounts.contains_key(vez_address) {
+                    println!("ℹ️ Contrat VEZ déjà présent à l'adresse {} — déploiement sauté.", vez_address);
+                    break;
+                }
+            }
+
+            // Déploiement réel
+            {
+                let mut vm_guard = vm_clone.write().await;
+
+                match deploy_vez_contract_evm(&mut vm_guard, &validator_address_clone).await {
+                    Ok(_) => {
+                        println!("🎉 Contrat VEZ déployé, initialisé et minté avec succès !");
+                        println!("   Adresse publique : 0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448");
+                        println!("   Mint de 888M VEZ effectué vers le validateur.");
+                    }
+                    Err(e) => {
+                        eprintln!("❌ Erreur critique lors du déploiement VEZ : {}", e);
+                        // Tu peux choisir de réessayer ou arrêter
+                        // continue; // ← décommente pour réessayer à chaque nouveau bloc
+                    }
+                }
+            }
+
+            break; // Sortie définitive après tentative
+        }
+
+        println!("🏁 Tâche d'initialisation VEZ terminée.");
+    });
+}
+    
     // ✅ Démarrage des services...
     let lurosonie_consensus = lurosonie_manager.clone();
     let consensus_handle = tokio::spawn(async move {
@@ -3669,10 +3735,6 @@ async fn save_system_state(
     let accounts = vm_read.state.accounts.read().unwrap();
     
     // ✅ Sauvegarde du contrat VEZ et des comptes système
-   
-   
-
-   
    
     for (address, account) in accounts.iter() {
         if account.is_contract || address == validator_address || address.starts_with("*") {
