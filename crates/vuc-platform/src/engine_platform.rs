@@ -1815,7 +1815,7 @@ pub fn deploy_vez_contract_evm_sync(
 
     // 2. Déploiement du proxy à l'adresse fixe
     let mut proxy_resources = BTreeMap::new();
-    proxy_resources.insert("implementation".to_string(), serde_json::Value::String(impl_address));
+    proxy_resources.insert("implementation".to_string(), serde_json::Value::String(impl_address.clone()));
     proxy_resources.insert("initialized".to_string(), serde_json::Value::Bool(false));
 
     accounts.insert(
