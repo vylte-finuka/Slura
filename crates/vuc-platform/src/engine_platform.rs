@@ -3390,42 +3390,38 @@ let genesis_block = TimestampRelease {
 lurosonie_manager.add_block_to_chain(genesis_block.clone(), None).await;
 println!("✅ Bloc genesis Lurosonie ajouté: {:?}", genesis_block);
 
-// ✅ TOUT AU MÊME ENDROIT : Attente du bloc #1 + Déploiement VEZ
 {
     let vm_clone = Arc::clone(&vm);
     let validator_address_clone = validator_address_generated.clone();
     let lurosonie_manager_clone = Arc::clone(&lurosonie_manager);
 
     tokio::spawn(async move {
-        println!("⏳ Tâche unique lancée : attente du bloc #1 pour déployer le contrat VEZ...");
+        println!("⏳ Attente du bloc #1 pour déployer le contrat VEZ...");
 
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
 
+            // Version simple et correcte
             let block_number = match lurosonie_manager_clone.get_block_height().await {
                 Ok(height) => height,
                 Err(e) => {
-                    eprintln!("⚠️ Erreur lors de la récupération du block height : {}", e);
+                    eprintln!("⚠️ Erreur get_block_height : {}", e);
                     continue;
                 }
             };
-
-            println!("⏳ Block height actuel : {}", block_number);
 
             if block_number < 1 {
                 continue;
             }
 
-            println!("🪙 Bloc #1 détecté (height = {}) — Initialisation du contrat VEZ", block_number);
+            println!("🪙 Bloc #1 atteint ! Déploiement VEZ...");
 
-            // Vérification anti-doublon
+            // Vérif si déjà déployé
             {
                 let vm_read = vm_clone.read().await;
                 let accounts = vm_read.state.accounts.read().unwrap();
-                let vez_address = "0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448";
-
-                if accounts.contains_key(vez_address) {
-                    println!("ℹ️ Contrat VEZ déjà déployé — déploiement sauté.");
+                if accounts.contains_key("0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448") {
+                    println!("ℹ️ VEZ déjà déployé → rien à faire.");
                     break;
                 }
             }
@@ -3433,22 +3429,17 @@ println!("✅ Bloc genesis Lurosonie ajouté: {:?}", genesis_block);
             // Déploiement
             {
                 let mut vm_guard = vm_clone.write().await;
-
-                match deploy_vez_contract_evm(&mut vm_guard, &validator_address_clone).await {
-                    Ok(_) => {
-                        println!("🎉 Contrat VEZ déployé, initialisé et minté avec succès !");
-                        println!("   Adresse publique : 0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448");
-                    }
-                    Err(e) => {
-                        eprintln!("❌ Erreur lors du déploiement VEZ : {}", e);
-                    }
+                if let Err(e) = deploy_vez_contract_evm(&mut vm_guard, &validator_address_clone).await {
+                    eprintln!("❌ Échec déploiement VEZ : {}", e);
+                } else {
+                    println!("🎉 Contrat VEZ déployé avec succès !");
                 }
             }
 
             break;
         }
 
-        println!("🏁 Tâche d'initialisation VEZ terminée.");
+        println!("🏁 Initialisation VEZ terminée.");
     });
 }
     
