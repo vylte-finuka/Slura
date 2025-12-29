@@ -3508,7 +3508,7 @@ tokio::spawn(async move {
             };
 
             // ✅ Étape 2 : On traite le résultat APRÈS avoir relâché le lock
-            match deploy_result {
+            match deploy_result.await {
                 Ok(_) => println!("✅ VEZ contract deployed at 0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448"),
                 Err(e) => eprintln!("❌ Failed to deploy VEZ contract at block 1: {}", e),
             }
