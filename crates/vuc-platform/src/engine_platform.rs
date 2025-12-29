@@ -32,14 +32,6 @@ use vuc_tx::slurachain_vm::SlurachainVm;
 use uvm_runtime::lib::BTreeMap;
 use vuc_tx::slurachain_vm::Signer;
 
-// Define the Network enum for cluster selection
-#[derive(Clone, Debug)]
-enum Network {
-    Mainnet,
-    Testnet,
-    Devnet,
-}
-
 // ✅ AJOUT: Structures pour le déploiement avec possession
 #[derive(Clone, Debug)]
 pub struct ContractDeploymentArgsWithOwnership {
@@ -2901,6 +2893,14 @@ module.register_async_method("eth_getCode", move |params, _meta, _| {
 }
 
 impl EnginePlatform {
+    pub async fn get_latest_block_info(&self) -> (u64, String) {
+        let height = self.rpc_service.lurosonie_manager.get_block_height().await;
+        let hash = self.rpc_service.lurosonie_manager.get_last_block_hash().await
+            .unwrap_or_else(|| format!("0x{:064x}", height));
+        (height, hash)
+    }
+}
+
 /// Génère une clé privée secp256k1 et l'associe à l'adresse système aléatoire
 pub fn assign_private_key_to_system_account(vm: &mut SlurachainVm) -> Result<String, anyhow::Error> {
     use k256::ecdsa::SigningKey;
@@ -3128,6 +3128,14 @@ mod tests {
     }
 }
 
+// Define the Network enum for cluster selection
+#[derive(Clone, Debug)]
+enum Network {
+    Mainnet,
+    Testnet,
+    Devnet,
+}
+
 #[tokio::main]
 async fn main() {
     dotenv::dotenv().ok();
@@ -3261,6 +3269,23 @@ async fn main() {
                 }
             }
         };
+
+        // ✅ DÉPLOIEMENT DU CONTRAT VEZ avec bytecode spécifique
+        println!("🪙 Deploying VEZ contract with bytecode...");
+        if let Err(e) = deploy_vez_contract_evm(&mut vm_guard, &validator_address_generated).await {
+            eprintln!("❌ Failed to deploy VEZ contract: {}", e);
+        } else {
+            println!("✅ VEZ contract deployed successfully with bytecode");
+        }
+
+        // ✅ VÉRIFICATION QUE LE MODULE EST BIEN ENREGISTRÉ
+        if vm_guard.modules.contains_key("0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448") {
+            println!("✅ VEZ module correctly registered");
+            println!("   • Functions available: {:?}", 
+                   vm_guard.modules["0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448"].functions.keys().collect::<Vec<_>>());
+        } else {
+            eprintln!("❌ VEZ module NOT registered - initialization will fail");
+        }
         
         // ✅ CRÉATION DES COMPTES INITIAUX avec VEZ
         println!("👥 Creating initial accounts...");
@@ -3355,18 +3380,6 @@ async fn main() {
 
     println!("✅ Engine Platform initialisé");
 
-    // ✅ Créer et émettre le bloc genesis Lurosonie
-println!("📦 Creating Lurosonie genesis block...");
-let genesis_block = TimestampRelease {
-    timestamp: Utc::now(),
-    log: "Lurosonie Genesis Block - Slurachain Network Initialized with VEZ Token".to_string(),
-    block_number: 0,
-    vyfties_id: "lurosonie_genesis".to_string(),
-};
-
-lurosonie_manager.add_block_to_chain(genesis_block.clone(), None).await;
-println!("✅ Bloc genesis Lurosonie ajouté: {:?}", genesis_block);
-
 // ✅ TOUT AU MÊME ENDROIT : Attente du bloc #1 + Déploiement VEZ
 {
     let vm_clone = Arc::clone(&vm);
@@ -3399,7 +3412,7 @@ println!("✅ Bloc genesis Lurosonie ajouté: {:?}", genesis_block);
         }
     }
 });
-    
+
     // ✅ Démarrage des services...
     let lurosonie_consensus = lurosonie_manager.clone();
     let consensus_handle = tokio::spawn(async move {
@@ -3666,6 +3679,10 @@ async fn save_system_state(
     let accounts = vm_read.state.accounts.read().unwrap();
     
     // ✅ Sauvegarde du contrat VEZ et des comptes système
+   
+   
+
+   
    
     for (address, account) in accounts.iter() {
         if account.is_contract || address == validator_address || address.starts_with("*") {
@@ -3988,7 +4005,9 @@ fn extract_token_symbol_from_bytecode(bytecode: &[u8]) -> Option<String> {
            string.chars().all(|c| c.is_ascii_uppercase()) &&
            !string.chars().all(|c| c.is_numeric()) {
             
-            {
+            // Priorité aux symboles contenant "VEZ", "EUR", etc.
+            if string.contains("VEZ") || string.contains("EUR") || 
+               string.contains("TOK") || string.contains("ERC") {
                 return Some(string.clone());
             }
         }
@@ -4634,11 +4653,6 @@ fn pad_hash_64(hex: &str) -> String {
 
 // Add this method to the EnginePlatform impl block:
 impl EnginePlatform {
-fn pad_hash_64(hex: &str) -> String {
-    let cleaned = hex.trim().strip_prefix("0x").unwrap_or(hex);
-    format!("0x{:0>64}", cleaned.to_lowercase())
-}
-    
     /// Déploie un contrat via l'opcode EVM CREATE (0xf0)
     pub async fn deploy_contract_evm_create(&self, bytecode_hex: &str, from: &str, value: u64) -> Result<String, String> {
         let bytecode = if bytecode_hex.starts_with("0x") {
@@ -4665,6 +4679,4 @@ fn pad_hash_64(hex: &str) -> String {
         };
         Ok(contract_address)
     }
-}
-}
-}
+    }
