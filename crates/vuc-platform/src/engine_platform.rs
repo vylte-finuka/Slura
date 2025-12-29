@@ -3268,7 +3268,7 @@ async fn main() {
                     panic!("Impossible de générer l'adresse du validateur !");
                 }
             }
-        };..¾
+        };
 
         // ✅ VÉRIFICATION QUE LE MODULE EST BIEN ENREGISTRÉ
         if vm_guard.modules.contains_key("0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448") {
