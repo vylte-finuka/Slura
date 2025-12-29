@@ -5,7 +5,6 @@ use rand::Rng;
 use vuc_events::timestamp_release::TimestampRelease;
 use vuc_platform::slurachain_rpc_service::TxRequest;
 use std::net::SocketAddr;
-use std::sync::{Arc, RwLock};
 use tokio::sync::RwLock as TokioRwLock;
 use hashbrown::HashMap;
 use tracing::{info, error};
