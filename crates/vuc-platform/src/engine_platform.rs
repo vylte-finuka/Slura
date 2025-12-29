@@ -5,6 +5,7 @@ use rand::Rng;
 use vuc_events::timestamp_release::TimestampRelease;
 use vuc_platform::slurachain_rpc_service::TxRequest;
 use std::net::SocketAddr;
+use std::sync::{Arc, RwLock};
 use tokio::sync::RwLock as TokioRwLock;
 use hashbrown::HashMap;
 use tracing::{info, error};
@@ -3488,18 +3489,30 @@ async fn main() {
 let vm_clone = vm.clone();
 let validator_addr_clone = validator_address_generated.clone();
 let lurosonie_manager_clone = lurosonie_manager.clone();
-
+    
 tokio::spawn(async move {
     loop {
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await; // ⏳ poll ou branche sur ton event de bloc !
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
         let block_number = lurosonie_manager_clone.get_block_height().await;
-        if block_number == 1 {
-            println!("🪙 Block #1 produit — déploiement du contrat VEZ...");
-            let mut vm_guard = vm_clone.write().await;
-            match engine_platform_clone.deploy_vez_contract_evm(&mut vm_guard, &validator_addr_clone).await {
+        if block_number >= 1 {
+            println!("🪙 Block #{} produit — déploiement du contrat VEZ...", block_number);
+
+            // ✅ Étape 1 : On récupère une référence mutable à la VM, mais ON NE FAIT RIEN D'ASYNC ICI
+            let deploy_result = {
+                let mut vm_guard = vm_clone.write().await;
+
+                // Appel SYNCHRONE (pas .await ici !)
+                // Ta fonction deploy_vez_contract_evm doit être modifiée pour être synchrone
+                engine_platform_clone.deploy_vez_contract_evm_sync(&mut vm_guard, &validator_addr_clone)
+            };
+
+            // ✅ Étape 2 : On traite le résultat APRÈS avoir relâché le lock
+            match deploy_result {
                 Ok(_) => println!("✅ VEZ contract deployed at 0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448"),
                 Err(e) => eprintln!("❌ Failed to deploy VEZ contract at block 1: {}", e),
             }
+
             break;
         }
     }
@@ -4495,4 +4508,4 @@ impl EnginePlatform {
         };
         Ok(contract_address)
     }
-}
+                                            }
