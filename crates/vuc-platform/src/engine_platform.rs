@@ -3395,16 +3395,11 @@ tokio::spawn(async move {
         if block_number >= 1 {
             println!("🪙 Bloc #1 détecté ! Déploiement du contrat VEZ en cours...");
 
-            // Prise du lock write sur la VM
+            // Prendre le lock sur la VM ici
             let mut vm_guard = vm_clone.write().await;
 
-            // Déploiement (on ignore le Result pour l'instant, ou tu peux gérer l'erreur)
-            let _ = deploy_vez_contract_evm(&mut vm_guard, &validator_address_clone).await;
-
-            // Optionnel : log de succès/erreur
-            println!("🎉 Tentative de déploiement VEZ effectuée.");
-
-            break; // on sort de la boucle après le déploiement
+            deploy_vez_contract_evm(&mut vm_guard, &validator_address_clone).await;
+            break; // on sort après tentative
         }
     }
 
