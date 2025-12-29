@@ -3716,85 +3716,75 @@ fn calculate_function_selector(function_name: &str) -> u32 {
 }
 
 
-/// ✅ CORRECTION TOTALE: Détection 100% dynamique depuis le bytecode uniquement
 async fn deploy_vez_contract_evm(vm: &mut SlurachainVm, validator_address: &str) -> Result<(), String> {
     use vuc_tx::slurachain_vm::AccountState;
     use sha3::{Digest, Keccak256};
     use std::collections::BTreeMap;
+    use hex;
 
     println!("🪙 [EVM] Déploiement du contrat VEZ (implémentation + proxy)...");
 
-    // 1) Déployer l'implémentation VEZ
+    // 1) Lire le bytecode de VEZ déployé (runtime, PAS creation code)
     let impl_bytecode_hex = include_str!("../../../vez_bytecode.hex");
-    let impl_bytecode = hex::decode(impl_bytecode_hex.trim()).map_err(|e| format!("Bytecode decode error: {}", e))?;
+    let impl_bytecode = hex::decode(impl_bytecode_hex.trim())
+        .map_err(|e| format!("Bytecode decode error: {}", e))?;
 
-    // Adresse déterministe de l'implémentation
+    // Adresse déterministe de l'implémentation (hash du bytecode)
     let mut hasher = Keccak256::new();
     hasher.update(&impl_bytecode);
     let impl_hash = hasher.finalize();
     let impl_address = format!("0x{}", hex::encode(&impl_hash)[..40].to_string()).to_lowercase();
 
-    // Lecture ABI VEZ
+    // (Optionnel) Lecture/merge ABI — si tu veux créer la table des selectors/offsets
     let abi_json = std::fs::read_to_string("VEZABI.json").map_err(|e| format!("VEZABI.json manquant: {}", e))?;
     let abi: serde_json::Value = serde_json::from_str(&abi_json).map_err(|e| format!("VEZABI.json invalide: {}", e))?;
-
-    // Lecture ABI proxy
     let proxy_abi_json = std::fs::read_to_string("vezcurproxycore.json").map_err(|e| format!("vezcurproxycore.json manquant: {}", e))?;
     let proxy_abi: serde_json::Value = serde_json::from_str(&proxy_abi_json).map_err(|e| format!("vezcurproxycore.json invalide: {}", e))?;
-
-    // Fusionne les deux ABI
     let mut full_abi = Vec::new();
-    if let Some(arr) = abi.as_array() {
-        full_abi.extend(arr.clone());
-    }
-    if let Some(arr) = proxy_abi.as_array() {
-        full_abi.extend(arr.clone());
-    }
+    if let Some(arr) = abi.as_array() { full_abi.extend(arr.clone()); }
+    if let Some(arr) = proxy_abi.as_array() { full_abi.extend(arr.clone()); }
 
-    // Détection des fonctions pour l'implémentation + proxy
-    let mut impl_functions = hashbrown::HashMap::new();
-    for item in &full_abi {
-        if item.get("type").and_then(|v| v.as_str()) == Some("function") {
-            let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let inputs_vec = item.get("inputs").and_then(|v| v.as_array()).cloned().unwrap_or_else(Vec::new);
-            let mut types = Vec::new();
-            for inp in &inputs_vec {
-                if let Some(t) = inp.get("type").and_then(|v| v.as_str()) {
-                    types.push(t.to_string());
-                }
-            }
-            if name == "initialize" && types.is_empty() {
-                println!("✅ Correction: initialize() détectée avec 0 argument");
-            }
-            let signature = format!("{}({})", name, types.join(","));
-            let mut hasher = Keccak256::new();
-            hasher.update(signature.as_bytes());
-            let selector_bytes = hasher.finalize();
-            let selector = u32::from_be_bytes([selector_bytes[0], selector_bytes[1], selector_bytes[2], selector_bytes[3]]);
-            // --- AJOUT : calcul offset réel ---
-            let offset = find_function_offset_in_bytecode(&impl_bytecode, selector).unwrap_or(0);
+    // 2) Définir l'adresse de déploiement effective
+    let vez_contract_addr = impl_address.clone(); // ou l'adresse proxy si utilisée
 
-            impl_functions.insert(name.clone(), vuc_tx::slurachain_vm::FunctionMetadata {
-                name,
-                offset, // <-- offset correct ici !
-                args_count: types.len(),
-                arg_types: types.clone(),
-                return_type: item.get("outputs")
-                    .and_then(|v| v.as_array())
-                    .and_then(|arr| arr.get(0))
-                    .and_then(|out| out.get("type"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown")
-                    .to_string(),
-                gas_limit: 50000,
-                payable: item.get("stateMutability").and_then(|v| v.as_str()) == Some("payable"),
-                mutability: item.get("stateMutability").and_then(|v| v.as_str()).unwrap_or("nonpayable").to_string(),
-                selector,
-                modifiers: vec![],
-            });
-        }
-    }
+    // 3) Appel initialize(address) sur l'impl OU proxy (admin = validator_address OU destinataire voulu)
+    let admin_address = validator_address.to_lowercase();
+    let owner_address = "0x53ae54b11251d5003e9aa51422405bc35a2ef32d";
+    let init_calldata = hex::decode(
+        "8129fc1c00000000000000000000000053ae54b11251d5003e9aa51422405bc35a2ef32d"
+    ).unwrap();
+    let init_tx = serde_json::json!({
+        "to": vez_contract_addr,
+        "from": admin_address,
+        "gas": "0x4c4b40",
+        "value": "0x0",
+        "data": format!("0x{}", hex::encode(&init_calldata))
+    });
+    // Si EnginePlatform/trait, adapte :
+    let receipt_init = self.send_transaction(init_tx).await.map_err(|e| format!("Tx initialize failed: {e}"))?;
+    println!("⏳ Envoi de initialize(address) ...");
+    // TODO : exécute la tx via VM ici
 
+    // 4) Appel mint(address,uint256)
+    let mint_calldata = hex::decode(
+        "40c10f1900000000000000000000000053ae54b11251d5003e9aa51422405bc35a2ef32d0000000000000000000000000000000000000000000000000000000034d54b40"
+    ).unwrap();
+    let mint_tx = serde_json::json!({
+        "to": vez_contract_addr,
+        "from": admin_address,
+        "gas": "0x4c4b40",
+        "value": "0x0",
+        "data": format!("0x{}", hex::encode(&mint_calldata))
+    });
+    println!("⏳ Envoi de mint(address,uint256)...");
+    // TODO : exécute la tx via VM ici
+    let receipt_mint = self.send_transaction(mint_tx).await.map_err(|e| format!("Tx mint failed: {e}"))?;
+
+    // // Tu peux (optionnel) attendre, décoder, logguer tx/résultat...
+    println!("✅ Appels initialize + mint envoyés (sur {vez_contract_addr})");
+
+    Ok(())
+}
     
     /// Finds the offset of a function selector in EVM bytecode (looks for PUSH4 + selector pattern).
     fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<usize> {
