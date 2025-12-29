@@ -3469,22 +3469,62 @@ tokio::spawn(async move {
 
         let block_number = lurosonie_manager_clone.get_block_height().await;
         if block_number >= 1 {
-            println!("🪙 Block #{} produit — déploiement du contrat VEZ...", block_number);
+            println!("🪙 Bloc #1 détecté — Initialisation VEZ via send_transaction (calldata brut)");
 
-            // ✅ On acquiert le lock, on fait le déploiement SYNCHRONE, on relâche immédiatement
-            let deploy_result = {
-                let mut vm_guard = vm_clone.write().await;
+            let proxy_address = "0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448";
+            let admin = validator_addr_clone.clone();
 
-                // Version SYNCHRONE du déploiement (voir plus bas)
-                engine_platform_clone.deploy_vez_contract_evm_sync(&mut vm_guard, &validator_addr_clone)
-            };
+            // ✅ 1. Transaction initialize(address admin)
+            // Selector: keccak256("initialize(address)") = 0xc4d66de8
+            let mut init_calldata = vec![0xc4, 0xd6, 0x6d, 0xe8];
+            let mut padded_admin = vec![0u8; 32];
+            if let Ok(admin_bytes) = hex::decode(admin.trim_start_matches("0x")) {
+                padded_admin[12..32].copy_from_slice(&admin_bytes);
+            }
+            init_calldata.extend_from_slice(&padded_admin);
 
-            // ✅ On traite le résultat APRÈS avoir relâché le lock
-            match deploy_result {
-                Ok(_) => println!("✅ VEZ contract deployed at 0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448"),
-                Err(e) => eprintln!("❌ Failed to deploy VEZ contract at block 1: {}", e),
+            let init_tx_params = serde_json::json!({
+                "from": admin,
+                "to": proxy_address,
+                "data": format!("0x{}", hex::encode(&init_calldata)),
+                "value": "0x0",
+                "gas": "0x5208",
+                "gasPrice": "0x3b9aca00"
+            });
+
+            // ✅ 2. Transaction mint(address to, uint256 amount)
+            let mut mint_calldata = vec![0x40, 0xc1, 0x0f, 0x19]; // selector mint(address,uint256)
+            // to = admin
+            mint_calldata.extend_from_slice(&padded_admin);
+            // amount = 888_000_000 VEZ
+            let amount = 888_000_000_000_000_000_000_000_000u128;
+            let mut amount_bytes = [0u8; 32];
+            amount_bytes[16..32].copy_from_slice(&amount.to_be_bytes());
+            mint_calldata.extend_from_slice(&amount_bytes);
+
+            let mint_tx_params = serde_json::json!({
+                "from": admin,
+                "to": proxy_address,
+                "data": format!("0x{}", hex::encode(&mint_calldata)),
+                "value": "0x0",
+                "gas": "0x5208",
+                "gasPrice": "0x3b9aca00"
+            });
+
+            // ✅ Envoi via send_transaction (passe par mempool → bloc → exécution VM)
+            println!("🚀 Envoi transaction initialize via send_transaction...");
+            match engine_platform_clone.send_transaction(init_tx_params).await {
+                Ok(tx_hash) => println!("✅ initialize envoyé ! TX hash: {}", tx_hash),
+                Err(e) => eprintln!("❌ Erreur envoi initialize: {}", e),
             }
 
+            println!("🚀 Envoi transaction mint via send_transaction...");
+            match engine_platform_clone.send_transaction(mint_tx_params).await {
+                Ok(tx_hash) => println!("✅ mint(888M VEZ) envoyé ! TX hash: {}", tx_hash),
+                Err(e) => eprintln!("❌ Erreur envoi mint: {}", e),
+            }
+
+            println!("🎉 Contrat VEZ initialisé et minté via transactions réelles (traçables, persistantes) !");
             break;
         }
     }
