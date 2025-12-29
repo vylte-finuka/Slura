@@ -3504,7 +3504,7 @@ tokio::spawn(async move {
 
                 // Appel SYNCHRONE (pas .await ici !)
                 // Ta fonction deploy_vez_contract_evm doit être modifiée pour être synchrone
-                engine_platform_clone.deploy_vez_contract_evm_sync(&mut vm_guard, &validator_addr_clone)
+                engine_platform_clone.deploy_vez_contract_evm(&mut vm_guard, &validator_addr_clone)
             };
 
             // ✅ Étape 2 : On traite le résultat APRÈS avoir relâché le lock
