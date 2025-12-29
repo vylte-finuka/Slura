@@ -3158,7 +3158,7 @@ enum Network {
     Devnet,
 }
 
-"✅ Engine Platform initialisé");
+("✅ Engine Platform initialisé");
 
     // ✅ Créer et émettre le bloc genesis Lurosonie
     println!("📦 Creating Lurosonie genesis block...");
