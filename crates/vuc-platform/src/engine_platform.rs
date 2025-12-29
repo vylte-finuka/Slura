@@ -32,6 +32,14 @@ use vuc_tx::slurachain_vm::SlurachainVm;
 use uvm_runtime::lib::BTreeMap;
 use vuc_tx::slurachain_vm::Signer;
 
+// Define the Network enum for cluster selection
+#[derive(Clone, Debug)]
+enum Network {
+    Mainnet,
+    Testnet,
+    Devnet,
+}
+
 // ✅ AJOUT: Structures pour le déploiement avec possession
 #[derive(Clone, Debug)]
 pub struct ContractDeploymentArgsWithOwnership {
@@ -3118,14 +3126,6 @@ mod tests {
         
         println!("🎯 BENCHMARK RÉUSSI - Tous les critères respectés!");
     }
-}
-
-// Define the Network enum for cluster selection
-#[derive(Clone, Debug)]
-enum Network {
-    Mainnet,
-    Testnet,
-    Devnet,
 }
 
 #[tokio::main]
