@@ -3456,7 +3456,7 @@ async fn main() {
     // Acquire a write lock on vm to get vm_guard before deploying the contract
     {
         let mut vm_guard = vm.write().await;
-        engine_platform.engine_platform.deploy_vez_contract_evm().await.expect("Failed to deploy VEZ contract");
+        engine_platform.deploy_vez_contract_evm().await.expect("Failed to deploy VEZ contract");
     }
     println!("✅ VEZ contract deployed at 0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448");
 
