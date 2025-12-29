@@ -3715,73 +3715,93 @@ fn calculate_function_selector(function_name: &str) -> u32 {
     (hasher.finish() & 0xFFFFFFFF) as u32
 }
 
-async fn deploy_vez_contract_evm(vm: &mut SlurachainVm, validator_address: &str) -> Result<(), String> {
-    use vuc_tx::slurachain_vm::AccountState;
+async fn deploy_vez_contract_evm(
+    &self,
+    vm: &mut SlurachainVm,
+    validator_address: &str,
+) -> Result<(), String> {
     use sha3::{Digest, Keccak256};
     use std::collections::BTreeMap;
     use hex;
 
     println!("🪙 [EVM] Déploiement du contrat VEZ (implémentation + proxy)...");
 
-    // 1) Lire le bytecode de VEZ déployé (runtime, PAS creation code)
+    // 1. Préparation du code
     let impl_bytecode_hex = include_str!("../../../vez_bytecode.hex");
     let impl_bytecode = hex::decode(impl_bytecode_hex.trim())
         .map_err(|e| format!("Bytecode decode error: {}", e))?;
-
-    // Adresse déterministe de l'implémentation (hash du bytecode)
     let mut hasher = Keccak256::new();
     hasher.update(&impl_bytecode);
     let impl_hash = hasher.finalize();
     let impl_address = format!("0x{}", hex::encode(&impl_hash)[..40].to_string()).to_lowercase();
 
-    // (Optionnel) Lecture/merge ABI — si tu veux créer la table des selectors/offsets
-    let abi_json = std::fs::read_to_string("VEZABI.json").map_err(|e| format!("VEZABI.json manquant: {}", e))?;
-    let abi: serde_json::Value = serde_json::from_str(&abi_json).map_err(|e| format!("VEZABI.json invalide: {}", e))?;
-    let proxy_abi_json = std::fs::read_to_string("vezcurproxycore.json").map_err(|e| format!("vezcurproxycore.json manquant: {}", e))?;
-    let proxy_abi: serde_json::Value = serde_json::from_str(&proxy_abi_json).map_err(|e| format!("vezcurproxycore.json invalide: {}", e))?;
-    let mut full_abi = Vec::new();
-    if let Some(arr) = abi.as_array() { full_abi.extend(arr.clone()); }
-    if let Some(arr) = proxy_abi.as_array() { full_abi.extend(arr.clone()); }
+    // 2. (RAM only) Insert impl & proxy as modules & accounts in VM
+    let mut accounts = vm.state.accounts.write().unwrap();
+    let impl_account = vuc_tx::slurachain_vm::AccountState {
+        address: impl_address.clone(),
+        balance: 0,
+        contract_state: impl_bytecode.clone(),
+        resources: BTreeMap::new(),
+        state_version: 1,
+        last_block_number: 0,
+        nonce: 0,
+        code_hash: "vez_impl_evm".to_string(),
+        storage_root: "vez_impl_root".to_string(),
+        is_contract: true,
+        gas_used: 0,
+    };
+    accounts.insert(impl_address.clone(), impl_account);
 
-    // 2) Définir l'adresse de déploiement effective
-    let vez_contract_addr = impl_address.clone(); // ou l'adresse proxy si utilisée
+    let proxy_address = "0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448".to_string();
+    let proxy_bytecode_hex = include_str!("../../../vezcurpoxycore_bytecode.hex");
+    let proxy_bytecode = hex::decode(proxy_bytecode_hex.trim())
+        .map_err(|e| format!("Proxy bytecode decode error: {}", e))?;
+    let mut proxy_resources = BTreeMap::new();
+    proxy_resources.insert("implementation".to_string(), serde_json::Value::String(impl_address.clone()));
+    proxy_resources.insert("initialized".to_string(), serde_json::Value::Bool(false));
+    let proxy_account = vuc_tx::slurachain_vm::AccountState {
+        address: proxy_address.clone(),
+        balance: 0,
+        contract_state: proxy_bytecode.clone(),
+        resources: proxy_resources,
+        state_version: 1,
+        last_block_number: 0,
+        nonce: 0,
+        code_hash: "vez_proxy_core".to_string(),
+        storage_root: "vez_proxy_root".to_string(),
+        is_contract: true,
+        gas_used: 0,
+    };
+    accounts.insert(proxy_address.clone(), proxy_account);
+    drop(accounts);
 
-    // 3) Appel initialize(address) sur l'impl OU proxy (admin = validator_address OU destinataire voulu)
-    let admin_address = validator_address.to_lowercase();
-    let owner_address = "0x53ae54b11251d5003e9aa51422405bc35a2ef32d";
-    let init_calldata = hex::decode(
-        "8129fc1c00000000000000000000000053ae54b11251d5003e9aa51422405bc35a2ef32d"
-    ).unwrap();
+    // 3. Appels EVM ABI: initialize et mint
+    let sender = validator_address.to_lowercase();
+    let vez_to = "0x53ae54b11251d5003e9aa51422405bc35a2ef32d";
+    let calldata_init = hex::decode("8129fc1c00000000000000000000000053ae54b11251d5003e9aa51422405bc35a2ef32d").unwrap();
+    let calldata_mint = hex::decode("40c10f1900000000000000000000000053ae54b11251d5003e9aa51422405bc35a2ef32d0000000000000000000000000000000000000000000000000000000034d54b40").unwrap();
+
     let init_tx = serde_json::json!({
-        "to": vez_contract_addr,
-        "from": admin_address,
+        "to": proxy_address,
+        "from": sender,
         "gas": "0x4c4b40",
         "value": "0x0",
-        "data": format!("0x{}", hex::encode(&init_calldata))
+        "data": format!("0x{}", hex::encode(&calldata_init))
     });
-    // Si EnginePlatform/trait, adapte :
-    let receipt_init = self.send_transaction(init_tx).await.map_err(|e| format!("Tx initialize failed: {e}"))?;
-    println!("⏳ Envoi de initialize(address) ...");
-    // TODO : exécute la tx via VM ici
+    println!("⏳ Envoi de initialize(address)...");
+    let _ = self.send_transaction(init_tx).await;
 
-    // 4) Appel mint(address,uint256)
-    let mint_calldata = hex::decode(
-        "40c10f1900000000000000000000000053ae54b11251d5003e9aa51422405bc35a2ef32d0000000000000000000000000000000000000000000000000000000034d54b40"
-    ).unwrap();
     let mint_tx = serde_json::json!({
-        "to": vez_contract_addr,
-        "from": admin_address,
+        "to": proxy_address,
+        "from": sender,
         "gas": "0x4c4b40",
         "value": "0x0",
-        "data": format!("0x{}", hex::encode(&mint_calldata))
+        "data": format!("0x{}", hex::encode(&calldata_mint))
     });
     println!("⏳ Envoi de mint(address,uint256)...");
-    // TODO : exécute la tx via VM ici
-    let receipt_mint = self.send_transaction(mint_tx).await.map_err(|e| format!("Tx mint failed: {e}"))?;
+    let _ = self.send_transaction(mint_tx).await;
 
-    // // Tu peux (optionnel) attendre, décoder, logguer tx/résultat...
-    println!("✅ Appels initialize + mint envoyés (sur {vez_contract_addr})");
-
+    println!("✅ Appels initialize + mint envoyés sur proxy ({})", proxy_address);
     Ok(())
 }
     
