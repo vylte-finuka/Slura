@@ -3453,34 +3453,6 @@ println!("✅ Bloc genesis Lurosonie ajouté: {:?}", genesis_block);
         engine_clone.start_server().await;
     });
 
-    tokio::spawn(async move {
-    loop {
-        tokio::time::sleep(Duration::from_secs(1)).await;
-
-        let block_number = match lurosonie_manager_clone.get_block_height().await {
-            Ok(height) => height,
-            Err(e) => {
-                eprintln!("Erreur lors de la récupération du block height : {}", e);
-                continue; // on réessaie au tour suivant
-            }
-        };
-
-        if block_number >= 1 {
-            println!("🪙 Bloc #1 détecté — Initialisation VEZ via send_transaction (calldata brut)");
-
-            if let Err(e) = deploy_vez_contract_evm(&mut vm_guard, &validator_address_generated).await {
-                eprintln!("❌ Erreur lors du déploiement/mint du contrat VEZ : {}", e);
-                // Tu peux choisir de continuer la boucle ou de paniquer selon ton besoin
-                // continue; // ← décommente si tu veux réessayer indéfiniment en cas d'erreur
-            } else {
-                println!("🎉 Contrat VEZ initialisé et minté via transactions réelles (traçables, persistantes) !");
-            }
-
-            break; // on sort de la boucle dans tous les cas (succès ou erreur gérée)
-        }
-    }
-});
-
     // ✅ Tasks de monitoring...
     let cleanup_manager = lurosonie_manager.clone();
     let cleanup_handle = tokio::spawn(async move {
