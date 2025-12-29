@@ -3380,7 +3380,9 @@ async fn main() {
   println!("🪙 Bloc #1 détecté ! Déploiement du contrat VEZ en cours...");
 
             let mut vm_guard = vm_clone.write().await;
-            let _ = deploy_vez_contract_evm(&mut vm_guard, &validator_address_clone).await;
+            engine_platform.deploy_vez_contract_evm().await.map_err(|e| {
+    eprintln!("❌ Échec déploiement VEZ: {}", e);
+})?;
 
     println!("🏁 Tâche d'attente et déploiement VEZ terminée.");
     
@@ -3715,72 +3717,66 @@ fn calculate_function_selector(function_name: &str) -> u32 {
     (hasher.finish() & 0xFFFFFFFF) as u32
 }
 
-async fn deploy_vez_contract_evm(vm: &mut SlurachainVm, validator_address: &str) -> Result<(), String> {
-    use vuc_tx::slurachain_vm::AccountState;
+/// Déploie et initialise le contrat VEZ (implémentation + appels initialize/mint)
+pub async fn deploy_vez_contract_evm(&self) -> Result<(), String> {
     use sha3::{Digest, Keccak256};
-    use std::collections::BTreeMap;
     use hex;
 
     println!("🪙 [EVM] Déploiement du contrat VEZ (implémentation + proxy)...");
 
-    // 1) Lire le bytecode de VEZ déployé (runtime, PAS creation code)
+    // 1. Bytecode runtime de l'implémentation VEZ
     let impl_bytecode_hex = include_str!("../../../vez_bytecode.hex");
     let impl_bytecode = hex::decode(impl_bytecode_hex.trim())
         .map_err(|e| format!("Bytecode decode error: {}", e))?;
 
-    // Adresse déterministe de l'implémentation (hash du bytecode)
+    // Adresse déterministe : Keccak256(bytecode)[12..32] → adresse Ethereum-style
     let mut hasher = Keccak256::new();
     hasher.update(&impl_bytecode);
-    let impl_hash = hasher.finalize();
-    let impl_address = format!("0x{}", hex::encode(&impl_hash)[..40].to_string()).to_lowercase();
+    let hash = hasher.finalize();
+    let vez_contract_addr = format!("0x{}", hex::encode(&hash[12..32])).to_lowercase();
 
-    // (Optionnel) Lecture/merge ABI — si tu veux créer la table des selectors/offsets
-    let abi_json = std::fs::read_to_string("VEZABI.json").map_err(|e| format!("VEZABI.json manquant: {}", e))?;
-    let abi: serde_json::Value = serde_json::from_str(&abi_json).map_err(|e| format!("VEZABI.json invalide: {}", e))?;
-    let proxy_abi_json = std::fs::read_to_string("vezcurproxycore.json").map_err(|e| format!("vezcurproxycore.json manquant: {}", e))?;
-    let proxy_abi: serde_json::Value = serde_json::from_str(&proxy_abi_json).map_err(|e| format!("vezcurproxycore.json invalide: {}", e))?;
-    let mut full_abi = Vec::new();
-    if let Some(arr) = abi.as_array() { full_abi.extend(arr.clone()); }
-    if let Some(arr) = proxy_abi.as_array() { full_abi.extend(arr.clone()); }
+    println!("📍 Adresse déterministe du contrat VEZ : {}", vez_contract_addr);
 
-    // 2) Définir l'adresse de déploiement effective
-    let vez_contract_addr = impl_address.clone(); // ou l'adresse proxy si utilisée
+    // 2. Transaction initialize(address)
+    let init_calldata = hex::decode("8129fc1c00000000000000000000000053ae54b11251d5003e9aa51422405bc35a2ef32d")
+        .map_err(|e| format!("Invalid init calldata: {}", e))?;
 
-    // 3) Appel initialize(address) sur l'impl OU proxy (admin = validator_address OU destinataire voulu)
-    let admin_address = validator_address.to_lowercase();
-    let owner_address = "0x53ae54b11251d5003e9aa51422405bc35a2ef32d";
-    let init_calldata = hex::decode(
-        "8129fc1c00000000000000000000000053ae54b11251d5003e9aa51422405bc35a2ef32d"
-    ).unwrap();
     let init_tx = serde_json::json!({
         "to": vez_contract_addr,
-        "from": admin_address,
+        "from": self.validator_address,
         "gas": "0x4c4b40",
         "value": "0x0",
         "data": format!("0x{}", hex::encode(&init_calldata))
     });
-    // Si EnginePlatform/trait, adapte :
-    let receipt_init = self.send_transaction(init_tx).await.map_err(|e| format!("Tx initialize failed: {e}"))?;
-    println!("⏳ Envoi de initialize(address) ...");
-    // TODO : exécute la tx via VM ici
 
-    // 4) Appel mint(address,uint256)
-    let mint_calldata = hex::decode(
-        "40c10f1900000000000000000000000053ae54b11251d5003e9aa51422405bc35a2ef32d0000000000000000000000000000000000000000000000000000000034d54b40"
-    ).unwrap();
+    println!("⏳ Envoi de initialize(...) ...");
+    // Ici on sait que send_transaction retourne Result<String, String>
+    let init_tx_hash: String = self.send_transaction(init_tx).await
+        .map_err(|e| format!("Échec transaction initialize: {}", e))?;
+
+    println!("✅ Transaction initialize envoyée → hash: {}", init_tx_hash);
+
+    // 3. Transaction mint(address,uint256)
+    let mint_calldata = hex::decode("40c10f1900000000000000000000000053ae54b11251d5003e9aa51422405bc35a2ef32d0000000000000000000000000000000000000000000000000000000034d54b40")
+        .map_err(|e| format!("Invalid mint calldata: {}", e))?;
+
     let mint_tx = serde_json::json!({
         "to": vez_contract_addr,
-        "from": admin_address,
+        "from": self.validator_address,
         "gas": "0x4c4b40",
         "value": "0x0",
         "data": format!("0x{}", hex::encode(&mint_calldata))
     });
-    println!("⏳ Envoi de mint(address,uint256)...");
-    // TODO : exécute la tx via VM ici
-    let receipt_mint = self.send_transaction(mint_tx).await.map_err(|e| format!("Tx mint failed: {e}"))?;
 
-    // // Tu peux (optionnel) attendre, décoder, logguer tx/résultat...
-    println!("✅ Appels initialize + mint envoyés (sur {vez_contract_addr})");
+    println!("⏳ Envoi de mint(...) ...");
+    let mint_tx_hash: String = self.send_transaction(mint_tx).await
+        .map_err(|e| format!("Échec transaction mint: {}", e))?;
+
+    println!("✅ Transaction mint envoyée → hash: {}", mint_tx_hash);
+
+    println!("🎉 Contrat VEZ déployé et initialisé avec succès à l'adresse : {}", vez_contract_addr);
+    println!("   • initialize tx: {}", init_tx_hash);
+    println!("   • mint tx:       {}", mint_tx_hash);
 
     Ok(())
 }
