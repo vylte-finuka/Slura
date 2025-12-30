@@ -3383,168 +3383,183 @@ async fn main() {
 let vm_clone = vm.clone();
 // ✅ TOUT AU MÊME ENDROIT : Attente du bloc #1 + Déploiement VEZ
     
-// === Tâche de déploiement VEZ au démarrage (au même niveau qu'une tx RPC) ===
+// === Déploiement VEZ sécurisé et non-bloquant ===
 let engine_platform_clone = engine_platform.clone();
 let validator_address_clone = validator_address_generated.clone();
 let lurosonie_manager_clone = lurosonie_manager.clone();
 
 tokio::spawn(async move {
+    // Attente patiente du premier bloc
     loop {
-        tokio::time::sleep(Duration::from_secs(1)).await;
-
-        let current_height = lurosonie_manager_clone.get_block_height().await;
-        if current_height >= 1 {
-            println!("🪙 Bloc #{} détecté → Lancement du déploiement déterministe VEZ à l'adresse fixe 0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448", current_height);
-
-            let target_vez_address = "0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448".to_lowercase();
-
-            // ========================
-            // 1. Déploiement de l'implémentation VEZ
-            // ========================
-            let impl_bytecode = hex::decode(include_str!("../../../vez_bytecode.hex").trim())
-                .expect("Bytecode impl VEZ invalide");
-
-            let deploy_impl_tx = serde_json::json!({
-                "from": validator_address_clone,
-                "data": format!("0x{}", hex::encode(&impl_bytecode)),
-                "value": "0x0"
-            });
-
-            let impl_tx_hash = match engine_platform_clone.send_transaction(deploy_impl_tx).await {
-                Ok(hash) => {
-                    println!("✅ Implémentation VEZ envoyée via RPC-like → tx hash: {}", hash);
-                    hash
-                }
-                Err(e) => {
-                    eprintln!("❌ Échec envoi implémentation: {}", e);
-                    break;
-                }
-            };
-
-            // Attente de l'adresse de l'implémentation via receipt
-            let mut impl_address = String::new();
-            for _ in 0..40 {
-                tokio::time::sleep(Duration::from_millis(800)).await;
-                if let Ok(receipt) = engine_platform_clone.get_transaction_receipt(impl_tx_hash.clone()).await {
-                    if let Some(addr) = receipt.get("contractAddress").and_then(|v| v.as_str()) {
-                        impl_address = addr.to_lowercase();
-                        println!("✅ Adresse implémentation récupérée: {}", impl_address);
-                        break;
-                    }
-                }
-            }
-
-            if impl_address.is_empty() {
-                eprintln!("❌ Timeout: adresse implémentation non trouvée");
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        match lurosonie_manager_clone.get_block_height().await {
+            height if height >= 1 => {
+                println!("Bloc #{} détecté → Démarrage déploiement VEZ déterministe", height);
                 break;
             }
-
-            // ========================
-            // 2. Calcul du salt CREATE2 pour adresse fixe
-            // ========================
-            use sha3::{Digest, Keccak256};
-
-            let proxy_bytecode = hex::decode(include_str!("../../../vezcurpoxycore_bytecode.hex").trim())
-                .expect("Bytecode proxy invalide");
-
-            // Constructor arg: adresse de l'impl (padded left 12 bytes)
-            let mut encoded_impl = vec![0u8; 12];
-            encoded_impl.extend_from_slice(&hex::decode(&impl_address[2..]).unwrap());
-
-            let mut init_code = proxy_bytecode;
-            init_code.extend_from_slice(&encoded_impl);
-
-            let deployer_bytes = hex::decode(validator_address_clone.trim_start_matches("0x")).unwrap();
-
-            let mut salt: u64 = 0;
-            let found_salt = loop {
-                let mut hasher = Keccak256::new();
-                hasher.update([0xff]);
-                hasher.update(&deployer_bytes);
-                hasher.update(salt.to_be_bytes());
-                hasher.update(Keccak256::digest(&init_code));
-                let result = hasher.finalize();
-                let computed = format!("0x{}", hex::encode(&result[12..32])).to_lowercase();
-
-                if computed == target_vez_address {
-                    println!("🎯 Salt trouvé ! salt = {} → adresse = {}", salt, computed);
-                    break salt;
-                }
-
-                salt += 1;
-                if salt > 2_000_000 {
-                    eprintln!("❌ Salt non trouvé après 2M tentatives");
-                    break 0; // on continue quand même avec salt=0 si pas trouvé (rare)
-                }
-            };
-
-            // ========================
-            // 3. Déploiement du proxy avec CREATE2 (via send_transaction → traité comme RPC)
-            // ========================
-            let deploy_proxy_tx = serde_json::json!({
-                "from": validator_address_clone,
-                "data": format!("0x{}", hex::encode(&init_code)),
-                "value": "0x0",
-                "salt": format!("0x{:064x}", found_salt) // ← Crucial : ton send_transaction doit gérer ce champ
-            });
-
-            let proxy_tx_hash = match engine_platform_clone.send_transaction(deploy_proxy_tx).await {
-                Ok(hash) => {
-                    println!("✅ Proxy VEZ envoyé via RPC-like avec CREATE2 → tx hash: {}", hash);
-                    hash
-                }
-                Err(e) => {
-                    eprintln!("❌ Échec déploiement proxy: {}", e);
-                    break;
-                }
-            };
-
-            // Attente confirmation adresse finale
-            let mut final_addr = String::new();
-            for _ in 0..40 {
-                tokio::time::sleep(Duration::from_millis(800)).await;
-                if let Ok(receipt) = engine_platform_clone.get_transaction_receipt(proxy_tx_hash.clone()).await {
-                    if let Some(addr) = receipt.get("contractAddress").and_then(|v| v.as_str()) {
-                        final_addr = addr.to_lowercase();
-                        if final_addr == target_vez_address {
-                            println!("🎉 SUCCÈS TOTAL → VEZ déployé à l'adresse fixe: {}", target_vez_address);
-                        } else {
-                            println!("⚠️ Adresse obtenue: {} (attendue: {})", final_addr, target_vez_address);
-                        }
-                        break;
-                    }
-                }
-            }
-
-            // ========================
-            // 4. initialize() + mint() — comme n'importe quelle tx RPC
-            // ========================
-            let owner = "0x53ae54b11251d5003e9aa51422405bc35a2ef32d";
-
-            let init_tx = serde_json::json!({
-                "to": target_vez_address,
-                "from": validator_address_clone,
-                "data": format!("0x8129fc1c000000000000000000000000{}", &owner[2..]),
-                "value": "0x0"
-            });
-            if let Ok(h) = engine_platform_clone.send_transaction(init_tx).await {
-                println!("✅ initialize() envoyé → {}", h);
-            }
-
-            let mint_tx = serde_json::json!({
-                "to": target_vez_address,
-                "from": validator_address_clone,
-                "data": format!("0x40c10f19000000000000000000000000{}0000000000000000000000000000000000000000000000000000000034d54b40", &owner[2..]),
-                "value": "0x0"
-            });
-            if let Ok(h) = engine_platform_clone.send_transaction(mint_tx).await {
-                println!("✅ mint() envoyé → {}", h);
-            }
-
-            println!("🚀 Déploiement VEZ complet → traité comme des transactions RPC normales !");
-            break;
+            _ => continue,
         }
     }
+
+    let target_vez_address = "0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448".to_lowercase();
+
+    // ==================== 1. Déploiement implémentation ====================
+    let impl_bytecode = match hex::decode(include_str!("../../../vez_bytecode.hex").trim()) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("ERREUR FATALE bytecode impl VEZ invalide : {}", e);
+            return; // Arrêt silencieux de la tâche, consensus continue
+        }
+    };
+
+    let deploy_impl_tx = serde_json::json!({
+        "from": validator_address_clone,
+        "data": format!("0x{}", hex::encode(&impl_bytecode)),
+        "value": "0x0"
+    });
+
+    let impl_tx_hash = match engine_platform_clone.send_transaction(deploy_impl_tx).await {
+        Ok(hash) => {
+            println!("Implémentation VEZ envoyée → {}", hash);
+            hash
+        }
+        Err(e) => {
+            eprintln!("Échec envoi implémentation VEZ : {}", e);
+            return;
+        }
+    };
+
+    // Attente adresse impl
+    let mut impl_address = String::new();
+    for attempt in 0..60 {
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+        if let Ok(receipt) = engine_platform_clone.get_transaction_receipt(impl_tx_hash.clone()).await {
+            if let Some(addr) = receipt.get("contractAddress").and_then(|v| v.as_str()) {
+                impl_address = addr.to_lowercase();
+                println!("Adresse implémentation obtenue : {}", impl_address);
+                break;
+            }
+        }
+        if attempt % 10 == 0 {
+            println!("Attente adresse impl... (tentative {}/{})", attempt + 1, 60);
+        }
+    }
+
+    if impl_address.is_empty() {
+        eprintln!("Timeout : impossible de récupérer l'adresse de l'implémentation VEZ");
+        return;
+    }
+
+    // ==================== 2. Calcul salt CREATE2 ====================
+    use sha3::{Digest, Keccak256};
+
+    let proxy_bytecode = match hex::decode(include_str!("../../../vezcurpoxycore_bytecode.hex").trim()) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("ERREUR bytecode proxy invalide : {}", e);
+            return;
+        }
+    };
+
+    let mut encoded_impl = vec![0u8; 12];
+    encoded_impl.extend_from_slice(&hex::decode(&impl_address[2..]).unwrap());
+
+    let mut init_code = proxy_bytecode;
+    init_code.extend_from_slice(&encoded_impl);
+
+    let deployer_bytes = match hex::decode(validator_address_clone.trim_start_matches("0x")) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("Erreur décodage adresse deployer : {}", e);
+            return;
+        }
+    };
+
+    let mut salt: u64 = 0;
+    let mut found_salt = None;
+    while salt < 5_000_000 {
+        let mut hasher = Keccak256::new();
+        hasher.update([0xff]);
+        hasher.update(&deployer_bytes);
+        hasher.update(salt.to_be_bytes());
+        hasher.update(Keccak256::digest(&init_code));
+        let result = hasher.finalize();
+        let computed = format!("0x{}", hex::encode(&result[12..32])).to_lowercase();
+
+        if computed == target_vez_address {
+            found_salt = Some(salt);
+            println!("Salt trouvé en {} tentatives ! → {}", salt, computed);
+            break;
+        }
+        salt += 1;
+    }
+
+    let salt = found_salt.unwrap_or(0);
+    if found_salt.is_none() {
+        println!("Salt non trouvé → utilisation de salt=0 (adresse sera différente)");
+    }
+
+    // ==================== 3. Déploiement proxy avec CREATE2 ====================
+    let deploy_proxy_tx = serde_json::json!({
+        "from": validator_address_clone,
+        "data": format!("0x{}", hex::encode(&init_code)),
+        "value": "0x0",
+        "salt": format!("0x{:064x}", salt)
+    });
+
+    let proxy_tx_hash = match engine_platform_clone.send_transaction(deploy_proxy_tx).await {
+        Ok(hash) => {
+            println!("Proxy VEZ envoyé avec CREATE2 → {}", hash);
+            hash
+        }
+        Err(e) => {
+            eprintln!("Échec envoi proxy : {}", e);
+            return;
+        }
+    };
+
+    // Attente confirmation adresse finale
+    let mut final_addr = String::new();
+    for _ in 0..60 {
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+        if let Ok(receipt) = engine_platform_clone.get_transaction_receipt(proxy_tx_hash.clone()).await {
+            if let Some(addr) = receipt.get("contractAddress").and_then(|v| v.as_str()) {
+                final_addr = addr.to_lowercase();
+                if final_addr == target_vez_address {
+                    println!("SUCCÈS → VEZ déployé à l'adresse fixe {}", target_vez_address);
+                    engine_platform_clone.set_vez_contract_address(target_vez_address.clone()).await;
+                } else {
+                    println!("Adresse obtenue : {} (cible était {})", final_addr, target_vez_address);
+                }
+                break;
+            }
+        }
+    }
+
+    // ==================== 4. initialize + mint ====================
+    let owner = "0x53ae54b11251d5003e9aa51422405bc35a2ef32d";
+
+    let init_tx = serde_json::json!({
+        "to": target_vez_address,
+        "from": validator_address_clone,
+        "data": format!("0x8129fc1c000000000000000000000000{}", &owner[2..]),
+        "value": "0x0"
+    });
+    if engine_platform_clone.send_transaction(init_tx).await.is_ok() {
+        println!("initialize() envoyé");
+    }
+
+    let mint_tx = serde_json::json!({
+        "to": target_vez_address,
+        "from": validator_address_clone,
+        "data": format!("0x40c10f19000000000000000000000000{}0000000000000000000000000000000000000000000000000000000034d54b40", &owner[2..]),
+        "value": "0x0"
+    });
+    if engine_platform_clone.send_transaction(mint_tx).await.is_ok() {
+        println!("mint() envoyé");
+    }
+
+    println!("Déploiement VEZ terminé (même si adresse différente, le nœud continue normalement)");
 });
     
     // ✅ Tasks de monitoring...
