@@ -3515,11 +3515,7 @@ tokio::spawn({
                             }
                             break;
                         }
-                    }
-                }
 
-                // 4. Enregistrement de l'adresse fixe dans EnginePlatform
-                engine_platform_clone.set_vez_contract_address(target_vez_address.clone()).await;
 
                 // 5. Appels initialize et mint sur l'adresse fixe (via delegatecall)
                 let owner_address = "0x53ae54b11251d5003e9aa51422405bc35a2ef32d";
