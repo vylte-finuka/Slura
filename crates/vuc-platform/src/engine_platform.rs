@@ -3384,13 +3384,7 @@ let vm_clone = vm.clone();
 // ✅ TOUT AU MÊME ENDROIT : Attente du bloc #1 + Déploiement VEZ
 
     let lurosonie_manager_clone = Arc::clone(&lurosonie_manager);
-    
-tokio::spawn({
-        let engine_platform_clone = engine_platform.clone();
-        let validator_address_generated = validator_address_generated.clone();
-        async move {
-            loop {
-                tokio::spawn({
+    tokio::spawn({
     let engine_platform_clone = engine_platform.clone();
     let validator_address_generated = validator_address_generated.clone();
     let lurosonie_manager_clone = Arc::clone(&lurosonie_manager);
