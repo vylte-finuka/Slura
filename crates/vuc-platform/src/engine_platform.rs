@@ -3816,33 +3816,3 @@ fn pad_hash_64(hex: &str) -> String {
     let hex = hex.strip_prefix("0x").unwrap_or(hex);
     format!("0x{:0>64}", hex)
 }
-
-// Add this method to the EnginePlatform impl block:
-impl EnginePlatform {
-    /// Déploie un contrat via l'opcode EVM CREATE (0xf0)
-    pub async fn deploy_contract_evm_create(&self, bytecode_hex: &str, from: &str, value: u64) -> Result<String, String> {
-        let bytecode = if bytecode_hex.starts_with("0x") {
-            hex::decode(&bytecode_hex[2..]).map_err(|e| format!("Invalid hex: {}", e))?
-        } else {
-            hex::decode(bytecode_hex).map_err(|e| format!("Invalid hex: {}", e))?
-        };
-
-        // Appel VM avec une transaction de déploiement (to = None)
-        let mut vm = self.vm.write().await;
-        let deploy_args = vec![
-            serde_json::Value::String(hex::encode(&bytecode)), // data
-            serde_json::Value::Number(serde_json::Number::from(value)),
-        ];
-        // Convention : module_path = "evm", function_name = "deploy"
-        let result = vm.execute_module("evm", "deploy", deploy_args, Some(from))
-            .map_err(|e| format!("VM deploy error: {}", e))?;
-
-        // L’adresse du contrat est retournée par l’opcode CREATE (dans r0)
-        let contract_address = match result {
-            serde_json::Value::String(addr) => addr,
-            serde_json::Value::Number(n) => format!("0x{:x}", n.as_u64().unwrap_or(0)),
-            _ => return Err("Invalid deploy result".to_string()),
-        };
-        Ok(contract_address)
-    }
-                                            }
