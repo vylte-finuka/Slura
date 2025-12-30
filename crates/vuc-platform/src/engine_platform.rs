@@ -118,7 +118,7 @@ impl EnginePlatform {
         EnginePlatform {
             vyftid,
             bytecode,
-            rpc_service,
+            vez_contract_address,
             vm,
             tx_receipts: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             validator_address,
@@ -1962,7 +1962,7 @@ module.register_async_method("eth_getBlockByHash", move |params, _meta, _| {
         let params_array: Vec<serde_json::Value> = params.parse().unwrap_or_default();
         let block_hash = params_array.get(0).and_then(|v| v.as_str()).unwrap_or("");
         let include_txs = params_array.get(1).and_then(|v| v.as_bool()).unwrap_or(false);
-        match engine_platform.get_block_by_hash(block_hash, include_txs).await {
+        match engine_platform.rpc_service.lurosonie_manager.get_block_by_hash(block_hash, include_txs).await {
             Ok(block) => Ok::<_, jsonrpsee_types::error::ErrorObject>(block),
             Err(e) => Err(jsonrpsee_types::error::ErrorObject::owned(
                 ErrorCode::ServerError(-32000).code(),
