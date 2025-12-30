@@ -3527,7 +3527,6 @@ tokio::spawn(async move {
                 final_addr = addr.to_lowercase();
                 if final_addr == target_vez_address {
                     println!("SUCCÈS → VEZ déployé à l'adresse fixe {}", target_vez_address);
-                    engine_platform_clone.set_vez_contract_address(target_vez_address.clone()).await;
                 } else {
                     println!("Adresse obtenue : {} (cible était {})", final_addr, target_vez_address);
                 }
