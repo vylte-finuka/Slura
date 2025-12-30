@@ -3384,8 +3384,7 @@ let vm_clone = vm.clone();
 // ✅ TOUT AU MÊME ENDROIT : Attente du bloc #1 + Déploiement VEZ
 
     let lurosonie_manager_clone = Arc::clone(&lurosonie_manager);
-    
-tokio::spawn({
+    tokio::spawn({
     let engine_platform_clone = engine_platform.clone();
     let validator_address_generated = validator_address_generated.clone();
     let lurosonie_manager_clone = Arc::clone(&lurosonie_manager);
@@ -3515,9 +3514,11 @@ tokio::spawn({
                             }
                             break;
                         }
+                    }
+                }
 
 
-                // 5. Appels initialize et mint sur l'adresse fixe (via delegatecall)
+                // 4. Appels initialize et mint sur l'adresse fixe (via delegatecall)
                 let owner_address = "0x53ae54b11251d5003e9aa51422405bc35a2ef32d";
 
                 // initialize(address _owner)
