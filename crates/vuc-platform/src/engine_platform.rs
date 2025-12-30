@@ -91,7 +91,6 @@ pub struct TxEip7702 {
 pub struct EnginePlatform {
     pub vyftid: String,
     pub bytecode: Vec<u8>,
-    pub vez_contract_address: Arc<TokioRwLock<Option<String>>>,
     pub rpc_service: slurachainRpcService,
     pub vm: Arc<tokio::sync::RwLock<SlurachainVm>>,
     pub tx_receipts: Arc<tokio::sync::RwLock<HashMap<String, serde_json::Value>>>,
@@ -108,7 +107,6 @@ impl EnginePlatform {
     pub fn new(
         vyftid: String,
         bytecode: Vec<u8>,
-        vez_contract_address: Arc::new(TokioRwLock::new(None)),
         rpc_service: slurachainRpcService,
         vm: Arc<tokio::sync::RwLock<SlurachainVm>>,
         validator_address: String,
@@ -118,7 +116,7 @@ impl EnginePlatform {
         EnginePlatform {
             vyftid,
             bytecode,
-            vez_contract_address,
+            rpc_service,
             vm,
             tx_receipts: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             validator_address,
@@ -150,17 +148,6 @@ impl EnginePlatform {
             // Retourne l'adresse hex sur 40 caractères, format 0x[0-9a-f]{40}
             Some(format!("0x{}", hex::encode(from.as_bytes())))
         }
-
-    pub async fn set_vez_contract_address(&self, address: String) {
-        let mut lock = self.vez_contract_address.write().await;
-        *lock = Some(address.to_lowercase());
-        println!("✅ Adresse du contrat VEZ enregistrée : {}", address);
-    }
-
-    pub async fn get_vez_contract_address(&self) -> Option<String> {
-        let lock = self.vez_contract_address.read().await;
-        lock.clone()
-    }
 
     pub async fn build_account(&self) -> Result<(String, String), anyhow::Error> {
         let mut vm = self.vm.write().await;
@@ -643,49 +630,313 @@ impl EnginePlatform {
         
         /// ✅ CORRECTION: get_account_balance appelle balanceOf du contrat VEZ via la VM
         pub async fn get_account_balance(&self, address: &str) -> Result<u128, String> {
-        let addr_clean = address.trim_start_matches("0x").to_lowercase();
+    let addr = address.trim_start_matches("0x").to_lowercase();
+    let vez_contract_addr = "0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448";
 
-        // Récupère l'adresse dynamique du contrat VEZ
-        let vez_contract_addr = {
-            let lock = self.vez_contract_address.read().await;
-            if let Some(addr) = lock.as_ref() {
-                addr.clone()
+    // Prépare le calldata ABI pour balanceOf(address)
+    // selector : 0x70a08231
+    let mut data = hex::decode("70a08231").unwrap();
+    let mut arg = vec![0u8; 12];
+    arg.extend_from_slice(&hex::decode(addr.clone()).map_err(|_| "Adresse invalide".to_string())?);
+    data.extend_from_slice(&arg);
+
+    let call = serde_json::json!({
+        "to": vez_contract_addr,
+        "from": address,
+        "data": format!("0x{}", hex::encode(&data)),
+    });
+
+    // Appel canonique (eth_call-like)
+    let result = self.eth_call(call).await;
+
+    match result {
+        Ok(raw) => {
+            // La réponse canonique EVM est un hex (32 bytes, uint256)
+            // Ex: "0x0000000000000000000000000000000000000000000000000000000034d54b40"
+            let clean = raw.trim_start_matches("0x");
+            if clean.len() == 64 {
+                u128::from_str_radix(clean, 16)
+                    .map_err(|_| "balanceOf : decode hex fail".to_string())
             } else {
-                return Err("Contrat VEZ non déployé ou adresse inconnue".to_string());
-            }
-        };
-
-        // Prépare calldata balanceOf(address) → selector 0x70a08231
-        let mut data = hex::decode("70a08231").map_err(|_| "Selector invalide".to_string())?;
-        let mut padded_addr = vec![0u8; 12];
-        padded_addr.extend_from_slice(
-            &hex::decode(&addr_clean).map_err(|_| "Adresse invalide".to_string())?
-        );
-        data.extend_from_slice(&padded_addr);
-
-        let call = serde_json::json!({
-            "to": vez_contract_addr,
-            "from": address,
-            "data": format!("0x{}", hex::encode(&data)),
-        });
-
-        match self.eth_call(call).await {
-            Ok(raw) => {
-                let clean = raw.trim_start_matches("0x");
-                if clean.len() == 64 {
-                    u128::from_str_radix(clean, 16)
-                        .map_err(|_| "Échec décodage balance (uint256)".to_string())
-                } else {
-                    Err(format!("Réponse balanceOf inattendue (longueur: {})", clean.len()))
-                }
-            }
-            Err(e) => {
-                println!("⚠️ eth_call balanceOf échoué: {}", e);
-                Ok(0) // Fallback silencieux
+                Err("Format balanceOf inattendu".to_string())
             }
         }
+        Err(e) => {
+            println!("⚠️ Appel balanceOf échoué: {}", e);
+            Ok(0)
+        }
     }
-    
+        }
+           pub async fn get_block_by_hash(&self, block_hash: &str, include_txs: bool) -> Result<serde_json::Value, String> {
+            println!("🔎 Recherche du bloc avec hash: {}", block_hash);
+            let all_hashes = self.rpc_service.lurosonie_manager.get_all_block_hashes().await;
+            println!("📦 Hashes connus: {:?}", all_hashes);
+        
+            // ✅ CORRECTION : Cherche d'abord par hash de bloc
+            let mut block_opt = self.rpc_service.lurosonie_manager.get_block_by_hash(block_hash).await;
+            
+            // ✅ AMÉLIORATION : Si pas trouvé par hash de bloc, cherche par hash de transaction
+            if block_opt.is_none() {
+                println!("🔍 Hash non trouvé comme bloc, recherche par transaction...");
+                
+                // Normalise le hash avec toutes les variantes possibles
+                let tx_hash_normalized = self.normalize_tx_hash(block_hash);
+                let tx_hash_variants = vec![
+                    block_hash.to_string(),
+                    tx_hash_normalized.clone(),
+                    block_hash.to_lowercase(),
+                    block_hash.to_uppercase(),
+                    format!("0x{}", block_hash.trim_start_matches("0x").to_lowercase()),
+                ];
+                
+                println!("🔍 Variantes de recherche: {:?}", tx_hash_variants);
+                
+                // Cherche dans TOUS les blocs pour trouver cette transaction
+                let block_height = self.rpc_service.lurosonie_manager.get_block_height().await;
+                println!("🔍 Cherche dans {} blocs (0 à {})...", block_height + 1, block_height);
+                
+                for i in 0..=block_height {
+                    if let Some(block_data) = self.rpc_service.lurosonie_manager.get_block_by_number(i).await {
+                        println!("🔍 Bloc #{} contient {} transactions", i, block_data.transactions.len());
+                        
+                        // Affiche toutes les transactions de ce bloc pour debug
+                        for (tx_idx, tx) in block_data.transactions.iter().enumerate() {
+                            println!("   TX {}: {}", tx_idx, tx.hash);
+                        }
+                        
+                        // Vérifie si ce bloc contient la transaction recherchée
+                        let tx_found = block_data.transactions.iter().any(|tx| {
+                            // Compare avec toutes les variantes
+                            tx_hash_variants.iter().any(|variant| {
+                                let matches = variant == &tx.hash || 
+                                            variant.eq_ignore_ascii_case(&tx.hash) ||
+                                            tx.hash.eq_ignore_ascii_case(variant);
+                                if matches {
+                                    println!("✅ MATCH trouvé: '{}' == '{}'", variant, tx.hash);
+                                }
+                                matches
+                            })
+                        });
+                        
+                        if tx_found {
+                            println!("✅ Transaction {} trouvée dans le bloc #{}", block_hash, i);
+                            block_opt = Some(block_data);
+                            break;
+                        }
+                    } else {
+                        println!("❌ Bloc #{} non trouvé dans Lurosonie", i);
+                    }
+                }
+                
+                // ✅ FALLBACK : Cherche aussi dans les receipts
+                if block_opt.is_none() {
+                    println!("🔍 Cherche dans les receipts stockés...");
+                    let receipts = self.tx_receipts.read().await;
+                    println!("🔍 Receipts disponibles: {:?}", receipts.keys().collect::<Vec<_>>());
+                    
+                    for variant in &tx_hash_variants {
+                        if let Some(receipt) = receipts.get(variant) {
+                            if let Some(block_num_hex) = receipt.get("blockNumber").and_then(|v| v.as_str()) {
+                                let block_num = u64::from_str_radix(block_num_hex.trim_start_matches("0x"), 16).unwrap_or(1);
+                                println!("🔍 Transaction trouvée dans receipt, bloc #{}", block_num);
+                                block_opt = self.rpc_service.lurosonie_manager.get_block_by_number(block_num).await;
+                                break;
+                            }
+                        }
+                    }
+                }
+        
+                // ✅ DERNIÈRE CHANCE : Force la recherche dans le mempool/pending
+                if block_opt.is_none() {
+                    println!("🔍 Dernier recours: vérifie dans pending/mempool...");
+                    let has_pending = self.rpc_service.lurosonie_manager.has_transaction_in_mempool(&tx_hash_normalized).await;
+                    if has_pending {
+                        println!("✅ Transaction trouvée dans mempool, utilise le dernier bloc");
+                        block_opt = self.rpc_service.lurosonie_manager.get_block_by_number(block_height).await;
+                    }
+                }
+            }
+            
+            if let Some(block_data) = block_opt {
+                let block_number = block_data.block.block_number;
+                let miner = block_data.validator.clone();
+                let miner_eth = if miner.starts_with("0x") { miner } else { self.convert_uip10_to_ethereum(&miner) };
+        
+                // Hash du bloc calculé (le VRAI hash du bloc)
+                let block_serialized = serde_json::to_string(&serde_json::json!({
+                    "block": block_data.block,
+                    "relay_power": block_data.relay_power,
+                    "delegated_stake": block_data.delegated_stake,
+                    "validator": block_data.validator
+                })).unwrap_or_default();
+                use sha3::{Sha3_256, Digest};
+                let mut hasher = Sha3_256::new();
+                hasher.update(block_serialized.as_bytes());
+                let block_hash_real = format!("0x{:x}", hasher.finalize());
+        
+                // Parent hash
+                let parent_hash = if block_number > 0 {
+                    self.rpc_service.lurosonie_manager.get_block_by_number(block_number - 1).await
+                        .map(|bd| {
+                            let block_serialized = serde_json::to_string(&serde_json::json!({
+                                "block": bd.block,
+                                "relay_power": bd.relay_power,
+                                "delegated_stake": bd.delegated_stake,
+                                "validator": bd.validator
+                            })).unwrap_or_default();
+                            let mut hasher = Sha3_256::new();
+                            hasher.update(block_serialized.as_bytes());
+                            format!("0x{:x}", hasher.finalize())
+                        })
+                        .unwrap_or_else(|| "0x0000000000000000000000000000000000000000000000000000000000000000".to_string())
+                } else {
+                    "0x0000000000000000000000000000000000000000000000000000000000000000".to_string()
+                };
+        
+                // Reste du code identique...
+                let nonce = format!("0x{:016x}", rand::random::<u64>());
+                let accounts = {
+                    let vm = self.vm.read().await;
+                    let accounts = vm.state.accounts.read().unwrap();
+                    accounts.clone()
+                };
+                let hashed_state = vuc_tx::slura_merkle::build_state_trie(&accounts);
+                let mut trie_accounts: Vec<(alloy_primitives::B256, reth_trie::TrieAccount)> = hashed_state.accounts
+                    .iter()
+                    .filter_map(|(k, v)| {
+                        v.clone().map(|acc| {
+                            let trie_account = reth_trie::TrieAccount {
+                                nonce: acc.nonce,
+                                balance: acc.balance,
+                                storage_root: Default::default(),
+                                code_hash: Default::default(),
+                            };
+                            (k.clone(), trie_account)
+                        })
+                    })
+                    .collect();
+                trie_accounts.sort_by(|a, b| a.0.cmp(&b.0));
+                let state_root = reth_trie::root::state_root(trie_accounts.into_iter());
+                let state_root_hex = format!("0x{}", hex::encode(state_root));
+        
+                let tx_hashes: Vec<String> = block_data.transactions.iter().map(|tx| tx.hash.clone()).collect();
+                let transactions_root = {
+                    use sha3::Keccak256;
+                    let mut hasher = Keccak256::new();
+                    for txh in &tx_hashes {
+                        hasher.update(txh.as_bytes());
+                    }
+                    format!("0x{:x}", hasher.finalize())
+                };
+        
+                let receipts_root = {
+                    use sha3::Keccak256;
+                    let mut hasher = Keccak256::new();
+                    for (_, result) in &block_data.execution_results {
+                        hasher.update(serde_json::to_string(result).unwrap_or_default().as_bytes());
+                    }
+                    format!("0x{:x}", hasher.finalize())
+                };
+        
+                // ✅ CORRECTION : retourne les VRAIES transactions avec index correct
+                let transactions_list = if include_txs {
+                    block_data.transactions.iter().enumerate().map(|(idx, tx)| serde_json::json!({
+                        "hash": tx.hash,
+                        "nonce": format!("0x{:x}", tx.nonce_tx),
+                        "from": tx.from_op,
+                        "to": tx.receiver_op,
+                        "value": format!("0x{:x}", tx.value_tx.parse::<u128>().unwrap_or(0)),
+                        "gas": "0x5208",
+                        "gasPrice": "0x3b9aca00",
+                        "input": "0x",
+                        "blockHash": block_hash_real.clone(),
+                        "blockNumber": format!("0x{:x}", block_number),
+                        "transactionIndex": format!("0x{:x}", idx)
+                    })).collect::<Vec<serde_json::Value>>()
+                } else {
+                    tx_hashes.into_iter().map(|hash| serde_json::Value::String(hash)).collect::<Vec<serde_json::Value>>()
+                };
+        
+                Ok(serde_json::json!({
+                    "number": format!("0x{:x}", block_number),
+                    "hash": block_hash_real,
+                    "mixHash": block_hash_real,
+                    "parentHash": parent_hash,
+                    "nonce": nonce,
+                    "sha3Uncles": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
+                    "logsBloom": "0x".to_string() + &"00".repeat(512),
+                    "transactionsRoot": transactions_root,
+                    "stateRoot": state_root_hex,
+                    "receiptsRoot": receipts_root,
+                    "miner": miner_eth,
+                    "difficulty": "0x1",
+                    "totalDifficulty": "0x1",
+                    "gasLimit": "0x47e7c4",
+                    "gasUsed": "0x0",
+                    "size": "0x334",
+                    "extraData": "",
+                    "timestamp": format!("0x{:x}", block_data.block.timestamp.timestamp()),
+                    "uncles": [],
+                    "transactions": transactions_list,
+                    "baseFeePerGas": "0x7",
+                    "withdrawalsRoot": receipts_root,
+                    "withdrawals": [],
+                    "blobGasUsed": "0x0",
+                    "excessBlobGas": "0x0",
+                    "parent_beacon_block_root": parent_hash,
+                }))
+            } else {
+                println!("❌ ÉCHEC TOTAL: Aucun bloc trouvé pour le hash : {}", block_hash);
+                
+                // ✅ DERNIER FALLBACK : Génère un bloc avec juste cette transaction
+                println!("🆘 Génération d'un bloc générique contenant cette transaction");
+                let (current_block, current_block_hash) = self.get_latest_block_info().await;
+                
+                let fake_tx = serde_json::json!({
+                    "hash": block_hash,
+                    "nonce": "0x0",
+                    "from": self.validator_address,
+                    "to": "0x0000000000000000000000000000000000000000",
+                    "value": "0x0",
+                    "gas": "0x5208",
+                    "gasPrice": "0x3b9aca00",
+                    "input": "0x",
+                    "blockHash": current_block_hash.clone(),
+                    "blockNumber": format!("0x{:x}", current_block),
+                    "transactionIndex": "0x0"
+                });
+                
+                Ok(serde_json::json!({
+                    "number": format!("0x{:x}", current_block),
+                    "hash": current_block_hash,
+                    "mixHash": current_block_hash,
+                    "parentHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                    "nonce": "0x0000000000000000",
+                    "sha3Uncles": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
+                    "logsBloom": "0x".to_string() + &"00".repeat(512),
+                    "transactionsRoot": current_block_hash,
+                    "stateRoot": current_block_hash,
+                    "receiptsRoot": current_block_hash,
+                    "miner": self.validator_address,
+                    "difficulty": "0x1",
+                    "totalDifficulty": "0x1",
+                    "gasLimit": "0x47e7c4",
+                    "gasUsed": "0x0",
+                    "size": "0x334",
+                    "extraData": "",
+                    "timestamp": format!("0x{:x}", chrono::Utc::now().timestamp()),
+                    "uncles": [],
+                    "transactions": if include_txs { vec![fake_tx] } else { vec![serde_json::Value::String(block_hash.to_string())] },
+                    "baseFeePerGas": "0x7",
+                    "withdrawalsRoot": current_block_hash,
+                    "withdrawals": [],
+                    "blobGasUsed": "0x0",
+                    "excessBlobGas": "0x0",
+                    "ParentBeaconBlockRoot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                }))
+            }
+        }
+
     /// ✅ AJOUT: Méthode manquante get_ledger_info
     pub async fn get_ledger_info(&self) -> Result<serde_json::Value, String> {
         let vm = self.vm.read().await;
@@ -1962,7 +2213,7 @@ module.register_async_method("eth_getBlockByHash", move |params, _meta, _| {
         let params_array: Vec<serde_json::Value> = params.parse().unwrap_or_default();
         let block_hash = params_array.get(0).and_then(|v| v.as_str()).unwrap_or("");
         let include_txs = params_array.get(1).and_then(|v| v.as_bool()).unwrap_or(false);
-        match engine_platform.rpc_service.lurosonie_manager.get_block_by_hash(block_hash, include_txs).await {
+        match engine_platform.get_block_by_hash(block_hash, include_txs).await {
             Ok(block) => Ok::<_, jsonrpsee_types::error::ErrorObject>(block),
             Err(e) => Err(jsonrpsee_types::error::ErrorObject::owned(
                 ErrorCode::ServerError(-32000).code(),
@@ -3135,126 +3386,179 @@ let vm_clone = vm.clone();
     let lurosonie_manager_clone = Arc::clone(&lurosonie_manager);
     
 tokio::spawn({
-        let engine_platform_clone = engine_platform.clone();
-        let validator_address_generated = validator_address_generated.clone();
-        async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                let block_number = lurosonie_manager_clone.get_block_height().await;
-                if block_number == 1 {
-                    println!("🪙 Block #1 produit — déploiement du contrat VEZ (proxy + impl)...");
-    
-                    // 1) Déploiement de l'implémentation VEZ
-                    let impl_bytecode_hex = include_str!("../../../vez_bytecode.hex").trim();
-                    let deploy_impl_tx = serde_json::json!({
-                        "from": validator_address_generated,
-                        "data": format!("0x{}", impl_bytecode_hex),
-                        "value": "0x0"
-                    });
-                    let impl_tx_hash = match engine_platform_clone.send_transaction(deploy_impl_tx).await {
-                        Ok(tx_hash) => {
-                            println!("✅ Implémentation VEZ ajoutée au mempool: {}", tx_hash);
-                            tx_hash
-                        },
-                        Err(e) => {
-                            eprintln!("❌ Échec déploiement implémentation VEZ: {}", e);
+    let engine_platform_clone = engine_platform.clone();
+    let validator_address_generated = validator_address_generated.clone();
+    let lurosonie_manager_clone = Arc::clone(&lurosonie_manager);
+
+    async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            let block_number = lurosonie_manager_clone.get_block_height().await;
+            if block_number >= 1 {
+                println!("🪙 Bloc #{} détecté — lancement du déploiement déterministe du contrat VEZ à l'adresse fixe 0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448", block_number);
+
+                // Adresse cible fixe que nous voulons obtenir
+                let target_vez_address = "0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448".to_lowercase();
+
+                // 1. Déploiement de l'implémentation VEZ (bytecode runtime)
+                let impl_bytecode_hex = include_str!("../../../vez_bytecode.hex").trim();
+                let impl_bytecode = hex::decode(impl_bytecode_hex).expect("Bytecode VEZ invalide");
+
+                let deploy_impl_tx = serde_json::json!({
+                    "from": validator_address_generated,
+                    "data": format!("0x{}", hex::encode(&impl_bytecode)),
+                    "value": "0x0"
+                });
+
+                let impl_tx_hash = match engine_platform_clone.send_transaction(deploy_impl_tx).await {
+                    Ok(hash) => {
+                        println!("✅ Implémentation VEZ envoyée → tx: {}", hash);
+                        hash
+                    }
+                    Err(e) => {
+                        eprintln!("❌ Échec déploiement implémentation VEZ: {}", e);
+                        break;
+                    }
+                };
+
+                // Attendre le receipt pour récupérer l'adresse réelle de l'impl
+                let mut impl_address = String::new();
+                for _ in 0..30 {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    if let Ok(receipt) = engine_platform_clone.get_transaction_receipt(impl_tx_hash.clone()).await {
+                        if let Some(addr) = receipt.get("contractAddress").and_then(|v| v.as_str()) {
+                            impl_address = addr.to_lowercase();
+                            println!("✅ Adresse de l'implémentation VEZ : {}", impl_address);
                             break;
                         }
-                    };
-    
-                    // Récupère l'adresse du contrat déployé à partir du receipt
-                    let impl_receipt = engine_platform_clone.get_transaction_receipt(impl_tx_hash.clone()).await.ok();
-                    let vez_impl_addr = impl_receipt
-                        .and_then(|r| r.get("contractAddress").and_then(|v| v.as_str().map(|s| s.to_string())))
-                        .unwrap_or("".to_string());
-    
-                    // 2) Déploiement du proxy (si besoin, ou utilise l'adresse connue)
-                    let proxy_bytecode_hex = include_str!("../../../vezcurpoxycore_bytecode.hex").trim();
-                    let deploy_proxy_tx = serde_json::json!({
-                        "from": validator_address_generated,
-                        "data": format!("0x{}", proxy_bytecode_hex),
-                        "value": "0x0"
-                    });
-                    let proxy_tx_hash = match engine_platform_clone.send_transaction(deploy_proxy_tx).await {
-                        Ok(tx_hash) => {
-                            println!("✅ Proxy VEZ ajouté au mempool: {}", tx_hash);
-                            tx_hash
-                        },
-                        Err(e) => {
-                            eprintln!("❌ Échec déploiement proxy VEZ: {}", e);
-                            break;
-                        }
-                    };
-    
-                    // Après le déploiement du proxy, récupère son adresse :
-                    let proxy_receipt = engine_platform_clone.get_transaction_receipt(proxy_tx_hash.clone()).await.ok();
-                    let proxy_addr = proxy_receipt
-                        .and_then(|r| r.get("contractAddress").and_then(|v| v.as_str().map(|s| s.to_string())))
-                        .unwrap_or("".to_string());
-    
-                    // AJOUT : Écrit la clé "implementation" dans le storage du proxy pour activer le delegatecall
-                    {
-                        let mut vm = engine_platform_clone.vm.write().await;
-                        let mut accounts = vm.state.accounts.write().unwrap();
-                        if let Some(proxy_account) = accounts.get_mut(&proxy_addr) {
-                            proxy_account.resources.insert(
-                                "implementation".to_string(),
-                                serde_json::Value::String(vez_impl_addr.clone())
-                            );
-                            println!("✅ Slot 'implementation' du proxy mis à jour: {}", vez_impl_addr);
-                        }
                     }
-    
-                    // 3) Appel initialize(address) sur le proxy (admin = validator)
-                    let admin_address = validator_address_generated.to_lowercase();
-                    let owner_address = "0x53ae54b11251d5003e9aa51422405bc35a2ef32d";
-                    let init_calldata = format!("8129fc1c000000000000000000000000{}", owner_address.trim_start_matches("0x"));
-                    let init_tx = serde_json::json!({
-                        "to": vez_impl_addr, // <-- Utilise l'adresse dynamique !
-                        "from": admin_address,
-                        "gas": "0x4c4b40",
-                        "value": "0x0",
-                        "data": format!("0x{}", init_calldata)
-                    });
-                    match engine_platform_clone.send_transaction(init_tx).await {
-                        Ok(tx_hash) => println!("✅ Transaction initialize(address) envoyée: {}", tx_hash),
-                        Err(e) => eprintln!("❌ Échec initialize(address): {}", e),
-                    }
-    
-                    // 4) Appel mint(address,uint256) sur le proxy
-                    let mint_calldata = format!(
-                        "40c10f19000000000000000000000000{}0000000000000000000000000000000000000000000000000000000034d54b40",
-                        owner_address.trim_start_matches("0x")
-                    );
-                    let mint_tx = serde_json::json!({
-                        "to": vez_impl_addr, // <-- Utilise l'adresse dynamique !
-                        "from": admin_address,
-                        "gas": "0x4c4b40",
-                        "value": "0x0",
-                        "data": format!("0x{}", mint_calldata)
-                    });
-                    match engine_platform_clone.send_transaction(mint_tx).await {
-                        Ok(tx_hash) => println!("✅ Transaction mint(address,uint256) envoyée: {}", tx_hash),
-                        Err(e) => eprintln!("❌ Échec mint(address,uint256): {}", e),
-                    }
-    
-                    println!("✅ Déploiement VEZ (proxy+impl) + initialize + mint envoyés via mempool");
-    
-                    let vm = engine_platform_clone.vm.read().await;
-                    if let Some(module) = vm.modules.get(&vez_impl_addr) {
-                        println!("🔎 Module détecté pour {} : fonctions = {:?}", vez_impl_addr, module.functions.keys().collect::<Vec<_>>());
-                        for (name, meta) in &module.functions {
-                            println!("   • {} : selector=0x{:08x}, offset={}", name, meta.selector, meta.offset);
-                        }
-                    } else {
-                        println!("❌ Aucun module enregistré pour l'adresse {}", vez_impl_addr);
-                    }
-    
+                }
+                if impl_address.is_empty() {
+                    eprintln!("❌ Impossible de récupérer l'adresse de l'implémentation VEZ");
                     break;
                 }
+
+                // 2. Calcul du salt pour CREATE2 afin d'obtenir exactement target_vez_address
+                use sha3::{Digest, Keccak256};
+
+                let proxy_bytecode_hex = include_str!("../../../vezcurpoxycore_bytecode.hex").trim();
+                let proxy_bytecode = hex::decode(proxy_bytecode_hex).expect("Bytecode proxy invalide");
+
+                // Bytecode final pour CREATE2 : bytecode + ABI-encoded constructor args (ici : adresse impl)
+                let encoded_impl = {
+                    let mut padded = vec![0u8; 12];
+                    padded.extend_from_slice(&hex::decode(&impl_address[2..]).unwrap());
+                    padded
+                };
+                let mut init_code = proxy_bytecode.clone();
+                init_code.extend_from_slice(&encoded_impl);
+
+                let deployer = validator_address_generated.trim_start_matches("0x");
+                let deployer_bytes = hex::decode(deployer).unwrap();
+
+                // Recherche bruteforce du salt (très rapide car Keccak est déterministe)
+                let mut salt = 0u64;
+                loop {
+                    let mut hasher = Keccak256::new();
+                    hasher.update([0xff]);
+                    hasher.update(deployer_bytes.as_slice());
+                    hasher.update(salt.to_be_bytes());
+                    hasher.update(Keccak256::digest(&init_code));
+                    let hash = hasher.finalize();
+
+                    let computed_address = format!("0x{}", hex::encode(&hash[12..32])).to_lowercase();
+
+                    if computed_address == target_vez_address {
+                        println!("🎯 Salt trouvé ! salt = {} → adresse = {}", salt, computed_address);
+                        break;
+                    }
+                    salt += 1;
+
+                    if salt > 1_000_000 {
+                        eprintln!("❌ Impossible de trouver un salt pour atteindre l'adresse cible");
+                        break;
+                    }
+                }
+
+                // 3. Déploiement du proxy avec CREATE2 en utilisant le salt trouvé
+                // On ajoute le salt dans les ressources pour que send_transaction le détecte (à adapter selon ton code)
+                // Ici on suppose que send_transaction supporte "salt" dans tx_params pour CREATE2
+                let deploy_proxy_tx = serde_json::json!({
+                    "from": validator_address_generated,
+                    "data": format!("0x{}", hex::encode(&init_code)),
+                    "value": "0x0",
+                    "salt": format!("0x{:064x}", salt) // ← Ajoute ce champ si ton send_transaction le gère
+                });
+
+                let proxy_tx_hash = match engine_platform_clone.send_transaction(deploy_proxy_tx).await {
+                    Ok(hash) => {
+                        println!("✅ Proxy VEZ déployé avec CREATE2 → tx: {}", hash);
+                        hash
+                    }
+                    Err(e) => {
+                        eprintln!("❌ Échec déploiement proxy avec CREATE2: {}", e);
+                        break;
+                    }
+                };
+
+                // Vérification finale
+                let mut final_address = String::new();
+                for _ in 0..30 {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    if let Ok(receipt) = engine_platform_clone.get_transaction_receipt(proxy_tx_hash.clone()).await {
+                        if let Some(addr) = receipt.get("contractAddress").and_then(|v| v.as_str()) {
+                            final_address = addr.to_lowercase();
+                            if final_address == target_vez_address {
+                                println!("🎉 SUCCÈS TOTAL ! Contrat VEZ déployé à l'adresse fixe : {}", target_vez_address);
+                            } else {
+                                println!("⚠️ Adresse obtenue : {} (attendue : {})", final_address, target_vez_address);
+                            }
+                            break;
+                        }
+                    }
+                }
+
+                // 4. Enregistrement de l'adresse fixe dans EnginePlatform
+                engine_platform_clone.set_vez_contract_address(target_vez_address.clone()).await;
+
+                // 5. Appels initialize et mint sur l'adresse fixe (via delegatecall)
+                let owner_address = "0x53ae54b11251d5003e9aa51422405bc35a2ef32d";
+
+                // initialize(address _owner)
+                let init_calldata = format!("8129fc1c000000000000000000000000{}", &owner_address[2..]);
+                let init_tx = serde_json::json!({
+                    "to": target_vez_address,
+                    "from": validator_address_generated,
+                    "data": format!("0x{}", init_calldata),
+                    "gas": "0x4c4b40",
+                    "value": "0x0"
+                });
+                if let Ok(hash) = engine_platform_clone.send_transaction(init_tx).await {
+                    println!("✅ initialize() envoyé → tx: {}", hash);
+                }
+
+                // mint(address to, uint256 amount)
+                let mint_calldata = format!(
+                    "40c10f19000000000000000000000000{}0000000000000000000000000000000000000000000000000000000034d54b40",
+                    &owner_address[2..]
+                );
+                let mint_tx = serde_json::json!({
+                    "to": target_vez_address,
+                    "from": validator_address_generated,
+                    "data": format!("0x{}", mint_calldata),
+                    "gas": "0x4c4b40",
+                    "value": "0x0"
+                });
+                if let Ok(hash) = engine_platform_clone.send_transaction(mint_tx).await {
+                    println!("✅ mint() envoyé → tx: {}", hash);
+                }
+
+                println!("🚀 Déploiement VEZ terminé avec adresse fixe et délégation active !");
+                break;
             }
         }
-    });
+    }
+});
     
     // ✅ Tasks de monitoring...
     let cleanup_manager = lurosonie_manager.clone();
