@@ -91,6 +91,7 @@ pub struct TxEip7702 {
 pub struct EnginePlatform {
     pub vyftid: String,
     pub bytecode: Vec<u8>,
+    pub vez_contract_address: Arc<TokioRwLock<Option<String>>>,
     pub rpc_service: slurachainRpcService,
     pub vm: Arc<tokio::sync::RwLock<SlurachainVm>>,
     pub tx_receipts: Arc<tokio::sync::RwLock<HashMap<String, serde_json::Value>>>,
@@ -107,6 +108,7 @@ impl EnginePlatform {
     pub fn new(
         vyftid: String,
         bytecode: Vec<u8>,
+        vez_contract_address: Arc::new(TokioRwLock::new(None)),
         rpc_service: slurachainRpcService,
         vm: Arc<tokio::sync::RwLock<SlurachainVm>>,
         validator_address: String,
@@ -148,6 +150,17 @@ impl EnginePlatform {
             // Retourne l'adresse hex sur 40 caractères, format 0x[0-9a-f]{40}
             Some(format!("0x{}", hex::encode(from.as_bytes())))
         }
+
+    pub async fn set_vez_contract_address(&self, address: String) {
+        let mut lock = self.vez_contract_address.write().await;
+        *lock = Some(address.to_lowercase());
+        println!("✅ Adresse du contrat VEZ enregistrée : {}", address);
+    }
+
+    pub async fn get_vez_contract_address(&self) -> Option<String> {
+        let lock = self.vez_contract_address.read().await;
+        lock.clone()
+    }
 
     pub async fn build_account(&self) -> Result<(String, String), anyhow::Error> {
         let mut vm = self.vm.write().await;
@@ -630,313 +643,49 @@ impl EnginePlatform {
         
         /// ✅ CORRECTION: get_account_balance appelle balanceOf du contrat VEZ via la VM
         pub async fn get_account_balance(&self, address: &str) -> Result<u128, String> {
-    let addr = address.trim_start_matches("0x").to_lowercase();
-    let vez_contract_addr = "0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448";
+        let addr_clean = address.trim_start_matches("0x").to_lowercase();
 
-    // Prépare le calldata ABI pour balanceOf(address)
-    // selector : 0x70a08231
-    let mut data = hex::decode("70a08231").unwrap();
-    let mut arg = vec![0u8; 12];
-    arg.extend_from_slice(&hex::decode(addr.clone()).map_err(|_| "Adresse invalide".to_string())?);
-    data.extend_from_slice(&arg);
-
-    let call = serde_json::json!({
-        "to": vez_contract_addr,
-        "from": address,
-        "data": format!("0x{}", hex::encode(&data)),
-    });
-
-    // Appel canonique (eth_call-like)
-    let result = self.eth_call(call).await;
-
-    match result {
-        Ok(raw) => {
-            // La réponse canonique EVM est un hex (32 bytes, uint256)
-            // Ex: "0x0000000000000000000000000000000000000000000000000000000034d54b40"
-            let clean = raw.trim_start_matches("0x");
-            if clean.len() == 64 {
-                u128::from_str_radix(clean, 16)
-                    .map_err(|_| "balanceOf : decode hex fail".to_string())
+        // Récupère l'adresse dynamique du contrat VEZ
+        let vez_contract_addr = {
+            let lock = self.vez_contract_address.read().await;
+            if let Some(addr) = lock.as_ref() {
+                addr.clone()
             } else {
-                Err("Format balanceOf inattendu".to_string())
+                return Err("Contrat VEZ non déployé ou adresse inconnue".to_string());
             }
-        }
-        Err(e) => {
-            println!("⚠️ Appel balanceOf échoué: {}", e);
-            Ok(0)
+        };
+
+        // Prépare calldata balanceOf(address) → selector 0x70a08231
+        let mut data = hex::decode("70a08231").map_err(|_| "Selector invalide".to_string())?;
+        let mut padded_addr = vec![0u8; 12];
+        padded_addr.extend_from_slice(
+            &hex::decode(&addr_clean).map_err(|_| "Adresse invalide".to_string())?
+        );
+        data.extend_from_slice(&padded_addr);
+
+        let call = serde_json::json!({
+            "to": vez_contract_addr,
+            "from": address,
+            "data": format!("0x{}", hex::encode(&data)),
+        });
+
+        match self.eth_call(call).await {
+            Ok(raw) => {
+                let clean = raw.trim_start_matches("0x");
+                if clean.len() == 64 {
+                    u128::from_str_radix(clean, 16)
+                        .map_err(|_| "Échec décodage balance (uint256)".to_string())
+                } else {
+                    Err(format!("Réponse balanceOf inattendue (longueur: {})", clean.len()))
+                }
+            }
+            Err(e) => {
+                println!("⚠️ eth_call balanceOf échoué: {}", e);
+                Ok(0) // Fallback silencieux
+            }
         }
     }
-        }
-           pub async fn get_block_by_hash(&self, block_hash: &str, include_txs: bool) -> Result<serde_json::Value, String> {
-            println!("🔎 Recherche du bloc avec hash: {}", block_hash);
-            let all_hashes = self.rpc_service.lurosonie_manager.get_all_block_hashes().await;
-            println!("📦 Hashes connus: {:?}", all_hashes);
-        
-            // ✅ CORRECTION : Cherche d'abord par hash de bloc
-            let mut block_opt = self.rpc_service.lurosonie_manager.get_block_by_hash(block_hash).await;
-            
-            // ✅ AMÉLIORATION : Si pas trouvé par hash de bloc, cherche par hash de transaction
-            if block_opt.is_none() {
-                println!("🔍 Hash non trouvé comme bloc, recherche par transaction...");
-                
-                // Normalise le hash avec toutes les variantes possibles
-                let tx_hash_normalized = self.normalize_tx_hash(block_hash);
-                let tx_hash_variants = vec![
-                    block_hash.to_string(),
-                    tx_hash_normalized.clone(),
-                    block_hash.to_lowercase(),
-                    block_hash.to_uppercase(),
-                    format!("0x{}", block_hash.trim_start_matches("0x").to_lowercase()),
-                ];
-                
-                println!("🔍 Variantes de recherche: {:?}", tx_hash_variants);
-                
-                // Cherche dans TOUS les blocs pour trouver cette transaction
-                let block_height = self.rpc_service.lurosonie_manager.get_block_height().await;
-                println!("🔍 Cherche dans {} blocs (0 à {})...", block_height + 1, block_height);
-                
-                for i in 0..=block_height {
-                    if let Some(block_data) = self.rpc_service.lurosonie_manager.get_block_by_number(i).await {
-                        println!("🔍 Bloc #{} contient {} transactions", i, block_data.transactions.len());
-                        
-                        // Affiche toutes les transactions de ce bloc pour debug
-                        for (tx_idx, tx) in block_data.transactions.iter().enumerate() {
-                            println!("   TX {}: {}", tx_idx, tx.hash);
-                        }
-                        
-                        // Vérifie si ce bloc contient la transaction recherchée
-                        let tx_found = block_data.transactions.iter().any(|tx| {
-                            // Compare avec toutes les variantes
-                            tx_hash_variants.iter().any(|variant| {
-                                let matches = variant == &tx.hash || 
-                                            variant.eq_ignore_ascii_case(&tx.hash) ||
-                                            tx.hash.eq_ignore_ascii_case(variant);
-                                if matches {
-                                    println!("✅ MATCH trouvé: '{}' == '{}'", variant, tx.hash);
-                                }
-                                matches
-                            })
-                        });
-                        
-                        if tx_found {
-                            println!("✅ Transaction {} trouvée dans le bloc #{}", block_hash, i);
-                            block_opt = Some(block_data);
-                            break;
-                        }
-                    } else {
-                        println!("❌ Bloc #{} non trouvé dans Lurosonie", i);
-                    }
-                }
-                
-                // ✅ FALLBACK : Cherche aussi dans les receipts
-                if block_opt.is_none() {
-                    println!("🔍 Cherche dans les receipts stockés...");
-                    let receipts = self.tx_receipts.read().await;
-                    println!("🔍 Receipts disponibles: {:?}", receipts.keys().collect::<Vec<_>>());
-                    
-                    for variant in &tx_hash_variants {
-                        if let Some(receipt) = receipts.get(variant) {
-                            if let Some(block_num_hex) = receipt.get("blockNumber").and_then(|v| v.as_str()) {
-                                let block_num = u64::from_str_radix(block_num_hex.trim_start_matches("0x"), 16).unwrap_or(1);
-                                println!("🔍 Transaction trouvée dans receipt, bloc #{}", block_num);
-                                block_opt = self.rpc_service.lurosonie_manager.get_block_by_number(block_num).await;
-                                break;
-                            }
-                        }
-                    }
-                }
-        
-                // ✅ DERNIÈRE CHANCE : Force la recherche dans le mempool/pending
-                if block_opt.is_none() {
-                    println!("🔍 Dernier recours: vérifie dans pending/mempool...");
-                    let has_pending = self.rpc_service.lurosonie_manager.has_transaction_in_mempool(&tx_hash_normalized).await;
-                    if has_pending {
-                        println!("✅ Transaction trouvée dans mempool, utilise le dernier bloc");
-                        block_opt = self.rpc_service.lurosonie_manager.get_block_by_number(block_height).await;
-                    }
-                }
-            }
-            
-            if let Some(block_data) = block_opt {
-                let block_number = block_data.block.block_number;
-                let miner = block_data.validator.clone();
-                let miner_eth = if miner.starts_with("0x") { miner } else { self.convert_uip10_to_ethereum(&miner) };
-        
-                // Hash du bloc calculé (le VRAI hash du bloc)
-                let block_serialized = serde_json::to_string(&serde_json::json!({
-                    "block": block_data.block,
-                    "relay_power": block_data.relay_power,
-                    "delegated_stake": block_data.delegated_stake,
-                    "validator": block_data.validator
-                })).unwrap_or_default();
-                use sha3::{Sha3_256, Digest};
-                let mut hasher = Sha3_256::new();
-                hasher.update(block_serialized.as_bytes());
-                let block_hash_real = format!("0x{:x}", hasher.finalize());
-        
-                // Parent hash
-                let parent_hash = if block_number > 0 {
-                    self.rpc_service.lurosonie_manager.get_block_by_number(block_number - 1).await
-                        .map(|bd| {
-                            let block_serialized = serde_json::to_string(&serde_json::json!({
-                                "block": bd.block,
-                                "relay_power": bd.relay_power,
-                                "delegated_stake": bd.delegated_stake,
-                                "validator": bd.validator
-                            })).unwrap_or_default();
-                            let mut hasher = Sha3_256::new();
-                            hasher.update(block_serialized.as_bytes());
-                            format!("0x{:x}", hasher.finalize())
-                        })
-                        .unwrap_or_else(|| "0x0000000000000000000000000000000000000000000000000000000000000000".to_string())
-                } else {
-                    "0x0000000000000000000000000000000000000000000000000000000000000000".to_string()
-                };
-        
-                // Reste du code identique...
-                let nonce = format!("0x{:016x}", rand::random::<u64>());
-                let accounts = {
-                    let vm = self.vm.read().await;
-                    let accounts = vm.state.accounts.read().unwrap();
-                    accounts.clone()
-                };
-                let hashed_state = vuc_tx::slura_merkle::build_state_trie(&accounts);
-                let mut trie_accounts: Vec<(alloy_primitives::B256, reth_trie::TrieAccount)> = hashed_state.accounts
-                    .iter()
-                    .filter_map(|(k, v)| {
-                        v.clone().map(|acc| {
-                            let trie_account = reth_trie::TrieAccount {
-                                nonce: acc.nonce,
-                                balance: acc.balance,
-                                storage_root: Default::default(),
-                                code_hash: Default::default(),
-                            };
-                            (k.clone(), trie_account)
-                        })
-                    })
-                    .collect();
-                trie_accounts.sort_by(|a, b| a.0.cmp(&b.0));
-                let state_root = reth_trie::root::state_root(trie_accounts.into_iter());
-                let state_root_hex = format!("0x{}", hex::encode(state_root));
-        
-                let tx_hashes: Vec<String> = block_data.transactions.iter().map(|tx| tx.hash.clone()).collect();
-                let transactions_root = {
-                    use sha3::Keccak256;
-                    let mut hasher = Keccak256::new();
-                    for txh in &tx_hashes {
-                        hasher.update(txh.as_bytes());
-                    }
-                    format!("0x{:x}", hasher.finalize())
-                };
-        
-                let receipts_root = {
-                    use sha3::Keccak256;
-                    let mut hasher = Keccak256::new();
-                    for (_, result) in &block_data.execution_results {
-                        hasher.update(serde_json::to_string(result).unwrap_or_default().as_bytes());
-                    }
-                    format!("0x{:x}", hasher.finalize())
-                };
-        
-                // ✅ CORRECTION : retourne les VRAIES transactions avec index correct
-                let transactions_list = if include_txs {
-                    block_data.transactions.iter().enumerate().map(|(idx, tx)| serde_json::json!({
-                        "hash": tx.hash,
-                        "nonce": format!("0x{:x}", tx.nonce_tx),
-                        "from": tx.from_op,
-                        "to": tx.receiver_op,
-                        "value": format!("0x{:x}", tx.value_tx.parse::<u128>().unwrap_or(0)),
-                        "gas": "0x5208",
-                        "gasPrice": "0x3b9aca00",
-                        "input": "0x",
-                        "blockHash": block_hash_real.clone(),
-                        "blockNumber": format!("0x{:x}", block_number),
-                        "transactionIndex": format!("0x{:x}", idx)
-                    })).collect::<Vec<serde_json::Value>>()
-                } else {
-                    tx_hashes.into_iter().map(|hash| serde_json::Value::String(hash)).collect::<Vec<serde_json::Value>>()
-                };
-        
-                Ok(serde_json::json!({
-                    "number": format!("0x{:x}", block_number),
-                    "hash": block_hash_real,
-                    "mixHash": block_hash_real,
-                    "parentHash": parent_hash,
-                    "nonce": nonce,
-                    "sha3Uncles": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
-                    "logsBloom": "0x".to_string() + &"00".repeat(512),
-                    "transactionsRoot": transactions_root,
-                    "stateRoot": state_root_hex,
-                    "receiptsRoot": receipts_root,
-                    "miner": miner_eth,
-                    "difficulty": "0x1",
-                    "totalDifficulty": "0x1",
-                    "gasLimit": "0x47e7c4",
-                    "gasUsed": "0x0",
-                    "size": "0x334",
-                    "extraData": "",
-                    "timestamp": format!("0x{:x}", block_data.block.timestamp.timestamp()),
-                    "uncles": [],
-                    "transactions": transactions_list,
-                    "baseFeePerGas": "0x7",
-                    "withdrawalsRoot": receipts_root,
-                    "withdrawals": [],
-                    "blobGasUsed": "0x0",
-                    "excessBlobGas": "0x0",
-                    "parent_beacon_block_root": parent_hash,
-                }))
-            } else {
-                println!("❌ ÉCHEC TOTAL: Aucun bloc trouvé pour le hash : {}", block_hash);
-                
-                // ✅ DERNIER FALLBACK : Génère un bloc avec juste cette transaction
-                println!("🆘 Génération d'un bloc générique contenant cette transaction");
-                let (current_block, current_block_hash) = self.get_latest_block_info().await;
-                
-                let fake_tx = serde_json::json!({
-                    "hash": block_hash,
-                    "nonce": "0x0",
-                    "from": self.validator_address,
-                    "to": "0x0000000000000000000000000000000000000000",
-                    "value": "0x0",
-                    "gas": "0x5208",
-                    "gasPrice": "0x3b9aca00",
-                    "input": "0x",
-                    "blockHash": current_block_hash.clone(),
-                    "blockNumber": format!("0x{:x}", current_block),
-                    "transactionIndex": "0x0"
-                });
-                
-                Ok(serde_json::json!({
-                    "number": format!("0x{:x}", current_block),
-                    "hash": current_block_hash,
-                    "mixHash": current_block_hash,
-                    "parentHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
-                    "nonce": "0x0000000000000000",
-                    "sha3Uncles": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
-                    "logsBloom": "0x".to_string() + &"00".repeat(512),
-                    "transactionsRoot": current_block_hash,
-                    "stateRoot": current_block_hash,
-                    "receiptsRoot": current_block_hash,
-                    "miner": self.validator_address,
-                    "difficulty": "0x1",
-                    "totalDifficulty": "0x1",
-                    "gasLimit": "0x47e7c4",
-                    "gasUsed": "0x0",
-                    "size": "0x334",
-                    "extraData": "",
-                    "timestamp": format!("0x{:x}", chrono::Utc::now().timestamp()),
-                    "uncles": [],
-                    "transactions": if include_txs { vec![fake_tx] } else { vec![serde_json::Value::String(block_hash.to_string())] },
-                    "baseFeePerGas": "0x7",
-                    "withdrawalsRoot": current_block_hash,
-                    "withdrawals": [],
-                    "blobGasUsed": "0x0",
-                    "excessBlobGas": "0x0",
-                    "ParentBeaconBlockRoot": "0x0000000000000000000000000000000000000000000000000000000000000000",
-                }))
-            }
-        }
-
+    
     /// ✅ AJOUT: Méthode manquante get_ledger_info
     pub async fn get_ledger_info(&self) -> Result<serde_json::Value, String> {
         let vm = self.vm.read().await;
