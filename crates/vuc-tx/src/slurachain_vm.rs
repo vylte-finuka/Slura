@@ -960,59 +960,75 @@ impl SlurachainVm {
     }
 
              /// ✅ NOUVEAU: Détection automatique des fonctions d'un contrat
-  pub fn auto_detect_contract_functions(&mut self, contract_address: &str, bytecode: &[u8]) -> Result<(), String> {
-        println!("🔍 [AUTO-DETECT] Analyse du bytecode pour {}", contract_address);
-        let mut detected_functions = HashMap::new();
-        // Cherche les sélecteurs dans le bytecode
-        let mut i = 0;
-        while i + 4 < bytecode.len() {
-            if bytecode[i] == 0x63 { // PUSH4
-                let selector = u32::from_be_bytes([
-                    bytecode[i + 1], bytecode[i + 2], bytecode[i + 3], bytecode[i + 4]
-                ]);
-                if selector != 0 && selector != 0xffffffff {
-                    let function_name = format!("function_{:08x}", selector);
-                    let offset = Self::find_function_offset_in_bytecode(bytecode, selector)
-                        .unwrap_or(0);
-                    detected_functions.insert(function_name.clone(), FunctionMetadata {
-                        name: function_name,
-                        offset,
-                        args_count: 0,
-                        return_type: "bytes".to_string(),
-                        gas_limit: 100000,
-                        payable: false,
-                        mutability: "nonpayable".to_string(),
-                        selector,
-                        arg_types: vec![],
-                        modifiers: vec![],
-                    });
-                    println!("🎯 [AUTO-DETECT] Fonction détectée: 0x{:08x} @ offset {}", selector, i + 5);
+pub fn auto_detect_contract_functions(&mut self, contract_address: &str, bytecode: &[u8]) -> Result<(), String> {
+    println!("🔍 [AUTO-DETECT] Analyse du bytecode pour {}", contract_address);
+    let mut detected_functions = HashMap::new();
+    let mut i = 0;
+    while i + 10 < bytecode.len() {
+        // Pattern Solidity: PUSH4 <selector> EQ PUSH2 <offset> JUMPI
+        if bytecode[i] == 0x63
+            && bytecode[i + 5] == 0x14
+            && bytecode[i + 6] == 0x61
+            && bytecode[i + 9] == 0x57
+        {
+            let selector = u32::from_be_bytes([
+                bytecode[i + 1], bytecode[i + 2], bytecode[i + 3], bytecode[i + 4]
+            ]);
+            let offset = ((bytecode[i + 7] as usize) << 8) | (bytecode[i + 8] as usize);
+            let function_name = format!("function_{:08x}", selector);
+
+            // Vérifie que l'offset pointe sur un JUMPDEST
+            let offset_valid = offset < bytecode.len() && bytecode[offset] == 0x5b;
+            let final_offset = if offset_valid { offset } else {
+                // Fallback : cherche le premier JUMPDEST après offset
+                let mut fallback = 0;
+                for j in offset..std::cmp::min(offset+32, bytecode.len()) {
+                    if bytecode[j] == 0x5b {
+                        fallback = j;
+                        break;
+                    }
                 }
-            }
-            i += 1;
-        }
-        // Crée ou met à jour le module
-        if let Some(module) = self.modules.get_mut(contract_address) {
-            module.functions.extend(detected_functions);
-        } else {
-            let module = Module {
-                name: contract_address.to_string(),
-                address: contract_address.to_string(),
-                bytecode: bytecode.to_vec(),
-                elf_buffer: vec![],
-                context: uvm_runtime::UbfContext::new(),
-                stack_usage: None,
-                functions: detected_functions,
-                gas_estimates: HashMap::new(),
-                storage_layout: HashMap::new(),
-                events: vec![],
-                constructor_params: vec![],
+                fallback
             };
-            self.modules.insert(contract_address.to_string(), module);
+
+            detected_functions.insert(function_name.clone(), FunctionMetadata {
+                name: function_name,
+                offset: final_offset,
+                args_count: 0,
+                return_type: "bytes".to_string(),
+                gas_limit: 100000,
+                payable: false,
+                mutability: "nonpayable".to_string(),
+                selector,
+                arg_types: vec![],
+                modifiers: vec![],
+            });
+            println!("🎯 [AUTO-DETECT] Fonction détectée: 0x{:08x} @ offset {} (JUMPDEST: {})", selector, final_offset, offset_valid);
         }
-        println!("✅ [AUTO-DETECT] Module mis à jour avec {} fonctions", self.modules[contract_address].functions.len());
-        Ok(())
+        i += 1;
     }
+    // Crée ou met à jour le module
+    if let Some(module) = self.modules.get_mut(contract_address) {
+        module.functions.extend(detected_functions);
+    } else {
+        let module = Module {
+            name: contract_address.to_string(),
+            address: contract_address.to_string(),
+            bytecode: bytecode.to_vec(),
+            elf_buffer: vec![],
+            context: uvm_runtime::UbfContext::new(),
+            stack_usage: None,
+            functions: detected_functions,
+            gas_estimates: HashMap::new(),
+            storage_layout: HashMap::new(),
+            events: vec![],
+            constructor_params: vec![],
+        };
+        self.modules.insert(contract_address.to_string(), module);
+    }
+    println!("✅ [AUTO-DETECT] Module mis à jour avec {} fonctions", self.modules[contract_address].functions.len());
+    Ok(())
+}
 
     /// ✅ NOUVEAU: Configuration du moteur parallèle
     pub fn with_parallel_engine(mut self, thread_count: usize, batch_size: usize) -> Self {
@@ -1152,101 +1168,52 @@ fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<us
             && &bytecode[i + 1..i + 5] == selector_bytes
             && bytecode[i + 5] == 0x14
             && bytecode[i + 6] == 0x61
-            && bytecode[i + 9] == 0x57 // JUMPI
+            && bytecode[i + 9] == 0x57
         {
             let offset = ((bytecode[i + 7] as usize) << 8) | (bytecode[i + 8] as usize);
-            // Vérifie que c'est bien un JUMPDEST
             if offset < len && bytecode[offset] == 0x5b {
-                // Nouvelle étape : vérifier que depuis ce JUMPDEST on peut atteindre un RETURN (0xf3)
-                // en parcourant un nombre limité d'octets (sécurité).
-                let max_scan = 8 * 1024; // 8 KB de scan max
-                let scan_end = std::cmp::min(len, offset + max_scan);
+                // Vérifie qu'il y a un RETURN dans les 8k suivants
+                let scan_end = std::cmp::min(len, offset + 8192);
                 let mut found_return = false;
                 let mut scan_pos = offset;
                 while scan_pos < scan_end {
                     let op = bytecode[scan_pos];
-                    if op == 0xf3 {
-                        found_return = true;
-                        break;
-                    }
-                    // avance ; si PUSHn rencontré, skip payload pour limiter faux positifs
+                    if op == 0xf3 { found_return = true; break; }
                     if (0x60..=0x7f).contains(&op) {
                         let push_bytes = (op - 0x5f) as usize;
                         scan_pos = scan_pos.saturating_add(1 + push_bytes);
                     } else {
-                        scan_pos = scan_pos.saturating_add(1);
+                        scan_pos += 1;
                     }
                 }
-                if found_return {
+                if found_return && offset != 0 {
                     return Some(offset);
-                } else {
-                    // si pas de RETURN trouvé, on continue la recherche (mais garde ce offset comme fallback)
-                    // on peut choisir de retourner cet offset quand aucune meilleure option est trouvée
-                    // => ici on continue la boucle pour potentiellement trouver un handler plus complet.
                 }
             }
         }
         i += 1;
     }
-
-    // fallback: si on n'a rien trouvé compatible, on retombe sur l'ancien scan simple
-    let mut j = 0;
-    while j + 9 < len {
-        if bytecode[j] == 0x63 {
-            let selector_bytes = selector.to_be_bytes();
-            if &bytecode[j + 1..j + 5] == selector_bytes
-                && bytecode[j + 5] == 0x14
-                && bytecode[j + 6] == 0x61
-                && bytecode[j + 9] == 0x57
-            {
-                let offset = ((bytecode[j + 7] as usize) << 8) | (bytecode[j + 8] as usize);
-                if offset < len && bytecode[offset] == 0x5b {
-                    return Some(offset);
-                }
+    // Fallback : cherche le premier JUMPDEST après 0x40
+    let start = std::cmp::max(0x40, len / 10);
+    for j in start..len {
+        if bytecode[j] == 0x5b {
+            return Some(j);
+        }
+    }
+    // Refuse offset 0 sauf si c'est un vrai handler (JUMPDEST + RETURN dans les 256 bytes)
+    if len > 0 && bytecode[0] == 0x5b {
+        let scan_end = std::cmp::min(len, 256);
+        for k in 1..scan_end {
+            if bytecode[k] == 0xf3 {
+                return Some(0);
             }
         }
-        j += 1;
     }
-
+    // Aucun offset valide trouvé
+    println!("❌ [EVM] Aucun offset de handler trouvé pour selector 0x{:08x}", selector);
     None
 }
-    
-    /// ✅ Estimation heuristique générale
-    fn estimate_function_offset_heuristic(bytecode: &[u8], selector: u32) -> Option<usize> {
-        let len = bytecode.len();
-        
-        // Heuristique 1: Les fonctions ont tendance à être après l'offset 0x40
-        let search_start = std::cmp::min(0x40, len / 4);
-        
-        // Cherche des patterns de début de fonction
-        for i in search_start..len.saturating_sub(10) {
-            if bytecode[i] == 0x5b { // JUMPDEST
-                // Vérifie si c'est suivi d'opcodes de fonction
-                let next_bytes = &bytecode[i + 1..std::cmp::min(i + 10, len)];
-                
-                let looks_like_function = next_bytes.iter().any(|&b| {
-                    matches!(b, 0x35 | 0x54 | 0x55 | 0x60..=0x7f)
-                });
-                
-                if looks_like_function {
-                    // Vérifie la cohérence avec le sélecteur (pattern simple)
-                    let selector_first_byte = (selector >> 24) as u8;
-                    let function_complexity = next_bytes.len();
-                    
-                    // Fonctions avec sélecteur haut (> 0x80) = souvent simples (view)
-                    // Fonctions avec sélecteur bas (< 0x80) = souvent complexes (mutable)
-                    let expected_simple = selector_first_byte >= 0x80;
-                    let is_simple = function_complexity < 5;
-                    
-                    if expected_simple == is_simple || function_complexity > 3 {
-                        return Some(i);
-                    }
-                }
-            }
-        }
-        
-        None
-    }
+
 
         /// ✅ NOUVEAU: Persistance immédiate du state après exécution
  fn persist_contract_state_immediate(&mut self, contract_address: &str, execution_result: &serde_json::Value) -> Result<(), String> {
@@ -1647,15 +1614,15 @@ fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<us
     }
 
     /// ✅ NOUVEAU: Préparation des arguments d'exécution génériques
-    fn prepare_generic_execution_args(
-        &self,
-        contract_address: &str,
-        function_name: &str,
-        args: Vec<NerenaValue>,
-        sender: &str,
-        function_meta: &FunctionMetadata,
-        resolved_offset: usize,
-    ) -> Result<uvm_runtime::interpreter::InterpreterArgs, String> {
+   fn prepare_generic_execution_args(
+    &self,
+    contract_address: &str,
+    function_name: &str,
+    args: Vec<NerenaValue>,
+    sender: &str,
+    function_meta: &FunctionMetadata,
+    _resolved_offset: usize, // <-- ignore ce paramètre
+) -> Result<uvm_runtime::interpreter::InterpreterArgs, String> {
         let current_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -1688,27 +1655,27 @@ fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<us
             }
         }
 
-        Ok(uvm_runtime::interpreter::InterpreterArgs {
-            function_name: function_name.to_string(),
-            contract_address: contract_address.to_string(),
-            sender_address: sender.to_string(),
-            args,
-            state_data: calldata,
-            gas_limit: function_meta.gas_limit,
-            gas_price: self.gas_price,
-            value: 0,
-            call_depth: 0,
-            block_number,
-            timestamp: current_time,
-            caller: sender.to_string(),
-            origin: sender.to_string(),
-            beneficiary: sender.to_string(),
-            function_offset: Some(resolved_offset),
-            base_fee: Some(0),
-            blob_base_fee: Some(0),
-            blob_hash: Some([0u8; 32]),
-        })
-    }
+    Ok(uvm_runtime::interpreter::InterpreterArgs {
+        function_name: function_name.to_string(),
+        contract_address: contract_address.to_string(),
+        sender_address: sender.to_string(),
+        args,
+        state_data: calldata,
+        gas_limit: function_meta.gas_limit,
+        gas_price: self.gas_price,
+        value: 0,
+        call_depth: 0,
+        block_number,
+        timestamp: current_time,
+        caller: sender.to_string(),
+        origin: sender.to_string(),
+        beneficiary: sender.to_string(),
+        function_offset: Some(0),
+        base_fee: Some(0),
+        blob_base_fee: Some(0),
+        blob_hash: Some([0u8; 32]),
+    })
+}
 
     /// ✅ NOUVEAU: Persistance des résultats dans le storage
   fn persist_result_to_storage(
@@ -1793,12 +1760,14 @@ fn decode_storage_slot_generically(&self, slot_value: &serde_json::Value) -> Opt
                         return Some(serde_json::json!(value));
                     }
                     // Essaie de décoder comme string
-                    if let Ok(text) = String::from_utf8(
-
-                        bytes.iter().cloned().filter(|&b| b != 0 && b >= 32 && b <= 126).collect()
-                    ) {
-                        if !text.trim().is_empty() && text.len() > 2 {
-                            return Some(serde_json::json!(text.trim()));
+                    if let Some(s) = hex_str.get(..2) {
+                        if s == "0x" {
+                            // Traite comme adresse hex
+                            let mut bytes = [0u8; 32];
+                            if let Ok(addr_bytes) = hex::decode(&hex_str[2..]) {
+                                bytes[12..32].copy_from_slice(&addr_bytes);
+                            }
+                            return Some(serde_json::json!(format!("0x{}", hex::encode(&bytes))));
                         }
                     }
                 }
@@ -1843,43 +1812,49 @@ fn looks_like_address(&self, addr: &str) -> bool {
     }
 
     /// ✅ NOUVEAU: Trouve ou crée des métadonnées de fonction
- fn find_or_create_function_metadata(
-        &mut self,
-        contract_address: &str,
-        function_name: &str,
-        selector: u32,
-        args: &[NerenaValue],
-    ) -> Result<FunctionMetadata, String> {
-        // Essaie de trouver dans les fonctions détectées
-        if let Some(module) = self.modules.get(contract_address) {
-            for (_, meta) in &module.functions {
-                if meta.selector == selector {
-                    println!("✅ [META] Fonction trouvée par sélecteur: 0x{:08x}", selector);
-                    return Ok(meta.clone());
-                }
+fn find_or_create_function_metadata(
+    &mut self,
+    contract_address: &str,
+    function_name: &str,
+    selector: u32,
+    args: &[NerenaValue],
+) -> Result<FunctionMetadata, String> {
+    // Essaie de trouver dans les fonctions détectées par selector
+    if let Some(module) = self.modules.get(contract_address) {
+        for (_, meta) in &module.functions {
+            if meta.selector == selector {
+                println!("✅ [META] Fonction trouvée par sélecteur: 0x{:08x}", selector);
+                return Ok(meta.clone());
             }
         }
-        // Crée des métadonnées dynamiques
-        let gas_estimate = 200000;
-        let metadata = FunctionMetadata {
-            name: function_name.to_string(),
-            offset: 0, // Sera résolu plus tard
-            args_count: args.len(),
-            return_type: "bool".to_string(), // GÉNÉRIQUE
-            gas_limit: gas_estimate,
-            payable: false,
-            mutability: "nonpayable".to_string(),
-            selector,
-            arg_types: args.iter().map(|_| "uint256".to_string()).collect(),
-            modifiers: vec![],
-        };
-        // Ajoute à la collection de fonctions
-        if let Some(module) = self.modules.get_mut(contract_address) {
-            module.functions.insert(function_name.to_string(), metadata.clone());
+        // ✅ PATCH: fallback sur le nom function_<selector>
+        let fallback_name = format!("function_{:08x}", selector);
+        if let Some(meta) = module.functions.get(&fallback_name) {
+            println!("✅ [META] Fonction fallback trouvée: {}", fallback_name);
+            return Ok(meta.clone());
         }
-        println!("✅ [META] Métadonnées créées dynamiquement pour {}", function_name);
-        Ok(metadata)
     }
+    // Crée des métadonnées dynamiques
+    let gas_estimate = 200000;
+    let metadata = FunctionMetadata {
+        name: function_name.to_string(),
+        offset: 0, // Sera résolu plus tard
+        args_count: args.len(),
+        return_type: "bool".to_string(), // GÉNÉRIQUE
+        gas_limit: gas_estimate,
+        payable: false,
+        mutability: "nonpayable".to_string(),
+        selector,
+        arg_types: args.iter().map(|_| "uint256".to_string()).collect(),
+        modifiers: vec![],
+    };
+    // Ajoute à la collection de fonctions
+    if let Some(module) = self.modules.get_mut(contract_address) {
+        module.functions.insert(function_name.to_string(), metadata.clone());
+    }
+    println!("✅ [META] Métadonnées créées dynamiquement pour {}", function_name);
+    Ok(metadata)
+}
 
 /// ✅ NOUVEAU: Estimation générique de l'offset de fonction dans le bytecode
 fn estimate_generic_function_offset(bytecode: &[u8], selector: u32) -> usize {

@@ -1764,84 +1764,6 @@ pub async fn verify_contract_deployment(&self, contract_address: &str) -> Result
         Ok(tx_hash_padded)
     }
 
-    /// ✅ Déploiement du contrat VEZ (impl + proxy) avec appels initialize + mint
-/// Version SYNCHRONE du déploiement VEZ — à appeler en tenant déjà le lock write sur la VM
-pub fn deploy_vez_contract_evm_sync(
-    &self,
-    vm: &mut SlurachainVm,
-    validator_address: &str,
-) -> Result<(), String> {
-    use sha3::{Digest, Keccak256};
-    use std::collections::BTreeMap;
-
-    println!("🪙 [EVM] Déploiement SYNCHRONE du contrat VEZ (impl + proxy)...");
-
-    // Bytecode de l'implémentation
-    let impl_bytecode_hex = include_str!("../../../vez_bytecode.hex");
-    let impl_bytecode = hex::decode(impl_bytecode_hex.trim())
-        .map_err(|e| format!("Erreur décodage bytecode impl: {}", e))?;
-
-    // Calcul de l'adresse de l'implémentation (déterministe)
-    let mut hasher = Keccak256::new();
-    hasher.update(&impl_bytecode);
-    let impl_hash = hasher.finalize();
-    let impl_address = format!("0x{}", hex::encode(&impl_hash[..20]));
-
-    // Bytecode du proxy
-    let proxy_address = "0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448";
-    let proxy_bytecode_hex = include_str!("../../../vezcurpoxycore_bytecode.hex");
-    let proxy_bytecode = hex::decode(proxy_bytecode_hex.trim())
-        .map_err(|e| format!("Erreur décodage bytecode proxy: {}", e))?;
-
-    let mut accounts = vm.state.accounts.write().unwrap();
-
-    // 1. Déploiement de l'implémentation
-    accounts.insert(
-        impl_address.clone(),
-        vuc_tx::slurachain_vm::AccountState {
-            address: impl_address.clone(),
-            balance: 0,
-            contract_state: impl_bytecode,
-            resources: BTreeMap::new(),
-            state_version: 1,
-            last_block_number: 0,
-            nonce: 0,
-            code_hash: "vez_impl_evm".to_string(),
-            storage_root: "vez_impl_root".to_string(),
-            is_contract: true,
-            gas_used: 0,
-        },
-    );
-
-    // 2. Déploiement du proxy à l'adresse fixe
-    let mut proxy_resources = BTreeMap::new();
-    proxy_resources.insert("implementation".to_string(), serde_json::Value::String(impl_address.clone()));
-    proxy_resources.insert("initialized".to_string(), serde_json::Value::Bool(false));
-
-    accounts.insert(
-        proxy_address.to_string(),
-        vuc_tx::slurachain_vm::AccountState {
-            address: proxy_address.to_string(),
-            balance: 0,
-            contract_state: proxy_bytecode,
-            resources: proxy_resources,
-            state_version: 1,
-            last_block_number: 0,
-            nonce: 0,
-            code_hash: "vez_proxy_core".to_string(),
-            storage_root: "vez_proxy_root".to_string(),
-            is_contract: true,
-            gas_used: 0,
-        },
-    );
-
-    println!("✅ Contrats VEZ déployés en mémoire :");
-    println!("   • Implémentation : {}", impl_address);
-    println!("   • Proxy (adresse fixe) : {}", proxy_address);
-
-    Ok(())
-}
-    
     /// ✅ Récupération d'un reçu de transaction
         pub async fn get_transaction_receipt(&self, input_hash: String) -> Result<serde_json::Value, String> {
         let hash = self.normalize_tx_hash(&input_hash);
@@ -3459,76 +3381,131 @@ async fn main() {
     });
 
 let vm_clone = vm.clone();
-let engine_platform_clone = engine_platform.clone();
-let validator_addr_clone = validator_address_generated.clone();
-let lurosonie_manager_clone = lurosonie_manager.clone();
+// ✅ TOUT AU MÊME ENDROIT : Attente du bloc #1 + Déploiement VEZ
 
-tokio::spawn(async move {
-    loop {
-        tokio::time::sleep(Duration::from_secs(1)).await;
-
-        let block_number = lurosonie_manager_clone.get_block_height().await;
-        if block_number >= 1 {
-            println!("🪙 Bloc #1 détecté — Initialisation VEZ via send_transaction (calldata brut)");
-
-            let proxy_address = "0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448";
-            let admin = validator_addr_clone.clone();
-
-            // ✅ 1. Transaction initialize(address admin)
-            // Selector: keccak256("initialize(address)") = 0xc4d66de8
-            let mut init_calldata = vec![0xc4, 0xd6, 0x6d, 0xe8];
-            let mut padded_admin = vec![0u8; 32];
-            if let Ok(admin_bytes) = hex::decode(admin.trim_start_matches("0x")) {
-                padded_admin[12..32].copy_from_slice(&admin_bytes);
+    let lurosonie_manager_clone = Arc::clone(&lurosonie_manager);
+    
+tokio::spawn({
+        let engine_platform_clone = engine_platform.clone();
+        let validator_address_generated = validator_address_generated.clone();
+        async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                let block_number = lurosonie_manager_clone.get_block_height().await;
+                if block_number == 1 {
+                    println!("🪙 Block #1 produit — déploiement du contrat VEZ (proxy + impl)...");
+    
+                    // 1) Déploiement de l'implémentation VEZ
+                    let impl_bytecode_hex = include_str!("../../../vez_bytecode.hex").trim();
+                    let deploy_impl_tx = serde_json::json!({
+                        "from": validator_address_generated,
+                        "data": format!("0x{}", impl_bytecode_hex),
+                        "value": "0x0"
+                    });
+                    let impl_tx_hash = match engine_platform_clone.send_transaction(deploy_impl_tx).await {
+                        Ok(tx_hash) => {
+                            println!("✅ Implémentation VEZ ajoutée au mempool: {}", tx_hash);
+                            tx_hash
+                        },
+                        Err(e) => {
+                            eprintln!("❌ Échec déploiement implémentation VEZ: {}", e);
+                            break;
+                        }
+                    };
+    
+                    // Récupère l'adresse du contrat déployé à partir du receipt
+                    let impl_receipt = engine_platform_clone.get_transaction_receipt(impl_tx_hash.clone()).await.ok();
+                    let vez_impl_addr = impl_receipt
+                        .and_then(|r| r.get("contractAddress").and_then(|v| v.as_str().map(|s| s.to_string())))
+                        .unwrap_or("".to_string());
+    
+                    // 2) Déploiement du proxy (si besoin, ou utilise l'adresse connue)
+                    let proxy_bytecode_hex = include_str!("../../../vezcurpoxycore_bytecode.hex").trim();
+                    let deploy_proxy_tx = serde_json::json!({
+                        "from": validator_address_generated,
+                        "data": format!("0x{}", proxy_bytecode_hex),
+                        "value": "0x0"
+                    });
+                    let proxy_tx_hash = match engine_platform_clone.send_transaction(deploy_proxy_tx).await {
+                        Ok(tx_hash) => {
+                            println!("✅ Proxy VEZ ajouté au mempool: {}", tx_hash);
+                            tx_hash
+                        },
+                        Err(e) => {
+                            eprintln!("❌ Échec déploiement proxy VEZ: {}", e);
+                            break;
+                        }
+                    };
+    
+                    // Après le déploiement du proxy, récupère son adresse :
+                    let proxy_receipt = engine_platform_clone.get_transaction_receipt(proxy_tx_hash.clone()).await.ok();
+                    let proxy_addr = proxy_receipt
+                        .and_then(|r| r.get("contractAddress").and_then(|v| v.as_str().map(|s| s.to_string())))
+                        .unwrap_or("".to_string());
+    
+                    // AJOUT : Écrit la clé "implementation" dans le storage du proxy pour activer le delegatecall
+                    {
+                        let mut vm = engine_platform_clone.vm.write().await;
+                        let mut accounts = vm.state.accounts.write().unwrap();
+                        if let Some(proxy_account) = accounts.get_mut(&proxy_addr) {
+                            proxy_account.resources.insert(
+                                "implementation".to_string(),
+                                serde_json::Value::String(vez_impl_addr.clone())
+                            );
+                            println!("✅ Slot 'implementation' du proxy mis à jour: {}", vez_impl_addr);
+                        }
+                    }
+    
+                    // 3) Appel initialize(address) sur le proxy (admin = validator)
+                    let admin_address = validator_address_generated.to_lowercase();
+                    let owner_address = "0x53ae54b11251d5003e9aa51422405bc35a2ef32d";
+                    let init_calldata = format!("8129fc1c000000000000000000000000{}", owner_address.trim_start_matches("0x"));
+                    let init_tx = serde_json::json!({
+                        "to": vez_impl_addr, // <-- Utilise l'adresse dynamique !
+                        "from": admin_address,
+                        "gas": "0x4c4b40",
+                        "value": "0x0",
+                        "data": format!("0x{}", init_calldata)
+                    });
+                    match engine_platform_clone.send_transaction(init_tx).await {
+                        Ok(tx_hash) => println!("✅ Transaction initialize(address) envoyée: {}", tx_hash),
+                        Err(e) => eprintln!("❌ Échec initialize(address): {}", e),
+                    }
+    
+                    // 4) Appel mint(address,uint256) sur le proxy
+                    let mint_calldata = format!(
+                        "40c10f19000000000000000000000000{}0000000000000000000000000000000000000000000000000000000034d54b40",
+                        owner_address.trim_start_matches("0x")
+                    );
+                    let mint_tx = serde_json::json!({
+                        "to": vez_impl_addr, // <-- Utilise l'adresse dynamique !
+                        "from": admin_address,
+                        "gas": "0x4c4b40",
+                        "value": "0x0",
+                        "data": format!("0x{}", mint_calldata)
+                    });
+                    match engine_platform_clone.send_transaction(mint_tx).await {
+                        Ok(tx_hash) => println!("✅ Transaction mint(address,uint256) envoyée: {}", tx_hash),
+                        Err(e) => eprintln!("❌ Échec mint(address,uint256): {}", e),
+                    }
+    
+                    println!("✅ Déploiement VEZ (proxy+impl) + initialize + mint envoyés via mempool");
+    
+                    let vm = engine_platform_clone.vm.read().await;
+                    if let Some(module) = vm.modules.get(&vez_impl_addr) {
+                        println!("🔎 Module détecté pour {} : fonctions = {:?}", vez_impl_addr, module.functions.keys().collect::<Vec<_>>());
+                        for (name, meta) in &module.functions {
+                            println!("   • {} : selector=0x{:08x}, offset={}", name, meta.selector, meta.offset);
+                        }
+                    } else {
+                        println!("❌ Aucun module enregistré pour l'adresse {}", vez_impl_addr);
+                    }
+    
+                    break;
+                }
             }
-            init_calldata.extend_from_slice(&padded_admin);
-
-            let init_tx_params = serde_json::json!({
-                "from": admin,
-                "to": proxy_address,
-                "data": format!("0x{}", hex::encode(&init_calldata)),
-                "value": "0x0",
-                "gas": "0x5208",
-                "gasPrice": "0x3b9aca00"
-            });
-
-            // ✅ 2. Transaction mint(address to, uint256 amount)
-            let mut mint_calldata = vec![0x40, 0xc1, 0x0f, 0x19]; // selector mint(address,uint256)
-            // to = admin
-            mint_calldata.extend_from_slice(&padded_admin);
-            // amount = 888_000_000 VEZ
-            let amount = 888_000_000_000_000_000_000_000_000u128;
-            let mut amount_bytes = [0u8; 32];
-            amount_bytes[16..32].copy_from_slice(&amount.to_be_bytes());
-            mint_calldata.extend_from_slice(&amount_bytes);
-
-            let mint_tx_params = serde_json::json!({
-                "from": admin,
-                "to": proxy_address,
-                "data": format!("0x{}", hex::encode(&mint_calldata)),
-                "value": "0x0",
-                "gas": "0x5208",
-                "gasPrice": "0x3b9aca00"
-            });
-
-            // ✅ Envoi via send_transaction (passe par mempool → bloc → exécution VM)
-            println!("🚀 Envoi transaction initialize via send_transaction...");
-            match engine_platform_clone.send_transaction(init_tx_params).await {
-                Ok(tx_hash) => println!("✅ initialize envoyé ! TX hash: {}", tx_hash),
-                Err(e) => eprintln!("❌ Erreur envoi initialize: {}", e),
-            }
-
-            println!("🚀 Envoi transaction mint via send_transaction...");
-            match engine_platform_clone.send_transaction(mint_tx_params).await {
-                Ok(tx_hash) => println!("✅ mint(888M VEZ) envoyé ! TX hash: {}", tx_hash),
-                Err(e) => eprintln!("❌ Erreur envoi mint: {}", e),
-            }
-
-            println!("🎉 Contrat VEZ initialisé et minté via transactions réelles (traçables, persistantes) !");
-            break;
         }
-    }
-});
+    });
     
     // ✅ Tasks de monitoring...
     let cleanup_manager = lurosonie_manager.clone();
@@ -3832,658 +3809,6 @@ async fn validate_system_integrity(vm: &Arc<TokioRwLock<SlurachainVm>>, validato
     }
     
     Ok(())
-}
-
-
-
-/// ✅ NOUVELLE FONCTION: Extraction du symbole token depuis le bytecode
-fn extract_token_symbol_from_bytecode(bytecode: &[u8]) -> Option<String> {
-    let strings = extract_strings_from_bytecode(bytecode);
-    
-    for string in &strings {
-        // Recherche de symboles typiques de tokens (3-5 caractères, majuscules)
-        if string.len() >= 3 && string.len() <= 5 && 
-           string.chars().all(|c| c.is_ascii_uppercase()) &&
-           !string.chars().all(|c| c.is_numeric()) {
-            
-            // Priorité aux symboles contenant "VEZ", "EUR", etc.
-            if string.contains("VEZ") || string.contains("EUR") || 
-               string.contains("TOK") || string.contains("ERC") {
-                return Some(string.clone());
-            }
-        }
-    }
-    
-    // Recherche plus large pour tous les strings courts en majuscules
-    strings.into_iter()
-        .find(|s| s.len() >= 3 && s.len() <= 5 && 
-                  s.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()))
-}
-
-/// ✅ NOUVELLE FONCTION: Calcul dynamique du slot de balance
-fn calculate_balance_slot_dynamic(address: &str) -> String {
-    use tiny_keccak::{Hasher, Keccak};
-    
-    // Utilise l'adresse + un salt dynamique basé sur le timestamp
-    let mut input = Vec::new();
-    input.extend_from_slice(address.as_bytes());
-    input.extend_from_slice(&chrono::Utc::now().timestamp().to_be_bytes());
-    input.extend_from_slice(b"DYNAMIC_BALANCE_SLOT");
-    
-    let mut hash = [0u8; 32];
-    let mut keccak = Keccak::v256();
-    keccak.update(&input);
-    keccak.finalize(&mut hash);
-    
-    format!("balance_slot_{}", hex::encode(hash))
-}
-
-/// ✅ NOUVELLE FONCTION: Détection améliorée des fonctions UUPS depuis bytecode
-fn detect_uups_functions_in_bytecode(bytecode: &[u8]) -> Vec<String> {
-    let mut detected_functions = Vec::new();
-    
-    // Table des sélecteurs UUPS standards (calculés avec Keccak256)
-    let uups_selectors = [
-        (0x3659cfe6, "upgradeTo"),
-        (0x4f1ef286, "upgradeToAndCall"),
-        (0x5c60da1b, "implementation"),
-        (0x52d1902d, "proxiableUUID"),
-        (0x8f283970u32 as i32, "changeAdmin"),
-        (0xf851a440u32 as i32, "admin"),
-    ];
-    
-    // Recherche des patterns PUSH4 + selector dans le bytecode
-    for (selector, function_name) in &uups_selectors {
-        let selector_bytes = (*selector as u32).to_be_bytes();
-        
-        // Pattern: PUSH4 (0x63) + 4 bytes selector
-        let pattern = [0x63, selector_bytes[0], selector_bytes[1], selector_bytes[2], selector_bytes[3]];
-        
-        if bytecode.windows(5).any(|window| window == pattern) {
-            detected_functions.push(function_name.to_string());
-            println!("🔍 Fonction UUPS détectée dans bytecode: {}() (selector: 0x{:08x})", function_name, selector);
-        }
-    }
-    
-    detected_functions
-}
-
-// Suppression de assign_private_key_to_system_account (contenait des valeurs hardcodées)
-// Suppression de create_initial_accounts_with_vez (contenait des valeurs hardcodées)
-
-/// ✅ NOUVELLE FONCTION: Création de comptes 100% dynamiques
-async fn create_dynamic_accounts(vm: &mut SlurachainVm, validator_address: &str) -> Result<(), String> {
-    use vuc_tx::slurachain_vm::AccountState;
-
-    println!("👥 Création de comptes 100% dynamiques...");
-
-    // Génère un balance dynamique basé sur le timestamp et l'adresse
-    let dynamic_balance = {
-        let mut hasher = sha3::Keccak256::new();
-        hasher.update(validator_address.as_bytes());
-        hasher.update(&chrono::Utc::now().timestamp().to_be_bytes());
-        hasher.update(b"DYNAMIC_BALANCE_CALCULATION");
-        let hash = hasher.finalize();
-        
-        // Convertit les premiers 16 bytes en u128 pour le balance
-        let mut balance_bytes = [0u8; 16];
-        balance_bytes.copy_from_slice(&hash[0..16]);
-        u128::from_be_bytes(balance_bytes) % 1_000_000_000_000_000_000_000_000u128 // Max 1M tokens
-    };
-
-    let account = AccountState {
-        address: validator_address.to_string(),
-        balance: dynamic_balance,
-        contract_state: vec![],
-        resources: {
-            let mut resources = std::collections::BTreeMap::new();
-            resources.insert("account_type".to_string(), serde_json::Value::String("validator_dynamic".to_string()));
-            resources.insert("created_at".to_string(), serde_json::Value::Number(chrono::Utc::now().timestamp().into()));
-            resources.insert("is_dynamic_account".to_string(), serde_json::Value::Bool(true));
-            resources.insert("balance_calculation".to_string(), serde_json::Value::String("timestamp_based_dynamic".to_string()));
-            resources.insert("hardcoded_values".to_string(), serde_json::Value::String("NONE".to_string()));
-            resources
-        },
-        state_version: 1,
-        last_block_number: 0,
-        nonce: 0,
-        code_hash: String::new(),
-        storage_root: String::new(),
-        is_contract: false,
-        gas_used: 0,
-    };
-
-    {
-        let mut accounts = vm.state.accounts.write().unwrap();
-        accounts.insert(validator_address.to_string(), account);
-    }
-
-    println!("✅ Compte validateur créé dynamiquement: {} avec balance: {}", validator_address, dynamic_balance);
-    Ok(())
-}
-
-/// ✅ NOUVEAU: Extraction du nom du contrat depuis le bytecode
-fn extract_contract_name_from_bytecode(bytecode: &[u8]) -> Option<String> {
-    // 1. Recherche de chaînes de caractères dans le bytecode
-    let strings = extract_strings_from_bytecode(bytecode);
-    
-    for string in &strings {
-        // Cherche des patterns typiques de noms de contrats
-        if string.len() >= 3 && string.len() <= 30 && 
-           string.chars().all(|c| c.is_alphanumeric() || c == '_') &&
-           !string.chars().all(|c| c.is_numeric()) {
-            
-            // Priorité aux noms contenant "VEZ", "Token", "Contract", etc.
-            if string.to_lowercase().contains("vez") ||
-               string.to_lowercase().contains("token") ||
-               string.to_lowercase().contains("erc20") ||
-               string.to_lowercase().contains("upgradeable") {
-                return Some(string.clone());
-            }
-        }
-    }
-    
-    // 2. Si aucun nom spécifique trouvé, utilise le premier string valide
-    strings.into_iter()
-        .find(|s| s.len() >= 3 && s.len() <= 20 && 
-                  s.chars().all(|c| c.is_alphanumeric()))
-}
-
-/// ✅ NOUVEAU: Détection complète des fonctions depuis le bytecode
-fn detect_all_functions_from_bytecode(bytecode: &[u8]) -> hashbrown::HashMap<String, vuc_tx::slurachain_vm::FunctionMetadata> {
-    let mut functions = hashbrown::HashMap::new();
-    
-    // 1. Détection via patterns PUSH4 (sélecteurs de fonction)
-    let selectors = extract_function_selectors_from_bytecode(bytecode);
-    
-    for (selector, offset) in selectors {
-        let function_name = guess_function_name_from_selector(selector)
-            .unwrap_or_else(|| format!("func_{:08x}", selector));
-        
-        let (args_count, return_type) = guess_function_signature_from_bytecode(bytecode, offset);
-        
-        functions.insert(function_name.clone(), vuc_tx::slurachain_vm::FunctionMetadata {
-            name: function_name,
-            offset,
-            args_count,
-            arg_types: vec![], // Sera rempli dynamiquement si possible
-            return_type,
-            gas_limit: 50000,
-            payable: detect_payable_from_bytecode(bytecode, offset),
-            mutability: detect_mutability_from_bytecode(bytecode, offset),
-            selector,
-            modifiers: vec![],
-        });
-    }
-    
-    // 2. Ajout des fonctions ERC20 standard si détectées
-    if functions.keys().any(|name| name == "balanceOf" || name == "transfer") {
-        add_missing_erc20_functions(&mut functions, bytecode);
-    }
-    
-    functions
-}
-
-/// ✅ NOUVEAU: Extraction des sélecteurs de fonction depuis le bytecode
-fn extract_function_selectors_from_bytecode(bytecode: &[u8]) -> Vec<(u32, usize)> {
-    let mut selectors = Vec::new();
-    let mut i = 0;
-    
-    while i + 4 < bytecode.len() {
-        // PUSH4 opcode (0x63) suivi de 4 bytes = sélecteur
-        if bytecode[i] == 0x63 {
-            let selector = u32::from_be_bytes([
-                bytecode[i + 1],
-                bytecode[i + 2], 
-                bytecode[i + 3],
-                bytecode[i + 4]
-            ]);
-            selectors.push((selector, i));
-            i += 5;
-        } else {
-            i += 1;
-        }
-    }
-    
-    selectors
-}
-
-/// ✅ NOUVEAU: Devine le nom de fonction depuis le sélecteur
-fn guess_function_name_from_selector(selector: u32) -> Option<String> {
-    // Table des sélecteurs ERC20 courants (calculés avec Keccak256)
-    match selector {
-        0x70a08231 => Some("balanceOf".to_string()),
-        0xa9059cbb => Some("transfer".to_string()),
-        0x23b872dd => Some("transferFrom".to_string()),
-        0x095ea7b3 => Some("approve".to_string()),
-        0xdd62ed3e => Some("allowance".to_string()),
-        0x18160ddd => Some("totalSupply".to_string()),
-        0x06fdde03 => Some("name".to_string()),
-        0x95d89b41 => Some("symbol".to_string()),
-        0x313ce567 => Some("decimals".to_string()),
-        0x8129fc1c => Some("initialize".to_string()),
-        0x40c10f19 => Some("mint".to_string()),
-        0x42966c68 => Some("burn".to_string()),
-        0x8da5cb5b => Some("owner".to_string()),
-        0xf2fde38b => Some("transferOwnership".to_string()),
-        0x715018a6 => Some("renounceOwnership".to_string()),
-        _ => None
-    }
-}
-
-/// ✅ NOUVEAU: Extraction de métadonnées depuis le bytecode
-fn extract_contract_metadata_from_bytecode(bytecode: &[u8]) -> BTreeMap<String, String> {
-    let mut metadata = BTreeMap::new();
-    
-    // 1. Analyse de la taille et complexité
-    metadata.insert("bytecode_complexity".to_string(), 
-                   if bytecode.len() > 10000 { "high".to_string() } 
-                   else if bytecode.len() > 5000 { "medium".to_string() }
-                   else { "low".to_string() });
-    
-    // 2. Détection des patterns EVM
-    let push_count = bytecode.iter().filter(|&&b| b >= 0x60 && b <= 0x7f).count();
-    metadata.insert("push_operations".to_string(), push_count.to_string());
-    
-    let jump_count = bytecode.iter().filter(|&&b| b == 0x56 || b == 0x57).count();
-    metadata.insert("jump_operations".to_string(), jump_count.to_string());
-    
-    let sload_count = bytecode.iter().filter(|&&b| b == 0x54).count();
-    metadata.insert("storage_reads".to_string(), sload_count.to_string());
-    
-    let sstore_count = bytecode.iter().filter(|&&b| b == 0x55).count();
-    metadata.insert("storage_writes".to_string(), sstore_count.to_string());
-    
-    // 3. Détection du type de contrat
-    if sload_count > 0 && sstore_count > 0 {
-        metadata.insert("contract_category".to_string(), "stateful".to_string());
-    } else {
-        metadata.insert("contract_category".to_string(), "stateless".to_string());
-    }
-    
-    // 4. Analyse des chaînes pour plus de métadonnées
-    let strings = extract_strings_from_bytecode(bytecode);
-    if !strings.is_empty() {
-        metadata.insert("embedded_strings_count".to_string(), strings.len().to_string());
-        
-        // Recherche de patterns spécifiques
-        for string in &strings {
-            let lower = string.to_lowercase();
-            if lower.contains("erc20") || lower.contains("token") {
-                metadata.insert("token_standard".to_string(), "ERC20".to_string());
-            }
-            if lower.contains("vez") || lower.contains("vyft") {
-                metadata.insert("token_symbol".to_string(), "VEZ".to_string());
-                metadata.insert("project_name".to_string(), "Vyft".to_string());
-            }
-            if lower.contains("proxy") || lower.contains("upgradeable") {
-                metadata.insert("proxy_type".to_string(), "upgradeable".to_string());
-            }
-        }
-    }
-    
-    metadata
-}
-
-/// ✅ NOUVEAU: Extraction des chaînes de caractères depuis le bytecode
-fn extract_strings_from_bytecode(bytecode: &[u8]) -> Vec<String> {
-    let mut strings = Vec::new();
-    let mut i = 0;
-    
-    while i < bytecode.len() {
-        // Recherche de séquences de caractères ASCII imprimables
-        if bytecode[i] >= 32 && bytecode[i] <= 126 {
-            let start = i;
-            while i < bytecode.len() && 
-                  bytecode[i] >= 32 && bytecode[i] <= 126 {
-                i += 1;
-            }
-            
-            if i - start >= 3 { // Minimum 3 caractères
-                if let Ok(string) = String::from_utf8(bytecode[start..i].to_vec()) {
-                    strings.push(string);
-                }
-            }
-        } else {
-            i += 1;
-        }
-    }
-    
-    // Déduplique et trie par longueur
-    strings.sort_by(|a, b| b.len().cmp(&a.len()));
-    strings.dedup();
-    
-    strings
-}
-
-/// ✅ NOUVEAU: Calcul du slot de storage pour balanceOf
-fn calculate_balance_slot(address: &str) -> String {
-    use tiny_keccak::{Hasher, Keccak};
-    let mut padded = [0u8; 64];
-    
-    if let Ok(addr_bytes) = hex::decode(address.trim_start_matches("0x")) {
-        if addr_bytes.len() == 20 {
-            padded[12..32].copy_from_slice(&addr_bytes);
-        }
-    }
-    
-    let mut hash = [0u8; 32];
-    let mut keccak = Keccak::v256();
-    keccak.update(&padded);
-    keccak.finalize(&mut hash);
-    
-    hex::encode(hash)
-}
-
-/// ✅ NOUVEAU: Extraction de la supply initiale depuis le bytecode
-fn extract_initial_supply_from_bytecode(bytecode: &[u8]) -> Option<u128> {
-    // Recherche de grands nombres dans le bytecode (patterns typiques de supply)
-    let mut i = 0;
-    while i + 16 <= bytecode.len() {
-        // Recherche de patterns de 16+ bytes consécutifs (supply en wei)
-        let mut candidate = 0u128;
-        let mut valid_bytes = 0;
-        
-        for j in 0..16 {
-            if i + j < bytecode.len() {
-                candidate = (candidate << 8) | (bytecode[i + j] as u128);
-                if bytecode[i + j] != 0 {
-                    valid_bytes = j + 1;
-                }
-            }
-        }
-        
-        // Si on trouve un nombre dans la range typique des supplies ERC20
-        if valid_bytes >= 8 && candidate >= 1_000_000_000_000_000_000u128 && 
-           candidate <= 1_000_000_000_000_000_000_000_000_000u128 {
-            return Some(candidate);
-        }
-        
-        i += 1;
-    }
-    
-    None
-}
-
-/// ✅ NOUVEAU: Helpers pour analyse bytecode
-fn guess_function_signature_from_bytecode(bytecode: &[u8], offset: usize) -> (usize, String) {
-    // Analyse basique du bytecode autour de l'offset pour deviner la signature
-    let args_count = 0; // À améliorer avec analyse plus poussée
-    let return_type = "uint256".to_string(); // Défaut pour ERC20
-    
-    (args_count, return_type)
-}
-
-fn detect_payable_from_bytecode(bytecode: &[u8], offset: usize) -> bool {
-    // Recherche CALLVALUE (0x34) near offset
-    let start = offset.saturating_sub(20);
-    let end = std::cmp::min(offset + 20, bytecode.len());
-    
-    bytecode[start..end].contains(&0x34)
-}
-
-fn detect_mutability_from_bytecode(bytecode: &[u8], offset: usize) -> String {
-    // Analyse SSTORE/SLOAD pour déterminer la mutabilité
-    let start = offset.saturating_sub(50);
-    let end = std::cmp::min(offset + 50, bytecode.len());
-    
-    if bytecode[start..end].contains(&0x55) { // SSTORE
-        "nonpayable".to_string()
-    } else if bytecode[start..end].contains(&0x54) { // SLOAD only
-        "view".to_string()
-    } else {
-        "pure".to_string()
-    }
-}
-
-fn add_missing_erc20_functions(
-    functions: &mut hashbrown::HashMap<String, vuc_tx::slurachain_vm::FunctionMetadata>,
-    bytecode: &[u8]
-) {
-    let erc20_functions = [
-        ("balanceOf", 0x70a08231u32, 1),
-        ("transfer", 0xa9059cbb, 2),
-        ("transferFrom", 0x23b872dd, 3),
-        ("approve", 0x095ea7b3, 2),
-        ("allowance", 0xdd62ed3e, 2),
-        ("totalSupply", 0x18160ddd, 0),
-        ("name", 0x06fdde03, 0),
-        ("symbol", 0x95d89b41, 0),
-        ("decimals", 0x313ce567, 0),
-    ];
-    
-    for (name, selector, args_count) in &erc20_functions {
-        if !functions.contains_key(*name) {
-            // Cherche le sélecteur dans le bytecode
-            if let Some(offset) = find_selector_offset(bytecode, *selector) {
-                functions.insert(name.to_string(), vuc_tx::slurachain_vm::FunctionMetadata {
-                    name: name.to_string(),
-                    offset,
-                    args_count: *args_count,
-                    arg_types: vec![],
-                    return_type: if *args_count == 0 { "uint256".to_string() } else { "bool".to_string() },
-                    gas_limit: 50000,
-                    payable: false,
-                    mutability: if *name == "balanceOf" || *name == "totalSupply" || 
-                                   *name == "name" || *name == "symbol" || *name == "decimals" ||
-                                   *name == "allowance" { 
-                        "view".to_string() 
-                    } else { 
-                        "nonpayable".to_string() 
-                    },
-                    selector: *selector,
-                    modifiers: vec![],
-                });
-            }
-        }
-    }
-}
-
-fn find_selector_offset(bytecode: &[u8], selector: u32) -> Option<usize> {
-    let selector_bytes = selector.to_be_bytes();
-    let pattern = [0x63, selector_bytes[0], selector_bytes[1], selector_bytes[2], selector_bytes[3]];
-    
-    bytecode.windows(5).position(|window| window == pattern)
-}
-
-fn extract_events_from_bytecode(bytecode: &[u8]) -> Vec<String> {
-    // Recherche des opcodes LOG* (0xa0-0xa4)
-    let mut events = Vec::new();
-    
-    for (i, &byte) in bytecode.iter().enumerate() {
-        if byte >= 0xa0 && byte <= 0xa4 {
-            let topics_count = (byte - 0xa0) as usize;
-            events.push(format!("Event_{:04x}()", i));
-        }
-    }
-    
-    events
-}
-
-fn extract_constructor_params_from_bytecode(bytecode: &[u8]) -> Vec<String> {
-    // Analyse basique pour détecter les paramètres du constructeur
-    // À améliorer selon les patterns spécifiques trouvés
-    vec![]
-}
-
-/// ✅ NOUVELLE FONCTION: Initialisation du contrat VEZ via execute_module
-async fn initialize_vez_contract(vm: &Arc<TokioRwLock<SlurachainVm>>, validator_address: &str) -> Result<(), String> {
-    println!("🔧 Initializing VEZ contract via bytecode execution...");
-
-    let vez_contract_address = "0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448";
-
-    // Charger l'ABI du proxy pour détecter la signature d'initialize
-    let proxy_abi_json = std::fs::read_to_string("vezcurproxycore.json")
-        .map_err(|e| format!("vezcurproxycore.json manquant: {}", e))?;
-    let proxy_abi: serde_json::Value = serde_json::from_str(&proxy_abi_json)
-        .map_err(|e| format!("vezcurproxycore.json invalide: {}", e))?;
-
-    // Cherche la fonction initialize dans l'ABI du proxy
-    let initialize_abi = proxy_abi.as_array()
-        .and_then(|arr| arr.iter().find(|item| {
-            item.get("type").and_then(|v| v.as_str()) == Some("function")
-                && item.get("name").and_then(|v| v.as_str()) == Some("initialize")
-        }));
-
-    let args_count = initialize_abi
-        .and_then(|item| item.get("inputs").and_then(|v| v.as_array()).map(|arr| arr.len()))
-        .unwrap_or(0);
-
-    // Charge l'ABI de l'implémentation VEZ
-    let impl_abi_json = std::fs::read_to_string("VEZABI.json")
-        .map_err(|e| format!("VEZABI.json manquant: {}", e))?;
-    let impl_abi: serde_json::Value = serde_json::from_str(&impl_abi_json)
-        .map_err(|e| format!("VEZABI.json invalide: {}", e))?;
-
-    // Cherche la fonction initialize dans l'ABI de l'implémentation
-    let initialize_abi = impl_abi.as_array()
-        .and_then(|arr| arr.iter().find(|item| {
-            item.get("type").and_then(|v| v.as_str()) == Some("function")
-                && item.get("name").and_then(|v| v.as_str()) == Some("initialize")
-        }));
-
-    let args_count = initialize_abi
-        .and_then(|item| item.get("inputs").and_then(|v| v.as_array()).map(|arr| arr.len()))
-        .unwrap_or(0);
-
-    // Prépare les arguments selon la signature de l'implémentation
-    let initial_supply: u128 = 888_000_000_000_000_000_000_000_000u128;
-    let initial_holder = validator_address;
-    let owner = validator_address;
-    let init_args = vec![]; // <-- aucun argument pour le proxy VEZ
-
-    let mut vm_guard = vm.write().await;
-    match vm_guard.execute_module(
-        vez_contract_address,
-        "initialize",
-        init_args,
-        Some(validator_address)
-    ) {
-        Ok(result) => {
-            println!("✅ VEZ initialize returned: {:?}", result);
-            Ok(())
-        }
-        Err(e) => {
-            eprintln!("❌ Failed to initialize VEZ contract via UVM: {}", e);
-            Err(e)
-        }
-    }
-}
-
-/// Détecte les fonctions Solidity dans le bytecode et génère la table des fonctions
-fn detect_functions_from_bytecode(bytecode: &[u8]) -> hashbrown::HashMap<String, vuc_tx::slurachain_vm::FunctionMetadata> {
-    use sha3::{Digest, Keccak256};
-    use std::collections::HashMap;
-
-    let mut functions = hashbrown::HashMap::new();
-
-    // Recherche des sélecteurs de fonction (4 bytes après PUSH4)
-    let mut i = 0;
-    while i + 4 < bytecode.len() {
-        // PUSH4 opcode = 0x63
-        if bytecode[i] == 0x63 {
-            let selector = u32::from_be_bytes([bytecode[i+1], bytecode[i+2], bytecode[i+3], bytecode[i+4]]);
-            // Recherche du nom de la fonction via une table de correspondance ou ABI (à améliorer)
-            let name = format!("func_{:08x}", selector);
-            functions.insert(name.clone(), vuc_tx::slurachain_vm::FunctionMetadata {
-                name,
-                offset: i,
-                args_count: 0,  // À améliorer si ABI disponible
-                arg_types: Vec::new(), // Ajout du champ manquant
-                return_type: "unknown".to_string(),
-                gas_limit: 50000,
-                payable: false, // Default value, as ABI is not available here
-                mutability: "nonpayable".to_string(), // Default value
-                selector,
-                modifiers: vec![],
-            });
-            i += 5;
-        } else {
-            i += 1;
-        }
-    }
-
-    functions
-}
-
-/// Détecte les fonctions Solidity via l'ABI JSON (VEZABI.json à la racine)
-fn detect_functions_from_abi_file() -> hashbrown::HashMap<String, vuc_tx::slurachain_vm::FunctionMetadata> {
-    use sha3::{Digest, Keccak256};
-    use std::fs;
-    let abi_json = fs::read_to_string("VEZABI.json").expect("VEZABI.json manquant à la racine");
-    let abi: serde_json::Value = serde_json::from_str(&abi_json).expect("VEZABI.json invalide");
-    let mut functions = hashbrown::HashMap::new();
-    if let Some(items) = abi.as_array() {
-        for item in items {
-            if item.get("type").and_then(|v| v.as_str()) == Some("function") {
-                let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                let inputs_vec = item.get("inputs").and_then(|v| v.as_array()).cloned().unwrap_or_else(Vec::new);
-                let mut types = Vec::new();
-                for inp in &inputs_vec {
-                    if let Some(t) = inp.get("type").and_then(|v| v.as_str()) {
-                        types.push(t.to_string());
-                    }
-                }
-                let signature = format!("{}({})", name, types.join(","));
-                let mut hasher = Keccak256::new();
-                hasher.update(signature.as_bytes());
-                let selector_bytes = hasher.finalize();
-                let selector = u32::from_be_bytes([selector_bytes[0], selector_bytes[1], selector_bytes[2], selector_bytes[3]]);
-                functions.insert(name.to_string(), vuc_tx::slurachain_vm::FunctionMetadata {
-                    name: name.to_string(),
-                    offset: 0,
-                    args_count: types.len(),
-                    arg_types: types.clone(),
-                    return_type: item.get("outputs")
-                        .and_then(|v| v.as_array())
-                        .and_then(|arr| arr.get(0))
-                        .and_then(|out| out.get("type"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown")
-                        .to_string(),
-                    gas_limit: 50000,
-                    payable: item.get("stateMutability").and_then(|v| v.as_str()) == Some("payable"),
-                    mutability: item.get("stateMutability").and_then(|v| v.as_str()).unwrap_or("nonpayable").to_string(),
-                    selector,
-                    modifiers: vec![],
-                });
-            }
-        }
-        // try to merge ABI functions if VEZABI.json exists (non-panicking)
-        if let Ok(abi_json) = std::fs::read_to_string("VEZABI.json") {
-            if let Ok(abi_val) = serde_json::from_str::<serde_json::Value>(&abi_json) {
-                if let Some(items) = abi_val.as_array() {
-                    let found = items.iter().any(|item| {
-                        item.get("type").and_then(|v| v.as_str()) == Some("function")
-                            && item.get("name").and_then(|v| v.as_str()) == Some("initialize")
-                            && item.get("inputs").and_then(|v| v.as_array()).map(|arr| arr.len() == 3).unwrap_or(false)
-                    });
-                    if found && !functions.contains_key("initialize") {
-                        use sha3::Keccak256;
-                        let sig = "initialize(uint256,address,address)";
-                        let mut hasher = Keccak256::new();
-                        hasher.update(sig.as_bytes());
-                        let sel = hasher.finalize();
-                        let selector = u32::from_be_bytes([sel[0], sel[1], sel[2], sel[3]]);
-                        functions.insert("initialize".to_string(), vuc_tx::slurachain_vm::FunctionMetadata {
-                            name: "initialize".to_string(),
-                            offset: 0,
-                            args_count: 3,
-                            arg_types: vec![],
-                            return_type: "unknown".to_string(),
-                            gas_limit: 200_000,
-                            payable: false,
-                            modifiers: vec![],
-                            mutability: "nonpayable".to_string(),
-                            selector,
-                        });
-                        println!("ℹ️ Added ABI-based 'initialize(uint256,address,address)' function metadata with selector 0x{:08x}", selector);
-                    }
-                }
-            }
-        }
-    }
-    functions
 }
 
 fn pad_hash_64(hex: &str) -> String {

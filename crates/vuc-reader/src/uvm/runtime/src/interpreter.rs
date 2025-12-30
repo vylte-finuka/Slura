@@ -1734,6 +1734,8 @@ while insn_ptr < prog.len() {
 
     //___ 0xfe INVALID
    
+
+   
     0xfe => {
         return Err(Error::new(ErrorKind::Other, "INVALID opcode"));
     },
@@ -1825,7 +1827,14 @@ while insn_ptr < prog.len() {
         for (slot, bytes) in contract_storage.iter().take(20) {
             let hexv = hex::encode(bytes);
             let maybe_u64 = {
-                let u = u256::from_big_endian(bytes);
+                // PATCH: always use 32 bytes for U256
+                let mut padded = [0u8; 32];
+                if bytes.len() >= 32 {
+                    padded.copy_from_slice(&bytes[..32]);
+                } else {
+                    padded[32 - bytes.len()..].copy_from_slice(bytes);
+                }
+                let u = u256::from_big_endian(&padded);
                 if u.bits() <= 64 { Some(u.low_u64()) } else { None }
             };
             if let Some(v) = maybe_u64 {
