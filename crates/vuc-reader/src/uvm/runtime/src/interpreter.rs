@@ -735,6 +735,50 @@ println!("🟢 [EVM INIT] Pile EVM vide (comportement EVM réel)");
     prog.iter().position(|&b| b == 0x5b).unwrap_or(0)
 });
     
+// Initialisation dynamique de la pile EVM selon la fonction appelée et le bytecode
+{
+    // Récupère le selector de la fonction (4 premiers bytes du calldata)
+    let selector = if interpreter_args.state_data.len() >= 4 {
+        u32::from_be_bytes([
+            interpreter_args.state_data[0],
+            interpreter_args.state_data[1],
+            interpreter_args.state_data[2],
+            interpreter_args.state_data[3],
+        ])
+    } else {
+        0
+    };
+
+    // Pousse le selector sur la pile si le bytecode commence par un dispatcher Solidity
+    if prog.len() >= 10 && prog[0] == 0x63 && prog[5] == 0x14 {
+        evm_stack.push(selector as u64);
+        let expected_selector = u32::from_be_bytes([prog[1], prog[2], prog[3], prog[4]]);
+        evm_stack.push(expected_selector as u64);
+    }
+
+    // Recherche le plus grand DUPn dans le bytecode
+    let max_dup = prog.iter()
+        .filter(|&&op| op >= 0x80 && op <= 0x8f)
+        .map(|&op| (op - 0x80 + 1) as usize)
+        .max()
+        .unwrap_or(0);
+
+    // Prépare la pile avec assez d'arguments pour le plus grand DUPn
+    let mut arg_idx = 0;
+    while evm_stack.len() < max_dup {
+        let arg_offset = 4 + (evm_stack.len() * 32);
+        let arg_val = if interpreter_args.state_data.len() >= arg_offset + 32 {
+            let mut buf = [0u8; 8];
+            buf.copy_from_slice(&interpreter_args.state_data[arg_offset + 24..arg_offset + 32]);
+            u64::from_be_bytes(buf)
+        } else {
+            0
+        };
+        evm_stack.push(arg_val);
+        arg_idx += 1;
+    }
+}
+    
 while insn_ptr < prog.len() {
     let opcode = prog[insn_ptr];
     let insn = ebpf::get_insn(prog, insn_ptr);
@@ -1337,8 +1381,43 @@ while insn_ptr < prog.len() {
         if evm_stack.is_empty() {
             return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
         }
-        let dest = evm_stack.pop().unwrap() as usize;
-        // SUPPRIMER la vérification JUMPDEST ici !
+        let mut dest = evm_stack.pop().unwrap() as usize;
+    
+        // PATCH: Ne jamais sauter sur 0x000 (fallback), ni sur le dispatcher
+        // On cherche le prochain vrai JUMPDEST après dest si dest == 0 ou dans la zone du dispatcher (<0x100)
+        if dest == 0 || dest < 0x100 {
+            // Cherche le prochain JUMPDEST après le dispatcher (souvent >0x100)
+            let mut found = false;
+            let mut pc = if dest < 0x100 { 0x100 } else { dest };
+            while pc < prog.len() {
+                if prog[pc] == 0x5b {
+                    dest = pc;
+                    found = true;
+                    println!("🚀 [JUMP PATCH] Saut corrigé vers vrai JUMPDEST à PC=0x{:04x}", dest);
+                    break;
+                }
+                pc += 1;
+            }
+            if !found {
+                return Err(Error::new(ErrorKind::Other, format!("JUMP: aucun JUMPDEST métier trouvé après 0x{:x}", dest)));
+            }
+        } else if prog.get(dest) != Some(&0x5b) {
+            // Si ce n'est pas un JUMPDEST, avance jusqu'au prochain JUMPDEST
+            let mut pc = dest;
+            let mut found = false;
+            while pc < prog.len() {
+                if prog[pc] == 0x5b {
+                    dest = pc;
+                    found = true;
+                    println!("🚀 [JUMP PATCH] Saut corrigé vers vrai JUMPDEST à PC=0x{:04x}", dest);
+                    break;
+                }
+                pc += 1;
+            }
+            if !found {
+                return Err(Error::new(ErrorKind::Other, format!("JUMP: aucun JUMPDEST trouvé après 0x{:x}", dest)));
+            }
+        }
         insn_ptr = dest;
         skip_advance = true;
     },
@@ -1645,7 +1724,7 @@ while insn_ptr < prog.len() {
         let str_offset = u256::from_big_endian(&ret_data[0..32]).low_u64() as usize;
         if str_offset == 32 && ret_data.len() >= 64 {
             let str_len = u256::from_big_endian(&ret_data[32..64]).low_u64() as usize;
-            if 64 + str_len <= ret_data.len() {
+            if  64 + str_len <= ret_data.len() {
                 let str_bytes = &ret_data[64..64 + str_len];
                 if let Ok(s) = std::str::from_utf8(str_bytes) {
                     serde_json::Value::String(s.to_string())

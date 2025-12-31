@@ -1391,9 +1391,25 @@ fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<us
     let function_meta = if let Some(meta) = module.functions.get(function_name) {
         meta.clone()
     } else {
-        // ✅ GÉNÈRE un sélecteur et trouve la fonction dynamiquement
+        // Calcule le selector attendu pour ce nom/signature
         let selector = Self::calculate_function_selector_from_signature(function_name, &args);
-        self.find_or_create_function_metadata(&&vyid, function_name, selector, &args)?
+
+        // Tente de trouver une fonction auto-détectée avec ce selector
+        let detected = module.functions.iter().find_map(|(fname, meta)| {
+            if meta.selector == selector {
+                Some(meta.clone())
+            } else {
+                None
+            }
+        });
+
+        if let Some(meta) = detected {
+            println!("✅ [DISPATCH] Appel '{}' mappé sur auto-detectée '{}', offset {}", function_name, meta.name, meta.offset);
+            meta
+        } else {
+            // Fallback : crée dynamiquement
+            self.find_or_create_function_metadata(&vyid, function_name, selector, &args)?
+        }
     };
 
     // ✅ ÉTAPE 5: Résolution d'offset générique
@@ -1621,7 +1637,7 @@ fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<us
     args: Vec<NerenaValue>,
     sender: &str,
     function_meta: &FunctionMetadata,
-    _resolved_offset: usize, // <-- ignore ce paramètre
+    resolved_offset: usize, // <-- utilise ce paramètre !
 ) -> Result<uvm_runtime::interpreter::InterpreterArgs, String> {
         let current_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1632,7 +1648,7 @@ fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<us
             .unwrap_or(1);
 
         // ✅ CALDATA ABI 100% CORRECT ET GÉNÉRIQUE (selector UNE SEULE FOIS)
-             let mut calldata = Vec::with_capacity(4 + args.len() * 32);
+        let mut calldata = Vec::with_capacity(4 + args.len() * 32);
         calldata.extend_from_slice(&function_meta.selector.to_be_bytes()); // UNE SEULE FOIS
 
         for arg in &args {
@@ -1655,27 +1671,28 @@ fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<us
             }
         }
 
-    Ok(uvm_runtime::interpreter::InterpreterArgs {
-        function_name: function_name.to_string(),
-        contract_address: contract_address.to_string(),
-        sender_address: sender.to_string(),
-        args,
-        state_data: calldata,
-        gas_limit: function_meta.gas_limit,
-        gas_price: self.gas_price,
-        value: 0,
-        call_depth: 0,
-        block_number,
-        timestamp: current_time,
-        caller: sender.to_string(),
-        origin: sender.to_string(),
-        beneficiary: sender.to_string(),
-        function_offset: Some(0),
-        base_fee: Some(0),
-        blob_base_fee: Some(0),
-        blob_hash: Some([0u8; 32]),
-    })
-}
+        Ok(uvm_runtime::interpreter::InterpreterArgs {
+            function_name: function_name.to_string(),
+            contract_address: contract_address.to_string(),
+            sender_address: sender.to_string(),
+            args,
+            state_data: calldata,
+            gas_limit: function_meta.gas_limit,
+            gas_price: self.gas_price,
+            value: 0,
+            call_depth: 0,
+            block_number,
+            timestamp: current_time,
+            caller: sender.to_string(),
+            origin: sender.to_string(),
+            beneficiary: sender.to_string(),
+            function_offset: Some(resolved_offset), // <-- CORRIGÉ : utilise le vrai offset !
+            base_fee: Some(0),
+            blob_base_fee: Some(0),
+            blob_hash: Some([0u8; 32]),
+        })
+    }
+// ...existing code...
 
     /// ✅ NOUVEAU: Persistance des résultats dans le storage
   fn persist_result_to_storage(
