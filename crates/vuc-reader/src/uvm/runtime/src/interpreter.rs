@@ -1450,13 +1450,13 @@ while insn_ptr < prog.len() {
             if (0x60..=0x7f).contains(&next_op) {
                 let push_bytes = (next_op - 0x5f) as usize;
                 advance = 1 + push_bytes; // JUMPI + PUSH
-            }
+     ___       }
         }
         // pas de saut → on avance normalement
     }
 }
         
-    //___ 0x58 PC
+    // 0x58 PC
     0x58 => {
         reg[_dst] = (insn_ptr * ebpf::INSN_SIZE) as u64;
         //consume_gas(&mut execution_context, 2)?;
@@ -1828,7 +1828,7 @@ if !skip_advance {
 }
 skip_advance = false;
 advance = 1; // reset pour prochaine itération
-}
+}}
 // Si on sort de la boucle sans STOP/RETURN/REVERT
 {
     let final_storage = execution_context.world_state.storage
