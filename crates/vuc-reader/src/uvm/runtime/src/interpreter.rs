@@ -796,7 +796,8 @@ while insn_ptr < prog.len() {
     let insn = ebpf::get_insn(prog, insn_ptr);
     let _dst = insn.dst as usize;
     let _src = insn.src as usize;
-
+let mut skip_advance = false;
+    let mut advance = 1;
     // Log EVM
     if debug_evm {
         println!("🔍 [EVM LOG] PC={:04x} | OPCODE=0x{:02x} ({})", insn_ptr, opcode, opcode_name(opcode));
