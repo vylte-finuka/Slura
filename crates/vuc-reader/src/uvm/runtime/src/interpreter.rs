@@ -1777,7 +1777,6 @@ while insn_ptr < prog.len() {
     if !skip_advance {
         insn_ptr += advance;
     }
-    }
 
 // Si on sort de la boucle sans STOP/RETURN/REVERT
 {
