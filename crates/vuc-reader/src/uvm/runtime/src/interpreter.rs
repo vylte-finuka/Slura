@@ -1824,8 +1824,17 @@ while insn_ptr < prog.len() {
     
 }
 if !skip_advance {
-    insn_ptr += advance;
-}}
+        let mut advance = 1; // l'opcode
+        if opcode >= 0x60 && opcode <= 0x7f {
+            let push_bytes = (opcode - 0x5f) as usize; // 1 à 32
+            advance += push_bytes;
+            println!("📏 [PUSH] Avance de {} bytes supplémentaires (total: {})", push_bytes, advance);
+        }
+        insn_ptr += advance;
+    } else {
+        println!("🚀 [JUMP/JUMPI] Saut pris → PC=0x{:04x}", insn_ptr);
+    }
+}
 // Si on sort de la boucle sans STOP/RETURN/REVERT
 {
     let final_storage = execution_context.world_state.storage
