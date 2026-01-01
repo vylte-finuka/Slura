@@ -805,9 +805,6 @@ while insn_ptr < prog.len() {
         }
     }
 
-    // initialise directement le flag (plus de loop imbriquée)
-    let mut skip_advance = false;
-    let mut advance = 1;
      //___ Pectra/Charène opcodes ___
     match opcode {
         // 0x00 STOP
@@ -1775,19 +1772,10 @@ while insn_ptr < prog.len() {
     _ => {
         println!("🟢 [NOP] Opcode inconnu 0x{:02x} ignoré à PC {}", opcode, insn_ptr);
     }
-    }
-
-    // Avancement correct du PC (gestion complète des PUSH 0x60-0x7f)
+        {
+    // === À L'INTÉRIEUR de la boucle while, juste après le match opcode ===
     if !skip_advance {
-        let mut advance = 1; // l'opcode
-        if opcode >= 0x60 && opcode <= 0x7f {
-            let push_bytes = (opcode - 0x5f) as usize; // 1 à 32
-            advance += push_bytes;
-            println!("📏 [PUSH] Avance de {} bytes supplémentaires (total: {})", push_bytes, advance);
-        }
         insn_ptr += advance;
-    } else {
-        println!("🚀 [JUMP/JUMPI] Saut pris → PC=0x{:04x}", insn_ptr);
     }
 }
 
