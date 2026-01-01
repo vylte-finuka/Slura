@@ -790,8 +790,9 @@ println!("🟢 [EVM INIT] Pile EVM vide (comportement EVM réel)");
     }
 }
     
+let opcode = prog[insn_ptr];
+    
 while insn_ptr < prog.len() {
-    let opcode = prog[insn_ptr];
     let insn = ebpf::get_insn(prog, insn_ptr);
     let _dst = insn.dst as usize;
     let _src = insn.src as usize;
@@ -1771,13 +1772,12 @@ while insn_ptr < prog.len() {
     //___ Tout le reste → crash clair
     _ => {
         println!("🟢 [NOP] Opcode inconnu 0x{:02x} ignoré à PC {}", opcode, insn_ptr);
-    }
-        {
-    // === À L'INTÉRIEUR de la boucle while, juste après le match opcode ===
+    }}
+        }
     if !skip_advance {
         insn_ptr += advance;
     }
-}
+    }
 
 // Si on sort de la boucle sans STOP/RETURN/REVERT
 {
