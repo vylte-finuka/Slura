@@ -1453,7 +1453,7 @@ while insn_ptr < prog.len() {
             if (0x60..=0x7f).contains(&next_op) {
                 let push_bytes = (next_op - 0x5f) as usize;
                 advance = 1 + push_bytes; // JUMPI + PUSH
-     ___       }
+          }
         }
         // pas de saut → on avance normalement
     }
