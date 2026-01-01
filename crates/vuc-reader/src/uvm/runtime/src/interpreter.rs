@@ -790,6 +790,9 @@ println!("🟢 [EVM INIT] Pile EVM vide (comportement EVM réel)");
     }
 }
     
+    let mut skip_advance = false;
+    let mut advance = 1;
+    
 while insn_ptr < prog.len() {
     let opcode = prog[insn_ptr];
     let insn = ebpf::get_insn(prog, insn_ptr);
