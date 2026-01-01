@@ -807,10 +807,7 @@ while insn_ptr < prog.len() {
             println!("🔍 [EVM STACK] Top 5: {:?}", evm_stack.iter().rev().take(5).collect::<Vec<_>>());
         }
     }
-
-    // initialise directement le flag (plus de loop imbriquée)
-    let mut skip_advance = false;
-    let mut advance = 1;
+    
      //___ Pectra/Charène opcodes ___
     match opcode {
         // 0x00 STOP
