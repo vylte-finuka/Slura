@@ -1388,61 +1388,42 @@ while insn_ptr < prog.len() {
 },
     
     //___ 0x56 JUMP
-0x56 => {
-    let Some(dest) = evm_stack.pop() else {
-        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
-    };
-
-    println!("🔀 [JUMP] to 0x{:04x}", dest);
-
-    if dest as usize >= prog.len() {
-        return Err(Error::new(ErrorKind::Other, "JUMP destination out of bounds"));
+ 0x56 => {
+    let dest = stack.pop()?.as_usize();
+    
+    if dest >= code.len() {
+        return Err(ExecutionError::InvalidJump);
     }
-
-    // Règle EVM stricte : la destination DOIT être un JUMPDEST (0x5b)
-    if prog[dest as usize] != 0x5b {
-        return Err(Error::new(ErrorKind::Other, format!(
-            "Invalid JUMP destination (0x{:04x}), expected JUMPDEST (0x5b), got 0x{:02x}",
-            dest, prog[dest as usize]
-        )));
+    
+    if code[dest] != 0x5b {
+        // Distingue le cas très courant du modifier onlyOwner
+        if dest == 0 {
+            log::debug!("Revert intentionnel via JUMP invalide à 0x0000 (probablement onlyOwner/minter)");
+        }
+        return Err(ExecutionError::InvalidJump);
     }
-
-    // Saut valide → on change directement le PC
-    insn_ptr = dest as usize;
-    skip_advance = true; // on ne fait pas insn_ptr += advance à la fin
+    
+    pc = dest;
     continue;
-},
-
+}
+        
 //___ 0x57 JUMPI
-0x57 => {
-    let Some(dest) = evm_stack.pop() else {
-        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMPI (dest)"));
-    };
-    let Some(condition) = evm_stack.pop() else {
-        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMPI (condition)"));
-    };
-
-    println!("🔀 [JUMPI] dest=0x{:04x}, condition={}", dest, condition);
-
-    if dest as usize >= prog.len() {
-        return Err(Error::new(ErrorKind::Other, "JUMPI destination out of bounds"));
+0x57 => { 
+    let condition = stack.pop()?;
+    let dest = stack.pop()?;
+    
+    if condition != U256::zero() {
+        // Validation JUMPDEST
+        if (dest.as_usize() >= code.len()) || code[dest.as_usize()] != 0x5b {
+            return Err(ExecutionError::InvalidJump);
+        }
+        pc = dest.as_usize();
+    } else {
+        // *** CORRECTION CRITIQUE ***
+        pc += 2; // saute le PUSH2 de la destination ignorée
     }
-
-    // Même règle stricte que JUMP
-    if prog[dest as usize] != 0x5b {
-        return Err(Error::new(ErrorKind::Other, format!(
-            "Invalid JUMPI destination (0x{:04x}), expected JUMPDEST (0x5b), got 0x{:02x}",
-            dest, prog[dest as usize]
-        )));
-    }
-
-    if condition != 0 {
-        insn_ptr = dest as usize;
-        skip_advance = true;
-        continue;
-    }
-    // Sinon, on continue normalement (pas de saut)
-},
+    continue;
+}
     
     //___ 0x58 PC
     0x58 => {
@@ -1509,24 +1490,20 @@ while insn_ptr < prog.len() {
     
     //___ 0x60..=0x7f : PUSH1 à PUSH32 — STRICT
 0x60..=0x7f => {
-    let n = (opcode - 0x5f) as usize;
-    let start = insn_ptr + 1;
-    let end = start + n;
-    let mut value = 0u64;
-    if end > prog.len() {
-        return Err(Error::new(ErrorKind::Other, format!("EVM PUSH{} out of bounds", n)));
+        let push_size = (opcode - 0x60) as usize + 1;
+        
+        // Valeur poussée sur la stack
+        let value = if pc + push_size <= code.len() {
+            BigUint::from_bytes_be(&code[pc + 1..pc + 1 + push_size])
+        } else {
+            BigUint::zero() // ou revert si tu veux être strict
+        };
+        stack.push(U256::from(value));
+        
+        // *** CORRECTION ESSENTIELLE ***
+        pc += push_size; // NE JAMAIS OUBLIER CETTE LIGNE !
+        continue; // ou pc += 1 pour l'opcode lui-même (selon ta boucle)
     }
-    let mut bytes = [0u8; 8];
-    let copy_len = n.min(8);
-    bytes[8 - copy_len..].copy_from_slice(&prog[start..start + copy_len]);
-    value = u64::from_be_bytes(bytes);
-    if evm_stack.len() >= 1024 {
-        return Err(Error::new(ErrorKind::Other, "EVM STACK overflow on PUSH"));
-    }
-    evm_stack.push(value);
-    reg[0] = value;
-    // PC advance handled below
-},
 
         //___ 0x80 → 0x8f : DUP1 à DUP16 — STRICT
         (0x80..=0x8f) => {
