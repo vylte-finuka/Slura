@@ -1388,73 +1388,53 @@ while insn_ptr < prog.len() {
 },
     
     //___ 0x56 JUMP
-0x56 => {
-    if evm_stack.is_empty() {
-        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
-    }
-    let dest = evm_stack.pop().unwrap() as usize;
+0x56 =>// Pour JUMP (0x56)
+if opcode == 0x56 {
+    let dest = evm_stack.pop();
+    println!("🔀 [JUMP] to 0x{:04x}", dest);
 
-    // Mise à jour de reg[0] pour refléter le nouveau sommet (ou 0 si pile vide)
-    reg[0] = evm_stack.last().copied().unwrap_or(0);
-
-    // Règle EVM stricte : dest doit pointer EXACTEMENT sur un JUMPDEST (0x5b)
-    if dest >= prog.len() {
-        return Err(Error::new(ErrorKind::Other, format!(
-            "EVM REVERT: JUMP destination out of bounds (0x{:04x} >= code len {})",
-            dest, prog.len()
-        )));
+    if dest >= code.len() as u64 {
+        return Err("JUMP destination out of bounds".to_string());
     }
 
-    if prog[dest] != 0x5b {
-        return Err(Error::new(ErrorKind::Other, format!(
-            "EVM REVERT: Invalid JUMP destination (0x{:04x}), expected JUMPDEST (0x5b), got 0x{:02x}",
-            dest, prog[dest]
-        )));
+    // Règle EVM stricte : la destination DOIT être un JUMPDEST (0x5b)
+    if code[dest as usize] != 0x5b {
+        return Err(format!(
+            "Invalid JUMP destination (0x{:04x}), expected JUMPDEST (0x5b), got 0x{:02x}",
+            dest, code[dest as usize]
+        ));
     }
 
-    println!("🚀 [JUMP] Saut valide vers JUMPDEST à PC=0x{:04x}", dest);
+    pc = dest as usize;
+    continue; // saute le pc += 1 habituel
+}
 
-    insn_ptr = dest;
-    skip_advance = true;
-    continue;
-},
+// Pour JUMPI (0x57)
+if opcode == 0x57 {
+    let dest = evm_stack.pop();
+    let condition = evm_stack.pop();
 
-//___ 0x57 JUMPI
-0x57 => {
-    if evm_stack.len() < 2 {
-        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMPI"));
+    println!("🔀 [JUMPI] dest=0x{:04x}, condition={}", dest, condition);
+
+    if dest >= code.len() as u64 {
+        return Err("JUMPI destination out of bounds".to_string());
     }
-    let dest = evm_stack.pop().unwrap() as usize;
-    let condition = evm_stack.pop().unwrap();
 
-    // Mise à jour reg[0]
-    reg[0] = evm_stack.last().copied().unwrap_or(0);
+    // MÊME règle stricte : destination valide SEULEMENT si c'est un JUMPDEST
+    if code[dest as usize] != 0x5b {
+        return Err(format!(
+            "Invalid JUMPI destination (0x{:04x}), expected JUMPDEST (0x5b), got 0x{:02x}",
+            dest, code[dest as usize]
+        ));
+    }
 
     if condition != 0 {
-        // Même validation stricte que pour JUMP
-        if dest >= prog.len() {
-            return Err(Error::new(ErrorKind::Other, format!(
-                "EVM REVERT: JUMPI destination out of bounds (0x{:04x})",
-                dest
-            )));
-        }
-
-        if prog[dest] != 0x5b {
-            return Err(Error::new(ErrorKind::Other, format!(
-                "EVM REVERT: Invalid JUMPI destination (0x{:04x}), expected JUMPDEST, got 0x{:02x}",
-                dest, prog[dest]
-            )));
-        }
-
-        println!("🚀 [JUMPI] Condition vraie → saut valide vers PC=0x{:04x}", dest);
-        insn_ptr = dest;
-        skip_advance = true;
-    } else {
-        println!("➡️ [JUMPI] Condition fausse → continuation séquentielle");
-        // Pas de saut → avance normale (gérée après le match)
+        pc = dest as usize;
+        continue;
     }
-},
-
+    // sinon, continue normalement (pc += 1 en fin de boucle)
+}
+    
     //___ 0x58 PC
     0x58 => {
         reg[_dst] = (insn_ptr * ebpf::INSN_SIZE) as u64;
