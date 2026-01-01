@@ -1361,20 +1361,20 @@ while insn_ptr < prog.len() {
     
     // ___ 0x55 SSTORE
   0x55 => {
-            if evm_stack.len() < 2 {
-                return Err(Error::new(ErrorKind::Other, "STACK underflow on SSTORE"));
-            }
-            let value = evm_stack.pop().unwrap();
-            let slot_u256 = u256::from(evm_stack.pop().unwrap());
-            let slot_key = format!("{:064x}", slot_u256);
-
-            let value_u256 = u256::from(value);
-            let mut bytes = [0u8; 32];
-            value_u256.to_big_endian(&mut bytes);
-
-            set_storage(&mut execution_context.world_state, &interpreter_args.contract_address, &slot_key, bytes.to_vec());
-            println!("💾 SSTORE slot {} ← 0x{:x}", slot_key, value);
-        }
+    // Slot EVM : sommet-1 de la pile, valeur : sommet
+    if evm_stack.len() < 2 {
+        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on SSTORE"));
+    }
+    let value = evm_stack.pop().unwrap();
+    let slot_u256 = u256::from(evm_stack.pop().unwrap());
+    let slot = format!("{:064x}", slot_u256);
+    let value_u256 = u256::from(value);
+    let bytes = value_u256.to_big_endian();
+    set_storage(&mut execution_context.world_state, &interpreter_args.contract_address, &slot, bytes.to_vec());
+    println!("💾 [SSTORE] slot={} <- value={}", slot, value);
+    reg[_dst] = value;
+    reg[0] = value;
+},
     
     //___ 0x56 JUMP
 0x56 => {
