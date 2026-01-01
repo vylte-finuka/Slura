@@ -1388,52 +1388,61 @@ while insn_ptr < prog.len() {
 },
     
     //___ 0x56 JUMP
-0x56 =>// Pour JUMP (0x56)
-if opcode == 0x56 {
-    let dest = evm_stack.pop();
+0x56 => {
+    let Some(dest) = evm_stack.pop() else {
+        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
+    };
+
     println!("🔀 [JUMP] to 0x{:04x}", dest);
 
-    if dest >= code.len() as u64 {
-        return Err("JUMP destination out of bounds".to_string());
+    if dest as usize >= prog.len() {
+        return Err(Error::new(ErrorKind::Other, "JUMP destination out of bounds"));
     }
 
     // Règle EVM stricte : la destination DOIT être un JUMPDEST (0x5b)
-    if code[dest as usize] != 0x5b {
-        return Err(format!(
+    if prog[dest as usize] != 0x5b {
+        return Err(Error::new(ErrorKind::Other, format!(
             "Invalid JUMP destination (0x{:04x}), expected JUMPDEST (0x5b), got 0x{:02x}",
-            dest, code[dest as usize]
-        ));
+            dest, prog[dest as usize]
+        )));
     }
 
-    pc = dest as usize;
-    continue; // saute le pc += 1 habituel
-}
+    // Saut valide → on change directement le PC
+    insn_ptr = dest as usize;
+    skip_advance = true; // on ne fait pas insn_ptr += advance à la fin
+    continue;
+},
 
-// Pour JUMPI (0x57)
-if opcode == 0x57 {
-    let dest = evm_stack.pop();
-    let condition = evm_stack.pop();
+//___ 0x57 JUMPI
+0x57 => {
+    let Some(dest) = evm_stack.pop() else {
+        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMPI (dest)"));
+    };
+    let Some(condition) = evm_stack.pop() else {
+        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMPI (condition)"));
+    };
 
     println!("🔀 [JUMPI] dest=0x{:04x}, condition={}", dest, condition);
 
-    if dest >= code.len() as u64 {
-        return Err("JUMPI destination out of bounds".to_string());
+    if dest as usize >= prog.len() {
+        return Err(Error::new(ErrorKind::Other, "JUMPI destination out of bounds"));
     }
 
-    // MÊME règle stricte : destination valide SEULEMENT si c'est un JUMPDEST
-    if code[dest as usize] != 0x5b {
-        return Err(format!(
+    // Même règle stricte que JUMP
+    if prog[dest as usize] != 0x5b {
+        return Err(Error::new(ErrorKind::Other, format!(
             "Invalid JUMPI destination (0x{:04x}), expected JUMPDEST (0x5b), got 0x{:02x}",
-            dest, code[dest as usize]
-        ));
+            dest, prog[dest as usize]
+        )));
     }
 
     if condition != 0 {
-        pc = dest as usize;
+        insn_ptr = dest as usize;
+        skip_advance = true;
         continue;
     }
-    // sinon, continue normalement (pc += 1 en fin de boucle)
-}
+    // Sinon, on continue normalement (pas de saut)
+},
     
     //___ 0x58 PC
     0x58 => {
