@@ -1902,7 +1902,6 @@ advance = 1; // reset pour prochaine itération
     }
     return Ok(serde_json::Value::Object(result_with_storage));
 }
-}
 
 /// ✅ AJOUT: Helper pour noms des opcodes
 fn opcode_name(opcode: u8) -> &'static str {
