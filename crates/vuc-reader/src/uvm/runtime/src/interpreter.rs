@@ -1931,7 +1931,7 @@ advance = 1; // reset pour prochaine itération
         }
     }
 
-    Ok(serde_json::Value::Object(result_with_storage))
+ 0xreturn Ok(serde_json::Value::Object(result_with_storage));
 } // fin de execute_program
 
 /// ✅ AJOUT: Helper pour noms des opcodes
