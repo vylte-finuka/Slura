@@ -1388,42 +1388,72 @@ while insn_ptr < prog.len() {
 },
     
     //___ 0x56 JUMP
- 0x56 => {
-    let dest = stack.pop()?.as_usize();
-    
-    if dest >= code.len() {
-        return Err(ExecutionError::InvalidJump);
+0x56 => {
+    if evm_stack.is_empty() {
+        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
     }
-    
-    if code[dest] != 0x5b {
-        // Distingue le cas très courant du modifier onlyOwner
+    let dest = evm_stack.pop().unwrap() as usize;
+
+    if dest >= prog.len() {
+        // Saut hors du code → invalide (sauf si c’est un revert intentionnel à 0)
         if dest == 0 {
-            log::debug!("Revert intentionnel via JUMP invalide à 0x0000 (probablement onlyOwner/minter)");
+            println!("🔀 [JUMP] Revert intentionnel via saut à 0x0000 (onlyOwner/minter typique)");
         }
-        return Err(ExecutionError::InvalidJump);
+        return Err(Error::new(ErrorKind::Other, "Invalid JUMP destination (out of bounds)"));
     }
-    
-    pc = dest;
+
+    if prog[dest] != 0x5b {
+        if dest == 0 {
+            println!("🔀 [JUMP] Revert intentionnel via JUMP invalide à 0x0000 (modifier protection)");
+        }
+        return Err(Error::new(ErrorKind::Other, "Invalid JUMP destination (not JUMPDEST)"));
+    }
+
+    println!("🔀 [JUMP] Saut valide vers 0x{:04x}", dest);
+    insn_ptr = dest;
+    skip_advance = true; // important : on ne fait pas insn_ptr += advance
     continue;
-}
+},
         
 //___ 0x57 JUMPI
-0x57 => { 
-    let condition = stack.pop()?;
-    let dest = stack.pop()?;
-    
-    if condition != U256::zero() {
-        // Validation JUMPDEST
-        if (dest.as_usize() >= code.len()) || code[dest.as_usize()] != 0x5b {
-            return Err(ExecutionError::InvalidJump);
-        }
-        pc = dest.as_usize();
-    } else {
-        // *** CORRECTION CRITIQUE ***
-        pc += 2; // saute le PUSH2 de la destination ignorée
+0x57 => {
+    if evm_stack.len() < 2 {
+        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMPI"));
     }
-    continue;
-}
+    let condition = evm_stack.pop().unwrap();
+    let dest = evm_stack.pop().unwrap() as usize;
+
+    if condition != 0 {
+        if dest >= prog.len() {
+            return Err(Error::new(ErrorKind::Other, "JUMPI destination out of bounds"));
+        }
+        if prog[dest] != 0x5b {
+            if dest == 0 {
+                println!("🔀 [JUMPI] Revert intentionnel (condition vraie mais saut à 0x0000)");
+            }
+            return Err(Error::new(ErrorKind::Other, "Invalid JUMPI destination (not JUMPDEST)"));
+        }
+        println!("🔀 [JUMPI] Condition vraie → saut vers 0x{:04x}", dest);
+        insn_ptr = dest;
+        skip_advance = true;
+        continue;
+    } else {
+        // Condition fausse → on saute simplement le PUSH de la destination
+        // Le prochain opcode après JUMPI est normalement un PUSH1/PUSH2/... avec la dest
+        // Donc on avance de 1 (JUMPI) + taille du PUSH
+        if insn_ptr + 1 < prog.len() {
+            let next_op = prog[insn_ptr + 1];
+            if (0x60..=0x7f).contains(&next_op) {
+                let push_size = (next_op - 0x60) as usize + 1;
+                insn_ptr += 1 + push_size;
+                skip_advance = true;
+                continue;
+            }
+        }
+        // Sinon, avance normal (1 pour JUMPI)
+        println!("🔀 [JUMPI] Condition fausse → continuation normale");
+    }
+},
     
     //___ 0x58 PC
     0x58 => {
@@ -1486,25 +1516,33 @@ while insn_ptr < prog.len() {
     0x5f => {
         reg[_dst] = 0;
         consume_gas(&mut execution_context, 2)?;
-    },
-    
-    //___ 0x60..=0x7f : PUSH1 à PUSH32 — STRICT
-0x60..=0x7f => {
-        let push_size = (opcode - 0x60) as usize + 1;
-        
-        // Valeur poussée sur la stack
-        let value = if pc + push_size <= code.len() {
-            BigUint::from_bytes_be(&code[pc + 1..pc + 1 + push_size])
-        } else {
-            BigUint::zero() // ou revert si tu veux être strict
-        };
-        stack.push(U256::from(value));
-        
-        // *** CORRECTION ESSENTIELLE ***
-        pc += push_size; // NE JAMAIS OUBLIER CETTE LIGNE !
-        continue; // ou pc += 1 pour l'opcode lui-même (selon ta boucle)
     }
+        
+//___ 0x60..=0x7f : PUSH1 à PUSH32
+0x60..=0x7f => {
+    let push_size = (opcode - 0x60) as usize + 1;
 
+    let mut value_bytes = [0u8; 32];
+    let start = insn_ptr + 1;
+    let end = start + push_size;
+
+    if end <= prog.len() {
+        let padding = 32 - push_size;
+        value_bytes[padding..].copy_from_slice(&prog[start..end]);
+    } // sinon reste à zéro → valeur = 0
+
+    let value = u256::from_big_endian(&value_bytes);
+    let value_u64 = value.low_u64();
+
+    evm_stack.push(value_u64);
+    println!("📌 [PUSH] 0x{:02x} → pousse 0x{:x} ({} bytes)", opcode, value_u64, push_size);
+
+    // Avancement correct du PC
+    insn_ptr += push_size; // +1 pour l'opcode déjà fait en bas de boucle
+    skip_advance = true;
+    continue;
+},
+        
         //___ 0x80 → 0x8f : DUP1 à DUP16 — STRICT
         (0x80..=0x8f) => {
             let depth = (opcode - 0x80 + 1) as usize;
