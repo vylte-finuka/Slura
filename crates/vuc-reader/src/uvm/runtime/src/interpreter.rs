@@ -1834,7 +1834,6 @@ if !skip_advance {
     } else {
         println!("🚀 [JUMP/JUMPI] Saut pris → PC=0x{:04x}", insn_ptr);
     }
-}
 // Si on sort de la boucle sans STOP/RETURN/REVERT
 {
     let final_storage = execution_context.world_state.storage
@@ -2019,4 +2018,4 @@ fn compute_mapping_slot(base_slot: u64, keys: &[serde_json::Value]) -> String {
     let mut hash = [0u8; 32];
     hasher.finalize(&mut hash);
     hex::encode(hash)
-}
+}}
