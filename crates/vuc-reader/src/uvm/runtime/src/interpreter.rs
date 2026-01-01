@@ -790,11 +790,8 @@ println!("🟢 [EVM INIT] Pile EVM vide (comportement EVM réel)");
     }
 }
     
-    let mut skip_advance = false;
-    let mut advance = 1;
-let opcode = prog[insn_ptr];
-    
 while insn_ptr < prog.len() {
+    let opcode = prog[insn_ptr];
     let insn = ebpf::get_insn(prog, insn_ptr);
     let _dst = insn.dst as usize;
     let _src = insn.src as usize;
@@ -808,6 +805,9 @@ while insn_ptr < prog.len() {
         }
     }
 
+    // initialise directement le flag (plus de loop imbriquée)
+    let mut skip_advance = false;
+    let mut advance = 1;
      //___ Pectra/Charène opcodes ___
     match opcode {
         // 0x00 STOP
@@ -1774,11 +1774,22 @@ while insn_ptr < prog.len() {
     //___ Tout le reste → crash clair
     _ => {
         println!("🟢 [NOP] Opcode inconnu 0x{:02x} ignoré à PC {}", opcode, insn_ptr);
-    }}
-        }
-    if !skip_advance {
-        insn_ptr += advance;
     }
+    }
+
+    // Avancement correct du PC (gestion complète des PUSH 0x60-0x7f)
+    if !skip_advance {
+        let mut advance = 1; // l'opcode
+        if opcode >= 0x60 && opcode <= 0x7f {
+            let push_bytes = (opcode - 0x5f) as usize; // 1 à 32
+            advance += push_bytes;
+            println!("📏 [PUSH] Avance de {} bytes supplémentaires (total: {})", push_bytes, advance);
+        }
+        insn_ptr += advance;
+    } else {
+        println!("🚀 [JUMP/JUMPI] Saut pris → PC=0x{:04x}", insn_ptr);
+    }
+}
 
 // Si on sort de la boucle sans STOP/RETURN/REVERT
 {
@@ -1852,6 +1863,7 @@ while insn_ptr < prog.len() {
         }
     }
     return Ok(serde_json::Value::Object(result_with_storage));
+}
 }
 
 /// ✅ AJOUT: Helper pour noms des opcodes
@@ -1964,5 +1976,4 @@ fn compute_mapping_slot(base_slot: u64, keys: &[serde_json::Value]) -> String {
     let mut hash = [0u8; 32];
     hasher.finalize(&mut hash);
     hex::encode(hash)
-}
 }
