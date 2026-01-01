@@ -790,11 +790,8 @@ println!("🟢 [EVM INIT] Pile EVM vide (comportement EVM réel)");
     }
 }
     
-    let mut skip_advance = false;
-    let mut advance = 1;
-    let opcode = prog[insn_ptr];
-    
 while insn_ptr < prog.len() {
+    let opcode = prog[insn_ptr];
     let insn = ebpf::get_insn(prog, insn_ptr);
     let _dst = insn.dst as usize;
     let _src = insn.src as usize;
@@ -807,7 +804,10 @@ while insn_ptr < prog.len() {
             println!("🔍 [EVM STACK] Top 5: {:?}", evm_stack.iter().rev().take(5).collect::<Vec<_>>());
         }
     }
-    
+
+    // initialise directement le flag (plus de loop imbriquée)
+    let mut skip_advance = false;
+    let mut advance = 1;
      //___ Pectra/Charène opcodes ___
     match opcode {
         // 0x00 STOP
@@ -1345,44 +1345,19 @@ while insn_ptr < prog.len() {
 },
 
 //___ 0x54 SLOAD
-0x54 => {
-    // Récupère le slot depuis la pile (standard EVM) ou fallback sur reg[_dst]
-    let slot_u256 = if !evm_stack.is_empty() {
-        u256::from(evm_stack.pop().unwrap())
-    } else {
-        u256::from(reg[_dst])
-    };
-    let slot = format!("{:064x}", slot_u256);
+  0x54 => {
+            if evm_stack.is_empty() {
+                return Err(Error::new(ErrorKind::Other, "STACK underflow on SLOAD"));
+            }
+            let slot_u256 = u256::from(evm_stack.pop().unwrap());
+            let slot_key = format!("{:064x}", slot_u256);
 
-    println!("🔍 [SLOAD DEBUG] slot={}", slot);
+            let value_bytes = get_storage(&execution_context.world_state, &interpreter_args.contract_address, &slot_key);
+            let value = u256::from_big_endian(&value_bytes).low_u64();
 
-    // Récupère les bytes stockés (peuvent être < 32, > 32, ou absents)
-    let stored_bytes = get_storage(&execution_context.world_state, &interpreter_args.contract_address, &slot);
-
-    // Normalisation à exactement 32 bytes en big-endian (convention EVM)
-    let mut bytes_32 = [0u8; 32];
-    let len = stored_bytes.len().min(32);
-    // On copie les len derniers bytes (comportement EVM : right-aligned pour les petites valeurs)
-    if len > 0 {
-        bytes_32[32 - len..].copy_from_slice(&stored_bytes[..len]);
-    }
-    // Si vide → tout à zéro
-
-    // Conversion correcte en u256
-    let loaded_u256 = u256::from_big_endian(&bytes_32);
-    let loaded_u64 = loaded_u256.low_u64();
-
-    // Pousse la valeur complète (64-bit truncaté) sur la pile EVM
-    evm_stack.push(loaded_u64);
-
-    // Met à jour les registres pour compatibilité uBPF/UVM
-    reg[0] = loaded_u64;
-    if _dst < reg.len() {
-        reg[_dst] = loaded_u64;
-    }
-
-    println!("🎯 [SLOAD] slot={} → value=0x{:x} (full u256={})", slot, loaded_u64, loaded_u256);
-},
+            evm_stack.push(value);
+            println!("📚 SLOAD slot {} → 0x{:x}", slot_key, value);
+        }
     
     // ___ 0x55 SSTORE
   0x55 => {
@@ -1426,37 +1401,34 @@ while insn_ptr < prog.len() {
         
 //___ 0x57 JUMPI
 0x57 => {
-    if evm_stack.len() < 2 {
-        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMPI"));
-    }
-    let condition = evm_stack.pop().unwrap();
-    let dest = evm_stack.pop().unwrap() as usize;
+            if evm_stack.len() < 2 {
+                return Err(Error::new(ErrorKind::Other, "STACK underflow on JUMPI"));
+            }
+            let condition = evm_stack.pop().unwrap();
+            let dest = evm_stack.pop().unwrap() as usize;
 
-    if condition != 0 {
-        // Saut pris → validation stricte JUMPDEST
-        if dest >= prog.len() || prog[dest] != 0x5b {
-            println!("⚠️ [JUMPI] Condition true but invalid dest 0x{:04x} → revert", dest);
-            return Err(Error::new(ErrorKind::Other, "Invalid JUMPI destination"));
+            if condition != 0 {
+                if dest >= prog.len() || prog[dest] != 0x5b {
+                    // Condition vraie mais destination invalide → c’est un revert intentionnel
+                    println!("⚠️ JUMPI true → invalid dest 0x{:04x} → intentional revert", dest);
+                    return Err(Error::new(ErrorKind::Other, "Intentional revert via invalid JUMPI"));
+                }
+                println!("✅ JUMPI true → jump to 0x{:04x}", dest);
+                insn_ptr = dest;
+                continue;
+            } else {
+                // Condition fausse → on skip simplement le PUSH de la destination
+                println!("🔀 JUMPI false → continue (skip destination PUSH)");
+                if insn_ptr + 1 < prog.len() {
+                    let next = prog[insn_ptr + 1];
+                    if (0x60..=0x7f).contains(&next) {
+                        advance += (next - 0x5f) as usize; // skip PUSH1..32
+                    }
+                }
+            }
         }
-        println!("🔀 [JUMPI] Condition true → jump to 0x{:04x}", dest);
-        insn_ptr = dest;
-        skip_advance = true; // on a déjà changé insn_ptr
-    } else {
-        println!("🔀 [JUMPI] Condition false → continue after destination PUSH");
-        // Le bytecode contient toujours un PUSHx juste après JUMPI
-        // On doit avancer : 1 (JUMPI) + taille du PUSH
-        if insn_ptr + 1 < prog.len() {
-            let next_op = prog[insn_ptr + 1];
-            if (0x60..=0x7f).contains(&next_op) {
-                let push_bytes = (next_op - 0x5f) as usize;
-                advance = 1 + push_bytes; // JUMPI + PUSH
-          }
-        }
-        // pas de saut → on avance normalement
-    }
-}
-        
-    // 0x58 PC
+    
+    //___ 0x58 PC
     0x58 => {
         reg[_dst] = (insn_ptr * ebpf::INSN_SIZE) as u64;
         //consume_gas(&mut execution_context, 2)?;
@@ -1521,25 +1493,16 @@ while insn_ptr < prog.len() {
         
 //___ 0x60..=0x7f : PUSH1 à PUSH32
 0x60..=0x7f => {
-    let push_size = (opcode - 0x60 + 1) as usize;
-    let start = insn_ptr + 1;
-    let end = (start + push_size).min(prog.len());
-    let mut value_bytes = [0u8; 32];
-    if end > start {
-        value_bytes[32 - (end - start)..].copy_from_slice(&prog[start..end]);
-    }
-    let value = u256::from_big_endian(&value_bytes);
-    let value_u64 = value.low_u64();
-
-    evm_stack.push(value_u64);
-    reg[0] = value_u64;
-
-    println!("📌 [PUSH{}] Pushed 0x{:x}", push_size, value_u64);
-    println!("📏 [PUSH] Avance de {} bytes supplémentaires (total: {})", push_size, push_size + 1);
-
-    advance = 1 + push_size;
-}
-
+            let size = (opcode - 0x60) as usize + 1;
+            let start = insn_ptr + 1;
+            let end = (start + size).min(prog.len());
+            let mut bytes = [0u8; 32];
+            bytes[32 - (end - start)..].copy_from_slice(&prog[start..end]);
+            let value = u256::from_big_endian(&bytes).low_u64();
+            evm_stack.push(value);
+            advance += size;
+        }
+        
         //___ 0x80 → 0x8f : DUP1 à DUP16 — STRICT
         (0x80..=0x8f) => {
             let depth = (opcode - 0x80 + 1) as usize;
@@ -1552,9 +1515,6 @@ while insn_ptr < prog.len() {
             }
             evm_stack.push(value);
             reg[0] = value;
-            if !evm_stack.is_empty() {
-    reg[0] = *evm_stack.last().unwrap();
-            }
         },
 
         // ___ 0x90 → 0x9f : SWAP1 à SWAP16 — STRICT
@@ -1566,11 +1526,8 @@ while insn_ptr < prog.len() {
             let top = evm_stack.len() - 1;
             evm_stack.swap(top, top - depth);
             reg[0] = evm_stack[top];
-            if !evm_stack.is_empty() {
-    reg[0] = *evm_stack.last().unwrap();
-            }
         },
-        
+
 //___ 0xa0 LOG0
 0xa0 => {
     // LOG0(offset, size): Ajoute un log sans topic
@@ -1821,9 +1778,7 @@ while insn_ptr < prog.len() {
     }
 
     // Avancement correct du PC (gestion complète des PUSH 0x60-0x7f)
-    
-}
-if !skip_advance {
+    if !skip_advance {
         let mut advance = 1; // l'opcode
         if opcode >= 0x60 && opcode <= 0x7f {
             let push_bytes = (opcode - 0x5f) as usize; // 1 à 32
@@ -1834,6 +1789,8 @@ if !skip_advance {
     } else {
         println!("🚀 [JUMP/JUMPI] Saut pris → PC=0x{:04x}", insn_ptr);
     }
+}
+
 // Si on sort de la boucle sans STOP/RETURN/REVERT
 {
     let final_storage = execution_context.world_state.storage
@@ -1906,6 +1863,7 @@ if !skip_advance {
         }
     }
     return Ok(serde_json::Value::Object(result_with_storage));
+}
 }
 
 /// ✅ AJOUT: Helper pour noms des opcodes
@@ -2018,4 +1976,4 @@ fn compute_mapping_slot(base_slot: u64, keys: &[serde_json::Value]) -> String {
     let mut hash = [0u8; 32];
     hasher.finalize(&mut hash);
     hex::encode(hash)
-}}
+}
