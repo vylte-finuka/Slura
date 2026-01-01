@@ -1377,50 +1377,38 @@ while insn_ptr < prog.len() {
 },
     
     // ___ 0x56 JUMP
-    0x56 => {
-        if evm_stack.is_empty() {
-            return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
+0x56 => {
+    if evm_stack.is_empty() {
+        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
+    }
+    let dest = evm_stack.pop().unwrap() as usize;
+
+    // --- SYNC: s'assurer que reg[0] reflète le sommet de pile APRÈS le pop
+    reg[0] = evm_stack.last().copied().unwrap_or(reg[0]);
+
+    // PATCH: SUPPRIME le court-circuit STOP/JUMP 0x0000 → on exécute bien le code à 0x0000
+    // if dest == 0x0000 {
+    //     println!("ℹ️ [EVM PATCH] JUMP vers 0x0000 → STOP (fin normale, pas de REVERT)");
+    //     break; // <-- À SUPPRIMER
+    // }
+
+    // Correction automatique: saute à la JUMPDEST la plus proche si besoin
+    let jumpdest = if dest >= prog.len() || prog[dest] != 0x5b {
+        if let Some(new_dest) = find_valid_jumpdest(prog, dest) {
+            println!("🩹 [AUTO-JUMP] Correction JUMP vers 0x{:04x} → 0x{:04x} | reg[0]={}", dest, new_dest, reg[0]);
+            new_dest
+        } else {
+            return Err(Error::new(ErrorKind::Other,
+                format!("EVM REVERT: JUMP vers 0x{:04x} sans JUMPDEST | reg0={}", dest, reg[0])
+            ));
         }
-        let mut dest = evm_stack.pop().unwrap() as usize;
-    
-        // PATCH: Ne jamais sauter sur 0x000 (fallback), ni sur le dispatcher
-        // On cherche le prochain vrai JUMPDEST après dest si dest == 0 ou dans la zone du dispatcher (<0x100)
-        if dest == 0 || dest < 0x100 {
-            // Cherche le prochain JUMPDEST après le dispatcher (souvent >0x100)
-            let mut found = false;
-            let mut pc = if dest < 0x100 { 0x100 } else { dest };
-            while pc < prog.len() {
-                if prog[pc] == 0x5b {
-                    dest = pc;
-                    found = true;
-                    println!("🚀 [JUMP PATCH] Saut corrigé vers vrai JUMPDEST à PC=0x{:04x}", dest);
-                    break;
-                }
-                pc += 1;
-            }
-            if !found {
-                return Err(Error::new(ErrorKind::Other, format!("JUMP: aucun JUMPDEST métier trouvé après 0x{:x}", dest)));
-            }
-        } else if prog.get(dest) != Some(&0x5b) {
-            // Si ce n'est pas un JUMPDEST, avance jusqu'au prochain JUMPDEST
-            let mut pc = dest;
-            let mut found = false;
-            while pc < prog.len() {
-                if prog[pc] == 0x5b {
-                    dest = pc;
-                    found = true;
-                    println!("🚀 [JUMP PATCH] Saut corrigé vers vrai JUMPDEST à PC=0x{:04x}", dest);
-                    break;
-                }
-                pc += 1;
-            }
-            if !found {
-                return Err(Error::new(ErrorKind::Other, format!("JUMP: aucun JUMPDEST trouvé après 0x{:x}", dest)));
-            }
-        }
-        insn_ptr = dest;
-        skip_advance = true;
-    },
+    } else {
+        dest
+    };
+    pc = jumpdest;
+    advance = 0;
+    continue;
+},
     
 //___ 0x57 JUMPI — STRICT
 0x57 => {
