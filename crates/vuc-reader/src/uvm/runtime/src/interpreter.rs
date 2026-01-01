@@ -1852,7 +1852,6 @@ while insn_ptr < prog.len() {
     }
     return Ok(serde_json::Value::Object(result_with_storage));
 }
-}
 
 /// ✅ AJOUT: Helper pour noms des opcodes
 fn opcode_name(opcode: u8) -> &'static str {
