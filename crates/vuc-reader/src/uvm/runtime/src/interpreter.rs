@@ -792,9 +792,9 @@ println!("🟢 [EVM INIT] Pile EVM vide (comportement EVM réel)");
     
     let mut skip_advance = false;
     let mut advance = 1;
+    let opcode = prog[insn_ptr];
     
 while insn_ptr < prog.len() {
-    let opcode = prog[insn_ptr];
     let insn = ebpf::get_insn(prog, insn_ptr);
     let _dst = insn.dst as usize;
     let _src = insn.src as usize;
