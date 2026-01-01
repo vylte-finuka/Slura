@@ -1860,8 +1860,6 @@ advance = 1; // reset pour prochaine itération
 
 // Si on sort de la boucle sans STOP/RETURN/REVERT
 {
-// Fin de la boucle while : aucun STOP/RETURN/REVERT/SELFDESTRUCT rencontré
-    // → fallback : on considère que c’est un getter simple ou succès vide
     let final_storage = execution_context.world_state.storage
         .get(&interpreter_args.contract_address)
         .cloned()
@@ -1869,41 +1867,34 @@ advance = 1; // reset pour prochaine itération
 
     let mut result_with_storage = serde_json::Map::new();
 
-    // 1. Priorité : valeur sur la pile EVM (cas classique des getters comme decimals(), totalSupply())
+    // 1. Si la pile EVM n'est pas vide, retourne le sommet de pile (cas getter simple)
     if !evm_stack.is_empty() {
         let top = evm_stack.last().copied().unwrap_or(0);
-        // Si c’est un petit nombre (ex: 18 pour decimals), on retourne un nombre
-        if top <= 255 {
-            result_with_storage.insert(
-                "return".to_string(),
-                serde_json::Value::Number(serde_json::Number::from(top))
-            );
-        } else {
-            result_with_storage.insert(
-                "return".to_string(),
-                serde_json::Value::String(format!("0x{:x}", top))
-            );
-        }
+        result_with_storage.insert(
+            "return".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(top))
+        );
     } else {
-        // 2. Sinon, on regarde si on a chargé une valeur depuis le storage (cas decimals buggé)
-        if let Some((_, bytes)) = final_storage.iter().next() {
-            let mut padded = [0u8; 32];
-            let len = bytes.len().min(32);
-            padded[32 - len..].copy_from_slice(&bytes[..len]);
-            let value = u256::from_big_endian(&padded);
+        // 2. Sinon, tente de retrouver la dernière valeur lue dans le storage (SLOAD)
+        // On prend le premier slot du storage du contrat (souvent le cas pour decimals, totalSupply, etc.)
+        if let Some((slot, bytes)) = final_storage.iter().next() {
+            let value = u256::from_big_endian(bytes);
             let formatted = if value.bits() <= 64 {
                 serde_json::Value::Number(serde_json::Number::from(value.low_u64()))
             } else {
-                serde_json::Value::String(format!("0x{}", value))
+                serde_json::Value::String(format!("0x{:064x}", value))
             };
             result_with_storage.insert("return".to_string(), formatted);
         } else {
-            // 3. Fallback ultime : succès vide
-            result_with_storage.insert("return".to_string(), serde_json::Value::Bool(true));
+            // 3. Fallback : retourne 0
+            result_with_storage.insert(
+                "return".to_string(),
+                serde_json::Value::Number(serde_json::Number::from(0))
+            );
         }
     }
 
-    // Storage modifié pour debug
+    // Ajoute le storage complet pour debug
     if !final_storage.is_empty() {
         let mut storage_json = serde_json::Map::new();
         for (slot, bytes) in final_storage {
@@ -1912,27 +1903,35 @@ advance = 1; // reset pour prochaine itération
         result_with_storage.insert("storage".to_string(), serde_json::Value::Object(storage_json));
     }
 
-    // Log final du storage
     if let Some(contract_storage) = execution_context.world_state.storage.get(&interpreter_args.contract_address) {
         println!("📦 [STORAGE FINAL] Contrat {}:", &interpreter_args.contract_address);
         for (slot, bytes) in contract_storage.iter().take(20) {
             let hexv = hex::encode(bytes);
-            let mut padded = [0u8; 32];
-            let len = bytes.len().min(32);
-            padded[32 - len..].copy_from_slice(&bytes[..len]);
-            let u = u256::from_big_endian(&padded);
-            if u.bits() <= 64 {
-                println!("   - slot {}: {} (hex: 0x{})", slot, u.low_u64(), hexv);
-            } else if bytes.len() >= 20 && &bytes[0..12] == &[0; 12] {
-                println!("   - slot {}: address 0x{} (hex: 0x{})", slot, hex::encode(&bytes[12..32]), hexv);
+            let maybe_u64 = {
+                // PATCH: always use 32 bytes for U256
+                let mut padded = [0u8; 32];
+                if bytes.len() >= 32 {
+                    padded.copy_from_slice(&bytes[..32]);
+                } else {
+                    padded[32 - bytes.len()..].copy_from_slice(bytes);
+                }
+                let u = u256::from_big_endian(&padded);
+                if u.bits() <= 64 { Some(u.low_u64()) } else { None }
+            };
+            if let Some(v) = maybe_u64 {
+                println!("   - slot {}: {} (hex: 0x{})", slot, v, hexv);
             } else {
-                println!("   - slot {}: hex=0x{}", slot, hexv);
+                if bytes.len() >= 32 && bytes[12..32].iter().any(|&b| b != 0) {
+                    println!("   - slot {}: address-like 0x{} (hex: 0x{})", slot, hex::encode(&bytes[12..32]), hexv);
+                } else {
+                    println!("   - slot {}: hex=0x{}", slot, hexv);
+                }
             }
         }
     }
-
- return Ok(serde_json::Value::Object(result_with_storage));
-} // fin de execute_program
+    return Ok(serde_json::Value::Object(result_with_storage));
+}
+}
 
 /// ✅ AJOUT: Helper pour noms des opcodes
 fn opcode_name(opcode: u8) -> &'static str {
@@ -2044,5 +2043,4 @@ fn compute_mapping_slot(base_slot: u64, keys: &[serde_json::Value]) -> String {
     let mut hash = [0u8; 32];
     hasher.finalize(&mut hash);
     hex::encode(hash)
-}}
-Ok(().into())}
+}
