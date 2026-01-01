@@ -426,6 +426,17 @@ fn calculate_gas_cost(opcode: u8) -> u64 {
     }
 }
 
+fn find_valid_jumpdest(prog: &[u8], mut dest: usize) -> Option<usize> {
+    while dest > 0 && prog.get(dest) != Some(&0x5b) {
+        dest -= 1;
+    }
+    if prog.get(dest) == Some(&0x5b) {
+        Some(dest)
+    } else {
+        None
+    }
+}
+
 // ✅ AJOUT: Helpers pour interaction avec l'état mondial
 fn get_balance(world_state: &UvmWorldState, address: &str) -> u64 {
     world_state.accounts.get(address)
