@@ -1822,10 +1822,17 @@ while insn_ptr < prog.len() {
 
     // Avancement correct du PC (gestion complète des PUSH 0x60-0x7f)
     if !skip_advance {
-    insn_ptr += advance;
+        let mut advance = 1; // l'opcode
+        if opcode >= 0x60 && opcode <= 0x7f {
+            let push_bytes = (opcode - 0x5f) as usize; // 1 à 32
+            advance += push_bytes;
+            println!("📏 [PUSH] Avance de {} bytes supplémentaires (total: {})", push_bytes, advance);
+        }
+        insn_ptr += advance;
+    } else {
+        println!("🚀 [JUMP/JUMPI] Saut pris → PC=0x{:04x}", insn_ptr);
+    }
 }
-skip_advance = false;
-advance = 1; // reset pour prochaine itération
 
 // Si on sort de la boucle sans STOP/RETURN/REVERT
 {
@@ -2012,4 +2019,4 @@ fn compute_mapping_slot(base_slot: u64, keys: &[serde_json::Value]) -> String {
     let mut hash = [0u8; 32];
     hasher.finalize(&mut hash);
     hex::encode(hash)
-}}
+}
