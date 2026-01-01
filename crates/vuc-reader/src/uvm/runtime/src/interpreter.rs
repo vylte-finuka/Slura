@@ -1828,7 +1828,6 @@ if !skip_advance {
 }
 skip_advance = false;
 advance = 1; // reset pour prochaine itération
-}
 // Si on sort de la boucle sans STOP/RETURN/REVERT
 {
     let final_storage = execution_context.world_state.storage
