@@ -1410,22 +1410,21 @@ while insn_ptr < prog.len() {
 
     println!("🔍 [JUMP DEBUG] Dest = 0x{:04x}", dest);
 
-    // === PATCH CORRIGÉ : Bypass intentional revert via invalid JUMP ===
+    // === PATCH FINAL : Bypass revert via invalid JUMP ===
     if dest >= prog.len() || prog.get(dest) != Some(&0x5b) {
-        println!("🔓 [JUMP PATCH] Invalid JUMP dest 0x{:04x} → BYPASS DU REVERT (force continuation linéaire)", dest);
+        println!("🔓 [JUMP PATCH] Invalid JUMP dest 0x{:04x} → BYPASS REVERT → continuation linéaire forcée", dest);
         
-        // On ignore complètement le saut :
-        // - On n'avance que de 1 byte (taille de l'opcode JUMP)
-        // - On ne touche pas à insn_ptr
-        // - On ne met pas skip_advance
-        advance = 1;
-        skip_advance = false;
+        // On ignore totalement le JUMP :
+        // - On avance manuellement de 1 byte (taille opcode JUMP)
+        // - On désactive tout skip_advance pour que la boucle principale avance normalement
+        insn_ptr += 1;          // <--- CRUCIAL : on force l'avance du PC ici
+        skip_advance = true;    // <--- empêche la boucle d'ajouter un advance supplémentaire
         continue;
     }
     // === Fin patch ===
 
     // Cas normal : saut valide
-    if prog[dest] != 0x5b {
+    if prog.get(dest) != Some(&0x5b) {
         println!("❌ [JUMP] Dest invalide 0x{:04x} (pas JUMPDEST) → REVERT", dest);
         return Err(Error::new(ErrorKind::Other, "Revert: invalid JUMP destination"));
     }
