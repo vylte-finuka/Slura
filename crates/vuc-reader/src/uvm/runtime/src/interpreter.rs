@@ -1429,23 +1429,22 @@ while insn_ptr < prog.len() {
     if evm_stack.len() < 2 {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMPI"));
     }
-    let condition = evm_stack.pop().unwrap();
-    let dest = evm_stack.pop().unwrap() as usize;
+    let dest = evm_stack.pop().unwrap() as usize;       // PREMIER pop = destination (top après PUSH)
+    let condition = evm_stack.pop().unwrap();            // DEUXIÈME pop = condition
+
+    println!("🔍 [JUMPI DEBUG] Dest = 0x{:04x}, Condition = {} (0x{:x})", dest, condition, condition);
 
     if condition != 0 {
-        // Seulement ici on valide la destination
         if dest >= prog.len() || prog[dest] != 0x5b {
-            println!("❌ [JUMPI] Condition true → invalid dest 0x{:04x} → REVERT (protection trigger)", dest);
-            return Err(Error::new(ErrorKind::Other, "Revert: invalid JUMP destination (access control)"));
+            println!("❌ [JUMPI] Condition TRUE mais dest invalide 0x{:04x} → REVERT (protection/initializer guard)", dest);
+            return Err(Error::new(ErrorKind::Other, "Revert: invalid JUMP destination (likely non-initialized proxy or access control)"));
         }
-        println!("✅ [JUMPI] Condition true → jump to 0x{:04x}", dest);
+        println!("✅ [JUMPI] Condition TRUE → saut valide vers 0x{:04x}", dest);
         insn_ptr = dest;
         skip_advance = true;
         continue;
     } else {
-        // Condition false → on ignore complètement la dest, pas de check
-        println!("🔀 [JUMPI] Condition false → continue (dest ignorée, même si invalide)");
-        // Avance correctement au-delà du PUSH suivant
+        println!("🔀 [JUMPI] Condition FALSE → continuation normale (dest ignorée)");
         let mut extra_advance = 0;
         if insn_ptr + 1 < prog.len() {
             let next_op = prog[insn_ptr + 1];
@@ -1453,7 +1452,7 @@ while insn_ptr < prog.len() {
                 extra_advance = (next_op - 0x5f) as usize;
             }
         }
-        advance = 1 + 1 + extra_advance; // JUMPI (1) + PUSH opcode (1) + push bytes
+        advance = 1 + 1 + extra_advance; // JUMPI + PUSH opcode + données PUSH
     }
 }
     
