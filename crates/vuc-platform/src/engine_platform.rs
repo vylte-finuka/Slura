@@ -2023,7 +2023,7 @@ pub async fn verify_contract_deployment(&self, contract_address: &str) -> Result
                     println!("📤 [eth_call] Résultat formaté standard: {}", result_hex);
                     return Ok(result_hex);
                 } else {
-                    return Err("Erreur VM execute_module".to_string());
+                    return Err("Erreur UVM execute_module".to_string());
                 }
             }
         }
