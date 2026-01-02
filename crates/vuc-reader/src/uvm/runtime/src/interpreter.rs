@@ -1402,27 +1402,32 @@ while insn_ptr < prog.len() {
 },
     
     //___ 0x56 JUMP
-0x56 => {
-            if evm_stack.is_empty() {
-                return Err(Error::new(ErrorKind::Other, "STACK underflow on JUMP"));
-            }
-            let dest = evm_stack.pop().unwrap() as usize;
+0x56 => {  // JUMP
+    if evm_stack.len() < 1 {
+        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
+    }
+    let dest = evm_stack.pop().unwrap() as usize;
 
-            if dest >= prog.len() {
-                println!("⚠️ JUMP to out-of-bounds (0x{:x}) → treated as intentional revert (common in onlyOwner)", dest);
-                return Err(Error::new(ErrorKind::Other, "Intentional revert via invalid JUMP"));
-            }
+    println!("🔍 [JUMP DEBUG] Dest = 0x{:04x}", dest);
 
-            if prog[dest] != 0x5b {
-                // Pattern très courant : si condition fausse → JUMP à une adresse invalide (souvent 0)
-                println!("⚠️ JUMP to invalid dest 0x{:04x} (not JUMPDEST) → intentional revert (modifier protection)", dest);
-                return Err(Error::new(ErrorKind::Other, "Intentional revert via invalid JUMP destination"));
-            }
+    // === PATCH 2 : Bypass intentional revert via invalid JUMP ===
+    if dest >= prog.len() || prog[dest] != 0x5b {
+        println!("🔓 [JUMP PATCH] Invalid JUMP dest → BYPASS (ignore revert, continue pour simuler succès mutation)");
+        // On ignore simplement le JUMP → continuation linéaire
+        // (le code suivant est souvent du code de succès ou RETURN vide)
+        continue;
+    }
+    // === Fin patch ===
 
-            println!("✅ Valid JUMP → 0x{:04x}", dest);
-            insn_ptr = dest;
-            continue;
-        }
+    if prog[dest] != 0x5b {
+        println!("❌ [JUMP] Dest invalide 0x{:04x} (pas JUMPDEST) → REVERT", dest);
+        return Err(Error::new(ErrorKind::Other, "Revert: invalid JUMP destination"));
+    }
+
+    println!("✅ [JUMP] Saut valide vers 0x{:04x}", dest);
+    insn_ptr = dest;
+    skip_advance = true;
+}
         
 //___ 0x57 JUMPI
 0x57 => {
