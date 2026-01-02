@@ -1345,19 +1345,44 @@ while insn_ptr < prog.len() {
 },
 
 //___ 0x54 SLOAD
-  0x54 => {
-            if evm_stack.is_empty() {
-                return Err(Error::new(ErrorKind::Other, "STACK underflow on SLOAD"));
-            }
-            let slot_u256 = u256::from(evm_stack.pop().unwrap());
-            let slot_key = format!("{:064x}", slot_u256);
+0x54 => {
+    // Récupère le slot depuis la pile (standard EVM) ou fallback sur reg[_dst]
+    let slot_u256 = if !evm_stack.is_empty() {
+        u256::from(evm_stack.pop().unwrap())
+    } else {
+        u256::from(reg[_dst])
+    };
+    let slot = format!("{:064x}", slot_u256);
 
-            let value_bytes = get_storage(&execution_context.world_state, &interpreter_args.contract_address, &slot_key);
-            let value = u256::from_big_endian(&value_bytes).low_u64();
+    println!("🔍 [SLOAD DEBUG] slot={}", slot);
 
-            evm_stack.push(value);
-            println!("📚 SLOAD slot {} → 0x{:x}", slot_key, value);
-        }
+    // Récupère les bytes stockés (peuvent être < 32, > 32, ou absents)
+    let stored_bytes = get_storage(&execution_context.world_state, &interpreter_args.contract_address, &slot);
+
+    // Normalisation à exactement 32 bytes en big-endian (convention EVM)
+    let mut bytes_32 = [0u8; 32];
+    let len = stored_bytes.len().min(32);
+    // On copie les len derniers bytes (comportement EVM : right-aligned pour les petites valeurs)
+    if len > 0 {
+        bytes_32[32 - len..].copy_from_slice(&stored_bytes[..len]);
+    }
+    // Si vide → tout à zéro
+
+    // Conversion correcte en u256
+    let loaded_u256 = u256::from_big_endian(&bytes_32);
+    let loaded_u64 = loaded_u256.low_u64();
+
+    // Pousse la valeur complète (64-bit truncaté) sur la pile EVM
+    evm_stack.push(loaded_u64);
+
+    // Met à jour les registres pour compatibilité uBPF/UVM
+    reg[0] = loaded_u64;
+    if _dst < reg.len() {
+        reg[_dst] = loaded_u64;
+    }
+
+    println!("🎯 [SLOAD] slot={} → value=0x{:x} (full u256={})", slot, loaded_u64, loaded_u256);
+},
     
     // ___ 0x55 SSTORE
   0x55 => {
@@ -1493,15 +1518,24 @@ while insn_ptr < prog.len() {
         
 //___ 0x60..=0x7f : PUSH1 à PUSH32
 0x60..=0x7f => {
-            let size = (opcode - 0x60) as usize + 1;
-            let start = insn_ptr + 1;
-            let end = (start + size).min(prog.len());
-            let mut bytes = [0u8; 32];
-            bytes[32 - (end - start)..].copy_from_slice(&prog[start..end]);
-            let value = u256::from_big_endian(&bytes).low_u64();
-            evm_stack.push(value);
-            advance += size;
-        }
+    let push_size = (opcode - 0x60 + 1) as usize;
+    let start = insn_ptr + 1;
+    let end = (start + push_size).min(prog.len());
+    let mut value_bytes = [0u8; 32];
+    if end > start {
+        value_bytes[32 - (end - start)..].copy_from_slice(&prog[start..end]);
+    }
+    let value = u256::from_big_endian(&value_bytes);
+    let value_u64 = value.low_u64();
+
+    evm_stack.push(value_u64);
+    reg[0] = value_u64;
+
+    println!("📌 [PUSH{}] Pushed 0x{:x}", push_size, value_u64);
+    println!("📏 [PUSH] Avance de {} bytes supplémentaires (total: {})", push_size, push_size + 1);
+
+    advance = 1 + push_size;
+}
         
         //___ 0x80 → 0x8f : DUP1 à DUP16 — STRICT
         (0x80..=0x8f) => {
