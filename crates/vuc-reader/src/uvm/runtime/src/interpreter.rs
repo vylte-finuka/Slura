@@ -1424,7 +1424,7 @@ while insn_ptr < prog.len() {
             continue;
         }
         
-//___ 0x57 JUMPI — Autorise destination invalide comme revert intentionnel
+//___ 0x57 JUMPI
 0x57 => {
     if evm_stack.len() < 2 {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMPI"));
@@ -1433,27 +1433,27 @@ while insn_ptr < prog.len() {
     let dest = evm_stack.pop().unwrap() as usize;
 
     if condition != 0 {
-        // Condition vraie → on saute
+        // Seulement ici on valide la destination
         if dest >= prog.len() || prog[dest] != 0x5b {
-            // Destination invalide alors que condition vraie → c'est un revert intentionnel (pattern courant)
-            println!("⚠️ [JUMPI] Condition true but invalid dest 0x{:04x} → intentional revert", dest);
-            return Err(Error::new(ErrorKind::Other, "Intentional revert via invalid JUMPI destination"));
+            println!("❌ [JUMPI] Condition true → invalid dest 0x{:04x} → REVERT (protection trigger)", dest);
+            return Err(Error::new(ErrorKind::Other, "Revert: invalid JUMP destination (access control)"));
         }
         println!("✅ [JUMPI] Condition true → jump to 0x{:04x}", dest);
         insn_ptr = dest;
         skip_advance = true;
         continue;
     } else {
-        // Condition fausse → on continue normalement (on skip le PUSH de destination)
-        println!("🔀 [JUMPI] Condition false → continue after destination PUSH");
-        // Avance au-delà du PUSH suivant
+        // Condition false → on ignore complètement la dest, pas de check
+        println!("🔀 [JUMPI] Condition false → continue (dest ignorée, même si invalide)");
+        // Avance correctement au-delà du PUSH suivant
+        let mut extra_advance = 0;
         if insn_ptr + 1 < prog.len() {
             let next_op = prog[insn_ptr + 1];
             if (0x60..=0x7f).contains(&next_op) {
-                let push_bytes = (next_op - 0x5f) as usize;
-                advance = 1 + push_bytes;
+                extra_advance = (next_op - 0x5f) as usize;
             }
         }
+        advance = 1 + 1 + extra_advance; // JUMPI (1) + PUSH opcode (1) + push bytes
     }
 }
     
