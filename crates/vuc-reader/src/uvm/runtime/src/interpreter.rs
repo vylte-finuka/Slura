@@ -1440,30 +1440,33 @@ while insn_ptr < prog.len() {
     if evm_stack.len() < 2 {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMPI"));
     }
-    let dest = evm_stack.pop().unwrap() as usize;       // PREMIER pop = destination (top après PUSH)
-    let condition = evm_stack.pop().unwrap();            // DEUXIÈME pop = condition
+    let dest = evm_stack.pop().unwrap() as usize;       // destination
+    let condition = evm_stack.pop().unwrap();            // condition
 
     println!("🔍 [JUMPI DEBUG] Dest = 0x{:04x}, Condition = {} (0x{:x})", dest, condition, condition);
 
     if condition != 0 {
+        // Condition TRUE → on saute seulement si la destination est valide (commence par JUMPDEST)
         if dest >= prog.len() || prog[dest] != 0x5b {
-            println!("❌ [JUMPI] Condition TRUE mais dest invalide 0x{:04x} → REVERT (protection/initializer guard)", dest);
-            return Err(Error::new(ErrorKind::Other, "Revert: invalid JUMP destination (likely non-initialized proxy or access control)"));
+            println!("❌ [JUMPI] Condition TRUE mais destination invalide 0x{:04x} → REVERT (bad jump destination)", dest);
+            return Err(Error::new(ErrorKind::Other, "Revert: bad jump destination"));
         }
         println!("✅ [JUMPI] Condition TRUE → saut valide vers 0x{:04x}", dest);
         insn_ptr = dest;
         skip_advance = true;
         continue;
     } else {
-        println!("🔀 [JUMPI] Condition FALSE → continuation normale (dest ignorée)");
+        // Condition FALSE → on ignore la destination et on avance normalement
+        println!("🔀 [JUMPI] Condition FALSE → continuation normale");
+        // Avance de 1 (JUMPI) + taille du PUSH suivant (si présent)
         let mut extra_advance = 0;
         if insn_ptr + 1 < prog.len() {
             let next_op = prog[insn_ptr + 1];
             if (0x60..=0x7f).contains(&next_op) {
-                extra_advance = (next_op - 0x5f) as usize;
+                extra_advance = (next_op - 0x5f) as usize; // taille des données PUSH
             }
         }
-        advance = 1 + 1 + extra_advance; // JUMPI + PUSH opcode + données PUSH
+        advance = 1 + 1 + extra_advance; // JUMPI + opcode PUSH + données PUSH
     }
 }
     
