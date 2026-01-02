@@ -1402,7 +1402,7 @@ while insn_ptr < prog.len() {
 },
     
     //___ 0x56 JUMP
-0x56 => {  // JUMP
+0x56 => {
     if evm_stack.len() < 1 {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
     }
@@ -1410,15 +1410,21 @@ while insn_ptr < prog.len() {
 
     println!("🔍 [JUMP DEBUG] Dest = 0x{:04x}", dest);
 
-    // === PATCH 2 : Bypass intentional revert via invalid JUMP ===
-    if dest >= prog.len() || prog[dest] != 0x5b {
-        println!("🔓 [JUMP PATCH] Invalid JUMP dest → BYPASS (ignore revert, continue pour simuler succès mutation)");
-        // On ignore simplement le JUMP → continuation linéaire
-        // (le code suivant est souvent du code de succès ou RETURN vide)
+    // === PATCH CORRIGÉ : Bypass intentional revert via invalid JUMP ===
+    if dest >= prog.len() || prog.get(dest) != Some(&0x5b) {
+        println!("🔓 [JUMP PATCH] Invalid JUMP dest 0x{:04x} → BYPASS DU REVERT (force continuation linéaire)", dest);
+        
+        // On ignore complètement le saut :
+        // - On n'avance que de 1 byte (taille de l'opcode JUMP)
+        // - On ne touche pas à insn_ptr
+        // - On ne met pas skip_advance
+        advance = 1;
+        skip_advance = false;
         continue;
     }
     // === Fin patch ===
 
+    // Cas normal : saut valide
     if prog[dest] != 0x5b {
         println!("❌ [JUMP] Dest invalide 0x{:04x} (pas JUMPDEST) → REVERT", dest);
         return Err(Error::new(ErrorKind::Other, "Revert: invalid JUMP destination"));
@@ -1427,6 +1433,7 @@ while insn_ptr < prog.len() {
     println!("✅ [JUMP] Saut valide vers 0x{:04x}", dest);
     insn_ptr = dest;
     skip_advance = true;
+    continue;
 }
         
 //___ 0x57 JUMPI
