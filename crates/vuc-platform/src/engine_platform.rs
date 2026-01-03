@@ -977,11 +977,6 @@ impl EnginePlatform {
         1u64
     }
 
-    /// ✅ Récupération du Chain ID pour Slurachain
-    pub fn get_chain_id(&self) -> u64 {
-        45056 // ID développement local, peut être changé pour mainnet
-    }
-
 /// ✅ Récupération du nombre de transactions (nonce) - CORRECTION TOTALE
 pub async fn get_transaction_count(&self, address: &str) -> Result<u64, String> {
     println!("\n🚨🚨🚨 ===== DEBUG ULTRA DÉTAILLÉ eth_getTransactionCount =====");
@@ -3159,16 +3154,61 @@ async fn main() {
     tracing_subscriber::fmt::init();
     println!("🚀 Starting Slurachain network with Lurosonie consensus...");
 
+    // ✅ CHOIX EXPLICITE DU CLUSTER/RÉSEAU (AVANT TOUTE AUTRE INITIALISATION)
+    let cluster = match std::env::var("SLURACHAIN_NETWORK") {
+        Ok(network) => match network.to_lowercase().as_str() {
+            "mainnet" => Network::Mainnet,
+            "testnet" => Network::Testnet,
+            "devnet" | "dev" | "development" => Network::Devnet,
+            _ => {
+                println!("⚠️ SLURACHAIN_NETWORK non reconnu '{}', utilise devnet par défaut", network);
+                Network::Devnet
+            }
+        },
+        Err(_) => {
+            println!("ℹ️ SLURACHAIN_NETWORK non défini, utilise devnet pour développement");
+            Network::Devnet
+        }
+    };
+
+    let cluster_str = match cluster {
+        Network::Mainnet => "mainnet",
+        Network::Testnet => "testnet", 
+        Network::Devnet => "devnet",
+    };
+
+    println!("🌐 Réseau Slurachain sélectionné: {} ({})", cluster_str, match cluster {
+        Network::Mainnet => "Production - Réseau principal",
+        Network::Testnet => "Test - Réseau de test public (Charène)", 
+        Network::Devnet => "Développement - Réseau local",
+    });
+
+    // ✅ CONFIGURATION SPÉCIFIQUE PAR RÉSEAU
+    let (default_port, default_chain_id, consensus_mode) = match cluster {
+        Network::Mainnet => (8080, 45056, "Lurosonie_bft"),
+        Network::Testnet => (8081, 45057, "Lurosonie_bft"),
+        Network::Devnet => (8082, 45058, "Lurosonie_bft"),
+    };
+
+    println!("⚙️ Configuration réseau:");
+    println!("   • Port RPC: {}", default_port);
+    println!("   • Chain ID: 0x{:x} ({})", default_chain_id, default_chain_id);
+    println!("   • Mode consensus: {}", consensus_mode);
+
     // ✅ Ouvre RocksDB UNE SEULE FOIS et partage l'Arc partout
     let storage: Arc<RocksDBManagerImpl> = Arc::new(RocksDBManagerImpl::new());
+    println!("✅ RocksDB storage manager initialisé");
 
-    // ✅ Initialisation de la VM Slurachain
-    let vm = Arc::new(TokioRwLock::new(SlurachainVm::new()));
+    // ✅ INITIALISATION UNIQUE DE LA VM avec cluster ET storage manager
+    let vm = Arc::new(TokioRwLock::new(SlurachainVm::new_with_cluster(cluster_str)));
     let mut validator_address_generated = String::new();
     
     {
         let mut vm_guard = vm.write().await;
+        
+        // ✅ CRITIQUE : ATTACHER LE STORAGE MANAGER IMMÉDIATEMENT
         vm_guard.set_storage_manager(storage.clone());
+        println!("✅ Storage manager attaché à la VM");
         
         // ✅ CRÉATION DU COMPTE SYSTÈME
         println!("🏛️ Creating system account...");
@@ -3213,132 +3253,50 @@ async fn main() {
     // ✅ Canal pour les blocs
     let (block_sender, block_receiver) = mpsc::channel(100);
 
-    // ✅ Manager Lurosonie avec storage
+    // ✅ Manager Lurosonie avec storage (UTILISE LA MÊME INSTANCE DE VM)
     let lurosonie_manager = Arc::new(LurosonieManager::new_with_storage(
         storage.clone(),
-        vm.clone(),
+        vm.clone(), // ✅ UTILISE LA MÊME VM INSTANCE
         block_sender.clone()
     ).await);
 
     println!("✅ Manager Lurosonie initialisé");
 
-    // ✅ Service RPC Slurachain
+    // ✅ Service RPC Slurachain avec port dynamique
     let slurachain_service = Arc::new(tokio::sync::Mutex::new(SlurEthService::new()));
     let rpc_service = slurachainRpcService::new(
-        8080, 
-        "http://0.0.0.0:8080".to_string(), 
-        "ws://0.0.0.0:8080".to_string(), 
-        slurachain_service.clone(), 
-        storage.clone(), 
-        block_receiver, 
+        default_port, // ✅ Port dynamique selon le réseau
+        format!("http://0.0.0.0:{}", default_port),
+        format!("ws://0.0.0.0:{}", default_port),
+        slurachain_service.clone(),
+        storage.clone(),
+        block_receiver,
         lurosonie_manager.clone()
     );
 
-    println!("✅ Service RPC Slurachain initialisé sur le port 8080");
+    println!("✅ Service RPC Slurachain initialisé sur le port {}", default_port);
 
     let validator_address = validator_address_generated.clone();
-    // Define the cluster variable here (choose the appropriate variant)
-    let cluster = Network::Mainnet; // Or use Mainnet/Testnet as needed
 
-    let cluster_str = match cluster {
-        Network::Mainnet => "mainnet",
-        Network::Testnet => "testnet",
-        Network::Devnet  => "devnet",
-    };
-    
-    // ✅ VM initialisée avec le cluster
-    let vm = Arc::new(TokioRwLock::new(SlurachainVm::new_with_cluster(cluster_str)));
-    
-    // ✅ EnginePlatform reçoit aussi le cluster
+    // ✅ EnginePlatform avec TOUS les paramètres du réseau (UTILISE LA MÊME VM)
     let engine_platform = Arc::new(EnginePlatform::new(
-        "vyft_slurachain".to_string(),
+        format!("vyft_slurachain_{}", cluster_str),
         vec![],
         rpc_service,
-        vm.clone(),
-        validator_address,
+        vm.clone(), // ✅ UTILISE LA MÊME VM INSTANCE AVEC STORAGE ATTACHÉ
+        validator_address.clone(),
         cluster_str.to_string(),
     ));
 
-    // ✅ Initialisation de la VM Slurachain
-    let vm = Arc::new(TokioRwLock::new(SlurachainVm::new()));
-    let mut validator_address_generated = String::new();
-    
+    // ✅ VÉRIFICATION QUE LE STORAGE MANAGER EST DISPONIBLE
     {
-        let mut vm_guard = vm.write().await;
-        vm_guard.set_storage_manager(storage.clone());
-        
-        // ✅ CRÉATION DU COMPTE SYSTÈME
-        println!("🏛️ Creating system account...");
-        validator_address_generated = {
-            match assign_private_key_to_system_account(&mut vm_guard) {
-                Ok(privkey_hex) => {
-                    let accounts = vm_guard.state.accounts.read().unwrap();
-                    accounts.iter()
-                        .find(|(_, acc)| acc.resources.get("private_key").map(|v| v.as_str().unwrap_or("")) == Some(privkey_hex.as_str()))
-                        .map(|(addr, _)| addr.clone())
-                        .unwrap_or_else(|| {
-                            panic!("Adresse liée à la clé privée non trouvée !");
-                        })
-                }
-                Err(e) => {
-                    eprintln!("❌ Erreur lors de la génération de la clé privée du validateur: {}", e);
-                    panic!("Impossible de générer l'adresse du validateur !");
-                }
-            }
-        };
-        
-        // ✅ CRÉATION DES COMPTES INITIAUX avec VEZ
-        println!("👥 Creating initial accounts...");
-        if let Err(e) = create_initial_accounts_with_vez(&mut vm_guard, &validator_address_generated).await {
-            eprintln!("❌ Failed to create initial accounts: {}", e);
+        let vm_test = engine_platform.vm.read().await;
+        if vm_test.storage_manager.is_some() {
+            println!("✅ Storage manager disponible dans EnginePlatform");
         } else {
-            println!("✅ Initial accounts created with VEZ");
+            panic!("❌ ERREUR CRITIQUE : Storage manager non disponible dans EnginePlatform");
         }
-        
-        println!("✅ VM Slurachain fully initialized with VEZ ecosystem");
     }
-
-    // ✅ Canal pour les blocs
-    let (block_sender, block_receiver) = mpsc::channel(100);
-
-    // ✅ Manager Lurosonie avec storage
-    let lurosonie_manager = Arc::new(LurosonieManager::new_with_storage(
-        storage.clone(),
-        vm.clone(),
-        block_sender.clone()
-    ).await);
-
-    println!("✅ Manager Lurosonie initialisé");
-
-    // ✅ Service RPC Slurachain
-    let slurachain_service = Arc::new(tokio::sync::Mutex::new(SlurEthService::new()));
-    let rpc_service = slurachainRpcService::new(
-        8080, 
-        "http://0.0.0.0:8080".to_string(), 
-        "ws://0.0.0.0:8080".to_string(), 
-        slurachain_service.clone(), 
-        storage.clone(), 
-        block_receiver, 
-        lurosonie_manager.clone()
-    );
-
-    println!("✅ Service RPC Slurachain initialisé sur le port 8080");
-
-    let validator_address = validator_address_generated.clone();
-
-    // ✅ Engine Platform
-    let engine_platform = Arc::new(EnginePlatform::new(
-        "vyft_slurachain".to_string(),
-        vec![],
-        rpc_service.clone(),
-        vm.clone(),
-        validator_address.clone(),
-        match cluster.clone() {
-            Network::Mainnet => "mainnet".to_string(),
-            Network::Testnet => "testnet".to_string(),
-            Network::Devnet => "devnet".to_string(),
-        },
-    ));
 
     // ✅ NOUVEAU: CHARGEMENT AU DÉMARRAGE
     println!("🔄 Chargement de l'état persisté...");
@@ -3352,7 +3310,6 @@ async fn main() {
         loop {
             interval.tick().await;
             
-            // ✅ APPEL DIRECT SANS CAPTURE DE VARIABLES NON-SEND
             if let Err(e) = engine_clone_persist.persist_all_state().await {
                 eprintln!("⚠️ Échec sauvegarde périodique: {}", e);
             } else {
@@ -3404,7 +3361,8 @@ async fn main() {
         engine_clone.start_server().await;
     });
     
-tokio::spawn({
+    // ✅ AJOUT: Implémentation de get_chain_id avec la configuration réseau
+    tokio::spawn({
         let lurosonie_manager_clone = Arc::clone(&lurosonie_manager);
         let value = engine_platform.clone();
         let validator_address_generated = validator_address_generated.clone();
@@ -3415,79 +3373,79 @@ tokio::spawn({
                 if block_number == 1 {
                     println!("🪙 Block #1 produit — déploiement du contrat VEZ (proxy + impl)...");
     
- // 1) Déploiement de l'implémentation VEZ
-            let impl_bytecode_hex = include_str!("../../../vez_bytecode.hex").trim();
-            let deploy_impl_tx = serde_json::json!({
-                "from": validator_address_generated,
-                "data": format!("0x{}", impl_bytecode_hex),
-                "value": "0x0"
-            });
-            let impl_tx_hash = value.send_transaction(deploy_impl_tx).await.unwrap();
-            println!("✅ Implémentation VEZ ajoutée au mempool: {}", impl_tx_hash);
-        
-            // Récupère l'adresse du contrat déployé à partir du receipt
-            let impl_receipt = value.get_transaction_receipt(impl_tx_hash.clone()).await.ok();
-            let vez_impl_addr = impl_receipt
-                .and_then(|r| r.get("contractAddress").and_then(|v| v.as_str().map(|s| s.to_string())))
-                .unwrap_or("".to_string());
-        
-            // 2) Déploiement du proxy avec CREATE2 (adresse déterministe)
-            let proxy_bytecode_hex = include_str!("../../../vezcurpoxycore_bytecode.hex").trim();
-            let salt = "vyftvezproxy2026";
-            let salt_bytes = hex::encode(sha3::Keccak256::digest(salt.as_bytes()));
-            let proxy_addr = "0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448".to_string();
-        
-            let deploy_proxy_tx = serde_json::json!({
-                "from": validator_address_generated,
-                "data": format!("0x{}", proxy_bytecode_hex),
-                "value": "0x0",
-                "create2": true,
-                "salt": format!("0x{}", salt_bytes),
-                "target_address": proxy_addr
-            });
-            let proxy_tx_hash = value.send_transaction(deploy_proxy_tx).await.unwrap();
-            println!("✅ Proxy VEZ ajouté au mempool (CREATE2): {}", proxy_tx_hash);
-        
-            // Écrit la clé "implementation" dans le storage du proxy
-            {
-                let mut vm = value.vm.write().await;
-                let mut accounts = vm.state.accounts.write().unwrap();
-                if let Some(proxy_account) = accounts.get_mut(&proxy_addr) {
-                    proxy_account.resources.insert(
-                        "implementation".to_string(),
-                        serde_json::Value::String(vez_impl_addr.clone())
+                    // 1) Déploiement de l'implémentation VEZ
+                    let impl_bytecode_hex = include_str!("../../../vez_bytecode.hex").trim();
+                    let deploy_impl_tx = serde_json::json!({
+                        "from": validator_address_generated,
+                        "data": format!("0x{}", impl_bytecode_hex),
+                        "value": "0x0"
+                    });
+                    let impl_tx_hash = value.send_transaction(deploy_impl_tx).await.unwrap();
+                    println!("✅ Implémentation VEZ ajoutée au mempool: {}", impl_tx_hash);
+            
+                    // Récupère l'adresse du contrat déployé à partir du receipt
+                    let impl_receipt = value.get_transaction_receipt(impl_tx_hash.clone()).await.ok();
+                    let vez_impl_addr = impl_receipt
+                        .and_then(|r| r.get("contractAddress").and_then(|v| v.as_str().map(|s| s.to_string())))
+                        .unwrap_or("".to_string());
+            
+                    // 2) Déploiement du proxy avec CREATE2 (adresse déterministe)
+                    let proxy_bytecode_hex = include_str!("../../../vezcurpoxycore_bytecode.hex").trim();
+                    let salt = "vyftvezproxy2026";
+                    let salt_bytes = hex::encode(sha3::Keccak256::digest(salt.as_bytes()));
+                    let proxy_addr = "0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448".to_string();
+            
+                    let deploy_proxy_tx = serde_json::json!({
+                        "from": validator_address_generated,
+                        "data": format!("0x{}", proxy_bytecode_hex),
+                        "value": "0x0",
+                        "create2": true,
+                        "salt": format!("0x{}", salt_bytes),
+                        "target_address": proxy_addr
+                    });
+                    let proxy_tx_hash = value.send_transaction(deploy_proxy_tx).await.unwrap();
+                    println!("✅ Proxy VEZ ajouté au mempool (CREATE2): {}", proxy_tx_hash);
+            
+                    // Écrit la clé "implementation" dans le storage du proxy
+                    {
+                        let mut vm = value.vm.write().await;
+                        let mut accounts = vm.state.accounts.write().unwrap();
+                        if let Some(proxy_account) = accounts.get_mut(&proxy_addr) {
+                            proxy_account.resources.insert(
+                                "implementation".to_string(),
+                                serde_json::Value::String(vez_impl_addr.clone())
+                            );
+                            println!("✅ Slot 'implementation' du proxy mis à jour: {}", vez_impl_addr);
+                        }
+                    }
+            
+                    // 3) Appel initialize(address) sur le proxy (admin = validator)
+                    let admin_address = validator_address_generated.to_lowercase();
+                    let owner_address = "0x53ae54b11251d5003e9aa51422405bc35a2ef32d";
+                    let init_calldata = format!("8129fc1c000000000000000000000000{}", owner_address.trim_start_matches("0x"));
+                    let init_tx = serde_json::json!({
+                        "to": proxy_addr,
+                        "from": admin_address,
+                        "gas": "0x4c4b40",
+                        "value": "0x0",
+                        "data": format!("0x{}", init_calldata)
+                    });
+                    value.send_transaction(init_tx).await.unwrap();
+            
+                    // 4) Appel mint(address,uint256) sur le proxy
+                    let mint_calldata = format!(
+                        "40c10f19000000000000000000000000{}0000000000000000000000000000000000000000000000000000000034d54b40",
+                        owner_address.trim_start_matches("0x")
                     );
-                    println!("✅ Slot 'implementation' du proxy mis à jour: {}", vez_impl_addr);
-                }
-            }
+                    let mint_tx = serde_json::json!({
+                        "to": proxy_addr,
+                        "from": admin_address,
+                        "gas": "0x4c4b40",
+                        "value": "0x0",
+                        "data": format!("0x{}", mint_calldata)
+                    });
+                    value.send_transaction(mint_tx).await.unwrap();
         
-            // 3) Appel initialize(address) sur le proxy (admin = validator)
-            let admin_address = validator_address_generated.to_lowercase();
-            let owner_address = "0x53ae54b11251d5003e9aa51422405bc35a2ef32d";
-            let init_calldata = format!("8129fc1c000000000000000000000000{}", owner_address.trim_start_matches("0x"));
-            let init_tx = serde_json::json!({
-                "to": proxy_addr,
-                "from": admin_address,
-                "gas": "0x4c4b40",
-                "value": "0x0",
-                "data": format!("0x{}", init_calldata)
-            });
-            value.send_transaction(init_tx).await.unwrap();
-        
-            // 4) Appel mint(address,uint256) sur le proxy
-            let mint_calldata = format!(
-                "40c10f19000000000000000000000000{}0000000000000000000000000000000000000000000000000000000034d54b40",
-                owner_address.trim_start_matches("0x")
-            );
-            let mint_tx = serde_json::json!({
-                "to": proxy_addr,
-                "from": admin_address,
-                "gas": "0x4c4b40",
-                "value": "0x0",
-                "data": format!("0x{}", mint_calldata)
-            });
-            value.send_transaction(mint_tx).await.unwrap();
-    
                     break;
                 }
             }
@@ -3538,8 +3496,8 @@ tokio::spawn({
 
     // ✅ Affichage des informations de démarrage
     println!("\n🎉 Slurachain Network fully operational!");
-    println!("📡 RPC Endpoint: http://0.0.0.0:8080");
-    println!("🔗 Chain ID: 0x{:x} ({})", engine_platform.get_chain_id(), engine_platform.get_chain_id());
+    println!("📡 RPC Endpoint: http://0.0.0.0:{}", default_port);
+    println!("🔗 Chain ID: 0x{:x} ({})", default_chain_id, default_chain_id);
     println!("⚡ Consensus: Lurosonie BFT Relayed PoS");
     println!("🪙 Native Token: VEZ (Vyft enhancing ZER)");
     println!("📄 Contract Address: 0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448");
@@ -3599,11 +3557,10 @@ tokio::spawn({
     println!("");
 
     println!("💡 MetaMask Configuration:");
-    println!("   1. Network Name: Slurachain");
-    println!("   2. RPC URL: http://localhost:8080");
-    println!("   3. Chain ID: {}", engine_platform.get_chain_id());
+    println!("   1. Network Name: Slurachain {}", cluster_str);
+    println!("   2. RPC URL: http://localhost:{}", default_port);
+    println!("   3. Chain ID: {}", default_chain_id);
     println!("   4. Currency Symbol: VEZ");
-    println!("   5. Block Explorer: Not configured");
     println!("");
 
     // ✅ NOUVEAU: Gestionnaire de signaux avec persistance
@@ -3636,7 +3593,6 @@ tokio::spawn({
                 eprintln!("❌ Erreur dans la validation: {}", e);
             }
         }
-        // ✅ NOUVEAU: Handle pour la persistance périodique
         result = persistence_handle => {
             if let Err(e) = result {
                 eprintln!("❌ Erreur dans la persistance: {}", e);
@@ -3647,14 +3603,12 @@ tokio::spawn({
     // ✅ NOUVEAU: Arrêt propre avec sauvegarde finale
     println!("🔄 Arrêt en cours...");
     
-    // ✅ SAUVEGARDE FINALE COMPLÈTE avant arrêt
     if let Err(e) = engine_platform.persist_all_state().await {
         eprintln!("⚠️ Échec sauvegarde finale: {}", e);
     } else {
         println!("💾 ✅ SAUVEGARDE FINALE RÉUSSIE");
     }
     
-    // ✅ Sauvegarde système tradicionales (comptes importants)
     if let Err(e) = save_system_state(&vm, &storage, &validator_address).await {
         eprintln!("⚠️ Failed to save system state: {}", e);
     } else {
@@ -3670,7 +3624,6 @@ tokio::spawn({
         println!("   • Validators: {}", validators);
     }
 
-    // ✅ STATS DE PERSISTANCE FINALE
     let final_accounts_count = {
         let vm_read = vm.read().await;
         let accounts = vm_read.state.accounts.read().unwrap();
@@ -3691,6 +3644,18 @@ tokio::spawn({
     println!("   • Rechargé {} éléments au démarrage", loaded_count);
     
     println!("🛑 Slurachain Network stopped gracefully with full state persistence");
+}
+
+
+// ✅ AJOUT: Implémentation get_chain_id avec configuration réseau
+impl EnginePlatform {
+    pub fn get_chain_id(&self) -> u64 {
+        match std::env::var("SLURACHAIN_NETWORK").unwrap_or("devnet".to_string()).as_str() {
+            "mainnet" => 45056,
+            "testnet" => 45057,
+            "devnet" | _ => 45058,
+        }
+    }
 }
 
 async fn create_initial_accounts_with_vez(vm: &mut SlurachainVm, validator_address: &str) -> Result<(), String> {
