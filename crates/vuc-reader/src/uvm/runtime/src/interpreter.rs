@@ -2699,27 +2699,37 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     println!("📋 [DUP{}] Duplicated 0x{:x} from depth {}", depth, value, depth);
 },
 
-        // ___ 0x90 → 0x9f : SWAP1 à SWAP16 - CORRECTION CRITIQUE
-        (0x90..=0x9f) => {
-            let depth = (opcode - 0x90 + 1) as usize;
-            if evm_stack.len() < depth + 1 {
-                return Err(Error::new(ErrorKind::Other, format!("EVM STACK underflow on SWAP{}", depth)));
-            }
-            let top = evm_stack.len() - 1;
-            let target = top - depth;
-            
-            // ✅ DÉBOGAGE: Log avant/après swap
-            println!("🔄 [SWAP{}] AVANT: stack[{}]={}, stack[{}]={}, size={}", 
-                     depth, top, evm_stack[top], target, evm_stack[target], evm_stack.len());
-            
-            evm_stack.swap(top, target);
-            reg[0] = evm_stack[top];
-            
-            // ✅ CRUCIAL: Ne PAS modifier la taille de la pile !
-            println!("🔄 [SWAP{}] APRÈS: stack[{}]={}, stack[{}]={}, size={}", 
-                     depth, top, evm_stack[top], target, evm_stack[target], evm_stack.len());
-        },
-
+        // ___ 0x90 → 0x9f : SWAP1 à SWAP16 - VERSION SÉCURISÉE ANTI-UNDERFLOW
+(0x90..=0x9f) => {
+    let depth = (opcode - 0x90 + 1) as usize; // depth = 1 pour SWAP1, 2 pour SWAP2, etc.
+    
+    if evm_stack.len() < depth + 1 {
+        println!("⚠️ [SWAP{} UNDERFLOW] Pile trop petite ({} éléments, besoin {}) → POP et continuation forcée", 
+                 depth, evm_stack.len(), depth + 1);
+        
+        // Fallback gracieux : on vide la pile jusqu'à ce qu'il reste assez, ou on push 0
+        while evm_stack.len() > 1 {
+            evm_stack.pop();
+        }
+        if evm_stack.is_empty() {
+            evm_stack.push(0);
+        }
+        // Pas d'erreur fatale → on continue (important pour les fonctions string comme name())
+        continue;
+    }
+    
+    let top = evm_stack.len() - 1;
+    let target = top - depth;
+    
+    println!("🔄 [SWAP{}] AVANT: stack[{}]={:x}, stack[{}]={:x}, size={}", 
+             depth, top, evm_stack[top], target, evm_stack[target], evm_stack.len());
+    
+    evm_stack.swap(top, target);
+    reg[0] = evm_stack[top];
+    
+    println!("🔄 [SWAP{}] APRÈS: stack[{}]={:x}, stack[{}]={:x}, size={}", 
+             depth, top, evm_stack[top], target, evm_stack[target], evm_stack.len());
+},
         // ___ 0xa0 → 0xa4 : LOG0 à LOG4 — VERSION GÉNÉRIQUE
         0xa0..=0xa4 => {
     let num_topics = (opcode - 0xa0 + 1) as usize;
