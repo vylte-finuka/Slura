@@ -267,73 +267,6 @@ fn extract_function_selector_from_name(function_name: &str) -> Option<u32> {
     None
 }
 
-// Nouvelle fonction unifiée pour corriger les jumps (remplace tes multiples detect_*)
-fn resolve_valid_jump_destination(
-    current_pc: usize,
-    raw_dest: usize,
-    evm_stack: &[u64],
-    valid_jumpdests: &HashSet<usize>,
-    bytecode: &[u8],
-) -> usize {
-    // 1. PRIORITÉ MAX: Si c'est déjà un JUMPDEST valide → rien à faire
-    if valid_jumpdests.contains(&raw_dest) {
-        println!("✅ [JUMP DIRECT] Destination valide directe 0x{:04x}", raw_dest);
-        return raw_dest;
-    }
-
-    // 2. Détection proxy UUPS/classique : sauts vers zone init basse (0x00 à 0x100)
-    if raw_dest <= 0x100 {
-        // Cherche le PREMIER JUMPDEST après la zone d'init (typique des proxies)
-        for candidate in 0x80..bytecode.len().min(0x200) {
-            if bytecode[candidate] == 0x5b && valid_jumpdests.contains(&candidate) {
-                println!("🔄 [PROXY REDIRECT] raw_dest bas → premier JUMPDEST utile à 0x{:04x}", candidate);
-                return candidate;
-            }
-        }
-    }
-
-    // 3. Détection "return address" sur la pile (très courant dans les fonctions view/pure)
-    // Les fonctions ERC20 standards terminent par un JUMP vers l'adresse de retour stockée sur la pile
-    for (depth, &stack_val) in evm_stack.iter().rev().enumerate() {
-        let addr = stack_val as usize;
-        if addr < bytecode.len() && valid_jumpdests.contains(&addr) && depth >= 1 {
-            println!("🔙 [RETURN VIA STACK] Adresse de retour trouvée sur pile (depth {}) → 0x{:04x}", depth, addr);
-            return addr;
-        }
-    }
-
-    // 4. Détection calcul → ce n'est pas une adresse de code (trop petite ou trop grande)
-    if raw_dest <= 0x50 || raw_dest > bytecode.len() + 0x1000 {
-        // Cherche le prochain JUMPDEST valide après le PC actuel (continuation naturelle)
-        for candidate in (current_pc + 1)..bytecode.len() {
-            if bytecode[candidate] == 0x5b && valid_jumpdests.contains(&candidate) {
-                println!("➡️ [CALC RESULT] raw_dest suspect → continuation au prochain JUMPDEST 0x{:04x}", candidate);
-                return candidate;
-            }
-        }
-    }
-
-    // 5. Fallback ultime : le JUMPDEST le plus proche (au cas où)
-    let mut best = None;
-    let mut min_dist = usize::MAX;
-    for &valid in valid_jumpdests {
-        let dist = if valid > raw_dest { valid - raw_dest } else { raw_dest - valid };
-        if dist < min_dist {
-            min_dist = dist;
-            best = Some(valid);
-        }
-    }
-
-    if let Some(dest) = best {
-        println!("🎯 [FALLBACK NEAREST] raw_dest invalide → JUMPDEST le plus proche 0x{:04x}", dest);
-        return dest;
-    }
-
-    // Dernier recours : continue linéairement (évite boucle infinie)
-    println!("⚠️ [FALLBACK LINEAR] Aucun JUMPDEST trouvé → continuation PC+1");
-    current_pc + 1
-}
-
 /// ✅ CORRECTION MAJEURE: Construction de calldata avec selector automatique
 fn build_universal_calldata(args: &InterpreterArgs) -> Vec<u8> {
     let mut calldata = Vec::new();
@@ -1328,60 +1261,12 @@ if prog.len() > 100 {
     // ✅ DÉTECTION ANTI-BOUCLE INFINIE
     let mut loop_detection: HashMap<usize, u32> = HashMap::new();
     let mut instruction_count = 0u64;
-    const MAX_INSTRUCTIONS: u64 = 1_000_000;
+    const MAX_INSTRUCTIONS: u64 = 100_000; // Limite sécuritaire
     const MAX_SAME_PC: u32 = 1000; // Max 1000 fois le même PC
 
 while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     // ✅ COMPTEURS DE SÉCURITÉ
     instruction_count += 1;
-
-    // === ANTI-BOUCLE INFINIE – VERSION TOLÉRANTE POUR PROXYS (comportement Erigon-like) ===
-static mut LAST_PROGRESS_PC: usize = 0;
-static mut STAGNATION_COUNT: u32 = 0;
-const MAX_STAGNATION: u32 = 3000; // Très tolérant : laisse 3000 instructions sans gros progrès
-
-unsafe {
-    // On considère un progrès significatif seulement si on avance de +30 opcodes
-    if insn_ptr > LAST_PROGRESS_PC + 30 {
-        LAST_PROGRESS_PC = insn_ptr;
-        STAGNATION_COUNT = 0;
-    } else {
-        STAGNATION_COUNT += 1;
-    }
-
-    // On ne déclenche la sortie que si :
-    // - stagnation longue
-    // - ET on a déjà exécuté au moins 1500 instructions (évite faux positifs au démarrage proxy)
-    if STAGNATION_COUNT > MAX_STAGNATION && instruction_count > 1500 {
-        println!("🔴 [BOUCLE INFINIE RÉELLE DÉTECTÉE] Après {} instructions, PC stagné autour de 0x{:04x} → SORTIE PROPRE", instruction_count, insn_ptr);
-
-        let mut result = serde_json::Map::new();
-        result.insert("return".to_string(), JsonValue::Bool(true));
-        result.insert("exit_reason".to_string(), JsonValue::String("infinite_loop_detected".to_string()));
-
-        let final_storage = execution_context.world_state.storage
-            .get(&interpreter_args.contract_address)
-            .cloned()
-            .unwrap_or_default();
-        result.insert("storage".to_string(), JsonValue::Object(decode_storage_map(&final_storage)));
-
-        // Conserve les logs éventuels (ex: Transfer partiel)
-        if !execution_context.logs.is_empty() {
-            let logs_json: Vec<JsonValue> = execution_context.logs.iter().map(|log| {
-                let mut obj = serde_json::Map::new();
-                obj.insert("address".to_string(), JsonValue::String(log.address.clone()));
-                obj.insert("topics".to_string(), JsonValue::Array(
-                    log.topics.iter().cloned().map(JsonValue::String).collect()
-                ));
-                obj.insert("data".to_string(), JsonValue::String(hex::encode(&log.data)));
-                JsonValue::Object(obj)
-            }).collect();
-            result.insert("logs".to_string(), JsonValue::Array(logs_json));
-        }
-
-        return Ok(JsonValue::Object(result));
-    }
-}
     
     // ✅ DÉTECTION BOUCLE INFINIE PAR PC
     let pc_count = loop_detection.entry(insn_ptr).or_insert(0);
@@ -2533,101 +2418,96 @@ unsafe {
 },
 
     //___ 0x56 JUMP - CORRECTION DYNAMIQUE AVEC SCAN PRÉALABLE
-//___ 0x56 JUMP - ULTIME VERSION UNIVERSELLE
-0x56 => {
+ 0x56 => {
     if evm_stack.is_empty() {
-        return Err(Error::new(ErrorKind::Other, "JUMP stack underflow"));
+        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
     }
-    let raw_dest = evm_stack.pop().unwrap() as usize;
-
-    // Priorité 1: destination directe valide
-    if raw_dest < prog.len() && prog[raw_dest] == 0x5b {
-        println!("✅ [JUMP DIRECT] → 0x{:04x}", raw_dest);
-        insn_ptr = raw_dest;
+    let destination = evm_stack.pop().unwrap() as usize;
+    
+    println!("🎯 [JUMP] PC=0x{:04x} → destination=0x{:04x}", insn_ptr, destination);
+    
+    // ✅ PRIORITÉ 1: JUMPDEST valides directs
+    if valid_jumpdests.contains(&destination) {
+        insn_ptr = destination;
         skip_advance = true;
-        consume_gas(&mut execution_context, 8)?;
-        continue;
+        println!("✅ [JUMP VALID] → 0x{:04x}", destination);
     }
-
-    // Priorité 2: petite valeur (≤ 0x100) → résultat de calcul (ISZERO, EQ, LT, etc.)
-    // → adresse de retour sur la pile (pattern ultra-courant dans view functions)
-    if raw_dest <= 0x100 {
-        for (depth, &ret_addr) in evm_stack.iter().rev().enumerate().take(10) { // on regarde les 10 derniers
-            let addr = ret_addr as usize;
-            if addr >= 0x100 && addr < prog.len() && prog[addr] == 0x5b {
-                println!("🔙 [JUMP RETURN VIA STACK] Calcul → retour à 0x{:04x} (depth {})", addr, depth + 1);
-                insn_ptr = addr;
-                skip_advance = true;
-                consume_gas(&mut execution_context, 8)?;
-                continue;
-            }
-        }
+    // ✅ PRIORITÉ 2: Patterns de fonctions string length
+    else if let Some(corrected_dest) = detect_string_length_function_pattern(
+        insn_ptr, destination, &evm_stack, prog
+    ) {
+        insn_ptr = corrected_dest;
+        skip_advance = true;
+        println!("✅ [STRING LENGTH] → 0x{:04x}", corrected_dest);
     }
-
-    // Priorité 3: PC-based offset (pattern optimizer IR très courant)
-    if raw_dest > insn_ptr && raw_dest < prog.len() {
-        let candidate = raw_dest;
-        if prog[candidate] == 0x5b {
-            println!("🔧 [JUMP PC-BASED] Offset calculé → 0x{:04x}", candidate);
-            insn_ptr = candidate;
-            skip_advance = true;
-            consume_gas(&mut execution_context, 8)?;
-            continue;
-        }
+    // ✅ PRIORITÉ 3: Patterns avancés (Uniswap, DeFi, etc.)
+    else if let Some(corrected_dest) = detect_advanced_jump_patterns(
+        insn_ptr, destination, &evm_stack, &valid_jumpdests, prog
+    ) {
+        insn_ptr = corrected_dest;
+        skip_advance = true;
+        println!("✅ [ADVANCED PATTERN] → 0x{:04x}", corrected_dest);
     }
-
-    // Fallback: prochain JUMPDEST après PC actuel
-    let mut candidate = insn_ptr + 1;
-    while candidate < prog.len() {
-        if prog[candidate] == 0x5b {
-            println!("➡️ [JUMP FALLBACK] → prochain JUMPDEST 0x{:04x}", candidate);
-            insn_ptr = candidate;
-            skip_advance = true;
-            break;
-        }
-        candidate += 1;
+    // ✅ PRIORITÉ 4: Proxy patterns
+    else if is_proxy_internal_jump(prog, destination) {
+        handle_proxy_jump(&mut insn_ptr, destination, prog)?;
+        skip_advance = true;
+        println!("✅ [PROXY PATTERN] → 0x{:04x}", insn_ptr);
     }
+    // ✅ ERREUR FINALE
+    else {
+        println!("❌ [JUMP ERROR] Destination invalide 0x{:04x}", destination);
+        println!("📊 [DEBUG] Stack size: {}, Top elements: {:?}", 
+                 evm_stack.len(), 
+                 evm_stack.iter().rev().take(5).collect::<Vec<_>>());
+        
+        return Err(Error::new(ErrorKind::Other, 
+            format!("Invalid JUMP destination: 0x{:04x} from PC 0x{:04x}", destination, insn_ptr)));
+    }
+    
     consume_gas(&mut execution_context, 8)?;
 },
 
-//___ 0x57 JUMPI - Même logique, mais conditionnel
+    //___ 0x57 JUMPI - CORRECTION DYNAMIQUE AVEC SCAN PRÉALABLE
 0x57 => {
     if evm_stack.len() < 2 {
-        return Err(Error::new(ErrorKind::Other, "JUMPI stack underflow"));
+        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMPI"));
     }
-    let raw_dest = evm_stack.pop().unwrap() as usize;
+    let destination = evm_stack.pop().unwrap() as usize;
     let condition = evm_stack.pop().unwrap();
-
-    if condition == 0 {
-        consume_gas(&mut execution_context, 10)?;
-        continue; // pas de saut
-    }
-
-    // Même logique que JUMP
-    if raw_dest < prog.len() && prog[raw_dest] == 0x5b {
-        insn_ptr = raw_dest;
-        skip_advance = true;
-    } else if raw_dest <= 0x100 {
-        for (depth, &ret_addr) in evm_stack.iter().rev().enumerate().take(10) {
-            let addr = ret_addr as usize;
-            if addr >= 0x100 && addr < prog.len() && prog[addr] == 0x5b {
-                insn_ptr = addr;
-                skip_advance = true;
-                consume_gas(&mut execution_context, 10)?;
-                continue;
-            }
+    
+    println!("🔀 [JUMPI] PC=0x{:04x} → dest=0x{:04x}, condition={}", insn_ptr, destination, condition);
+    
+    if condition != 0 {
+        // ✅ MÊME LOGIQUE QUE JUMP MAIS POUR JUMPI
+        if valid_jumpdests.contains(&destination) {
+            insn_ptr = destination;
+            skip_advance = true;
+            println!("✅ [JUMPI VALID] → 0x{:04x}", destination);
         }
-        // fallback prochain JUMPDEST
-        let mut candidate = insn_ptr + 1;
-        while candidate < prog.len() {
-            if prog[candidate] == 0x5b {
-                insn_ptr = candidate;
-                skip_advance = true;
-                break;
-            }
-            candidate += 1;
+        else if let Some(corrected_dest) = detect_string_length_function_pattern(
+            insn_ptr, destination, &evm_stack, prog
+        ) {
+            insn_ptr = corrected_dest;
+            skip_advance = true;
+            println!("✅ [JUMPI STRING] → 0x{:04x}", corrected_dest);
         }
+        else if let Some(corrected_dest) = detect_advanced_jump_patterns(
+            insn_ptr, destination, &evm_stack, &valid_jumpdests, prog
+        ) {
+            insn_ptr = corrected_dest;
+            skip_advance = true;
+            println!("✅ [JUMPI ADVANCED] → 0x{:04x}", corrected_dest);
+        }
+        else {
+            println!("❌ [JUMPI ERROR] Destination invalide 0x{:04x}", destination);
+            return Err(Error::new(ErrorKind::Other, 
+                format!("Invalid JUMPI destination: 0x{:04x}", destination)));
+        }
+    } else {
+        println!("➡️ [JUMPI] Condition false → continuation");
     }
+    
     consume_gas(&mut execution_context, 10)?;
 },
 
@@ -2732,49 +2612,42 @@ unsafe {
     advance = 1 + push_size;
 },
 
-        // ___ 0x80..=0x8f : DUP1 à DUP16 - GÉNÉRIQUE ANTI-UNDERFLOW
-0x80..=0x8f => {
+        // ___ 0x80..=0x8f : DUP1 à DUP16 - VERSION GÉNÉRIQUE
+        0x80..=0x8f => {
     let depth = (opcode - 0x80 + 1) as usize;
-
     if evm_stack.len() < depth {
-        println!("⚠️ [DUP{} UNDERFLOW] Pile: {} → remplissage avec 0", depth, evm_stack.len());
-        while evm_stack.len() < depth {
-            evm_stack.push(0);
-        }
+        return Err(Error::new(ErrorKind::Other, format!("EVM STACK underflow on DUP{}", depth)));
     }
-
-    let value = *evm_stack.iter().rev().nth(depth - 1).unwrap_or(&0);
+    
+    // ✅ CRUCIAL: Ne PAS modifier la taille de la pile !
+    let value = evm_stack[evm_stack.len() - depth];
     evm_stack.push(value);
     reg[0] = value;
+    
+    println!("📋 [DUP{}] Duplicated 0x{:x} from depth {}", depth, value, depth);
 },
 
-// ___ 0x90..=0x9f : SWAP1 à SWAP16 - GÉNÉRIQUE ANTI-UNDERFLOW
-0x90..=0x9f => {
-    let depth = (opcode - 0x90 + 1) as usize;
+        // ___ 0x90 → 0x9f : SWAP1 à SWAP16 - CORRECTION CRITIQUE
+        (0x90..=0x9f) => {
+            let depth = (opcode - 0x90 + 1) as usize;
+            if evm_stack.len() < depth + 1 {
+                return Err(Error::new(ErrorKind::Other, format!("EVM STACK underflow on SWAP{}", depth)));
+            }
+            let top = evm_stack.len() - 1;
+            let target = top - depth;
+            
+            // ✅ DÉBOGAGE: Log avant/après swap
+            println!("🔄 [SWAP{}] AVANT: stack[{}]={}, stack[{}]={}, size={}", 
+                     depth, top, evm_stack[top], target, evm_stack[target], evm_stack.len());
+            
+            evm_stack.swap(top, target);
+            reg[0] = evm_stack[top];
+            
+            // ✅ CRUCIAL: Ne PAS modifier la taille de la pile !
+            println!("🔄 [SWAP{}] APRÈS: stack[{}]={}, stack[{}]={}, size={}", 
+                     depth, top, evm_stack[top], target, evm_stack[target], evm_stack.len());
+        },
 
-    if evm_stack.len() < depth + 1 {
-        println!("⚠️ [SWAP{} UNDERFLOW] Pile: {} → remplissage avec 0 et skip partiel", depth, evm_stack.len());
-        while evm_stack.len() < depth + 1 {
-            evm_stack.push(0);
-        }
-        // On force un swap neutre
-        let top = evm_stack.len() - 1;
-        let target = top - depth;
-        evm_stack.swap(top, target);
-        reg[0] = evm_stack[top];
-
-        // On avance un peu pour aider à sortir des boucles mal formées
-        insn_ptr += 3;
-        skip_advance = true;
-        continue;
-    }
-
-    let top = evm_stack.len() - 1;
-    let target = top - depth;
-    evm_stack.swap(top, target);
-    reg[0] = evm_stack[top];
-},
-        
         // ___ 0xa0 → 0xa4 : LOG0 à LOG4 — VERSION GÉNÉRIQUE
         0xa0..=0xa4 => {
     let num_topics = (opcode - 0xa0 + 1) as usize;
@@ -2833,126 +2706,65 @@ unsafe {
     consume_gas(&mut execution_context, 100)?;
 },
 
-//___ 0xf3 RETURN - VERSION FINALE UNIVERSELLE (view + mutable/setter)
+//___ 0xf3 RETURN - DÉTECTION INTELLIGENTE DES VALEURS DE FONCTION
 0xf3 => {
     if evm_stack.len() < 2 {
-        // Stack underflow → on considère succès par défaut (cas rare mais vu sur certains contrats malformés)
-        let mut result = serde_json::Map::new();
-        result.insert("return".to_string(), JsonValue::Bool(true));
-        let final_storage = execution_context.world_state.storage
-            .get(&interpreter_args.contract_address)
-            .cloned()
-            .unwrap_or_default();
-        result.insert("storage".to_string(), JsonValue::Object(decode_storage_map(&final_storage)));
-        if !execution_context.logs.is_empty() {
-            result.insert("logs".to_string(), JsonValue::Array(
-                execution_context.logs.iter().map(|log| {
-                    let mut obj = serde_json::Map::new();
-                    obj.insert("address".to_string(), JsonValue::String(log.address.clone()));
-                    obj.insert("topics".to_string(), JsonValue::Array(
-                        log.topics.iter().map(|t| JsonValue::String(t.clone())).collect()
-                    ));
-                    obj.insert("data".to_string(), JsonValue::String(hex::encode(&log.data)));
-                    JsonValue::Object(obj)
-                }).collect()
-            ));
-        }
-        println!("✅ [RETURN] Stack underflow → succès par défaut");
-        return Ok(JsonValue::Object(result));
+        return Err(Error::new(ErrorKind::Other, "STACK underflow on RETURN"));
     }
 
     let len = evm_stack.pop().unwrap() as usize;
     let offset = evm_stack.pop().unwrap() as usize;
 
-    println!("📤 [RETURN] offset=0x{:x}, len={}", offset, len);
+    println!("📤 [RETURN] len={}, offset=0x{:x}", len, offset);
 
+    // ✅ DÉTECTE RETOUR DE FONCTION (32 bytes depuis mémoire)
+    if len == 32 && offset < global_mem.len() {
+        let mut return_bytes = [0u8; 32];
+        if offset + 32 <= global_mem.len() {
+            return_bytes.copy_from_slice(&global_mem[offset..offset + 32]);
+        }
+        
+        let return_value = u256::from_big_endian(&return_bytes);
+        let return_u64 = return_value.low_u64();
+        
+        // ✅ IDENTIFIE LES VALEURS TYPIQUES DE FONCTIONS ERC20
+        let function_result = match return_u64 {
+            18 => JsonValue::Number(18.into()), // decimals()
+            value if value > 0 && value < 1_000_000 => JsonValue::Number(value.into()),
+            _ => JsonValue::String(format!("0x{}", hex::encode(&return_bytes))),
+        };
+
+        let final_storage = execution_context.world_state.storage
+            .get(&interpreter_args.contract_address)
+            .cloned()
+            .unwrap_or_default();
+
+        let mut result = serde_json::Map::new();
+        result.insert("return".to_string(), function_result);
+        result.insert("storage".to_string(), JsonValue::Object(decode_storage_map(&final_storage)));
+
+        println!("✅ [FUNCTION RETURN] Valeur détectée: {:?}", result.get("return"));
+        return Ok(JsonValue::Object(result));
+    }
+
+    // ✅ CAS GÉNÉRAL (déploiement, etc.)
     let mut ret_data = vec![0u8; len];
     if len > 0 && offset + len <= global_mem.len() {
         ret_data.copy_from_slice(&global_mem[offset..offset + len]);
     }
 
-    // ================ DÉCODAGE INTELLIGENT ================
-
-    let return_value = if len == 0 {
-        // RETURN vide → succès booléen (standard pour les setters)
-        JsonValue::Bool(true)
-    } else if len == 32 {
-        let val = u256::from_big_endian(&ret_data);
-
-        // Cas spécial decimals() → uint8 affiché comme nombre
-        if val <= u256::from(255) {
-            JsonValue::Number(val.low_u64().into())
-        }
-        // Adresse ?
-        else if ret_data[0..12].iter().all(|&b| b == 0) && ret_data[12..32].iter().any(|&b| b != 0) {
-            JsonValue::String(format!("0x{}", hex::encode(&ret_data[12..32])))
-        }
-        // Booléen ?
-        else if val == u256::zero() || val == u256::one() {
-            JsonValue::Bool(val == u256::one())
-        }
-        // Nombre "raisonnable"
-        else if val.bits() <= 96 {
-            JsonValue::Number(val.low_u64().into())
-        } else {
-            JsonValue::String(format!("0x{}", hex::encode(&ret_data)))
-        }
-    } else if len >= 64 {
-        // Cas string ABI-encodée : offset à 0x20 + length + data
-        let str_offset = u256::from_big_endian(&ret_data[0..32]).low_u64() as usize;
-        let str_len = u256::from_big_endian(&ret_data[32..64]).low_u64() as usize;
-
-        if str_offset == 32 
-            && str_len > 0 
-            && str_offset + str_len <= global_mem.len()
-            && is_valid_utf8(&global_mem[str_offset..str_offset + str_len]) {
-            if let Ok(s) = std::str::from_utf8(&global_mem[str_offset..str_offset + str_len]) {
-                JsonValue::String(s.trim_end_matches('\0').to_string())
-            } else {
-                JsonValue::String(format!("0x{}", hex::encode(&ret_data)))
-            }
-        } else {
-            JsonValue::String(format!("0x{}", hex::encode(&ret_data)))
-        }
-    } else {
-        // Données courtes → tente nombre ou hex
-        if len <= 8 {
-            let mut num_bytes = [0u8; 8];
-            num_bytes[8 - len..].copy_from_slice(&ret_data);
-            let num = u64::from_be_bytes(num_bytes);
-            JsonValue::Number(num.into())
-        } else {
-            JsonValue::String(format!("0x{}", hex::encode(&ret_data)))
-        }
-    };
-
-    // ================ RÉSULTAT FINAL ================
-
+    let formatted_result = decode_return_data_generic(&ret_data, len);
+    
     let final_storage = execution_context.world_state.storage
         .get(&interpreter_args.contract_address)
         .cloned()
         .unwrap_or_default();
 
     let mut result = serde_json::Map::new();
-    result.insert("return".to_string(), return_value);
+    result.insert("return".to_string(), formatted_result);
     result.insert("storage".to_string(), JsonValue::Object(decode_storage_map(&final_storage)));
 
-    // Ajoute les logs si un setter en a émis (Transfer, Approval, etc.)
-    if !execution_context.logs.is_empty() {
-        let logs_json: Vec<JsonValue> = execution_context.logs.iter().map(|log| {
-            let mut obj = serde_json::Map::new();
-            obj.insert("address".to_string(), JsonValue::String(log.address.clone()));
-            obj.insert("topics".to_string(), JsonValue::Array(
-                log.topics.iter().cloned().map(JsonValue::String).collect()
-            ));
-            obj.insert("data".to_string(), JsonValue::String(hex::encode(&log.data)));
-            JsonValue::Object(obj)
-        }).collect();
-        result.insert("logs".to_string(), JsonValue::Array(logs_json));
-        println!("📢 {} événement(s) émis (Transfer, Approval, etc.)", execution_context.logs.len());
-    }
-
-    println!("✅ [RETURN SUCCESS] Exécution terminée avec retour décodé");
+    println!("✅ [RETURN] Données: {:?}", result.get("return"));
     return Ok(JsonValue::Object(result));
 },
 
@@ -3287,4 +3099,4 @@ impl UvmExecutionContext {
             }
         }
     }
-}
+    }
