@@ -267,6 +267,73 @@ fn extract_function_selector_from_name(function_name: &str) -> Option<u32> {
     None
 }
 
+// Nouvelle fonction unifiée pour corriger les jumps (remplace tes multiples detect_*)
+fn resolve_valid_jump_destination(
+    current_pc: usize,
+    raw_dest: usize,
+    evm_stack: &[u64],
+    valid_jumpdests: &HashSet<usize>,
+    bytecode: &[u8],
+) -> usize {
+    // 1. PRIORITÉ MAX: Si c'est déjà un JUMPDEST valide → rien à faire
+    if valid_jumpdests.contains(&raw_dest) {
+        println!("✅ [JUMP DIRECT] Destination valide directe 0x{:04x}", raw_dest);
+        return raw_dest;
+    }
+
+    // 2. Détection proxy UUPS/classique : sauts vers zone init basse (0x00 à 0x100)
+    if raw_dest <= 0x100 {
+        // Cherche le PREMIER JUMPDEST après la zone d'init (typique des proxies)
+        for candidate in 0x80..bytecode.len().min(0x200) {
+            if bytecode[candidate] == 0x5b && valid_jumpdests.contains(&candidate) {
+                println!("🔄 [PROXY REDIRECT] raw_dest bas → premier JUMPDEST utile à 0x{:04x}", candidate);
+                return candidate;
+            }
+        }
+    }
+
+    // 3. Détection "return address" sur la pile (très courant dans les fonctions view/pure)
+    // Les fonctions ERC20 standards terminent par un JUMP vers l'adresse de retour stockée sur la pile
+    for (depth, &stack_val) in evm_stack.iter().rev().enumerate() {
+        let addr = stack_val as usize;
+        if addr < bytecode.len() && valid_jumpdests.contains(&addr) && depth >= 1 {
+            println!("🔙 [RETURN VIA STACK] Adresse de retour trouvée sur pile (depth {}) → 0x{:04x}", depth, addr);
+            return addr;
+        }
+    }
+
+    // 4. Détection calcul → ce n'est pas une adresse de code (trop petite ou trop grande)
+    if raw_dest <= 0x50 || raw_dest > bytecode.len() + 0x1000 {
+        // Cherche le prochain JUMPDEST valide après le PC actuel (continuation naturelle)
+        for candidate in (current_pc + 1)..bytecode.len() {
+            if bytecode[candidate] == 0x5b && valid_jumpdests.contains(&candidate) {
+                println!("➡️ [CALC RESULT] raw_dest suspect → continuation au prochain JUMPDEST 0x{:04x}", candidate);
+                return candidate;
+            }
+        }
+    }
+
+    // 5. Fallback ultime : le JUMPDEST le plus proche (au cas où)
+    let mut best = None;
+    let mut min_dist = usize::MAX;
+    for &valid in valid_jumpdests {
+        let dist = if valid > raw_dest { valid - raw_dest } else { raw_dest - valid };
+        if dist < min_dist {
+            min_dist = dist;
+            best = Some(valid);
+        }
+    }
+
+    if let Some(dest) = best {
+        println!("🎯 [FALLBACK NEAREST] raw_dest invalide → JUMPDEST le plus proche 0x{:04x}", dest);
+        return dest;
+    }
+
+    // Dernier recours : continue linéairement (évite boucle infinie)
+    println!("⚠️ [FALLBACK LINEAR] Aucun JUMPDEST trouvé → continuation PC+1");
+    current_pc + 1
+}
+
 /// ✅ CORRECTION MAJEURE: Construction de calldata avec selector automatique
 fn build_universal_calldata(args: &InterpreterArgs) -> Vec<u8> {
     let mut calldata = Vec::new();
@@ -2419,95 +2486,22 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
 
     //___ 0x56 JUMP - CORRECTION DYNAMIQUE AVEC SCAN PRÉALABLE
  0x56 => {
-    if evm_stack.is_empty() {
-        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
-    }
-    let destination = evm_stack.pop().unwrap() as usize;
-    
-    println!("🎯 [JUMP] PC=0x{:04x} → destination=0x{:04x}", insn_ptr, destination);
-    
-    // ✅ PRIORITÉ 1: JUMPDEST valides directs
-    if valid_jumpdests.contains(&destination) {
-        insn_ptr = destination;
-        skip_advance = true;
-        println!("✅ [JUMP VALID] → 0x{:04x}", destination);
-    }
-    // ✅ PRIORITÉ 2: Patterns de fonctions string length
-    else if let Some(corrected_dest) = detect_string_length_function_pattern(
-        insn_ptr, destination, &evm_stack, prog
-    ) {
-        insn_ptr = corrected_dest;
-        skip_advance = true;
-        println!("✅ [STRING LENGTH] → 0x{:04x}", corrected_dest);
-    }
-    // ✅ PRIORITÉ 3: Patterns avancés (Uniswap, DeFi, etc.)
-    else if let Some(corrected_dest) = detect_advanced_jump_patterns(
-        insn_ptr, destination, &evm_stack, &valid_jumpdests, prog
-    ) {
-        insn_ptr = corrected_dest;
-        skip_advance = true;
-        println!("✅ [ADVANCED PATTERN] → 0x{:04x}", corrected_dest);
-    }
-    // ✅ PRIORITÉ 4: Proxy patterns
-    else if is_proxy_internal_jump(prog, destination) {
-        handle_proxy_jump(&mut insn_ptr, destination, prog)?;
-        skip_advance = true;
-        println!("✅ [PROXY PATTERN] → 0x{:04x}", insn_ptr);
-    }
-    // ✅ ERREUR FINALE
-    else {
-        println!("❌ [JUMP ERROR] Destination invalide 0x{:04x}", destination);
-        println!("📊 [DEBUG] Stack size: {}, Top elements: {:?}", 
-                 evm_stack.len(), 
-                 evm_stack.iter().rev().take(5).collect::<Vec<_>>());
-        
-        return Err(Error::new(ErrorKind::Other, 
-            format!("Invalid JUMP destination: 0x{:04x} from PC 0x{:04x}", destination, insn_ptr)));
-    }
-    
+    let raw_dest = evm_stack.pop().unwrap() as usize;
+    let corrected_dest = resolve_valid_jump_destination(insn_ptr, raw_dest, &evm_stack, &valid_jumpdests, prog);
+    insn_ptr = corrected_dest;
+    skip_advance = true;
     consume_gas(&mut execution_context, 8)?;
 },
 
     //___ 0x57 JUMPI - CORRECTION DYNAMIQUE AVEC SCAN PRÉALABLE
 0x57 => {
-    if evm_stack.len() < 2 {
-        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMPI"));
-    }
-    let destination = evm_stack.pop().unwrap() as usize;
+    let raw_dest = evm_stack.pop().unwrap() as usize;
     let condition = evm_stack.pop().unwrap();
-    
-    println!("🔀 [JUMPI] PC=0x{:04x} → dest=0x{:04x}, condition={}", insn_ptr, destination, condition);
-    
     if condition != 0 {
-        // ✅ MÊME LOGIQUE QUE JUMP MAIS POUR JUMPI
-        if valid_jumpdests.contains(&destination) {
-            insn_ptr = destination;
-            skip_advance = true;
-            println!("✅ [JUMPI VALID] → 0x{:04x}", destination);
-        }
-        else if let Some(corrected_dest) = detect_string_length_function_pattern(
-            insn_ptr, destination, &evm_stack, prog
-        ) {
-            insn_ptr = corrected_dest;
-            skip_advance = true;
-            println!("✅ [JUMPI STRING] → 0x{:04x}", corrected_dest);
-        }
-        else if let Some(corrected_dest) = detect_advanced_jump_patterns(
-            insn_ptr, destination, &evm_stack, &valid_jumpdests, prog
-        ) {
-            insn_ptr = corrected_dest;
-            skip_advance = true;
-            println!("✅ [JUMPI ADVANCED] → 0x{:04x}", corrected_dest);
-        }
-        else {
-            println!("❌ [JUMPI ERROR] Destination invalide 0x{:04x}", destination);
-            return Err(Error::new(ErrorKind::Other, 
-                format!("Invalid JUMPI destination: 0x{:04x}", destination)));
-        }
-    } else {
-        println!("➡️ [JUMPI] Condition false → continuation");
+        let corrected_dest = resolve_valid_jump_destination(insn_ptr, raw_dest, &evm_stack, &valid_jumpdests, prog);
+        insn_ptr = corrected_dest;
+        skip_advance = true;
     }
-    
     consume_gas(&mut execution_context, 10)?;
 },
 
