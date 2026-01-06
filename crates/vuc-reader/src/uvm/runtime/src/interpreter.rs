@@ -1335,38 +1335,49 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     // ✅ COMPTEURS DE SÉCURITÉ
     instruction_count += 1;
 
-    // === ANTI-BOUCLE INFINIE 100% GÉNÉRIQUE ===
+    // === ANTI-BOUCLE INFINIE – VERSION TOLÉRANTE POUR PROXYS (comportement Erigon-like) ===
 static mut LAST_PROGRESS_PC: usize = 0;
 static mut STAGNATION_COUNT: u32 = 0;
-const MAX_STAGNATION: u32 = 200; // 200 instructions sans avancer de plus de 10 opcodes → boucle infinie
+const MAX_STAGNATION: u32 = 3000; // Très tolérant : laisse 3000 instructions sans gros progrès
 
 unsafe {
-    // Réinitialise le compteur si on a avancé significativement
-    if insn_ptr > LAST_PROGRESS_PC + 10 {
+    // On considère un progrès significatif seulement si on avance de +30 opcodes
+    if insn_ptr > LAST_PROGRESS_PC + 30 {
         LAST_PROGRESS_PC = insn_ptr;
         STAGNATION_COUNT = 0;
     } else {
         STAGNATION_COUNT += 1;
     }
 
-    // Détection de boucle infinie
-    if STAGNATION_COUNT > MAX_STAGNATION {
-        println!("🔴 [BOUCLE INFINIE GÉNÉRIQUE DÉTECTÉE] PC stagné autour de 0x{:04x} pendant {} instructions → SORTIE PROPRE UNIVERSELLE", insn_ptr, STAGNATION_COUNT);
+    // On ne déclenche la sortie que si :
+    // - stagnation longue
+    // - ET on a déjà exécuté au moins 1500 instructions (évite faux positifs au démarrage proxy)
+    if STAGNATION_COUNT > MAX_STAGNATION && instruction_count > 1500 {
+        println!("🔴 [BOUCLE INFINIE RÉELLE DÉTECTÉE] Après {} instructions, PC stagné autour de 0x{:04x} → SORTIE PROPRE", instruction_count, insn_ptr);
 
         let mut result = serde_json::Map::new();
-
-        // Retour neutre et universel : succès booléen (standard EVM pour les fonctions qui ne retournent rien ou échouent silencieusement)
         result.insert("return".to_string(), JsonValue::Bool(true));
+        result.insert("exit_reason".to_string(), JsonValue::String("infinite_loop_detected".to_string()));
 
-        // On conserve toujours le storage final (utile même en cas de boucle)
         let final_storage = execution_context.world_state.storage
             .get(&interpreter_args.contract_address)
             .cloned()
             .unwrap_or_default();
         result.insert("storage".to_string(), JsonValue::Object(decode_storage_map(&final_storage)));
 
-        // Optionnel : on peut ajouter un flag pour indiquer que c'était une boucle détectée
-        result.insert("exit_reason".to_string(), JsonValue::String("loop_detection".to_string()));
+        // Conserve les logs éventuels (ex: Transfer partiel)
+        if !execution_context.logs.is_empty() {
+            let logs_json: Vec<JsonValue> = execution_context.logs.iter().map(|log| {
+                let mut obj = serde_json::Map::new();
+                obj.insert("address".to_string(), JsonValue::String(log.address.clone()));
+                obj.insert("topics".to_string(), JsonValue::Array(
+                    log.topics.iter().cloned().map(JsonValue::String).collect()
+                ));
+                obj.insert("data".to_string(), JsonValue::String(hex::encode(&log.data)));
+                JsonValue::Object(obj)
+            }).collect();
+            result.insert("logs".to_string(), JsonValue::Array(logs_json));
+        }
 
         return Ok(JsonValue::Object(result));
     }
