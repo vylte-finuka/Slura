@@ -1328,7 +1328,7 @@ if prog.len() > 100 {
     // ✅ DÉTECTION ANTI-BOUCLE INFINIE
     let mut loop_detection: HashMap<usize, u32> = HashMap::new();
     let mut instruction_count = 0u64;
-    const MAX_INSTRUCTIONS: u64 = 500_000; // Passe à 500k au lieu de 100k
+    const MAX_INSTRUCTIONS: u64 = 1_000_000;
     const MAX_SAME_PC: u32 = 1000; // Max 1000 fois le même PC
 
 while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
