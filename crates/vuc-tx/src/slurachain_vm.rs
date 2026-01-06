@@ -1,6 +1,5 @@
 //___ Unity VM: Slurachain VM avec parallélisme optimiste pour 300M TPS ___//
 use anyhow::Result;
-use goblin::elf::Elf;
 use uvm_runtime::interpreter;
 use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
