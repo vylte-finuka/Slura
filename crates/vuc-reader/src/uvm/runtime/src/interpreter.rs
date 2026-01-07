@@ -2005,37 +2005,26 @@ struct ForbiddenZone {
     reason: String,
 }
 
-/// Extrait le runtime bytecode depuis un bytecode de déploiement Solidity/Vyper/Yul
-/// Retourne None si impossible (très rare)
 fn extract_runtime_bytecode(full_bytecode: &[u8]) -> Option<Vec<u8>> {
-    // Pattern classique de fin de constructor : CODECOPY + RETURN
-    // Format : PUSH2 <size> PUSH2 <offset> PUSH1 0 CODECOPY PUSH1 0 PUSH2 <size> RETURN
-    // Opcodes : 61 xxxx 60 yyyy 60 00 39 60 00 61 xxxx F3
-
-    // On cherche en remontant depuis la fin
     for i in (0..full_bytecode.len().saturating_sub(15)).rev() {
-        if full_bytecode[i..i+15].starts_with(&[
-            0x61, _, _,        // PUSH2 offset
-            0x60, 0x00,       // PUSH1 0
-            0x39,             // CODECOPY
-            0x60, 0x00,       // PUSH1 0
-            0x61, _, _,       // PUSH2 size
-            0xf3              // RETURN
-        ]) {
-            let offset = ((full_bytecode[i+1] as usize) << 8) | (full_bytecode[i+2] as usize);
-            let size   = ((full_bytecode[i+10] as usize) << 8) | (full_bytecode[i+11] as usize);
+        if full_bytecode.get(i..i+15).map_or(false, |slice| slice.starts_with(&[
+            0x61, 0xff, 0xff, 0x60, 0x00, 0x39, 0x60, 0x00, 0x61, 0xff, 0xff, 0xf3
+        ])) {
+            // On ignore les valeurs exactes, on lit dynamiquement
+            if let Some(offset_slice) = full_bytecode.get(i+1..i+3) {
+                if let Some(size_slice) = full_bytecode.get(i+10..i+12) {
+                    let offset = ((offset_slice[0] as usize) << 8) | (offset_slice[1] as usize);
+                    let size   = ((size_slice[0] as usize)   << 8) | (size_slice[1] as usize);
 
-            if offset + size <= full_bytecode.len() && size > 0 {
-                println!("🎯 [RUNTIME EXTRACTED] offset=0x{:04x}, size={} bytes ({} KB)", 
-                         offset, size, size / 1024);
-                return Some(full_bytecode[offset..offset + size].to_vec());
+                    if offset + size <= full_bytecode.len() && size > 100 {
+                        println!("🎯 [RUNTIME FOUND] offset=0x{:04x}, size={} bytes", offset, size);
+                        return Some(full_bytecode[offset..offset + size].to_vec());
+                    }
+                }
             }
         }
     }
-
-    // Variante alternative (plus rare) : taille en PUSH1/PUSH32
-    // On accepte aussi un fallback : tout le bytecode est runtime (contrats sans constructor)
-    println!("⚠️ [NO CODECOPY FOUND] Utilisation du bytecode complet comme runtime (pas de constructor détecté)");
+    println!("⚠️ [RUNTIME FALLBACK] Pas de CODECOPY détecté → tout le bytecode utilisé");
     Some(full_bytecode.to_vec())
 }
 
