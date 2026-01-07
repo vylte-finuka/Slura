@@ -2025,105 +2025,63 @@ struct ForbiddenZone {
     reason: String,
 }
 
-// ✅ FONCTION PRINCIPALE: CONSTRUCTION AUTOMATIQUE DE LA DISPATCH TABLE
-fn build_dispatch_table_from_bytecode(bytecode: &[u8]) -> Result<HashMap<u32, FunctionInfo>, Error> {
-    println!("🔍 [DISPATCH ANALYSIS] Analyse du bytecode {} bytes", bytecode.len());
-    
-    let mut dispatch_table = HashMap::new();
-    let mut i = 0;
-    
-    // ✅ ÉTAPE 1: Recherche du dispatcher principal
-    while i + 10 < bytecode.len() {
-        // Pattern: PUSH4 <selector> DUP1 PUSH1 0xE0 SHR EQ PUSH2 <offset> JUMPI
-        if bytecode[i] == 0x63 &&  // PUSH4
-           i + 9 < bytecode.len() &&
-           bytecode[i + 5] == 0x80 &&  // DUP1  
-           bytecode[i + 6] == 0x60 &&  // PUSH1
-           bytecode[i + 7] == 0xe0 &&  // 0xE0
-           bytecode[i + 8] == 0x1c &&  // SHR
-           bytecode[i + 9] == 0x14      // EQ
-        {
-            // Extraction du selector
-            let selector = u32::from_be_bytes([
-                bytecode[i + 1], bytecode[i + 2], 
-                bytecode[i + 3], bytecode[i + 4]
-            ]);
-            
-            // Recherche du PUSH2 suivant pour l'offset
-            let mut j = i + 10;
-            while j + 3 < bytecode.len() && j < i + 20 {
-                if bytecode[j] == 0x61 && bytecode[j + 3] == 0x57 {  // PUSH2 ... JUMPI
-                    let offset = ((bytecode[j + 1] as usize) << 8) | (bytecode[j + 2] as usize);
-                    
-                    if offset < bytecode.len() && bytecode[offset] == 0x5b {  // Vérifie JUMPDEST
-                        let func_name = guess_function_name_from_selector(selector);
-                        dispatch_table.insert(selector, FunctionInfo {
-                            pc: offset,
-                            selector,
-                            name: func_name,
-                            is_fallback: false,
-                        });
-                        
-                        println!("   📍 Fonction détectée: 0x{:08x} → PC:0x{:04x} ({})", 
-                                selector, offset, dispatch_table[&selector].name);
+fn build_dispatch_table_from_bytecode(bytecode: &[u8]) -> HashMap<u32, FunctionInfo> {
+    let mut dispatch_table: HashMap<u32, FunctionInfo> = HashMap::new();
+    let mut visited_selectors = HashSet::new();
+
+    let mut i = 0usize;
+    while i + 5 < bytecode.len() {
+        // Recherche de tous les PUSH4 (opcode 0x63)
+        if bytecode[i] == 0x63 {
+            let selector_bytes = [bytecode[i+1], bytecode[i+2], bytecode[i+3], bytecode[i+4]];
+            let selector = u32::from_be_bytes(selector_bytes);
+
+            // Évite les doublons (certains selectors peuvent apparaître plusieurs fois)
+            if visited_selectors.contains(&selector) {
+                i += 1;
+                continue;
+            }
+
+            // On cherche le JUMPI le plus proche après ce PUSH4
+            let mut j = i + 5;
+            let mut jump_pc = None;
+
+            while j + 3 < bytecode.len() && j < i + 150 {  // 150 opcodes max pour éviter les boucles infinies
+                // Pattern : PUSH2 <pc> JUMPI
+                if bytecode[j] == 0x61        // PUSH2
+                    && j + 3 < bytecode.len()
+                    && bytecode[j+3] == 0x57   // JUMPI
+                {
+                    let pc = ((bytecode[j+1] as usize) << 8) | (bytecode[j+2] as usize);
+
+                    // Vérifie que la destination est un JUMPDEST valide
+                    if pc < bytecode.len() && bytecode[pc] == 0x5b {
+                        jump_pc = Some(pc);
                         break;
                     }
                 }
                 j += 1;
             }
-        }
-        i += 1;
-    }
-    
-    // ✅ ÉTAPE 2: Recherche de patterns alternatifs
-    i = 0;
-    while i + 6 < bytecode.len() {
-        // Pattern simple: PUSH4 <selector> EQ PUSH2 <offset> JUMPI  
-        if bytecode[i] == 0x63 &&  // PUSH4
-           i + 8 < bytecode.len() &&
-           bytecode[i + 5] == 0x14 &&  // EQ
-           bytecode[i + 6] == 0x61 &&  // PUSH2
-           bytecode[i + 9] == 0x57      // JUMPI
-        {
-            let selector = u32::from_be_bytes([
-                bytecode[i + 1], bytecode[i + 2], 
-                bytecode[i + 3], bytecode[i + 4]
-            ]);
-            
-            let offset = ((bytecode[i + 7] as usize) << 8) | (bytecode[i + 8] as usize);
-            
-            if !dispatch_table.contains_key(&selector) && 
-               offset < bytecode.len() && 
-               bytecode[offset] == 0x5b {
-                
-                let func_name = guess_function_name_from_selector(selector);
+
+            if let Some(pc) = jump_pc {
+                let name = format!("func_{:08x}", selector);
+
                 dispatch_table.insert(selector, FunctionInfo {
-                    pc: offset,
+                    pc,
                     selector,
-                    name: func_name,
+                    name: name.clone(),
                     is_fallback: false,
                 });
-                
-                println!("   📍 Fonction alternative: 0x{:08x} → PC:0x{:04x} ({})", 
-                        selector, offset, dispatch_table[&selector].name);
+
+                println!("🎯 [DISPATCH DETECTED] 0x{:08x} → {} (PC:0x{:04x})", selector, name, pc);
+                visited_selectors.insert(selector);
             }
         }
         i += 1;
     }
-    
-    // ✅ ÉTAPE 3: Ajout d'une fonction fallback générique
-    if dispatch_table.is_empty() {
-        let fallback_pc = find_first_jumpdest_after(bytecode, 0x100);
-        dispatch_table.insert(0x00000000, FunctionInfo {
-            pc: fallback_pc,
-            selector: 0x00000000,
-            name: "fallback".to_string(),
-            is_fallback: true,
-        });
-        println!("   📍 Fonction fallback ajoutée: PC:0x{:04x}", fallback_pc);
-    }
-    
-    Ok(dispatch_table)
+
+    println!("📊 [DISPATCH TABLE] {} fonctions détectées automatiquement", dispatch_table.len());
+    dispatch_table
 }
 
 // ✅ DÉTECTION AUTOMATIQUE DES ZONES INTERDITES
@@ -2180,24 +2138,6 @@ fn resolve_pc_from_dispatch_table(calldata: &[u8], dispatch_table: &HashMap<u32,
         
         Err(Error::new(ErrorKind::Other, 
             format!("Selector 0x{:08x} non supporté par le contrat (dispatch table incomplete ou fonction non publique)", selector)))
-    }
-}
-
-// ✅ FONCTIONS HELPER POUR L'ANALYSE GÉNÉRIQUE
-fn guess_function_name_from_selector(selector: u32) -> String {
-    match selector {
-        0xa9059cbb => "transfer".to_string(),
-        0x70a08231 => "balanceOf".to_string(),
-        0x095ea7b3 => "approve".to_string(),
-        0x18160ddd => "totalSupply".to_string(),
-        0x06fdde03 => "name".to_string(),
-        0x95d89b41 => "symbol".to_string(),
-        0x313ce567 => "decimals".to_string(),
-        0xdd62ed3e => "allowance".to_string(),
-        0x8da5cb5b => "owner".to_string(),
-        0xf2fde38b => "transferOwnership".to_string(),
-        0x40c10f19 => "mint".to_string(),
-        _ => format!("func_{:08x}", selector),
     }
 }
 
