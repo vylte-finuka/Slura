@@ -685,7 +685,7 @@ pub fn execute_program(
     let stack_usage = stack_usage.unwrap_or(&default_stack_usage);
 
     // ✅ AJOUT: Initialisation du contexte d'exécution UVM
-  let mut execution_context = UvmExecutionContext {
+   let mut execution_context = UvmExecutionContext {
         world_state: {
             let mut ws = UvmWorldState::default();
             if let Some(ref storage) = initial_storage {
@@ -764,30 +764,7 @@ pub fn execute_program(
     interpreter_args.sender_address.hash(&mut sender_hasher);
     let sender_hash = sender_hasher.finish();
 
-    let check_mem_load = |addr: u64, len: usize, insn_ptr: usize| {
-        check_mem(
-            addr,
-            len,
-            "load",
-            insn_ptr,
-            &mbuff,
-            mem,
-            &stack,
-            allowed_memory,
-        )
-    };
-    let check_mem_store = |addr: u64, len: usize, insn_ptr: usize| {
-        check_mem(
-            addr,
-            len,
-            "store",
-            insn_ptr,
-            &mbuff,
-            mem,
-            &stack,
-            allowed_memory,
-        )
-    };
+    // ...existing code pour check_mem functions...
 
     println!("🚀 DÉBUT EXÉCUTION UVM GÉNÉRIQUE");
     println!("   Fonction: {}", interpreter_args.function_name);
@@ -856,8 +833,9 @@ pub fn execute_program(
 
         let opcode = prog[insn_ptr];
         let insn = ebpf::get_insn(prog, insn_ptr);
-        let _dst = insn.dst as usize;
-        let _src = insn.src as usize;
+          let _dst = insn.dst as usize;
+    let _src = insn.src as usize;
+
         let debug_evm = true;
         if debug_evm && instruction_count % 100 == 0 {
             println!("🔍 [GENERIC EXEC] PC={:04x} | OPCODE=0x{:02x} ({})", insn_ptr, opcode, opcode_name(opcode));
@@ -865,6 +843,7 @@ pub fn execute_program(
 
         let mut skip_advance = false;
         let mut advance = 1;
+
      //___ Pectra/Charène opcodes ___
     match opcode {
         // 0x00 STOP
@@ -1620,7 +1599,7 @@ pub fn execute_program(
 },
     
     //___ 0x56 JUMP
-       0x56 => {
+     0x56 => {
                 if evm_stack.is_empty() {
                     return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
                 }
@@ -1653,7 +1632,7 @@ pub fn execute_program(
             },
         
 //___ 0x57 JUMPI - VERSION GÉNÉRIQUE UNIVERSELLE
-         0x57 => {
+          0x57 => {
                 if evm_stack.len() < 2 {
                     return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMPI"));
                 }
@@ -1971,7 +1950,7 @@ pub fn execute_program(
     }
     }
 
-      // ✅ AVANCEMENT SÉCURISÉ DU PC
+       // ✅ AVANCEMENT SÉCURISÉ DU PC
         if skip_advance {
             skip_advance = false;
             continue;
