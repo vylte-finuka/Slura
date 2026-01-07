@@ -2095,50 +2095,40 @@ fn build_dispatch_table_from_bytecode(bytecode: &[u8]) -> HashMap<u32, FunctionI
     dispatch_table
 }
 
-/// ✅ NOUVELLE VERSION OPTIMISÉE POUR VEZ / UUPS
-/// Autorise tout le vrai code (dès 0x0000)
-/// Interdit uniquement la zone CBOR/metadata à la fin
+/// ✅ VERSION FINALE : Détection des zones interdites pour contrats UUPS/VEZ
+/// Autorise tout le code fonctionnel dès 0x0000
+/// Interdit uniquement les métadonnées CBOR à la fin
 fn detect_forbidden_zones(bytecode: &[u8]) -> Vec<ForbiddenZone> {
     let mut forbidden_zones = Vec::new();
 
-    // Recherche du marqueur CBOR Solidity : a26464736f6c63  (≡ "dsolc" dans le CBOR)
-    // C'est le début officiel des métadonnées compilateur Solidity
-    let cbor_marker = [0xa2, 0x64, 0x64, 0x73, 0x6f, 0x6c, 0x63]; // a2 64 "dsolc"
+    // Marqueur CBOR Solidity : a26464736f6c63 → "dsolc" (début officiel des métadonnées)
+    let cbor_marker = [0xa2, 0x64, 0x64, 0x73, 0x6f, 0x6c, 0x63];
 
-    if let Some(pos) = bytecode.windows(cbor_marker.len()).position(|window| window == cbor_marker) {
-        let metadata_start = pos;
-
-        println!("📜 [METADATA DETECTED] CBOR Solidity trouvé à PC=0x{:04x}", metadata_start);
+    if let Some(pos) = bytecode.windows(cbor_marker.len()).position(|w| w == cbor_marker) {
+        println!("📜 [METADATA DETECTED] CBOR Solidity à PC=0x{:04x}", pos);
 
         forbidden_zones.push(ForbiddenZone {
-            start: metadata_start,
+            start: pos,
             end: bytecode.len(),
-            reason: "Solidity CBOR metadata + Swarm/IPFS hash".to_string(),
+            reason: "Solidity CBOR metadata + Swarm hash".to_string(),
         });
-
-        // Optionnel : on peut aussi interdire une petite zone juste avant si on veut être ultra-prudent
-        // Mais pas nécessaire → le vrai code est bien avant
     } else {
-        // Fallback conservateur : interdire les derniers 300 bytes (métadonnées typiques)
-        let conservative_start = bytecode.len().saturating_sub(300);
-
-        if conservative_start > 1000 {  // Seulement si le bytecode est assez long
-            println!("⚠️ [METADATA FALLBACK] Pas de marqueur CBOR → interdiction des {} derniers bytes", bytecode.len() - conservative_start);
+        // Fallback : interdiction des derniers 400 bytes (sécurité max)
+        if bytecode.len() > 1000 {
+            let start = bytecode.len().saturating_sub(400);
+            println!("⚠️ [METADATA FALLBACK] Interdiction des {} derniers bytes (pas de CBOR détecté)", bytecode.len() - start);
 
             forbidden_zones.push(ForbiddenZone {
-                start: conservative_start,
+                start,
                 end: bytecode.len(),
-                reason: "Probable metadata zone (fallback)".to_string(),
+                reason: "Probable metadata zone (fallback conservateur)".to_string(),
             });
         }
     }
 
-    // ✅ IMPORTANT : On n'interdit RIEN avant → tout dès 0x0000 est autorisé
-    // C'est exactement ce qu'il faut pour VEZ, veCRV, veBAL, etc.
-
     println!("🚫 [FORBIDDEN ZONES] {} zone(s) définie(s)", forbidden_zones.len());
     for zone in &forbidden_zones {
-        println!("   → 0x{:04x}..0x{:04x} : {}", zone.start, zone.end, zone.reason);
+        println!("   → 0x{:04x}..0x{:04x} : {}", zone.start, zone.end - 1, zone.reason);
     }
 
     forbidden_zones
