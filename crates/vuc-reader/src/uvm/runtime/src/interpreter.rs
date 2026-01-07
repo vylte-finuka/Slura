@@ -650,36 +650,18 @@ pub fn execute_program(
         )),
     };
 
-    // ✅ ANALYSE AUTOMATIQUE DU BYTECODE POUR CONSTRUIRE LA DISPATCH TABLE
-    println!("🔍 [BYTECODE ANALYSIS] Analyse automatique du contrat...");
-    let dispatch_table = build_dispatch_table_from_bytecode(prog);
-    println!("📊 [DISPATCH TABLE] {} fonctions détectées", dispatch_table.len());
-    
-    for (selector, info) in &dispatch_table {
-        println!("   🎯 0x{:08x} → PC:0x{:04x} ({})", selector, info.pc, info.name);
-    }
+// ✅ NOUVELLE ÉTAPE : extraction du runtime
+    let runtime_bytecode = extract_runtime_bytecode(prog)
+        .ok_or_else(|| Error::new(ErrorKind::Other, "Échec extraction runtime bytecode"))?;
 
-    // ✅ CONSTRUCTION CALLDATA UNIVERSELLE
-    let calldata = build_universal_calldata(interpreter_args);
-    println!("📡 [CALLDATA] {} bytes générés pour '{}'", calldata.len(), interpreter_args.function_name);
+    println!("📦 [BYTECODE] Runtime extrait : {} bytes", runtime_bytecode.len());
 
-    // ✅ RÉSOLUTION AUTOMATIQUE DU PC VIA DISPATCH TABLE
-    let initial_pc = resolve_pc_from_dispatch_table(&calldata, &dispatch_table)?;
-    println!("🎯 [PC RESOLUTION] PC initial: 0x{:04x}", initial_pc);
+    // ✅ TOUTES LES OPÉRATIONS SUIVANTES SUR runtime_bytecode
+    let dispatch_table = build_dispatch_table_from_bytecode(&runtime_bytecode);
 
-    // ✅ DÉTECTION AUTOMATIQUE DES ZONES INTERDITES
-    let forbidden_zones = detect_forbidden_zones(prog);
-    println!("🚫 [FORBIDDEN ZONES] {} zones détectées", forbidden_zones.len());
-    
-    for zone in &forbidden_zones {
-        println!("   🚫 0x{:04x} - 0x{:04x}", zone.start, zone.end);
-    }
+    let forbidden_zones = detect_forbidden_zones(&runtime_bytecode);
 
-    // ✅ VALIDATION DU PC INITIAL
-    if is_pc_in_forbidden_zones(initial_pc, &forbidden_zones) {
-        return Err(Error::new(ErrorKind::Other, 
-            format!("PC initial 0x{:04x} dans une zone interdite", initial_pc)));
-    }
+    let valid_jumpdests = scan_all_valid_jumpdests(&runtime_bytecode);
 
     let default_stack_usage = StackUsage::new();
     let stack_usage = stack_usage.unwrap_or(&default_stack_usage);
@@ -764,8 +746,6 @@ pub fn execute_program(
     interpreter_args.sender_address.hash(&mut sender_hasher);
     let sender_hash = sender_hasher.finish();
 
-    // ...existing code pour check_mem functions...
-
     println!("🚀 DÉBUT EXÉCUTION UVM GÉNÉRIQUE");
     println!("   Fonction: {}", interpreter_args.function_name);
     println!("   Contrat: {}", interpreter_args.contract_address);
@@ -831,7 +811,7 @@ pub fn execute_program(
             }
         }
 
-        let opcode = prog[insn_ptr];
+        let opcode = runtime_bytecode[insn_ptr];
         let insn = ebpf::get_insn(prog, insn_ptr);
           let _dst = insn.dst as usize;
     let _src = insn.src as usize;
@@ -2023,6 +2003,40 @@ struct ForbiddenZone {
     start: usize,
     end: usize,
     reason: String,
+}
+
+/// Extrait le runtime bytecode depuis un bytecode de déploiement Solidity/Vyper/Yul
+/// Retourne None si impossible (très rare)
+fn extract_runtime_bytecode(full_bytecode: &[u8]) -> Option<Vec<u8>> {
+    // Pattern classique de fin de constructor : CODECOPY + RETURN
+    // Format : PUSH2 <size> PUSH2 <offset> PUSH1 0 CODECOPY PUSH1 0 PUSH2 <size> RETURN
+    // Opcodes : 61 xxxx 60 yyyy 60 00 39 60 00 61 xxxx F3
+
+    // On cherche en remontant depuis la fin
+    for i in (0..full_bytecode.len().saturating_sub(15)).rev() {
+        if full_bytecode[i..i+15].starts_with(&[
+            0x61, _, _,        // PUSH2 offset
+            0x60, 0x00,       // PUSH1 0
+            0x39,             // CODECOPY
+            0x60, 0x00,       // PUSH1 0
+            0x61, _, _,       // PUSH2 size
+            0xf3              // RETURN
+        ]) {
+            let offset = ((full_bytecode[i+1] as usize) << 8) | (full_bytecode[i+2] as usize);
+            let size   = ((full_bytecode[i+10] as usize) << 8) | (full_bytecode[i+11] as usize);
+
+            if offset + size <= full_bytecode.len() && size > 0 {
+                println!("🎯 [RUNTIME EXTRACTED] offset=0x{:04x}, size={} bytes ({} KB)", 
+                         offset, size, size / 1024);
+                return Some(full_bytecode[offset..offset + size].to_vec());
+            }
+        }
+    }
+
+    // Variante alternative (plus rare) : taille en PUSH1/PUSH32
+    // On accepte aussi un fallback : tout le bytecode est runtime (contrats sans constructor)
+    println!("⚠️ [NO CODECOPY FOUND] Utilisation du bytecode complet comme runtime (pas de constructor détecté)");
+    Some(full_bytecode.to_vec())
 }
 
 fn build_dispatch_table_from_bytecode(bytecode: &[u8]) -> HashMap<u32, FunctionInfo> {
