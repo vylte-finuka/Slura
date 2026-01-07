@@ -652,7 +652,7 @@ pub fn execute_program(
 
     // ✅ ANALYSE AUTOMATIQUE DU BYTECODE POUR CONSTRUIRE LA DISPATCH TABLE
     println!("🔍 [BYTECODE ANALYSIS] Analyse automatique du contrat...");
-    let dispatch_table = build_dispatch_table_from_bytecode(prog)?;
+    let dispatch_table = build_dispatch_table_from_bytecode(prog);
     println!("📊 [DISPATCH TABLE] {} fonctions détectées", dispatch_table.len());
     
     for (selector, info) in &dispatch_table {
