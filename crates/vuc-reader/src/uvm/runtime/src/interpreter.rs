@@ -650,6 +650,11 @@ pub fn execute_program(
         )),
     };
 
+    // ✅ CONSTRUCTION CALLDATA UNIVERSELLE
+    let calldata = build_universal_calldata(interpreter_args);
+    println!("📡 [CALLDATA] {} bytes générés pour '{}'", calldata.len(), interpreter_args.function_name);
+
+
 // ✅ NOUVELLE ÉTAPE : extraction du runtime
     let runtime_bytecode = extract_runtime_bytecode(prog)
         .ok_or_else(|| Error::new(ErrorKind::Other, "Échec extraction runtime bytecode"))?;
