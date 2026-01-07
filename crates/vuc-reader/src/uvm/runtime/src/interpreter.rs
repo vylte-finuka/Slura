@@ -734,6 +734,9 @@ pub fn execute_program(
         }
     }
 
+    let initial_pc = resolve_pc_from_dispatch_table(&calldata, &dispatch_table)?;
+    println!("🎯 [PC RESOLUTION] PC initial: 0x{:04x}", initial_pc);
+
     // ✅ SCAN AUTOMATIQUE DES JUMPDESTS VALIDES
     let valid_jumpdests = scan_all_valid_jumpdests(prog);
     println!("📍 [JUMPDESTS] {} destinations valides détectées", valid_jumpdests.len());
