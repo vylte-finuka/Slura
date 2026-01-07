@@ -2571,91 +2571,76 @@ fn detect_function_signature(function_name: &str, args: &[serde_json::Value]) ->
     }
 }
 
-/// ✅ NOUVEAU: Construction automatique de calldata universelle
+/// ✅ CONSTRUCTION CALLDATA UNIVERSELLE – 100% GÉNÉRIQUE (function_* only)
 fn build_universal_calldata(args: &InterpreterArgs) -> Vec<u8> {
     let mut calldata = Vec::new();
-    
-    // Function selector (4 bytes) - calcul simple basé sur le nom
-    let mut hasher = DefaultHasher::new();
-    args.function_name.hash(&mut hasher);
-    let selector = (hasher.finish() as u32).to_be_bytes();
-    calldata.extend_from_slice(&selector);
-    
-    // Encodage des arguments
+
+    // PRIORITÉ MAXIMALE : si le nom est "function_<8_hex_chars>", on extrait le selector DIRECTEMENT
+    let selector = if args.function_name.starts_with("function_") && args.function_name.len() == 17 {
+        match u32::from_str_radix(&args.function_name[9..], 16) {
+            Ok(sel) => {
+                println!("🎯 [SELECTOR EXTRACTED] {} → 0x{:08x} (direct from function_*)", args.function_name, sel);
+                sel
+            }
+            Err(_) => {
+                println!("⚠️ [SELECTOR PARSING ERROR] Invalid hex in {}", args.function_name);
+                0 // fallback rare
+            }
+        }
+    } else {
+        // Cas improbable (nom non standard) → hash du nom complet
+        let mut hasher = DefaultHasher::new();
+        args.function_name.hash(&mut hasher);
+        (hasher.finish() as u32)
+    };
+
+    // Ajout du selector (4 bytes big-endian)
+    calldata.extend_from_slice(&selector.to_be_bytes());
+
+    // Encodage générique des arguments (inchangé)
     for arg in &args.args {
         let encoded = encode_generic_abi_argument(arg);
         calldata.extend_from_slice(&encoded);
     }
-    
+
+    println!("📡 [CALLDATA BUILT] Selector: 0x{:08x} | Total: {} bytes", selector, calldata.len());
     calldata
 }
 
-/// ✅ NOUVEAU: Détection automatique du type d'un argument
-fn detect_argument_type(arg: &serde_json::Value) -> &'static str {
-    match arg {
-        serde_json::Value::String(s) if s.starts_with("0x") && s.len() == 42 => "address",
-        serde_json::Value::String(s) if s.starts_with("0x") => "uint256",
-        serde_json::Value::Number(_) => "uint256",
-        serde_json::Value::Bool(_) => "bool",
-        serde_json::Value::String(_) => "string",
-        serde_json::Value::Array(_) => "array",
-        _ => "bytes32"
-    }
-}
+/// ✅ DÉTECTION TAILLE CALLDATA – 100% GÉNÉRIQUE (pas de noms hardcodés)
+fn detect_function_signature(function_name: &str, args: &[serde_json::Value]) -> usize {
+    let mut total_size = 4; // 4 bytes pour le selector (toujours présent)
 
-/// ✅ NOUVEAU: Encodage ABI complètement générique
-fn encode_generic_abi_argument(arg: &serde_json::Value) -> [u8; 32] {
-    let mut result = [0u8; 32];
-    
-    match arg {
-        serde_json::Value::String(s) if s.starts_with("0x") && s.len() == 42 => {
-            // Adresse Ethereum
-            if let Ok(decoded) = hex::decode(&s[2..]) {
-                if decoded.len() == 20 {
-                    result[12..32].copy_from_slice(&decoded);
-                }
+    // Encodage ABI standard : chaque argument = 32 bytes (même dynamique → offset + data)
+    for arg in args {
+        match arg {
+            serde_json::Value::String(s) if s.starts_with("0x") && s.len() == 42 => {
+                total_size += 32; // address
             }
-        },
-        serde_json::Value::String(s) if s.starts_with("0x") => {
-            // Nombre hexadécimal
-            if let Ok(decoded) = hex::decode(&s[2..]) {
-                let start = 32 - decoded.len().min(32);
-                result[start..].copy_from_slice(&decoded[..decoded.len().min(32)]);
+            serde_json::Value::String(s) if s.starts_with("0x") => {
+                total_size += 32; // bytes32 / uint256
             }
-        },
-        serde_json::Value::Number(n) => {
-            // Nombre → uint256 big-endian
-            if let Some(val) = n.as_u64() {
-                result[24..32].copy_from_slice(&val.to_be_bytes());
+            serde_json::Value::Number(_) => {
+                total_size += 32; // uint256
             }
-        },
-        serde_json::Value::Bool(b) => {
-            // Booléen → 0 ou 1
-            result[31] = if *b { 1 } else { 0 };
-        },
-        serde_json::Value::String(s) => {
-            // String → bytes paddés ou hash selon taille
-            let bytes = s.as_bytes();
-            if bytes.len() <= 32 {
-                // String courte → pad à droite
-                result[..bytes.len()].copy_from_slice(bytes);
-            } else {
-                // String longue → hash keccak256
-                use tiny_keccak::{Hasher, Keccak};
-                let mut hasher = Keccak::v256();
-                hasher.update(bytes);
-                hasher.finalize(&mut result);
+            serde_json::Value::Bool(_) => {
+                total_size += 32; // bool
             }
-        },
-        _ => {
-            // Autres types → reste à zéro ou hash de la représentation JSON
-            let json_str = arg.to_string();
-            let bytes = json_str.as_bytes();
-            if bytes.len() <= 32 {
-                result[..bytes.len()].copy_from_slice(bytes);
+            serde_json::Value::String(s) => {
+                // string dynamique : offset (32) + length (32) + data paddée
+                let padded_len = ((s.len() + 31) / 32) * 32;
+                total_size += 32 + 32 + padded_len;
+            }
+            serde_json::Value::Array(arr) => {
+                // array dynamique : offset (32) + length (32) + éléments (32 chacun)
+                total_size += 32 + 32 + (arr.len() * 32);
+            }
+            _ => {
+                total_size += 32; // type inconnu → 32 bytes
             }
         }
     }
-    
-    result
+
+    // Minimum réaliste pour toute fonction view (selector seul)
+    total_size.max(4)
 }
