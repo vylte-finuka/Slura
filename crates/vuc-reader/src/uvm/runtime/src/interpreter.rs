@@ -2157,39 +2157,30 @@ fn detect_forbidden_zones(bytecode: &[u8]) -> Vec<ForbiddenZone> {
     forbidden_zones
 }
 
-// ✅ RÉSOLUTION DU PC VIA DISPATCH TABLE
+/// ✅ RÉSOLUTION DU PC – STRICTE, SANS FALLBACK DANGEREUX
 fn resolve_pc_from_dispatch_table(calldata: &[u8], dispatch_table: &HashMap<u32, FunctionInfo>) -> Result<usize, Error> {
     if calldata.len() < 4 {
-        // Pas assez de données pour un selector, utilise fallback
-        for func_info in dispatch_table.values() {
-            if func_info.is_fallback {
-                return Ok(func_info.pc);
-            }
-        }
-        // Première fonction disponible
-        return Ok(dispatch_table.values().next().unwrap().pc);
+        return Err(Error::new(ErrorKind::Other, "Calldata trop court pour un selector"));
     }
     
     let selector = u32::from_be_bytes([calldata[0], calldata[1], calldata[2], calldata[3]]);
     println!("🎯 [SELECTOR LOOKUP] Recherche de 0x{:08x}", selector);
     
     if let Some(func_info) = dispatch_table.get(&selector) {
-        println!("✅ [FUNCTION FOUND] {} à PC:0x{:04x}", func_info.name, func_info.pc);
-        return Ok(func_info.pc);
-    }
-    
-    // Fallback si selector non trouvé
-    for func_info in dispatch_table.values() {
-        if func_info.is_fallback {
-            println!("🔄 [FALLBACK] Utilisation de la fonction fallback");
-            return Ok(func_info.pc);
+        println!("✅ [FUNCTION FOUND] {} → PC:0x{:04x}", func_info.name, func_info.pc);
+        Ok(func_info.pc)
+    } else {
+        // ✅ PLUS DE FALLBACK SILENCIEUX !
+        // On refuse d'exécuter une autre fonction
+        println!("❌ [SELECTOR NOT FOUND] 0x{:08x} absent de la dispatch table", selector);
+        println!("   Fonctions disponibles :");
+        for (sel, info) in dispatch_table {
+            println!("   - 0x{:08x} → {} (PC:0x{:04x})", sel, info.name, info.pc);
         }
+        
+        Err(Error::new(ErrorKind::Other, 
+            format!("Selector 0x{:08x} non supporté par le contrat (dispatch table incomplete ou fonction non publique)", selector)))
     }
-    
-    // Première fonction disponible en dernier recours
-    let first_func = dispatch_table.values().next().unwrap();
-    println!("🔄 [DEFAULT] Utilisation de la première fonction: {}", first_func.name);
-    Ok(first_func.pc)
 }
 
 // ✅ FONCTIONS HELPER POUR L'ANALYSE GÉNÉRIQUE
