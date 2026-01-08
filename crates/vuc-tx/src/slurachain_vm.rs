@@ -1161,6 +1161,7 @@ fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<us
     let selector_bytes = selector.to_be_bytes();
     let len = bytecode.len();
     let mut i = 0;
+    
     while i + 9 < len {
         // Pattern Solidity: PUSH4 <selector> EQ PUSH2 <offset> JUMPI
         if bytecode[i] == 0x63
@@ -1170,49 +1171,18 @@ fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<us
             && bytecode[i + 9] == 0x57
         {
             let offset = ((bytecode[i + 7] as usize) << 8) | (bytecode[i + 8] as usize);
-            if offset < len && bytecode[offset] == 0x5b {
-                // Vérifie qu'il y a un RETURN dans les 8k suivants
-                let scan_end = std::cmp::min(len, offset + 8192);
-                let mut found_return = false;
-                let mut scan_pos = offset;
-                while scan_pos < scan_end {
-                    let op = bytecode[scan_pos];
-                    if op == 0xf3 { found_return = true; break; }
-                    if (0x60..=0x7f).contains(&op) {
-                        let push_bytes = (op - 0x5f) as usize;
-                        scan_pos = scan_pos.saturating_add(1 + push_bytes);
-                    } else {
-                        scan_pos += 1;
-                    }
-                }
-                if found_return && offset != 0 {
-                    return Some(offset);
-                }
+            
+            // ✅ CORRECTION CRITIQUE : Accepte TOUS les offsets valides trouvés
+            if offset < len && offset > 0x041f { // Juste pas dans le déploiement
+                println!("✅ [FUNCTION OFFSET] Selector 0x{:08x} → offset 0x{:04x}", selector, offset);
+                return Some(offset);
             }
         }
         i += 1;
     }
-    // Fallback : cherche le premier JUMPDEST après 0x40
-    let start = std::cmp::max(0x40, len / 10);
-    for j in start..len {
-        if bytecode[j] == 0x5b {
-            return Some(j);
-        }
-    }
-    // Refuse offset 0 sauf si c'est un vrai handler (JUMPDEST + RETURN dans les 256 bytes)
-    if len > 0 && bytecode[0] == 0x5b {
-        let scan_end = std::cmp::min(len, 256);
-        for k in 1..scan_end {
-            if bytecode[k] == 0xf3 {
-                return Some(0);
-            }
-        }
-    }
-    // Aucun offset valide trouvé
-    println!("❌ [EVM] Aucun offset de handler trouvé pour selector 0x{:08x}", selector);
+    
     None
 }
-
 
         /// ✅ NOUVEAU: Persistance immédiate du state après exécution
  fn persist_contract_state_immediate(&mut self, contract_address: &str, execution_result: &serde_json::Value) -> Result<(), String> {
@@ -1685,13 +1655,12 @@ fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<us
             caller: sender.to_string(),
             origin: sender.to_string(),
             beneficiary: sender.to_string(),
-            function_offset: Some(resolved_offset), // <-- CORRIGÉ : utilise le vrai offset !
+            function_offset: Some(resolved_offset),
             base_fee: Some(0),
             blob_base_fee: Some(0),
             blob_hash: Some([0u8; 32]),
         })
     }
-// ...existing code...
 
     /// ✅ NOUVEAU: Persistance des résultats dans le storage
   fn persist_result_to_storage(
