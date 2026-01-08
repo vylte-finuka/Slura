@@ -267,30 +267,45 @@ fn extract_function_selector_from_name(function_name: &str) -> Option<u32> {
     None
 }
 
-/// ✅ CORRECTION MAJEURE: Construction de calldata avec selector automatique
+/// ✅ CORRECTIF FINAL : Calldata strictement conforme EVM pour fonctions sans arguments
 fn build_universal_calldata(args: &InterpreterArgs) -> Vec<u8> {
     let mut calldata = Vec::new();
-    
-    // ✅ PRIORITÉ 1: Extraction du selector depuis le nom de fonction
-    let selector = if let Some(extracted_selector) = extract_function_selector_from_name(&args.function_name) {
-        extracted_selector
+
+    // Extraction du selector depuis le nom "function_XXXXXXXX"
+    let selector = if let Some(extracted) = extract_function_selector_from_name(&args.function_name) {
+        extracted
     } else {
-        // Fallback: calcul simple basé sur le nom
+        // Fallback sécurisé
         let mut hasher = DefaultHasher::new();
         args.function_name.hash(&mut hasher);
-        hasher.finish() as u32
+        (hasher.finish() as u32)
     };
-    
-    // ✅ AJOUT DU SELECTOR AU DÉBUT DU CALLDATA
+
+    // AJOUT DU SELECTOR UNIQUEMENT (4 bytes)
     calldata.extend_from_slice(&selector.to_be_bytes());
+
     println!("🎯 [FUNCTION SELECTOR] {} → 0x{:08x}", args.function_name, selector);
-    
-    // Encodage des arguments
-    for arg in &args.args {
-        let encoded = encode_generic_abi_argument(arg);
-        calldata.extend_from_slice(&encoded);
+
+    // SI IL Y A DES ARGUMENTS → on les encode en ABI
+    if !args.args.is_empty() {
+        for arg in &args.args {
+            let encoded = encode_generic_abi_argument(arg);
+            calldata.extend_from_slice(&encoded);
+        }
+        println!("📡 [CALLDATA] Avec {} arguments → {} bytes total", args.args.len(), calldata.len());
+    } else {
+        // CAS CRITIQUE : fonction sans arguments (decimals, name, symbol, totalSupply...)
+        println!("📡 [CALLDATA] Fonction sans arguments → calldata = EXACTEMENT 4 bytes (selector seul)");
     }
-    
+
+    // Preview propre
+    let preview = if calldata.len() <= 32 {
+        hex::encode(&calldata)
+    } else {
+        hex::encode(&calldata[..32]) + "..."
+    };
+    println!("📡 [CALLDATA PREVIEW] 0x{}", preview);
+
     calldata
 }
 
