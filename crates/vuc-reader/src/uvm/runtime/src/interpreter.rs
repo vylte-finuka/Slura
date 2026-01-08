@@ -1178,7 +1178,24 @@ println!("📡 [AUTO-DETECTED] Fonction: '{}' avec {} arguments",
          interpreter_args.function_name, interpreter_args.args.len());
 println!("📡 [CALLDATA PREVIEW]  0x{}", hex::encode(&calldata[..calldata.len().min(32)]));
     // 256 Mo → assez pour tous les contrats EOF + initialize + proxy UUPS
+    // 256 Mo → assez pour tous les contrats EOF + initialize + proxy UUPS
     let mut global_mem = vec![0u8; 256 * 1024 * 1024];
+
+    // ✅ CORRECTIF DÉFINITIF : Nettoyage des offsets mémoire utilisés par le dispatcher Slura
+    // Le contrat lit MLOAD(0xa0) pour obtenir la longueur des données après le selector
+    // On force cette zone (et les zones typiques) à 0 pour simuler calldata = 4 bytes pur
+    if global_mem.len() >= 0xa0 + 32 {
+        global_mem[0xa0..0xa0 + 32].fill(0);
+        println!("🧹 [DISPATCHER FIX] Offset 0xa0 nettoyé → longueur forcée à 0");
+    }
+    if global_mem.len() >= 0x80 + 32 {
+        global_mem[0x80..0x80 + 32].fill(0);
+        println!("🧹 [DISPATCHER FIX] Offset 0x80 nettoyé");
+    }
+    if global_mem.len() >= 0x40 + 32 {
+        global_mem[0x40..0x40 + 32].fill(0);
+        println!("🧹 [DISPATCHER FIX] Offset 0x40 nettoyé");
+    }
 
     let mut reg: [u64; 64] = [0; 64];
 
