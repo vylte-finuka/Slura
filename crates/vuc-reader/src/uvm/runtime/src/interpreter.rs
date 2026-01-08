@@ -267,44 +267,44 @@ fn extract_function_selector_from_name(function_name: &str) -> Option<u32> {
     None
 }
 
-/// ✅ CORRECTIF FINAL : Calldata strictement conforme EVM pour fonctions sans arguments
+/// ✅ CORRECTIF ULTIME : Calldata 100% conforme EVM pour fonctions sans arguments
 fn build_universal_calldata(args: &InterpreterArgs) -> Vec<u8> {
-    let mut calldata = Vec::new();
+    let mut calldata = Vec::with_capacity(4 + args.args.len() * 32);
 
-    // Extraction du selector depuis le nom "function_XXXXXXXX"
+    // Extraction du selector
     let selector = if let Some(extracted) = extract_function_selector_from_name(&args.function_name) {
         extracted
     } else {
-        // Fallback sécurisé
         let mut hasher = DefaultHasher::new();
         args.function_name.hash(&mut hasher);
         (hasher.finish() as u32)
     };
 
-    // AJOUT DU SELECTOR UNIQUEMENT (4 bytes)
+    // Selector en premier (4 bytes)
     calldata.extend_from_slice(&selector.to_be_bytes());
 
     println!("🎯 [FUNCTION SELECTOR] {} → 0x{:08x}", args.function_name, selector);
 
-    // SI IL Y A DES ARGUMENTS → on les encode en ABI
-    if !args.args.is_empty() {
-        for arg in &args.args {
-            let encoded = encode_generic_abi_argument(arg);
-            calldata.extend_from_slice(&encoded);
-        }
-        println!("📡 [CALLDATA] Avec {} arguments → {} bytes total", args.args.len(), calldata.len());
-    } else {
-        // CAS CRITIQUE : fonction sans arguments (decimals, name, symbol, totalSupply...)
-        println!("📡 [CALLDATA] Fonction sans arguments → calldata = EXACTEMENT 4 bytes (selector seul)");
+    // Cas spécial : fonction sans arguments → on FORCE calldata = 4 bytes exactement
+    if args.args.is_empty() {
+        println!("📡 [CALLDATA] Fonction sans arguments (ex: decimals) → calldata = EXACTEMENT 4 bytes");
+        println!("📡 [CALLDATA PREVIEW] 0x{:08x}", selector);
+        return calldata; // Retourne SEULEMENT le selector
     }
 
-    // Preview propre
+    // Sinon, on encode les arguments normalement
+    for arg in &args.args {
+        let encoded = encode_generic_abi_argument(arg);
+        calldata.extend_from_slice(&encoded);
+    }
+
     let preview = if calldata.len() <= 32 {
-        hex::encode(&calldata)
+        format!("0x{}", hex::encode(&calldata))
     } else {
-        hex::encode(&calldata[..32]) + "..."
+        format!("0x{}...", hex::encode(&calldata[..32]))
     };
-    println!("📡 [CALLDATA PREVIEW] 0x{}", preview);
+    println!("📡 [CALLDATA] Avec arguments → {} bytes", calldata.len());
+    println!("📡 [CALLDATA PREVIEW] {}", preview);
 
     calldata
 }
