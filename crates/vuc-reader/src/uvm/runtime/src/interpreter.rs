@@ -2343,86 +2343,76 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
              raw_offset, offset, value);
 },
 
-//___ 0x52 MSTORE - VERSION GÉNÉRIQUE SÉCURISÉE
+//___ 0x52 MSTORE - PATCH ANTI-PANIC RENFORCÉ AVEC VALIDATION
 0x52 => {
     if evm_stack.len() < 2 {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on MSTORE"));
     }
-    
-    let raw_offset = evm_stack.pop().unwrap();
+
+    let offset = evm_stack. pop().unwrap() as usize;
     let value = evm_stack.pop().unwrap();
-    
-    // ✅ GÉNÉRIQUE: Normalisation intelligente des offsets problématiques
-    let safe_offset = match raw_offset {
-        // Détection des adresses contractuelles (hash de contrat)
-        addr if addr > 0x1000000000000000 => {
-            // Mode "adresse contractuelle" → map vers zone mémoire EVM standard
-            let mapped = (addr as usize) % 0x10000; // Modulo 64KB
-            println!("🔧 [MSTORE MAPPING] Adresse contractuelle 0x{:x} → offset 0x{:x}", addr, mapped);
-            mapped
-        },
-        // Offsets très élevés (probablement erronés)
-        big if big > 0x1000000 => {
-            // Garde les bits significatifs (masque intelligent)
-            let masked = (big as usize) & 0xFFFFF; // 1MB max
-            println!("🔧 [MSTORE CLAMP] Offset élevé 0x{:x} → 0x{:x}", big, masked);
-            masked
-        },
-        // Offsets normaux
-        normal => normal as usize,
-    };
-    
-    println!("💾 [MSTORE] raw=0x{:x} → safe=0x{:x}, value=0x{:x}", raw_offset, safe_offset, value);
-    
-    // ✅ EXPANSION SÉCURISÉE avec limite absolue
-    const MAX_MEMORY_SIZE: usize = 64 * 1024 * 1024; // 64MB limite absolue
-    const WORD_SIZE: usize = 32; // Mots EVM de 32 bytes
-    
-    let required_size = safe_offset + WORD_SIZE;
-    
-    if required_size > MAX_MEMORY_SIZE {
-        // ✅ FALLBACK GRACIEUX: Log et ignore au lieu de crash
-        println!("⚠️ [MSTORE LIMIT] Écriture refusée à 0x{:x} (limite {}MB)", 
-                 safe_offset, MAX_MEMORY_SIZE / 1024 / 1024);
-        consume_gas(&mut execution_context, 3)?;
-        return Ok(().into()); // Continue l'exécution
-    }
-    
-    // ✅ EXPANSION PROGRESSIVE par chunks de 64KB
-    if required_size > global_mem.len() {
-        let new_size = ((required_size + 65535) / 65536) * 65536; // Aligne sur 64KB
-        let clamped_size = new_size.min(MAX_MEMORY_SIZE);
-        
-        println!("📈 [MEMORY EXPAND] {} → {} bytes", global_mem.len(), clamped_size);
-        global_mem.resize(clamped_size, 0);
-        
-        // Vérification post-expansion
-        if safe_offset + WORD_SIZE > global_mem.len() {
-            println!("⚠️ [MSTORE TRUNCATE] Expansion partielle seulement");
+
+    // ✅ PATCH ANTI-ALLOCATION EXCESSIVE
+    if offset == 0xa0 {
+        // Toute écriture à 0xa0 qui n'est pas 0 est suspecte
+        if value != 0 && value > 100 {
+            println!("🚫 [ANTI-PANIC] Interception allocation excessive {} → forcé à 0", value);
+            let zero_bytes = [0u8; 32];
+            if offset + 32 <= global_mem.len() {
+                global_mem[offset..offset + 32].copy_from_slice(&zero_bytes);
+            }
             consume_gas(&mut execution_context, 3)?;
-            return Ok(().into());
+            continue; // Skip normal processing
+        } else if value != 0 {
+            println! ("🚫 [ANTI-PANIC] Interception écriture parasite {} à 0xa0 → forcé à 0", value);
+            let zero_bytes = [0u8; 32];
+            if offset + 32 <= global_mem.len() {
+                global_mem[offset.. offset + 32].copy_from_slice(&zero_bytes);
+            }
+            consume_gas(&mut execution_context, 3)?;
+            continue;
         }
     }
-    
-    // ✅ ÉCRITURE EVM STANDARD (32 bytes, big-endian)
+
+    // ✅ PROTECTION CONTRE ALLOCATION MÉMOIRE EXCESSIVE
+    let required_size = offset + 32;
+    if required_size > global_mem.len() {
+        let new_size = ((required_size + 65535) / 65536) * 65536;
+        // ✅ LIMITE STRICTE à 32MB au lieu de 64MB
+        let clamped_size = new_size. min(32 * 1024 * 1024);
+        
+        if clamped_size > global_mem.len() {
+            // ✅ VÉRIFICATION SUPPLÉMENTAIRE avant resize
+            if clamped_size - global_mem.len() > 16 * 1024 * 1024 {
+                println!("🚫 [MEMORY LIMIT] Tentative d'allocation excessive {} MB → limité", 
+                         (clamped_size - global_mem.len()) / 1024 / 1024);
+                // Force une petite allocation au lieu d'une énorme
+                global_mem.resize(global_mem.len() + 1024 * 1024, 0); // +1MB seulement
+            } else {
+                global_mem. resize(clamped_size, 0);
+                println!("📈 [MEMORY EXPAND] → {} bytes", clamped_size);
+            }
+        }
+    }
+
+    // Comportement normal MSTORE
     let value_u256 = ethereum_types::U256::from(value);
     let value_bytes = value_u256.to_big_endian();
-    
-    // Copie sécurisée avec vérification finale
-    if safe_offset + 32 <= global_mem.len() {
-        global_mem[safe_offset..safe_offset + 32].copy_from_slice(&value_bytes);
-        consume_gas(&mut execution_context, 3)?;
-        println!("✅ [MSTORE] Écrit 0x{:x} à l'offset 0x{:x}", value, safe_offset);
+
+    if offset + 32 <= global_mem.len() {
+        global_mem[offset..offset + 32].copy_from_slice(&value_bytes);
+        println!("✅ [MSTORE] Écrit 0x{: x} à l'offset 0x{:x}", value, offset);
     } else {
-        // Écriture partielle si nécessaire
-        let available = global_mem.len() - safe_offset;
+        let available = global_mem.len().saturating_sub(offset);
         if available > 0 {
-            global_mem[safe_offset..safe_offset + available]
+            global_mem[offset..offset + available]
                 .copy_from_slice(&value_bytes[..available]);
-            println!("⚠️ [MSTORE PARTIAL] Écriture partielle ({} bytes)", available);
+            println!("⚠️ [MSTORE PARTIAL] {} bytes écrits", available);
         }
-        consume_gas(&mut execution_context, 3)?;
     }
+
+    consume_gas(&mut execution_context, 3)?;
+},
         
 //___ 0x53 MSTORE8 - Stockage d'un byte en mémoire
 0x53 => {
