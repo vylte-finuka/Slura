@@ -2401,8 +2401,7 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
 
     if offset + 32 <= global_mem.len() {
         global_mem[offset..offset + 32].copy_from_slice(&value_bytes);
-        println!("✅ [MSTORE] Écrit 0x{: x} à l'offset 0x{:x}", value, offset);
-    } else {
+            } else {
         let available = global_mem.len().saturating_sub(offset);
         if available > 0 {
             global_mem[offset..offset + available]
