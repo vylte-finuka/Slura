@@ -2613,66 +2613,28 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     println!("📌 [PUSH0] Pushed 0 (EVM standard)");
 },
         
-      //___ 0x60..=0x7f : PUSH1 à PUSH32 - CORRECTION SÉCURISÉE
-0x60..=0x7f => {
-    let push_size = (opcode - 0x60 + 1) as usize;
-    let start = insn_ptr + 1;
-    let end = (start + push_size).min(prog.len());
-    
-    // ✅ SÉCURITÉ: Vérification des bornes AVANT lecture
-    if start >= prog.len() {
-        // Pas de données à lire → push 0
-        evm_stack.push(0);
-        reg[0] = 0;
-        println!("⚠️ [PUSH{}] PC=0x{:04x} → 0x0 (pas de données)", push_size, insn_ptr);
-        advance = 1; // Avance seulement d'1 instruction
-        continue;
-    }
-    
-    // ✅ LECTURE SÉCURISÉE: Seulement les bytes disponibles
-    let mut value = 0u64;
-    let available_bytes = end - start;
-    
-    if available_bytes == 0 {
-        // Aucun byte disponible
-        value = 0;
-    } else {
-        // ✅ LECTURE CORRECTE: big-endian, seulement les bytes existants
-        for i in start..end {
-            if i < prog.len() {
-                value = (value << 8) | (prog[i] as u64);
+      // ___ 0x60 → 0x7f : PUSH1 à PUSH32 (tous les PUSH valides EVM)
+        0x60..=0x7f => {
+            let push_size = (opcode - 0x60 + 1) as usize; // 1 à 32
+            let start = insn_ptr + 1;
+            let end = (start + push_size).min(runtime_bytecode.len()); // sécurité
+            
+            let mut value = 0u64;
+            
+            // Lecture big-endian correcte
+            for i in start..end {
+                value = (value << 8) | (runtime_bytecode[i] as u64);
             }
-        }
-    }
-    
-    evm_stack.push(value);
-    reg[0] = value;
-    
-    // ✅ LOG DÉTAILLÉ POUR DÉBUGGAGE
-    if debug_evm && instruction_count <= 100 {
-        if available_bytes < push_size {
-            println!("📌 [PUSH{}] PC=0x{:04x} → 0x{:x} (partial: {} bytes)", 
-                     push_size, insn_ptr, value, available_bytes);
-        } else {
-            println!("📌 [PUSH{}] PC=0x{:04x} → 0x{:x} (raw bytes: {})", 
-                     push_size, insn_ptr, value,
-                     hex::encode(&prog[start..end]));
-        }
-    }
-    
-    // ✅ AVANCEMENT CORRECT: 1 + bytes effectivement consommés
-    advance = 1 + available_bytes;
-    
-    // ✅ VÉRIFICATION CRITIQUE: Ne jamais dépasser la taille du programme
-    if insn_ptr + advance >= prog.len() {
-        // Si on va dépasser, ajuste l'avancement
-        advance = prog.len() - insn_ptr - 1;
-        if advance == 0 {
-            advance = 1; // Minimum 1 pour éviter boucle infinie
-        }
-    }
-},
-
+            
+            evm_stack.push(value);
+            reg[0] = value;
+            
+            println!("📌 [PUSH{}] Pushed 0x{:016x} (size: {})", push_size, value, push_size);
+            
+            // Avance correct du PC : opcode + données
+            advance = 1 + push_size;
+        },
+        
         // ___ 0x80..=0x8f : DUP1 à DUP16 - VERSION GÉNÉRIQUE
         0x80..=0x8f => {
     let depth = (opcode - 0x80 + 1) as usize;
