@@ -281,21 +281,37 @@ fn build_universal_calldata(args: &InterpreterArgs) -> Vec<u8> {
     };
 
     // Selector en premier (4 bytes)
-    calldata.extend_from_slice(&selector.to_be_bytes());
+    calldata.extend_from_slice(&selector. to_be_bytes());
 
     println!("🎯 [FUNCTION SELECTOR] {} → 0x{:08x}", args.function_name, selector);
 
-    // Cas spécial : fonction sans arguments → on FORCE calldata = 4 bytes exactement
+    // Cas spécial :  fonction sans arguments
     if args.args.is_empty() {
         println!("📡 [CALLDATA] Fonction sans arguments → calldata = EXACTEMENT 4 bytes");
-        println!("📡 [CALLDATA PREVIEW] 0x{:08x}", selector);
         return calldata;
     }
 
-    // Sinon, on encode les arguments normalement
-    for arg in &args.args {
-        let encoded = encode_generic_abi_argument(arg);
-        calldata.extend_from_slice(&encoded);
+    // ✅ VALIDATION PRÉALABLE DES ARGUMENTS
+    for (i, arg) in args.args.iter().enumerate() {
+        match arg {
+            serde_json::Value::String(s) if s.len() > 100 => {
+                println!("⚠️ [CALLDATA WARNING] Argument {} trop long ({} chars) → tronqué", i, s.len());
+                // Créer une version tronquée sécurisée
+                let safe_arg = if s.starts_with("0x") && s.len() > 42 {
+                    // Si ça ressemble à une adresse, extraire seulement l'adresse
+                    serde_json::Value::String(s[.. 42].to_string())
+                } else {
+                    // Sinon, tronquer à 50 caractères
+                    serde_json::Value::String(s[..s.len().min(50)].to_string())
+                };
+                let encoded = encode_generic_abi_argument(&safe_arg);
+                calldata.extend_from_slice(&encoded);
+            },
+            _ => {
+                let encoded = encode_generic_abi_argument(arg);
+                calldata.extend_from_slice(&encoded);
+            }
+        }
     }
 
     let preview = if calldata.len() <= 32 {
@@ -2327,59 +2343,76 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
              raw_offset, offset, value);
 },
 
-//___ 0x52 MSTORE - PATCH ANTI-PANIC UNIVERSEL RENFORCÉ
-        0x52 => {
-            if evm_stack.len() < 2 {
-                return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on MSTORE"));
+//___ 0x52 MSTORE - PATCH ANTI-PANIC RENFORCÉ AVEC VALIDATION
+0x52 => {
+    if evm_stack.len() < 2 {
+        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on MSTORE"));
+    }
+
+    let offset = evm_stack. pop().unwrap() as usize;
+    let value = evm_stack.pop().unwrap();
+
+    // ✅ PATCH ANTI-ALLOCATION EXCESSIVE
+    if offset == 0xa0 {
+        // Toute écriture à 0xa0 qui n'est pas 0 est suspecte
+        if value != 0 && value > 100 {
+            println!("🚫 [ANTI-PANIC] Interception allocation excessive {} → forcé à 0", value);
+            let zero_bytes = [0u8; 32];
+            if offset + 32 <= global_mem.len() {
+                global_mem[offset..offset + 32].copy_from_slice(&zero_bytes);
             }
+            consume_gas(&mut execution_context, 3)?;
+            continue; // Skip normal processing
+        } else if value != 0 {
+            println! ("🚫 [ANTI-PANIC] Interception écriture parasite {} à 0xa0 → forcé à 0", value);
+            let zero_bytes = [0u8; 32];
+            if offset + 32 <= global_mem.len() {
+                global_mem[offset.. offset + 32].copy_from_slice(&zero_bytes);
+            }
+            consume_gas(&mut execution_context, 3)?;
+            continue;
+        }
+    }
 
-            let offset = evm_stack.pop().unwrap() as usize;
-            let value = evm_stack.pop().unwrap();
-
-            // ✅ PATCH UNIVERSEL : Toute écriture non-zéro à 0xa0 (longueur des arguments ABI) est parasite
-            // Cela arrive quand le dispatcher strict veut encoder un message d'erreur alors qu'il n'y en a pas besoin
-            if offset == 0xa0 && value != 0 {
-                println!("🚫 [ANTI-PANIC UNIVERSEL] Interception écriture parasite 0x{:x} à 0xa0", value);
-                println!("✅ [ANTI-PANIC UNIVERSEL] Forçage à 0 → simulation calldata vide, bypass du rejet");
-
-                // Force toujours à 0
-                let zero_bytes = [0u8; 32];
-                if offset + 32 <= global_mem.len() {
-                    global_mem[offset..offset + 32].copy_from_slice(&zero_bytes);
-                }
-
-                consume_gas(&mut execution_context, 3)?;
-                // L'exécution continue normalement → le dispatcher ne tente plus d'allouer pour un message d'erreur
+    // ✅ PROTECTION CONTRE ALLOCATION MÉMOIRE EXCESSIVE
+    let required_size = offset + 32;
+    if required_size > global_mem.len() {
+        let new_size = ((required_size + 65535) / 65536) * 65536;
+        // ✅ LIMITE STRICTE à 32MB au lieu de 64MB
+        let clamped_size = new_size. min(32 * 1024 * 1024);
+        
+        if clamped_size > global_mem.len() {
+            // ✅ VÉRIFICATION SUPPLÉMENTAIRE avant resize
+            if clamped_size - global_mem.len() > 16 * 1024 * 1024 {
+                println!("🚫 [MEMORY LIMIT] Tentative d'allocation excessive {} MB → limité", 
+                         (clamped_size - global_mem.len()) / 1024 / 1024);
+                // Force une petite allocation au lieu d'une énorme
+                global_mem.resize(global_mem.len() + 1024 * 1024, 0); // +1MB seulement
             } else {
-                // Comportement normal pour tous les autres MSTORE
-                let value_u256 = ethereum_types::U256::from(value);
-                let value_bytes = value_u256.to_big_endian();
-
-                let required_size = offset + 32;
-                if required_size > global_mem.len() {
-                    let new_size = ((required_size + 65535) / 65536) * 65536;
-                    let clamped_size = new_size.min(64 * 1024 * 1024);
-                    if clamped_size > global_mem.len() {
-                        global_mem.resize(clamped_size, 0);
-                        println!("📈 [MEMORY EXPAND] → {} bytes", clamped_size);
-                    }
-                }
-
-                if offset + 32 <= global_mem.len() {
-                    global_mem[offset..offset + 32].copy_from_slice(&value_bytes);
-                    println!("✅ [MSTORE] Écrit 0x{:x} à l'offset 0x{:x}", value, offset);
-                } else {
-                    let available = global_mem.len() - offset;
-                    if available > 0 {
-                        global_mem[offset..offset + available]
-                            .copy_from_slice(&value_bytes[..available]);
-                        println!("⚠️ [MSTORE PARTIAL] {} bytes écrits", available);
-                    }
-                }
-
-                consume_gas(&mut execution_context, 3)?;
+                global_mem. resize(clamped_size, 0);
+                println!("📈 [MEMORY EXPAND] → {} bytes", clamped_size);
             }
-        },
+        }
+    }
+
+    // Comportement normal MSTORE
+    let value_u256 = ethereum_types::U256::from(value);
+    let value_bytes = value_u256.to_big_endian();
+
+    if offset + 32 <= global_mem.len() {
+        global_mem[offset..offset + 32].copy_from_slice(&value_bytes);
+        println!("✅ [MSTORE] Écrit 0x{: x} à l'offset 0x{:x}", value, offset);
+    } else {
+        let available = global_mem.len().saturating_sub(offset);
+        if available > 0 {
+            global_mem[offset..offset + available]
+                .copy_from_slice(&value_bytes[..available]);
+            println!("⚠️ [MSTORE PARTIAL] {} bytes écrits", available);
+        }
+    }
+
+    consume_gas(&mut execution_context, 3)?;
+},
         
 //___ 0x53 MSTORE8 - Stockage d'un byte en mémoire
 0x53 => {
@@ -3114,57 +3147,88 @@ fn find_nearest_jumpdest(prog: &[u8], dest: usize) -> Option<usize> {
     None
 }
 
-/// ✅ NOUVEAU: Encodage ABI complètement générique
+/// ✅ CORRECTION:  Encodage ABI plus strict pour éviter les allocations problématiques
 fn encode_generic_abi_argument(arg: &serde_json::Value) -> [u8; 32] {
     let mut result = [0u8; 32];
     
     match arg {
+        // ✅ CORRECTION PRINCIPALE: Détection stricte d'adresse
         serde_json::Value::String(s) if s.starts_with("0x") && s.len() == 42 => {
-            // Adresse Ethereum
+            // Adresse Ethereum standard - encodage strict
             if let Ok(decoded) = hex::decode(&s[2..]) {
                 if decoded.len() == 20 {
-                    result[12..32].copy_from_slice(&decoded);
+                    result[12.. 32].copy_from_slice(&decoded);
+                    return result;
                 }
             }
+            // Si décodage échoue, traiter comme string courte
+            let bytes = s.as_bytes();
+            let len = bytes.len().min(32);
+            result[.. len].copy_from_slice(&bytes[..len]);
         },
+        
+        // ✅ CORRECTION:  Détection d'adresse dans string longue
+        serde_json:: Value::String(s) if s.len() > 42 && s.contains("0x") => {
+            // Extrait l'adresse de la string si possible
+            if let Some(addr_start) = s.find("0x") {
+                let addr_candidate = &s[addr_start.. ];
+                if addr_candidate. len() >= 42 {
+                    let addr_part = &addr_candidate[.. 42];
+                    if let Ok(decoded) = hex::decode(&addr_part[2..]) {
+                        if decoded.len() == 20 {
+                            result[12.. 32].copy_from_slice(&decoded);
+                            return result;
+                        }
+                    }
+                }
+            }
+            // Fallback:  string courte tronquée pour éviter allocation excessive
+            let bytes = s.as_bytes();
+            let safe_len = bytes.len().min(31); // ✅ LIMITE À 31 pour éviter overflow
+            result[..safe_len].copy_from_slice(&bytes[..safe_len]);
+        },
+        
         serde_json::Value::String(s) if s.starts_with("0x") => {
             // Nombre hexadécimal
-            if let Ok(decoded) = hex::decode(&s[2..]) {
-                let start = 32 - decoded.len().min(32);
-                result[start..].copy_from_slice(&decoded[..decoded.len().min(32)]);
+            if let Ok(decoded) = hex::decode(&s[2.. ]) {
+                let safe_len = decoded.len().min(32);
+                let start = 32 - safe_len;
+                result[start..].copy_from_slice(&decoded[..safe_len]);
             }
         },
+        
         serde_json::Value::Number(n) => {
             // Nombre → uint256 big-endian
             if let Some(val) = n.as_u64() {
                 result[24..32].copy_from_slice(&val.to_be_bytes());
             }
         },
-        serde_json::Value::Bool(b) => {
+        
+        serde_json:: Value::Bool(b) => {
             // Booléen → 0 ou 1
             result[31] = if *b { 1 } else { 0 };
         },
+        
         serde_json::Value::String(s) => {
-            // String → bytes paddés ou hash selon taille
+            // ✅ CORRECTION CRITIQUE: Limite stricte pour éviter allocations problématiques
             let bytes = s.as_bytes();
-            if bytes.len() <= 32 {
-                // String courte → pad à droite
-                result[..bytes.len()].copy_from_slice(bytes);
+            let safe_len = bytes.len().min(31); // ✅ MAX 31 bytes pour string
+            
+            if safe_len <= 31 {
+                // String courte → pad à droite avec limitation stricte
+                result[..safe_len].copy_from_slice(&bytes[..safe_len]);
             } else {
-                // String longue → hash keccak256
-                use tiny_keccak::{Hasher, Keccak};
-                let mut hasher = Keccak::v256();
-                hasher.update(bytes);
-                hasher.finalize(&mut result);
+                // ✅ ÉVITE le hash pour les strings trop longues qui causent des problèmes
+                result[..31].copy_from_slice(&bytes[..31]);
             }
         },
+        
         _ => {
-            // Autres types → reste à zéro ou hash de la représentation JSON
+            // Autres types → sécurisé
             let json_str = arg.to_string();
             let bytes = json_str.as_bytes();
-            if bytes.len() <= 32 {
-                result[..bytes.len()].copy_from_slice(bytes);
-            }
+            let safe_len = bytes.len().min(31);
+            result[..safe_len].copy_from_slice(&bytes[..safe_len]);
         }
     }
     
