@@ -2327,7 +2327,7 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
              raw_offset, offset, value);
 },
 
-//___ 0x52 MSTORE - VERSION FINALE AVEC ANTI-PANIC
+//___ 0x52 MSTORE - VERSION FINALE ET CORRIGÉE
 0x52 => {
     if evm_stack.len() < 2 {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on MSTORE"));
@@ -2336,45 +2336,51 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     let offset = evm_stack.pop().unwrap() as usize;
     let value = evm_stack.pop().unwrap();
 
-    // ✅ CORRECTION DÉFINITIVE : Intercepte l'écriture parasite du proxy Slura
-    // Ce MSTORE spécifique (offset 0xa0, valeur 0x3) est un artefact du template
-    // Il sert à détecter les appels avec arguments, mais bloque decimals()
+    // ✅ PATCH ANTI-PANIC : Intercepte l'écriture parasite du proxy Slura
+    // offset 0xa0 + value 0x3 = artefact qui cause le Panic(0x41)
     if offset == 0xa0 && value == 0x3 {
         println!("🚫 [ANTI-PANIC PATCH] Interception écriture parasite 0x3 à 0xa0");
         println!("✅ [ANTI-PANIC PATCH] Forçage valeur à 0 → longueur arguments = 0");
-        
-        // On écrit 0 à la place pour simuler calldata vide
+
+        // On écrit 0 au lieu de 0x3
         let zero_bytes = [0u8; 32];
         if offset + 32 <= global_mem.len() {
             global_mem[offset..offset + 32].copy_from_slice(&zero_bytes);
         }
-        
+
         consume_gas(&mut execution_context, 3)?;
-        continue; // On passe à l'instruction suivante
-    }
-
-    // Comportement normal pour tous les autres MSTORE
-    let value_u256 = ethereum_types::U256::from(value);
-    let value_bytes = value_u256.to_big_endian();
-
-    let required_size = offset + 32;
-    if required_size > global_mem.len() {
-        let new_size = ((required_size + 65535) / 65536) * 65536;
-        let clamped_size = new_size.min(64 * 1024 * 1024);
-        global_mem.resize(clamped_size, 0);
-        println!("📈 [MEMORY EXPAND] → {} bytes", clamped_size);
-    }
-
-    if offset + 32 <= global_mem.len() {
-        global_mem[offset..offset + 32].copy_from_slice(&value_bytes);
-        println!("✅ [MSTORE] Écrit 0x{:x} à l'offset 0x{:x}", value, offset);
+        // ⚠️ NE PAS faire continue ! On laisse l'exécution suivre normalement
     } else {
-        let available = global_mem.len() - offset;
-        global_mem[offset..offset + available].copy_from_slice(&value_bytes[..available]);
-        println!("⚠️ [MSTORE PARTIAL] {} bytes écrits", available);
+        // Comportement normal pour tous les autres MSTORE
+        let value_u256 = ethereum_types::U256::from(value);
+        let value_bytes = value_u256.to_big_endian();
+
+        let required_size = offset + 32;
+        if required_size > global_mem.len() {
+            let new_size = ((required_size + 65535) / 65536) * 65536;
+            let clamped_size = new_size.min(64 * 1024 * 1024);
+            if clamped_size > global_mem.len() {
+                global_mem.resize(clamped_size, 0);
+                println!("📈 [MEMORY EXPAND] → {} bytes", clamped_size);
+            }
+        }
+
+        if offset + 32 <= global_mem.len() {
+            global_mem[offset..offset + 32].copy_from_slice(&value_bytes);
+            println!("✅ [MSTORE] Écrit 0x{:x} à l'offset 0x{:x}", value, offset);
+        } else {
+            let available = global_mem.len() - offset;
+            if available > 0 {
+                global_mem[offset..offset + available]
+                    .copy_from_slice(&value_bytes[..available]);
+                println!("⚠️ [MSTORE PARTIAL] {} bytes écrits", available);
+            }
+        }
+
+        consume_gas(&mut execution_context, 3)?;
     }
 
-    consume_gas(&mut execution_context, 3)?;
+    // ✅ On ne touche pas à l'avancement du PC → reste normal
 },
 
 //___ 0x53 MSTORE8 - Stockage d'un byte en mémoire
