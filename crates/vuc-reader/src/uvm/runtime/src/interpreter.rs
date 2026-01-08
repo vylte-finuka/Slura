@@ -2617,13 +2617,13 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
         0x60..=0x7f => {
             let push_size = (opcode - 0x60 + 1) as usize; // 1 à 32
             let start = insn_ptr + 1;
-            let end = (start + push_size).min(runtime_bytecode.len()); // sécurité
+            let end = (start + push_size).min(prog.len()); // sécurité
             
             let mut value = 0u64;
             
             // Lecture big-endian correcte
             for i in start..end {
-                value = (value << 8) | (runtime_bytecode[i] as u64);
+                value = (value << 8) | (prog[i] as u64);
             }
             
             evm_stack.push(value);
