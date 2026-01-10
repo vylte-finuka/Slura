@@ -937,10 +937,10 @@ pub fn execute_program(
 
     // ✅ CORRECTION DÉFINITIVE: Toujours utiliser calldata construite pour les fonctions view/pure
 let effective_mbuff = if interpreter_args.function_name.starts_with("function_") && args.args.is_empty() {
-    println!("🔧 [FORCE 68 BYTES] Fonction view/pure détectée → utilisation calldata 68 bytes");
-    &calldata
-} else if mbuff.is_empty() || mbuff.len() < 4 {
-    println!("🔧 [MBUFF CORRECTION] mbuff vide/court → utilise calldata");
+let effective_mbuff = if (interpreter_args.function_name.starts_with("function_") && interpreter_args.args.is_empty())
+    || mbuff.is_empty() || mbuff.len() < 4
+{
+    println!("🔧 [FORCE CALLDATA] view/pure ou mbuff insuffisant → on prend les 68+ bytes construits");
     &calldata
 } else {
     mbuff
