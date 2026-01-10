@@ -935,14 +935,16 @@ pub fn execute_program(
     // ✅ CONSTRUCTION CALLDATA UNIVERSELLE GÉNÉRIQUE
     let calldata = build_universal_calldata(interpreter_args);
 
-    // ✅ CORRECTION CRITIQUE: Utilise calldata au lieu de mbuff vide
-    let effective_mbuff = if mbuff.is_empty() || mbuff.len() < 4 {
-        // Si mbuff est vide ou trop court, utilise les calldata construites
-        println!("🔧 [MBUFF CORRECTION] mbuff vide/court → utilise calldata construites");
-        &calldata
-    } else {
-        mbuff
-    };
+    // ✅ CORRECTION DÉFINITIVE: Toujours utiliser calldata construite pour les fonctions view/pure
+let effective_mbuff = if interpreter_args.function_name.starts_with("function_") && args.args.is_empty() {
+    println!("🔧 [FORCE 68 BYTES] Fonction view/pure détectée → utilisation calldata 68 bytes");
+    &calldata
+} else if mbuff.is_empty() || mbuff.len() < 4 {
+    println!("🔧 [MBUFF CORRECTION] mbuff vide/court → utilise calldata");
+    &calldata
+} else {
+    mbuff
+};
 
     println!("📡 [CALLDATA UNIVERSEL] Construit automatiquement {} bytes", calldata.len());
     println!("📡 [MBUFF EFFECTIF] Utilise {} bytes", effective_mbuff.len());
