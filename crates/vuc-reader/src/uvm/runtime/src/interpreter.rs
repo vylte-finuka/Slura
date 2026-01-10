@@ -279,46 +279,24 @@ fn build_universal_calldata(args: &InterpreterArgs) -> Vec<u8> {
         (hasher.finish() as u32)
     };
 
-    // Selector en premier (4 bytes) - TOUJOURS présent
+    // Selector en premier (4 bytes)
     calldata.extend_from_slice(&selector.to_be_bytes());
 
     println!("🎯 [FUNCTION SELECTOR] {} → 0x{:08x}", args.function_name, selector);
 
-    // ✅ SOLUTION SPÉCIALE: Pour les contrats buggés, on doit avoir une longueur énorme
-    if args.args.is_empty() {
-        if args.function_name.starts_with("function_") {
-            // ✅ WORKAROUND: Ajoute assez de données pour que la validation bizarre passe
-            // Le contrat vérifie: 0xffffffffffffffff > longueur_données
-            // Pour que ce soit FALSE, il faut que longueur_données >= 0xffffffffffffffff
-            
-            // Mais comme on ne peut pas avoir une vraie longueur de 18+ exabytes,
-            // on triche en modifiant ce que MLOAD(0xa0) va retourner
-            println!("🔧 [BUG WORKAROUND] Contrat avec validation inversée détecté");
-            println!("📡 [FUNCTION_* WORKAROUND] {} bytes calldata (selector + padding)", calldata.len());
-        } else {
-            println!("📡 [CALLDATA STANDARD] Fonction normale → calldata = EXACTEMENT {} bytes ✅", calldata.len());
-        }
+    // ✅ WORKAROUND UNIVERSEL POUR TOUTES LES FONCTIONS VIEW/PURE SANS PARAMÈTRES
+    if args.args.is_empty() && args.function_name.starts_with("function_") {
+        // Force 68 bytes → 4 selector + 64 padding
+        calldata.resize(68, 0u8);
+        println!("🔧 [VIEW FUNCTION WORKAROUND] Calldata forcé à 68 bytes (selector + 64 padding)");
+        println!("📡 [CALLDATA UNIVERSEL] 68 bytes pour éviter stack underflow sur DUP1");
         return calldata;
     }
 
-    // Pour les fonctions avec arguments, encoder selon l'ABI EVM standard
-    for (i, arg) in args.args.iter().enumerate() {
-        match arg {
-            serde_json::Value::String(s) if s.len() > 100 => {
-                println!("⚠️ [CALLDATA WARNING] Argument {} trop long ({} chars) → tronqué", i, s.len());
-                let safe_arg = if s.starts_with("0x") && s.len() > 42 {
-                    serde_json::Value::String(s[..42].to_string())
-                } else {
-                    serde_json::Value::String(s[..s.len().min(50)].to_string())
-                };
-                let encoded = encode_generic_abi_argument(&safe_arg);
-                calldata.extend_from_slice(&encoded);
-            },
-            _ => {
-                let encoded = encode_generic_abi_argument(arg);
-                calldata.extend_from_slice(&encoded);
-            }
-        }
+    // Pour les fonctions avec arguments → ABI standard
+    for arg in &args.args {
+        let encoded = encode_generic_abi_argument(arg);
+        calldata.extend_from_slice(&encoded);
     }
 
     println!("📡 [CALLDATA FINAL] Avec arguments → {} bytes", calldata.len());
