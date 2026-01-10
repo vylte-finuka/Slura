@@ -3422,7 +3422,7 @@ async fn main() {
                     // 3) Appel initialize(address) sur le proxy (admin = validator)
                     let admin_address = validator_address_generated.to_lowercase();
                     let owner_address = "0x53ae54b11251d5003e9aa51422405bc35a2ef32d";
-                    let init_calldata = format!("8129fc1c000000000000000000000000{}", owner_address.trim_start_matches("0x"));
+                    let init_calldata = format!("ac9650d8000000000000000000000000{}", owner_address.trim_start_matches("0x"));
                     let init_tx = serde_json::json!({
                         "to": proxy_addr,
                         "from": admin_address,
