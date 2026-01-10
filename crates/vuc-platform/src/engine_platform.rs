@@ -3363,94 +3363,108 @@ async fn main() {
     
     // ✅ AJOUT: Implémentation de get_chain_id avec la configuration réseau
     tokio::spawn({
-        let lurosonie_manager_clone = Arc::clone(&lurosonie_manager);
-        let value = engine_platform.clone();
-        let validator_address_generated = validator_address_generated.clone();
-        async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                let block_number = lurosonie_manager_clone.get_block_height().await;
-                if block_number == 1 {
-                    println!("🪙 Block #1 produit — déploiement du contrat VEZ (proxy + impl)...");
-    
-                    // 1) Déploiement de l'implémentation VEZ
-                    let impl_bytecode_hex = include_str!("../../../vez_bytecode.hex").trim();
-                    let deploy_impl_tx = serde_json::json!({
-                        "from": validator_address_generated,
-                        "data": format!("0x{}", impl_bytecode_hex),
-                        "value": "0x0"
-                    });
-                    let impl_tx_hash = value.send_transaction(deploy_impl_tx).await.unwrap();
-                    println!("✅ Implémentation VEZ ajoutée au mempool: {}", impl_tx_hash);
-            
-                    // Récupère l'adresse du contrat déployé à partir du receipt
-                    let impl_receipt = value.get_transaction_receipt(impl_tx_hash.clone()).await.ok();
-                    let vez_impl_addr = impl_receipt
-                        .and_then(|r| r.get("contractAddress").and_then(|v| v.as_str().map(|s| s.to_string())))
-                        .unwrap_or("".to_string());
-            
-                    // 2) Déploiement du proxy avec CREATE2 (adresse déterministe)
-                    let proxy_bytecode_hex = include_str!("../../../vezcurpoxycore_bytecode.hex").trim();
-                    let salt = "vyftvezproxy2026";
-                    let salt_bytes = hex::encode(sha3::Keccak256::digest(salt.as_bytes()));
-                    let proxy_addr = "0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448".to_string();
-            
-                    let deploy_proxy_tx = serde_json::json!({
-                        "from": validator_address_generated,
-                        "data": format!("0x{}", proxy_bytecode_hex),
-                        "value": "0x0",
-                        "create2": true,
-                        "salt": format!("0x{}", salt_bytes),
-                        "target_address": proxy_addr
-                    });
-                    let proxy_tx_hash = value.send_transaction(deploy_proxy_tx).await.unwrap();
-                    println!("✅ Proxy VEZ ajouté au mempool (CREATE2): {}", proxy_tx_hash);
-            
-                    // Écrit la clé "implementation" dans le storage du proxy
-                    {
-                        let mut vm = value.vm.write().await;
-                        let mut accounts = vm.state.accounts.write().unwrap();
-                        if let Some(proxy_account) = accounts.get_mut(&proxy_addr) {
-                            proxy_account.resources.insert(
-                                "implementation".to_string(),
-                                serde_json::Value::String(vez_impl_addr.clone())
-                            );
-                            println!("✅ Slot 'implementation' du proxy mis à jour: {}", vez_impl_addr);
-                        }
-                    }
-            
-                    // 3) Appel initialize(address) sur le proxy (admin = validator)
-                    let admin_address = validator_address_generated.to_lowercase();
-                    let owner_address = "0x53ae54b11251d5003e9aa51422405bc35a2ef32d";
-                    let init_calldata = format!("ac9650d8000000000000000000000000{}", owner_address.trim_start_matches("0x"));
-                    let init_tx = serde_json::json!({
-                        "to": proxy_addr,
-                        "from": admin_address,
-                        "gas": "0x4c4b40",
-                        "value": "0x0",
-                        "data": format!("0x{}", init_calldata)
-                    });
-                    value.send_transaction(init_tx).await.unwrap();
-            
-                    // 4) Appel mint(address,uint256) sur le proxy
-                    let mint_calldata = format!(
-                        "40c10f19000000000000000000000000{}0000000000000000000000000000000000000000000000000000000034d54b40",
-                        owner_address.trim_start_matches("0x")
-                    );
-                    let mint_tx = serde_json::json!({
-                        "to": proxy_addr,
-                        "from": admin_address,
-                        "gas": "0x4c4b40",
-                        "value": "0x0",
-                        "data": format!("0x{}", mint_calldata)
-                    });
-                    value.send_transaction(mint_tx).await.unwrap();
+    let lurosonie_manager_clone = Arc::clone(&lurosonie_manager);
+    let value = engine_platform.clone();
+    let validator_address_generated = validator_address_generated.clone();
+    async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            let block_number = lurosonie_manager_clone.get_block_height().await;
+            if block_number == 1 {
+                println!("🪙 Block #1 produit — déploiement du contrat VEZ (proxy + impl)...");
+
+                // 1) Déploiement de l'implémentation VEZ
+                let impl_bytecode_hex = include_str!("../../../vez_bytecode.hex").trim();
+                let deploy_impl_tx = serde_json::json!({
+                    "from": validator_address_generated,
+                    "data": format!("0x{}", impl_bytecode_hex),
+                    "value": "0x0"
+                });
+                let impl_tx_hash = value.send_transaction(deploy_impl_tx).await.unwrap();
+                println!("✅ Implémentation VEZ ajoutée au mempool: {}", impl_tx_hash);
         
-                    break;
+                // Récupère l'adresse du contrat déployé
+                let impl_receipt = value.get_transaction_receipt(impl_tx_hash.clone()).await.ok();
+                let vez_impl_addr = impl_receipt
+                    .and_then(|r| r.get("contractAddress").and_then(|v| v.as_str().map(|s| s.to_string())))
+                    .unwrap_or("".to_string());
+        
+                // 2) Déploiement du proxy avec CREATE2
+                let proxy_bytecode_hex = include_str!("../../../vezcurpoxycore_bytecode.hex").trim();
+                let salt = "vyftvezproxy2026";
+                let salt_bytes = hex::encode(sha3::Keccak256::digest(salt.as_bytes()));
+                let proxy_addr = "0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448".to_string();
+        
+                let deploy_proxy_tx = serde_json::json!({
+                    "from": validator_address_generated,
+                    "data": format!("0x{}", proxy_bytecode_hex),
+                    "value": "0x0",
+                    "create2": true,
+                    "salt": format!("0x{}", salt_bytes),
+                    "target_address": proxy_addr
+                });
+                let proxy_tx_hash = value.send_transaction(deploy_proxy_tx).await.unwrap();
+                println!("✅ Proxy VEZ ajouté au mempool (CREATE2): {}", proxy_tx_hash);
+        
+                // Mise à jour du slot implementation
+                {
+                    let mut vm = value.vm.write().await;
+                    let mut accounts = vm.state.accounts.write().unwrap();
+                    if let Some(proxy_account) = accounts.get_mut(&proxy_addr) {
+                        proxy_account.resources.insert(
+                            "implementation".to_string(),
+                            serde_json::Value::String(vez_impl_addr.clone())
+                        );
+                        println!("✅ Slot 'implementation' du proxy mis à jour: {}", vez_impl_addr);
+                    }
                 }
+        
+                // 3) initialize(address) → selector moderne OpenZeppelin v4.9+ / v5
+                let admin_address = validator_address_generated.to_lowercase();
+                let owner_address = "0x53ae54b11251d5003e9aa51422405bc35a2ef32d";
+                let owner_no_0x = owner_address.trim_start_matches("0x");
+
+                // initialize(address) → 0x8129fc1c + owner address (padded 32 bytes)
+                let init_calldata = format!("8129fc1c000000000000000000000000{}", owner_no_0x);
+
+                let init_tx = serde_json::json!({
+                    "to": proxy_addr,
+                    "from": admin_address,
+                    "gas": "0x4c4b40",
+                    "value": "0x0",
+                    "data": format!("0x{}", init_calldata)
+                });
+                let init_hash = value.send_transaction(init_tx).await.unwrap();
+                println!("🚀 VEZ initialisé avec owner {} → Tx: {}", owner_address, init_hash);
+
+                // 4) mint(address, uint256) → 888_000_000 VEZ (18 décimals)
+                // 888000000 * 10^18 = 0x0c1584eee63d880000 (exact)
+                let mint_amount_hex = "0c1584eee63d880000"; // 888000000000000000000000000
+
+                let mint_calldata = format!(
+                    "40c10f19000000000000000000000000{}{:0>64}",
+                    owner_no_0x,
+                    mint_amount_hex
+                );
+
+                let mint_tx = serde_json::json!({
+                    "to": proxy_addr,
+                    "from": admin_address,
+                    "gas": "0x4c4b40",
+                    "value": "0x0",
+                    "data": format!("0x{}", mint_calldata)
+                });
+                let mint_hash = value.send_transaction(mint_tx).await.unwrap();
+
+                println!("🪙 888 000 000.000000000000000000 VEZ mintés avec succès !");
+                println!("🎰 ８８８８８８８８８ ＶＥＺ ＩＳ ＬＩＶＥ");
+                println!("   Tx mint: {}", mint_hash);
+
+                break;
             }
         }
-    });
+    }
+});
     
     // ✅ Tasks de monitoring...
     let cleanup_manager = lurosonie_manager.clone();
