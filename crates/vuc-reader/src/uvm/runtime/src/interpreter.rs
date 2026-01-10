@@ -935,12 +935,14 @@ pub fn execute_program(
     // ✅ CONSTRUCTION CALLDATA UNIVERSELLE GÉNÉRIQUE
     let calldata = build_universal_calldata(interpreter_args);
 
-    // ✅ CORRECTION DÉFINITIVE: Toujours utiliser calldata construite pour les fonctions view/pure
-let effective_mbuff = if interpreter_args.function_name.starts_with("function_") && interpreter_args.args.is_empty() {
-    println!("🔧 [FORCE 68 BYTES] Fonction view/pure détectée → utilisation calldata 68 bytes");
+// ██████████████████████████████████████████████████████████████
+// FIX UNIVERSEL – TOUTES les fonctions EVM (view + mutables) passent
+// ██████████████████████████████████████████████████████████████
+let effective_mbuff = if interpreter_args.function_name.starts_with("function_") {
+    println!("🔥 [UNIVERSAL FIX] Fonction EVM détectée ({}) → force calldata construite", interpreter_args.function_name);
     &calldata
 } else if mbuff.is_empty() || mbuff.len() < 4 {
-    println!("🔧 [MBUFF CORRECTION] mbuff vide/court → utilise calldata");
+    println!("🔧 [MBUFF VIDE] → force calldata construite");
     &calldata
 } else {
     mbuff
@@ -1085,8 +1087,7 @@ println!("📏 [FINAL FIX] CALLDATASIZE = {} bytes poussé sur la pile → DUP1 
 println!("🟢 [EVM INIT] Pile EVM vide, mémoire initialisée");
 
 // ✅ Registres UVM compatibles EVM
-reg[0] = 0; // Accumulator
-reg[1] = effective_mbuff.len() as u64; // Calldata size  
+reg[0] = 0; // Accumulator 
 reg[8] = 0; // Memory base offset
 
 // ✅ Configuration spéciale pour contrats Slura (proxy UUPS)
