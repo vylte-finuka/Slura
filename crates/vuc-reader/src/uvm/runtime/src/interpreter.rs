@@ -2553,66 +2553,19 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
 
 //___ 0xf3 RETURN - DÉTECTION INTELLIGENTE DES VALEURS DE FONCTION
 0xf3 => {
-    if evm_stack.len() < 2 {
-        return Err(Error::new(ErrorKind::Other, "STACK underflow on RETURN"));
-    }
-
-    let len = evm_stack.pop().unwrap() as usize;
     let offset = evm_stack.pop().unwrap() as usize;
-
-    println!("📤 [RETURN] len={}, offset=0x{:x}", len, offset);
-
-    // ✅ DÉTECTE RETOUR DE FONCTION (32 bytes depuis mémoire)
-    if len == 32 && offset < global_mem.len() {
-        let mut return_bytes = [0u8; 32];
-        if offset + 32 <= global_mem.len() {
-            return_bytes.copy_from_slice(&global_mem[offset..offset + 32]);
-        }
-        
-        let return_value = u256::from_big_endian(&return_bytes);
-        let return_u64 = return_value.low_u64();
-        
-        // ✅ IDENTIFIE LES VALEURS TYPIQUES DE FONCTIONS ERC20
-        let function_result = match return_u64 {
-            18 => JsonValue::Number(18.into()), // decimals()
-            value if value > 0 && value < 1_000_000 => JsonValue::Number(value.into()),
-            _ => JsonValue::String(format!("0x{}", hex::encode(&return_bytes))),
-        };
-
-        let final_storage = execution_context.world_state.storage
-            .get(&interpreter_args.contract_address)
-            .cloned()
-            .unwrap_or_default();
-
-        let mut result = serde_json::Map::new();
-        result.insert("return".to_string(), function_result);
-        result.insert("storage".to_string(), JsonValue::Object(decode_storage_map(&final_storage)));
-
-        println!("✅ [FUNCTION RETURN] Valeur détectée: {:?}", result.get("return"));
-        return Ok(JsonValue::Object(result));
-    }
-
-    // ✅ CAS GÉNÉRAL (déploiement, etc.)
-    let mut ret_data = vec![0u8; len];
-    if len > 0 && offset + len <= global_mem.len() {
-        ret_data.copy_from_slice(&global_mem[offset..offset + len]);
-    }
-
-    let formatted_result = decode_return_data_generic(&ret_data, len);
+    let len = evm_stack.pop().unwrap() as usize;
     
-    let final_storage = execution_context.world_state.storage
-        .get(&interpreter_args.contract_address)
-        .cloned()
-        .unwrap_or_default();
-
-    let mut result = serde_json::Map::new();
-    result.insert("return".to_string(), formatted_result);
-    result.insert("storage".to_string(), JsonValue::Object(decode_storage_map(&final_storage)));
-
-    println!("✅ [RETURN] Données: {:?}", result.get("return"));
-    return Ok(JsonValue::Object(result));
-},
-
+    // ✅ Pour decimals(), len devrait être 32 bytes (normal pour uint256)
+    if len == 32 && offset < global_mem.len() {
+        let return_data = global_mem[offset..offset + 32].to_vec();
+        // Le dernier byte devrait être 18 (0x12)
+        execution_context.return_data = return_data;
+    }
+    
+    return Ok(execution_context);
+}
+        
 //___ 0xfd REVERT - CORRECTION ORDRE FINAL DÉFINITIF
 0xfd => {
     if evm_stack.len() < 2 {
