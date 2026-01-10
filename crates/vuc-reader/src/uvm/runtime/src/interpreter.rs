@@ -1074,11 +1074,15 @@ reg[54] = interpreter_args.call_depth as u64;           // Profondeur d'appel
 
     let mut pc: usize = 0;
     let mut evm_stack: Vec<u64> = Vec::with_capacity(1024);
+// FIX FINAL – calldata size sur la pile pour TOUTES les fonctions EVM
+evm_stack.push(effective_mbuff.len() as u64);
+reg[1] = effective_mbuff.len() as u64;
+println!("📏 [FINAL FIX] CALLDATASIZE = {} bytes poussé sur la pile → DUP1 sauvé", effective_mbuff.len());
     let mut natural_exit_detected = false;
     let mut exit_value = 0u64;
 
 // ✅ SUPPRIME COMPLÈTEMENT l'initialisation spéciale
-println!("🟢 [EVM INIT] Pile EVM vide, mémoire initialisée à 256MB");
+println!("🟢 [EVM INIT] Pile EVM vide, mémoire initialisée");
 
 // ✅ Registres UVM compatibles EVM
 reg[0] = 0; // Accumulator
