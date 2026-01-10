@@ -1803,8 +1803,9 @@ pub fn execute_module(
             .unwrap_or(1);
 
         // ✅ CALDATA ABI 100% CORRECT ET GÉNÉRIQUE (selector UNE SEULE FOIS)
-        let mut calldata = Vec::with_capacity(4 + args.len() * 32);
-        calldata.extend_from_slice(&function_meta.selector.to_be_bytes()); // UNE SEULE FOIS
+        let min_calldata_len = if args.is_empty() { 68 } else { 4 + args.len() * 32 };
+    let mut calldata = vec![0u8; min_calldata_len.max(68)]; // force au moins 68 bytes
+    calldata[0..4].copy_from_slice(&function_meta.selector.to_be_bytes());
 
         for arg in &args {
             match arg {
