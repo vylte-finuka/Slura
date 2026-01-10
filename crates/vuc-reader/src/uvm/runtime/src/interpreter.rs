@@ -1114,10 +1114,10 @@ if prog.len() > 100 && prog[0] == 0x60 && prog[2] == 0x60 && prog[4] == 0x52 {
 
     let debug_evm = true;
     
-    // SUPPRIME la logique de function_offset spécialisée
-    let mut insn_ptr: usize = 0; // Commence TOUJOURS à 0x0000 selon le désassemblage
+        let starting_pc = interpreter_args.function_offset.unwrap_or(0);
+    let mut insn_ptr: usize = starting_pc; // ⬅️ UTILISE L'OFFSET AU LIEU DE 0
 
-println!("🚀 [DÉMARRAGE] PC=0x{:04x}, objectif: suivre le flux 0x0000 → 0x00cf → 0x03ed", insn_ptr);
+println!("🚀 [DÉMARRAGE] PC=0x{:04x}", insn_ptr);
 
 // ✅ Configuration pour bien suivre le flux du contrat VEZ
 if prog.len() > 100 {

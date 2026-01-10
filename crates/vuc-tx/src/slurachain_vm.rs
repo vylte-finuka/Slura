@@ -1343,38 +1343,6 @@ fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<us
         }
     }
     
-    // ✅ PHASE 2: Si pas trouvé directement, analyse tous les PUSH2 + JUMPI dans dispatcher
-    println!("🔍 [FALLBACK] Analyse des sauts dans le dispatcher...");
-    
-    let mut jump_destinations = Vec::new();
-    for pos in dispatcher_start..len.saturating_sub(3) {
-        if bytecode[pos] == 0x61 && // PUSH2
-           pos + 3 < len &&
-           bytecode[pos + 3] == 0x57 { // JUMPI
-            
-            let offset = ((bytecode[pos + 1] as usize) << 8) | (bytecode[pos + 2] as usize);
-            if offset < len && offset > dispatcher_start && offset < 0x2000 {
-                jump_destinations.push(offset);
-                println!("📍 [JUMP DEST] Destination trouvée: 0x{:04x}", offset);
-            }
-        }
-    }
-    
-    // Trie les destinations et prend une basée sur le hash du sélecteur
-    if !jump_destinations.is_empty() {
-        jump_destinations.sort();
-        jump_destinations.dedup();
-        
-        // Utilise un hash simple du sélecteur pour choisir une destination
-        let selector_hash = (selector.wrapping_mul(0x9E3779B9) >> 24) as usize;
-        let chosen_index = selector_hash % jump_destinations.len();
-        let chosen_offset = jump_destinations[chosen_index];
-        
-        println!("🎯 [HASH SELECT] 0x{:08x} → offset 0x{:04x} (index {} de {})", 
-               selector, chosen_offset, chosen_index, jump_destinations.len());
-        return Some(chosen_offset);
-    }
-    
     println!("❌ [NOT FOUND] Sélecteur 0x{:08x} non résolu dynamiquement", selector);
     None
 }
@@ -1499,7 +1467,64 @@ fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<us
         }
     }
 
- /// ✅ EXÉCUTION STRICTE avec validation obligatoire - CORRECTION DES EMPRUNTS
+     /// ✅ NOUVEAU: Détection intelligente des contrats proxy
+    fn is_proxy_contract(&self, contract_address: &str) -> bool {
+        if let Ok(accounts) = self.state.accounts.read() {
+            if let Some(account) = accounts.get(contract_address) {
+                // ✅ Vérifie les patterns de proxy standards
+                return account.resources.contains_key("implementation") ||
+                       account.resources.contains_key("admin") ||
+                       account.resources.contains_key("beacon") ||
+                       account.resources.contains_key(ERC1967_IMPLEMENTATION_SLOT) ||
+                       account.resources.contains_key(ERC1967_ADMIN_SLOT) ||
+                       account.resources.contains_key(ERC1967_BEACON_SLOT);
+            }
+        }
+        false
+    }
+    
+    /// ✅ NOUVEAU: Récupération intelligente de l'adresse d'implémentation
+    fn get_implementation_address(&self, proxy_address: &str) -> Option<String> {
+        if let Ok(accounts) = self.state.accounts.read() {
+            if let Some(account) = accounts.get(proxy_address) {
+                // ✅ Recherche dans l'ordre de priorité
+                let implementation_keys = [
+                    "implementation",
+                    ERC1967_IMPLEMENTATION_SLOT,
+                    "logic",
+                    "target",
+                    "masterCopy"
+                ];
+                
+                for key in &implementation_keys {
+                    if let Some(impl_value) = account.resources.get(*key) {
+                        if let Some(impl_str) = impl_value.as_str() {
+                            let cleaned = impl_str.trim();
+                            if !cleaned.is_empty() && 
+                               cleaned != "0x0000000000000000000000000000000000000000" &&
+                               cleaned != "0x0" {
+                                println!("✅ [PROXY] Implémentation trouvée via clé '{}': {}", key, cleaned);
+                                return Some(cleaned.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+    
+    /// ✅ NOUVEAU: Validation de l'adresse d'implémentation
+    fn validate_implementation_address(&self, impl_address: &str) -> bool {
+        if let Ok(accounts) = self.state.accounts.read() {
+            if let Some(impl_account) = accounts.get(impl_address) {
+                return impl_account.is_contract && !impl_account.contract_state.is_empty();
+            }
+        }
+        false
+    }
+
+/// ✅ EXÉCUTION STRICTE avec bytecode réel - CORRECTION MAJEURE POUR PROXY
 pub fn execute_module(
     &mut self,
     module_path: &str,
@@ -1510,103 +1535,95 @@ pub fn execute_module(
     let vyid = Self::extract_address(module_path);
     let sender = sender_vyid.unwrap_or("*system*#default#");
     
-    println!("🎯 [STRICT EXECUTION] Contrat: {}, Fonction: {}", vyid, function_name);
+    println!("🎯 [REAL BYTECODE EXECUTION] Contrat: {}, Fonction: {}", vyid, function_name);
     
-    // ✅ Vérification de l'existence du contrat
-    let (is_contract, bytecode_opt) = {
+    // ✅ ÉTAPE CRUCIALE : RÉCUPÈRE LE BYTECODE RÉEL du contrat
+    let real_bytecode = {
         let accounts = self.state.accounts.read()
             .map_err(|e| format!("Erreur lecture accounts: {}", e))?;
+        
         if let Some(account) = accounts.get(vyid) {
-            (account.is_contract && !account.contract_state.is_empty(), 
-             Some(account.contract_state.clone()))
+            if account.is_contract && !account.contract_state.is_empty() {
+                account.contract_state.clone() // ✅ BYTECODE RÉEL
+            } else {
+                return Err(format!("Contrat {} sans bytecode réel", vyid));
+            }
         } else {
             return Err(format!("Contrat {} non trouvé", vyid));
         }
     };
     
-    if !is_contract {
-        return Err(format!("Adresse {} n'est pas un contrat déployé", vyid));
-    }
-    
-    let bytecode = bytecode_opt.ok_or_else(|| format!("Aucun bytecode pour {}", vyid))?;
-    
-    // ✅ AUTO-DÉTECTION OBLIGATOIRE si le module n'existe pas
-    if !self.modules.contains_key(vyid) {
-        self.auto_detect_contract_functions(vyid, &bytecode)?;
-    }
-    
-    let module = self.modules.get(vyid)
-        .ok_or_else(|| format!("Impossible de détecter les fonctions du contrat {}", vyid))?
-        .clone();
+    println!("✅ [REAL BYTECODE] Chargé {} bytes de bytecode réel pour {}", real_bytecode.len(), vyid);
     
     // ✅ CALCUL DU SÉLECTEUR
     let selector = Self::calculate_function_selector_from_signature(function_name, &args);
     
-    // ✅ RECHERCHE STRICTE de la fonction
-    let function_meta = self.find_or_create_function_metadata(vyid, function_name, selector, &args)?;
-    
-    // ✅ RÉSOLUTION STRICTE DE L'OFFSET - AUCUN FALLBACK
-    let resolved_offset = Self::find_function_offset_in_bytecode(&module.bytecode, function_meta.selector)
-        .ok_or_else(|| format!(
-            "Fonction '{}' (sélecteur 0x{:08x}) introuvable dans le bytecode. \
-            Le contrat ne contient pas cette fonction ou le bytecode est corrompu.",
-            function_name, function_meta.selector
-        ))?;
-    
-    println!("🎯 [EXECUTION] Fonction {} trouvée à l'offset 0x{:04x}", function_name, resolved_offset);
-    
-    // ✅ Gestion proxy
+    // ✅ 🔥 NOUVEAU: DÉTECTION PROXY ET UTILISATION DU BYTECODE DE L'IMPLÉMENTATION
     let impl_addr_opt = {
         let accounts = self.state.accounts.read()
             .map_err(|e| format!("Erreur lecture accounts proxy: {}", e))?;
         accounts.get(vyid)
             .and_then(|acc| acc.resources.get("implementation"))
             .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty() && *s != "0x0000000000000000000000000000000000000000")
             .map(|s| s.to_string())
     };
-        
+    
     if let Some(impl_addr) = impl_addr_opt {
-        println!("🧩 [PROXY] Delegatecall vers impl {} pour {}", impl_addr, function_name);
+        println!("🧩 [PROXY DETECTED] Proxy {} délègue vers implémentation {}", vyid, impl_addr);
+        println!("🔍 [PROXY STRATEGY] Utilise le bytecode de l'implémentation pour la recherche de fonctions");
         
-        // Auto-détection de l'implémentation si nécessaire
-        if !self.modules.contains_key(&impl_addr) {
+        // ✅ RÉCUPÈRE LE BYTECODE RÉEL DE L'IMPLÉMENTATION
+        let impl_real_bytecode = {
             let impl_accounts = self.state.accounts.read()
                 .map_err(|e| format!("Erreur lecture accounts impl: {}", e))?;
             if let Some(impl_account) = impl_accounts.get(&impl_addr) {
                 if !impl_account.contract_state.is_empty() {
-                    // ✅ Clone le bytecode pour éviter les emprunts
-                    let impl_bytecode = impl_account.contract_state.clone();
-                    drop(impl_accounts); // Libère le lock avant l'appel mutable
-                    self.auto_detect_contract_functions(&impl_addr, &impl_bytecode)?;
+                    impl_account.contract_state.clone()
+                } else {
+                    return Err(format!("Implémentation {} sans bytecode réel", impl_addr));
                 }
+            } else {
+                return Err(format!("Implémentation {} non trouvée", impl_addr));
             }
+        };
+        
+        println!("✅ [IMPL BYTECODE] Chargé {} bytes de bytecode d'implémentation", impl_real_bytecode.len());
+        
+        // ✅ 🔥 CRITIQUE: Auto-détection avec le bytecode de l'implémentation
+        if !self.modules.contains_key(&impl_addr) {
+            println!("🔄 [IMPL AUTO-DETECT] Analyse du bytecode d'implémentation ({} bytes)", impl_real_bytecode.len());
+            self.auto_detect_contract_functions(&impl_addr, &impl_real_bytecode)?;
         }
         
-        // ✅ CORRECTION COMPLÈTE: Sépare complètement les emprunts
-        let impl_module_clone = {
-            if let Some(impl_module) = self.modules.get(&impl_addr) {
-                impl_module.clone()
-            } else {
-                return Err(format!("Module d'implémentation {} non trouvé", impl_addr));
-            }
-        }; // ✅ L'emprunt immutable se termine ici
-        
-        // ✅ Maintenant on peut faire l'emprunt mutable en toute sécurité
+        // ✅ 🔥 RECHERCHE DE LA FONCTION DANS LE BYTECODE DE L'IMPLÉMENTATION
         let impl_function_meta = self.find_or_create_function_metadata(&impl_addr, function_name, selector, &args)?;
         
-        let impl_resolved_offset = Self::find_function_offset_in_bytecode(&impl_module_clone.bytecode, impl_function_meta.selector)
+        // ✅ 🔥 UTILISE LE BYTECODE DE L'IMPLÉMENTATION POUR FIND_FUNCTION_OFFSET
+        println!("🔍 [IMPL OFFSET SEARCH] Recherche offset pour {} dans bytecode d'implémentation", function_name);
+        let impl_resolved_offset = Self::find_function_offset_in_bytecode(&impl_real_bytecode, impl_function_meta.selector)
             .ok_or_else(|| format!(
-                "Fonction '{}' introuvable dans l'implémentation {}",
-                function_name, impl_addr
+                "Fonction '{}' (sélecteur 0x{:08x}) introuvable dans le bytecode d'implémentation {} ({} bytes). \
+                L'implémentation ne contient pas cette fonction.",
+                function_name, impl_function_meta.selector, impl_addr, impl_real_bytecode.len()
             ))?;
         
+        println!("🎯 [IMPL EXECUTION] Fonction {} trouvée à l'offset 0x{:04x} dans bytecode d'implémentation", 
+                 function_name, impl_resolved_offset);
+        
+        // ✅ EXÉCUTION AVEC CONTEXTE PROXY (storage du proxy) MAIS BYTECODE DE L'IMPLÉMENTATION
         let interpreter_args = self.prepare_generic_execution_args(
-            vyid, function_name, args.clone(), sender, &impl_function_meta, impl_resolved_offset
+            vyid, // ✅ GARDE L'ADRESSE DU PROXY pour le contexte de storage
+            function_name, 
+            args.clone(), 
+            sender, 
+            &impl_function_meta, 
+            impl_resolved_offset
         )?;
         
+        // ✅ STORAGE DU PROXY (pas de l'implémentation)
         let initial_storage = self.build_dynamic_storage_from_contract_state(vyid)?;
         
-        // ✅ PROTECTION REENTRANCY avec scope limité
         let result = {
             let _guard = self.global_execution_lock.lock()
                 .map_err(|e| format!("Erreur acquisition lock global: {}", e))?;
@@ -1614,30 +1631,62 @@ pub fn execute_module(
             let mut interpreter = self.interpreter.lock()
                 .map_err(|e| format!("Erreur lock interpréteur: {}", e))?;
             
+            // ✅ 🔥 CRUCIAL: UTILISE LE BYTECODE DE L'IMPLÉMENTATION !
             interpreter.execute_program(
-                &impl_module_clone.bytecode,
+                &impl_real_bytecode, // ✅ BYTECODE DE L'IMPLÉMENTATION !
                 &interpreter_args,
-                impl_module_clone.stack_usage.as_ref(),
+                None, // stack_usage de l'implémentation
                 self.state.accounts.clone(),
                 Some(&impl_function_meta.return_type),
-                initial_storage,
+                initial_storage, // ✅ MAIS STORAGE DU PROXY !
             ).map_err(|e| e.to_string())?
-        }; // ✅ Guard libéré ici
+        };
         
-        // ✅ Post-processing APRÈS libération du lock
+        // ✅ POST-TRAITEMENT SUR LE PROXY (pas l'implémentation)
         self.process_execution_result_generically(vyid, &result, &impl_function_meta)?;
-        
         return Ok(result);
     }
+    
+    // ✅ EXÉCUTION NORMALE (pas de proxy) - Code existant inchangé
+    if !self.modules.contains_key(vyid) {
+        println!("🔄 [AUTO-DETECT] Analyse du bytecode réel ({} bytes)", real_bytecode.len());
+        self.auto_detect_contract_functions(vyid, &real_bytecode)?;
+    } else {
+        // ✅ Met à jour le module avec le bytecode réel si nécessaire
+        if let Some(module) = self.modules.get_mut(vyid) {
+            if module.bytecode.len() != real_bytecode.len() {
+                println!("🔄 [BYTECODE UPDATE] Mise à jour bytecode: {} → {} bytes", 
+                        module.bytecode.len(), real_bytecode.len());
+                module.bytecode = real_bytecode.clone();
+                
+                // Re-détection avec le nouveau bytecode
+                self.auto_detect_contract_functions(vyid, &real_bytecode)?;
+            }
+        }
+    }
+    
+    // ✅ RECHERCHE STRICTE avec le bytecode réel
+    let function_meta = self.find_or_create_function_metadata(vyid, function_name, selector, &args)?;
+    
+    // ✅ RÉSOLUTION DE L'OFFSET avec le bytecode réel
+    println!("🔍 [OFFSET SEARCH] Recherche offset pour {} dans bytecode réel", function_name);
+    let resolved_offset = Self::find_function_offset_in_bytecode(&real_bytecode, function_meta.selector)
+        .ok_or_else(|| format!(
+            "Fonction '{}' (sélecteur 0x{:08x}) introuvable dans le bytecode réel de {} bytes. \
+            Le contrat ne contient pas cette fonction.",
+            function_name, function_meta.selector, real_bytecode.len()
+        ))?;
+    
+    println!("🎯 [REAL EXECUTION] Fonction {} trouvée à l'offset 0x{:04x} dans bytecode réel", 
+             function_name, resolved_offset);
         
-    // ✅ EXÉCUTION NORMALE avec protection reentrancy
+    // ✅ EXÉCUTION NORMALE avec le bytecode réel
     let interpreter_args = self.prepare_generic_execution_args(
         vyid, function_name, args.clone(), sender, &function_meta, resolved_offset
     )?;
     
     let initial_storage = self.build_dynamic_storage_from_contract_state(vyid)?;
     
-    // ✅ Exécution avec lock dans scope limité
     let result = {
         let _guard = self.global_execution_lock.lock()
             .map_err(|e| format!("Erreur acquisition lock global: {}", e))?;
@@ -1645,19 +1694,18 @@ pub fn execute_module(
         let mut interpreter = self.interpreter.lock()
             .map_err(|e| format!("Erreur lock interpréteur: {}", e))?;
         
+        // ✅ UTILISE LE BYTECODE RÉEL !
         interpreter.execute_program(
-            &module.bytecode,
+            &real_bytecode, // ✅ BYTECODE RÉEL récupéré du contract_state !
             &interpreter_args,
-            module.stack_usage.as_ref(),
+            None, // stack_usage calculé dynamiquement
             self.state.accounts.clone(),
             Some(&function_meta.return_type),
             initial_storage,
         ).map_err(|e| e.to_string())?
-    }; // ✅ Guard libéré ici
+    };
     
-    // ✅ Post-processing APRÈS libération du lock
     self.process_execution_result_generically(vyid, &result, &function_meta)?;
-    
     Ok(result)
 }
 
