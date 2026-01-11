@@ -1092,7 +1092,6 @@ reg[54] = interpreter_args.call_depth as u64;           // Profondeur d'appel
     println!("   Gas limit: {}", interpreter_args.gas_limit);
     println!("   Valeur: {}", interpreter_args.value);
 
-    let mut insn_ptr = find_universal_runtime_start(prog, interpreter_args);
     
     println!("🚀 [EXECUTION] Démarrage à PC=0x{:x} pour fonction: {}", 
              insn_ptr, interpreter_args.function_name);
@@ -1121,7 +1120,7 @@ if prog.len() > 100 && prog[0] == 0x60 && prog[2] == 0x60 && prog[4] == 0x52 {
 
     let debug_evm = true;
     
-        let mut insn_ptr = 0;
+let mut insn_ptr = find_universal_runtime_start(prog, interpreter_args);
 
 println!("🚀 [DÉMARRAGE] PC=0x{:04x}", insn_ptr);
 
