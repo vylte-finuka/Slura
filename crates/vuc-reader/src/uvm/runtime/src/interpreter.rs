@@ -1748,7 +1748,7 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
         consume_gas(&mut execution_context, 2)?;
     },
 
- //___ 0x35 CALLDATALOAD - CORRECTION POUR EXTRAIRE LE SELECTOR
+ //___ 0x35 CALLDATALOAD - FIX CRITIQUE POUR LE SELECTOR
 0x35 => {
     if evm_stack.is_empty() {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on CALLDATALOAD"));
@@ -1756,34 +1756,31 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     let offset = evm_stack.pop().unwrap() as usize;
     
     let value = if offset == 0 && effective_mbuff.len() >= 4 {
-        // ✅ CORRECTION:  Lit le selector de fonction (4 premiers bytes)
-        u32::from_be_bytes([
+        // ✅ FIX CRITIQUE: Extrait le SELECTOR, pas la SIZE ! 
+        let selector_bytes = [
             effective_mbuff[0], 
             effective_mbuff[1], 
             effective_mbuff[2], 
             effective_mbuff[3]
-        ]) as u64
-    } else if offset + 32 <= effective_mbuff.len() {
-        // ✅ CORRECTION: Lecture 32-byte EVM standard
+        ];
+        let selector = u32::from_be_bytes(selector_bytes) as u64;
+        println!("📥 [CALLDATALOAD] offset=0 → SELECTOR=0x{:08x}", selector);
+        selector
+    } else if offset + 32 <= effective_mbuff. len() {
+        // Lecture normale 32 bytes
         let mut value = 0u64;
-        for i in 0..8 { // Prend les 8 premiers bytes des 32
+        for i in 0..8 {
             value = (value << 8) | (effective_mbuff[offset + i] as u64);
         }
         value
-    } else if offset < effective_mbuff.len() {
-        // Lecture partielle
-        let mut value = 0u64;
-        let end = (offset + 8).min(effective_mbuff.len());
-        for i in offset.. end {
-            value = (value << 8) | (effective_mbuff[i] as u64);
-        }
-        value
     } else {
-        0 // EVM spec:  retourne 0 pour accès hors borne
+        0 // EVM spec
     };
     
     evm_stack.push(value);
-    println!("📥 [CALLDATALOAD] offset={} → selector=0x{:x}", offset, value);
+    if debug_evm && instruction_count <= 50 {
+        println!("📥 [CALLDATALOAD] offset=0x{: x} → value=0x{:x}", offset, value);
+    }
 },
     
     //___ 0x36 CALLDATASIZE - CORRECTION POUR CONTRATS UUPS
