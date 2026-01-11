@@ -1100,39 +1100,19 @@ if prog.len() > 100 && prog[0] == 0x60 && prog[2] == 0x60 && prog[4] == 0x52 {
     let debug_evm = true;
     
         // ✅ VERSION FINALE DISPATCHER-READY
-let (runtime_code, start_pc) = if args.function_name.starts_with("function_") {
-    let runtime_offset = [[0x60,0x80,0x60,0x40,0x52,0x60,0x04,0x36,0x10,0x61,0x01,0xe2], 
-                          [0x60,0x80,0x60,0x40,0x52,0x60,0x04,0x36], 
-                          [0x34,0x80,0x15,0x61]]
-        .iter()
-        .find_map(|p| prog.windows(p. len()).enumerate().skip(100)
-            .find(|(_, w)| w == p).map(|(i, _)| i))
-        .unwrap_or(0x421);  // Fallback pour votre contrat VEZ
-    
-    println!("🎯 [DISPATCHER] Runtime extrait depuis 0x{:x}, taille {} bytes", 
-             runtime_offset, prog. len() - runtime_offset);
-    (&prog[runtime_offset..], 0)
-} else {
-    println!("🏗️ [CONSTRUCTOR] Bytecode complet");
-    (prog, 0)
-};
-
-let prog = runtime_code;
-let mut insn_ptr = start_pc;
-
-println!("🚀 [DÉMARRAGE] PC=0x{:04x}", insn_ptr);
-
-// ✅ Configuration pour bien suivre le flux du contrat VEZ
-if prog.len() > 100 {
-    println!("📋 [CONTRAT Slura] {} opcodes détectés", prog.len());
-    
-    // Affiche les premiers JUMPDEST pour debug
-    for i in 0..prog.len().min(1000) {
-        if prog[i] == 0x5b {
-            println!("🎯 [JUMPDEST DÉTECTÉ] Adresse 0x{:04x}", i);
-        }
+// ✅ VERSION SIMPLE SANS COMPLEXITÉ DE TYPES
+let mut insn_ptr = if interpreter_args.function_name. starts_with("function_") {
+    // Cherche juste le pattern principal
+    if let Some(pos) = prog.windows(8).enumerate().skip(100)
+        .find(|(_, w)| *w == [0x60,0x80,0x60,0x40,0x52,0x60,0x04,0x36])
+        .map(|(i, _)| i) {
+        pos
+    } else {
+        0x421  // Fallback pour votre contrat VEZ
     }
-}
+} else {
+    0
+};
 
     // ✅ DÉTECTION ANTI-BOUCLE INFINIE
     let mut loop_detection: HashMap<usize, u32> = HashMap::new();
