@@ -2294,7 +2294,7 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
     }
     let dest = evm_stack.pop().unwrap() as usize;
-    if is_valid_jumpdest(dest, prog, &valid_jumpdests) {
+    find_valid_jumpdest(dest, prog, &valid_jumpdests) {
         insn_ptr = dest;
         skip_advance = true;
         println!("✅ [JUMP] vers 0x{:04x}", dest);
@@ -2314,7 +2314,7 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     let dest = evm_stack.pop().unwrap() as usize;
     let cond = evm_stack.pop().unwrap();
     if cond != 0 {
-        if is_valid_jumpdest(dest, prog, &valid_jumpdests) {
+        if find_valid_jumpdest(dest, prog, &valid_jumpdests) {
             insn_ptr = dest;
             skip_advance = true;
             println!("✅ [JUMPI] condition vraie → 0x{:04x}", dest);
