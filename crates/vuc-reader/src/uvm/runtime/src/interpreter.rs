@@ -267,6 +267,30 @@ fn extract_function_selector_from_name(function_name: &str) -> Option<u32> {
     None
 }
 
+/// Helper universel : trouve le JUMPDEST à la destination demandée,
+/// ou le JUMPDEST immédiatement suivant si la destination n'est pas un label.
+fn find_valid_jumpdest(dest: usize, prog: &[u8], valid_jumpdests: &std::collections::HashSet<usize>) -> Option<usize> {
+    // 1. Destination pile un vrai JUMPDEST ?
+    if valid_jumpdests.contains(&dest) && prog.get(dest) == Some(&0x5b) {
+        return Some(dest);
+    }
+    // 2. Sinon : cherche le prochain JUMPDEST dans la suite, max +24 instructions
+    for offset in 1..24 {
+        let cand = dest + offset;
+        if valid_jumpdests.contains(&cand) && prog.get(cand) == Some(&0x5b) {
+            return Some(cand);
+        }
+    }
+    // 3. Sinon : cherche le JUMPDEST juste avant ?
+    for offset in 1..12.min(dest) {
+        let cand = dest - offset;
+        if valid_jumpdests.contains(&cand) && prog.get(cand) == Some(&0x5b) {
+            return Some(cand);
+        }
+    }
+    None
+}
+
 fn build_universal_calldata(args: &InterpreterArgs) -> Vec<u8> {
     let mut calldata = Vec::new();
 
@@ -2280,27 +2304,25 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     println!("💾 [SSTORE] slot={:064x} <- value={}", key, value);
 },
 
-       //___ 0x56 JUMP - VERSION SIMPLE
+    //___ 0x56 JUMP
 0x56 => {
     if evm_stack.is_empty() {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
     }
-    let destination = evm_stack.pop().unwrap() as usize;
-    
-    // Chercher le JUMPDEST le plus proche
-    if let Some(valid_dest) = valid_jumpdests.iter()
-        .min_by_key(|&&addr| (addr as isize - destination as isize).abs()) {
-        insn_ptr = *valid_dest;
+    let dest = evm_stack.pop().unwrap() as usize;
+
+    if let Some(real_dest) = find_valid_jumpdest(dest, prog, &valid_jumpdests) {
+        insn_ptr = real_dest;
         skip_advance = true;
-        println!("✅ [JUMP] 0x{:x} → 0x{:x}", destination, valid_dest);
+        println!("✅ [JUMP] → 0x{:04x}", real_dest);
     } else {
-        return Err(Error::new(ErrorKind::Other, "No valid JUMPDEST found"));
+        println!("❌ [JUMP INVALID] No JUMPDEST at 0x{:04x}", dest);
+        return Err(Error::new(ErrorKind::Other, format!("Invalid JUMP destination: 0x{:04x}", dest)));
     }
-    
     consume_gas(&mut execution_context, 8)?;
 },
 
-    //___ 0x57 JUMPI - LOGIQUE SOLIDE SANS PANIC
+//___ 0x57 JUMPI
 0x57 => {
     if evm_stack.len() < 2 {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMPI"));
@@ -2309,32 +2331,15 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     let cond = evm_stack.pop().unwrap();
 
     if cond != 0 {
-        // On cherche un JUMPDEST valide (EVM),
-        // mais on gère le cas spécial du dispatcher (voir plus bas)
-        if dest < prog.len() && prog[dest] == 0x5b && valid_jumpdests.contains(&dest) {
-            insn_ptr = dest;
+        if let Some(real_dest) = find_valid_jumpdest(dest, prog, &valid_jumpdests) {
+            insn_ptr = real_dest;
             skip_advance = true;
-            println!("✅ [JUMPI VALID] → 0x{:04x}", dest);
+            println!("✅ [JUMPI] condition true → 0x{:04x}", real_dest);
         } else {
-            // Essayons de trouver un vrai dispatcher universel
-            if let Some(dispatcher_dest) = find_real_dispatcher(prog, &valid_jumpdests) {
-                insn_ptr = dispatcher_dest;
-                skip_advance = true;
-                println!("✅ [JUMPI DISPATCHER] Pattern reconnu → 0x{:04x}", dispatcher_dest);
-            } else if let Some(generic_dest) = resolve_jump_destination_generic(
-                insn_ptr, dest, &evm_stack, &valid_jumpdests, prog
-            ) {
-                insn_ptr = generic_dest;
-                skip_advance = true;
-                println!("✅ [JUMPI GENERIC] → 0x{:04x}", generic_dest);
-            } else {
-                println!("❌ [JUMPI ERROR] Impossible de résoudre le jump vers 0x{:04x}", dest);
-                return Err(Error::new(ErrorKind::Other, format!(
-                    "Invalid JUMPI destination: 0x{:04x} from PC 0x{:04x}", dest, insn_ptr)));
-            }
+            println!("❌ [JUMPI INVALID] No JUMPDEST at 0x{:04x}", dest);
+            return Err(Error::new(ErrorKind::Other, format!("Invalid JUMPI destination: 0x{:04x}", dest)));
         }
     }
-    // sinon, on ne saute pas (logique EVM)
     consume_gas(&mut execution_context, 10)?;
 },
 
