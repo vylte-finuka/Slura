@@ -1779,8 +1779,8 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     
     evm_stack.push(value);
     if debug_evm && instruction_count <= 50 {
-        println!("📥 [CALLDATALOAD] offset=0x{: x} → value=0x{:x}", offset, value);
-        //                               ↑ Pas d'espace      ↑ Pas d'espace
+        println!("📥 [CALLDATALOAD] offset=0x{:x} → value=0x{:x}", offset, value);
+        //                              
     }
 },
     
