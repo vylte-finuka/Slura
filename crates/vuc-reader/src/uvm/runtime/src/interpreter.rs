@@ -2552,77 +2552,67 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
 },
 
 //___ 0xf3 RETURN - DÉTECTION INTELLIGENTE DES VALEURS DE FONCTION
-// ✅ CORRECTION MAJEURE:  Opcode RETURN avec retour du bon type
 0xf3 => {
     if evm_stack.len() < 2 {
-        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on RETURN"));
+        return Err(Error::new(ErrorKind::Other, "STACK underflow on RETURN"));
     }
-    
-    let offset = evm_stack.pop().unwrap() as usize;
+
     let len = evm_stack.pop().unwrap() as usize;
-    
+    let offset = evm_stack.pop().unwrap() as usize;
+
     println!("📤 [RETURN] len={}, offset=0x{:x}", len, offset);
-    
-    // ✅ PROTECTION CONTRE LES ALLOCATIONS MASSIVES
-    let safe_len = if len > 16 * 1024 * 1024 {
-        println!("🚫 [RETURN PROTECTION] Tentative de retour de {} bytes → limité à 1MB", len);
-        1024 * 1024
-    } else if len > 1024 * 1024 {
-        println!("⚠️ [RETURN WARNING] Retour de {} bytes → suspecieux", len);
-        len. min(1024 * 1024)
-    } else {
-        len
-    };
-    
-    // ✅ GESTION CORRECTE DES DIFFÉRENTS CAS
-    let return_data = match safe_len {
-        0 => {
-            println!("✅ [RETURN SUCCESS] Fonction void exécutée avec succès");
-            Vec::new()
-        },
-        1.. =32 => {
-            if offset + safe_len <= global_mem.len() {
-                let data = global_mem[offset..offset + safe_len].to_vec();
-                println!("📦 [RETURN DATA] {} bytes retournés", safe_len);
-                
-                // ✅ DÉBOGAGE SPÉCIAL POUR DECIMALS
-                if safe_len == 32 {
-                    let value = u64::from_be_bytes([
-                        data[24], data[25], data[26], data[27],
-                        data[28], data[29], data[30], data[31]
-                    ]);
-                    println!("🎯 [DECODED VALUE] uint256 = {}", value);
-                    }
-                }
-                data
-            } else {
-                println!("⚠️ [RETURN] Offset/len dépasse la mémoire → retour vide");
-                Vec::new()
-            }
-        },
-        _ => {
-            println!("🚫 [RETURN PROTECTION] Retour de {} bytes anormalement gros → forcé à vide", safe_len);
-            Vec::new()
+
+    // ✅ DÉTECTE RETOUR DE FONCTION (32 bytes depuis mémoire)
+    if len == 32 && offset < global_mem.len() {
+        let mut return_bytes = [0u8; 32];
+        if offset + 32 <= global_mem.len() {
+            return_bytes.copy_from_slice(&global_mem[offset..offset + 32]);
         }
-    };
-    
-    // ✅ MISE À JOUR DU CONTEXTE
-    execution_context.return_data = return_data. clone();
-    
-    // ✅ DÉCODAGE INTELLIGENT ET RETOUR CORRECT
-    let decoded_result = if return_data.is_empty() {
-        println!("✅ [RETURN] Fonction exécutée avec succès (pas de retour)");
-        serde_json::Value::Null
-    } else {
-        decode_return_data_generic(&return_data, return_data.len())
-    };
-    
-    println!("✅ [RETURN FINAL] Données:  {:?}", decoded_result);
-    
-    // ✅ RETOUR DU BON TYPE
-    return Ok(decoded_result);
-},
         
+        let return_value = u256::from_big_endian(&return_bytes);
+        let return_u64 = return_value.low_u64();
+        
+        // ✅ IDENTIFIE LES VALEURS TYPIQUES DE FONCTIONS ERC20
+        let function_result = match return_u64 {
+            18 => JsonValue::Number(18.into()), // decimals()
+            value if value > 0 && value < 1_000_000 => JsonValue::Number(value.into()),
+            _ => JsonValue::String(format!("0x{}", hex::encode(&return_bytes))),
+        };
+
+        let final_storage = execution_context.world_state.storage
+            .get(&interpreter_args.contract_address)
+            .cloned()
+            .unwrap_or_default();
+
+        let mut result = serde_json::Map::new();
+        result.insert("return".to_string(), function_result);
+        result.insert("storage".to_string(), JsonValue::Object(decode_storage_map(&final_storage)));
+
+        println!("✅ [FUNCTION RETURN] Valeur détectée: {:?}", result.get("return"));
+        return Ok(JsonValue::Object(result));
+    }
+
+    // ✅ CAS GÉNÉRAL (déploiement, etc.)
+    let mut ret_data = vec![0u8; len];
+    if len > 0 && offset + len <= global_mem.len() {
+        ret_data.copy_from_slice(&global_mem[offset..offset + len]);
+    }
+
+    let formatted_result = decode_return_data_generic(&ret_data, len);
+    
+    let final_storage = execution_context.world_state.storage
+        .get(&interpreter_args.contract_address)
+        .cloned()
+        .unwrap_or_default();
+
+    let mut result = serde_json::Map::new();
+    result.insert("return".to_string(), formatted_result);
+    result.insert("storage".to_string(), JsonValue::Object(decode_storage_map(&final_storage)));
+
+    println!("✅ [RETURN] Données: {:?}", result.get("return"));
+    return Ok(JsonValue::Object(result));
+},
+
 //___ 0xfd REVERT - CORRECTION ORDRE FINAL DÉFINITIF
 0xfd => {
     if evm_stack.len() < 2 {
