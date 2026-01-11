@@ -868,24 +868,6 @@ fn safe_u256_to_u64(val: &u256) -> u64 {
     }
 }
 
-fn find_universal_runtime_start(bytecode: &[u8], args: &InterpreterArgs) -> usize {
-    // Si c'est du déploiement
-    if args.function_name. is_empty() || args.function_name == "deploy" {
-        return 0;
-    }
-    
-    // Chercher CALLDATASIZE (0x36) - présent dans tous les dispatchers
-    for (i, &byte) in bytecode.iter().enumerate() {
-        if byte == 0x36 && i > 100 {  // CALLDATASIZE après le constructor
-            println!("✅ [UNIVERSAL] CALLDATASIZE à PC 0x{:x}", i. saturating_sub(10));
-            return i.saturating_sub(10);  // Un peu avant pour être sûr
-        }
-    }
-    
-    // Fallback
-    bytecode.len() / 3
-}
-
 pub fn execute_program(
     prog_: Option<&[u8]>,
     stack_usage: Option<&StackUsage>,
@@ -1116,7 +1098,16 @@ if prog.len() > 100 && prog[0] == 0x60 && prog[2] == 0x60 && prog[4] == 0x52 {
 
     let debug_evm = true;
     
-let mut insn_ptr = find_universal_runtime_start(prog, interpreter_args);
+let mut insn_ptr = if args.function_name.starts_with("function_") {
+    // Si c'est votre contrat VEZ → offset fixe
+    if prog.len() > 3000 && prog[0x421..0x421+4] == [0x60, 0x80, 0x60, 0x40] {
+        0x421  // C'est votre contrat
+    } else {
+        find_universal_runtime_start(prog)  // Autre contrat
+    }
+} else {
+    0  // Constructor
+};
 println!("🚀 [EXECUTION] Démarrage à PC=0x{:x} pour fonction: {}", 
              insn_ptr, interpreter_args.function_name);
 println!("🚀 [DÉMARRAGE] PC=0x{:04x}", insn_ptr);
