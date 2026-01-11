@@ -1092,10 +1092,10 @@ reg[54] = interpreter_args.call_depth as u64;           // Profondeur d'appel
     println!("   Gas limit: {}", interpreter_args.gas_limit);
     println!("   Valeur: {}", interpreter_args.value);
 
-    let mut insn_ptr = find_universal_runtime_start(prog, args);
+    let mut insn_ptr = find_universal_runtime_start(prog, interpreter_args);
     
     println!("🚀 [EXECUTION] Démarrage à PC=0x{:x} pour fonction: {}", 
-             insn_ptr, args.function_name);
+             insn_ptr, interpreter_args.function_name);
     
     let mut evm_stack: Vec<u64> = Vec::with_capacity(1024);
 // FIX FINAL – calldata size sur la pile pour TOUTES les fonctions EVM
