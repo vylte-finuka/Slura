@@ -1099,7 +1099,26 @@ if prog.len() > 100 && prog[0] == 0x60 && prog[2] == 0x60 && prog[4] == 0x52 {
 
     let debug_evm = true;
     
-        let mut insn_ptr = 0x421; // ← C'est tout ! 
+        // ✅ VERSION FINALE DISPATCHER-READY
+let (runtime_code, start_pc) = if args.function_name.starts_with("function_") {
+    let runtime_offset = [[0x60,0x80,0x60,0x40,0x52,0x60,0x04,0x36,0x10,0x61,0x01,0xe2], 
+                          [0x60,0x80,0x60,0x40,0x52,0x60,0x04,0x36], 
+                          [0x34,0x80,0x15,0x61]]
+        .iter()
+        .find_map(|p| prog.windows(p. len()).enumerate().skip(100)
+            .find(|(_, w)| w == p).map(|(i, _)| i))
+        .unwrap_or(0x421);  // Fallback pour votre contrat VEZ
+    
+    println!("🎯 [DISPATCHER] Runtime extrait depuis 0x{:x}, taille {} bytes", 
+             runtime_offset, prog. len() - runtime_offset);
+    (&prog[runtime_offset..], 0)
+} else {
+    println!("🏗️ [CONSTRUCTOR] Bytecode complet");
+    (prog, 0)
+};
+
+let prog = runtime_code;
+let mut insn_ptr = start_pc;
 
 println!("🚀 [DÉMARRAGE] PC=0x{:04x}", insn_ptr);
 
