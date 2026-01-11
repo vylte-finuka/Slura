@@ -851,16 +851,13 @@ fn classify_memory_offset(offset: u64) -> MemoryOffsetType {
 
 fn find_real_dispatcher(prog: &[u8], valid_jumpdests: &HashSet<usize>) -> Option<usize> {
     for &addr in valid_jumpdests {
-        // Cherche le pattern PUSH1 0x00 (=0x60 0x00), CALLDATALOAD (=0x35), DUP1 (=0x80)
-        if addr + 3 < prog.len()
-            && prog[addr + 0] == 0x5b // JUMPDEST
-            && prog[addr + 1] == 0x60
-            && prog[addr + 2] == 0x00
-            && prog[addr + 3] == 0x35
-        {
-            return Some(addr);
+        if addr + 3 < prog.len() {
+            let p = &prog[addr..];
+            // Patterns courants de dispatcher universel
+            if p[0] == 0x5b && p[1] == 0x60 && p[2] == 0x00 && p[3] == 0x35 { return Some(addr); }
+            if p[0] == 0x5b && p[1] == 0x5f && p[2] == 0x35 { return Some(addr); }
+            if p[0] == 0x5b && p[1] == 0x60 && p[2] == 0x04 && p[3] == 0x36 { return Some(addr); }
         }
-        // Variante PUSH0 (0x5f) ou PUSH1 0x04 possible
     }
     None
 }
@@ -2303,19 +2300,43 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     consume_gas(&mut execution_context, 8)?;
 },
 
-    //___ 0x57 JUMPI 
-    0x57 => {
-    let condition = evm_stack.pop().unwrap();
-    let destination = evm_stack.pop().unwrap() as usize;
-    if condition != 0 {
-        if find_real_dispatcher(prog, &valid_jumpdests).is_some() {
-            insn_ptr = find_real_dispatcher(prog, &valid_jumpdests).unwrap();
-        } else {
-            // fallback old generic jumpdest search
-        }
-        skip_advance = true;
+    //___ 0x57 JUMPI - LOGIQUE SOLIDE SANS PANIC
+0x57 => {
+    if evm_stack.len() < 2 {
+        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMPI"));
     }
-}
+    let dest = evm_stack.pop().unwrap() as usize;
+    let cond = evm_stack.pop().unwrap();
+
+    if cond != 0 {
+        // On cherche un JUMPDEST valide (EVM),
+        // mais on gère le cas spécial du dispatcher (voir plus bas)
+        if dest < prog.len() && prog[dest] == 0x5b && valid_jumpdests.contains(&dest) {
+            insn_ptr = dest;
+            skip_advance = true;
+            println!("✅ [JUMPI VALID] → 0x{:04x}", dest);
+        } else {
+            // Essayons de trouver un vrai dispatcher universel
+            if let Some(dispatcher_dest) = find_real_dispatcher(prog, valid_jumpdests) {
+                insn_ptr = dispatcher_dest;
+                skip_advance = true;
+                println!("✅ [JUMPI DISPATCHER] Pattern reconnu → 0x{:04x}", dispatcher_dest);
+            } else if let Some(generic_dest) = resolve_jump_destination_generic(
+                insn_ptr, dest, &evm_stack, valid_jumpdests, prog
+            ) {
+                insn_ptr = generic_dest;
+                skip_advance = true;
+                println!("✅ [JUMPI GENERIC] → 0x{:04x}", generic_dest);
+            } else {
+                println!("❌ [JUMPI ERROR] Impossible de résoudre le jump vers 0x{:04x}", dest);
+                return Err(Error::new(ErrorKind::Other, format!(
+                    "Invalid JUMPI destination: 0x{:04x} from PC 0x{:04x}", dest, insn_ptr)));
+            }
+        }
+    }
+    // sinon, on ne saute pas (logique EVM)
+    consume_gas(&mut execution_context, 10)?;
+},
 
     //___ 0x58 PC
     0x58 => {
