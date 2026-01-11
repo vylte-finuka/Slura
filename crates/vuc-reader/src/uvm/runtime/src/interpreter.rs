@@ -2552,19 +2552,76 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
 },
 
 //___ 0xf3 RETURN - DÉTECTION INTELLIGENTE DES VALEURS DE FONCTION
+// ✅ CORRECTION MAJEURE:  Opcode RETURN avec retour du bon type
 0xf3 => {
+    if evm_stack.len() < 2 {
+        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on RETURN"));
+    }
+    
     let offset = evm_stack.pop().unwrap() as usize;
     let len = evm_stack.pop().unwrap() as usize;
     
-    // ✅ Pour decimals(), len devrait être 32 bytes (normal pour uint256)
-    if len == 32 && offset < global_mem.len() {
-        let return_data = global_mem[offset..offset + 32].to_vec();
-        // Le dernier byte devrait être 18 (0x12)
-        execution_context.return_data = return_data;
-    }
+    println!("📤 [RETURN] len={}, offset=0x{:x}", len, offset);
     
-    return Ok(execution_context);
-}
+    // ✅ PROTECTION CONTRE LES ALLOCATIONS MASSIVES
+    let safe_len = if len > 16 * 1024 * 1024 {
+        println!("🚫 [RETURN PROTECTION] Tentative de retour de {} bytes → limité à 1MB", len);
+        1024 * 1024
+    } else if len > 1024 * 1024 {
+        println!("⚠️ [RETURN WARNING] Retour de {} bytes → suspecieux", len);
+        len. min(1024 * 1024)
+    } else {
+        len
+    };
+    
+    // ✅ GESTION CORRECTE DES DIFFÉRENTS CAS
+    let return_data = match safe_len {
+        0 => {
+            println!("✅ [RETURN SUCCESS] Fonction void exécutée avec succès");
+            Vec::new()
+        },
+        1.. =32 => {
+            if offset + safe_len <= global_mem.len() {
+                let data = global_mem[offset..offset + safe_len].to_vec();
+                println!("📦 [RETURN DATA] {} bytes retournés", safe_len);
+                
+                // ✅ DÉBOGAGE SPÉCIAL POUR DECIMALS
+                if safe_len == 32 {
+                    let value = u64::from_be_bytes([
+                        data[24], data[25], data[26], data[27],
+                        data[28], data[29], data[30], data[31]
+                    ]);
+                    println!("🎯 [DECODED VALUE] uint256 = {}", value);
+                    }
+                }
+                data
+            } else {
+                println!("⚠️ [RETURN] Offset/len dépasse la mémoire → retour vide");
+                Vec::new()
+            }
+        },
+        _ => {
+            println!("🚫 [RETURN PROTECTION] Retour de {} bytes anormalement gros → forcé à vide", safe_len);
+            Vec::new()
+        }
+    };
+    
+    // ✅ MISE À JOUR DU CONTEXTE
+    execution_context.return_data = return_data. clone();
+    
+    // ✅ DÉCODAGE INTELLIGENT ET RETOUR CORRECT
+    let decoded_result = if return_data.is_empty() {
+        println!("✅ [RETURN] Fonction exécutée avec succès (pas de retour)");
+        serde_json::Value::Null
+    } else {
+        decode_return_data_generic(&return_data, return_data.len())
+    };
+    
+    println!("✅ [RETURN FINAL] Données:  {:?}", decoded_result);
+    
+    // ✅ RETOUR DU BON TYPE
+    return Ok(decoded_result);
+},
         
 //___ 0xfd REVERT - CORRECTION ORDRE FINAL DÉFINITIF
 0xfd => {
