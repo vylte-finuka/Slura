@@ -849,6 +849,22 @@ fn classify_memory_offset(offset: u64) -> MemoryOffsetType {
     }
 }
 
+fn find_real_dispatcher(prog: &[u8], valid_jumpdests: &HashSet<usize>) -> Option<usize> {
+    for &addr in valid_jumpdests {
+        // Cherche le pattern PUSH1 0x00 (=0x60 0x00), CALLDATALOAD (=0x35), DUP1 (=0x80)
+        if addr + 3 < prog.len()
+            && prog[addr + 0] == 0x5b // JUMPDEST
+            && prog[addr + 1] == 0x60
+            && prog[addr + 2] == 0x00
+            && prog[addr + 3] == 0x35
+        {
+            return Some(addr);
+        }
+        // Variante PUSH0 (0x5f) ou PUSH1 0x04 possible
+    }
+    None
+}
+
 /// ✅ Encodage d'adresse vers u64
 fn encode_address_to_u64(addr: &str) -> u64 {
     use std::collections::hash_map::DefaultHasher;
@@ -2286,47 +2302,20 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     
     consume_gas(&mut execution_context, 8)?;
 },
-        
-        //___ 0x57 JUMPI - MÊME LOGIQUE GÉNÉRIQUE
-0x57 => {
-    if evm_stack.len() < 2 {
-        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMPI"));
-    }
-    let destination = evm_stack.pop().unwrap() as usize;
+
+    //___ 0x57 JUMPI 
+    0x57 => {
     let condition = evm_stack.pop().unwrap();
-    
-    println!("🔀 [JUMPI] PC=0x{:04x} → dest=0x{:04x}, condition={}", insn_ptr, destination, condition);
-    
+    let destination = evm_stack.pop().unwrap() as usize;
     if condition != 0 {
-        // ✅ MÊME LOGIQUE GÉNÉRIQUE QUE JUMP
-        if destination < prog.len() && prog[destination] == 0x5b && valid_jumpdests.contains(&destination) {
-            insn_ptr = destination;
-            skip_advance = true;
-            println!("✅ [JUMPI VALID] → 0x{:04x}", destination);
+        if find_real_dispatcher(prog, &valid_jumpdests).is_some() {
+            insn_ptr = find_real_dispatcher(prog, &valid_jumpdests).unwrap();
+        } else {
+            // fallback old generic jumpdest search
         }
-        else if let Some(context_dest) = analyze_jump_context(insn_ptr, destination, &evm_stack, prog) {
-            insn_ptr = context_dest;
-            skip_advance = true;
-            println!("✅ [JUMPI CONTEXT] → 0x{:04x}", context_dest);
-        }
-        else if let Some(generic_dest) = resolve_jump_destination_generic(
-            insn_ptr, destination, &evm_stack, &valid_jumpdests, prog
-        ) {
-            insn_ptr = generic_dest;
-            skip_advance = true;
-            println!("✅ [JUMPI GENERIC] → 0x{:04x}", generic_dest);
-        }
-        else {
-            println!("❌ [JUMPI ERROR] Destination invalide 0x{:04x}", destination);
-            return Err(Error::new(ErrorKind::Other, 
-                format!("Invalid JUMPI destination: 0x{:04x}", destination)));
-        }
-    } else {
-        println!("➡️ [JUMPI] Condition false → continuation");
+        skip_advance = true;
     }
-    
-    consume_gas(&mut execution_context, 10)?;
-},
+}
 
     //___ 0x58 PC
     0x58 => {
