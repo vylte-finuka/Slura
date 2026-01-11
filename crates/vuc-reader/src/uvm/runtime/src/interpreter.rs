@@ -270,9 +270,7 @@ fn extract_function_selector_from_name(function_name: &str) -> Option<u32> {
 /// Helper universel : trouve le JUMPDEST à la destination demandée,
 /// ou le JUMPDEST immédiatement suivant si la destination n'est pas un label.
 fn find_valid_jumpdest(dest: usize, prog: &[u8], valid_jumpdests: &HashSet<usize>) -> bool {
-    dest < prog.len() &&
-    prog[dest] == 0x5b &&
-    valid_jumpdests.contains(&dest)
+    dest < prog.len() && prog[dest] == 0x5b && valid_jumpdests.contains(&dest)
 }
 
 fn build_universal_calldata(args: &InterpreterArgs) -> Vec<u8> {
@@ -465,6 +463,26 @@ fn scan_valid_jumpdests(prog: &[u8]) -> HashSet<usize> {
     }
     
     valid_jumpdests
+}
+
+/// Détecte l'offset où commence vraiment le runtime (skip le constructor)
+fn detect_runtime_offset(bytecode: &[u8]) -> usize {
+    // On cherche le motif classique de fin de constructor : F3 FE 60 80 60 40...
+    // "F3FE" => RETURN, EOF, PUSH1 0x80, ...
+    let pattern: &[u8] = &[0xf3, 0xfe, 0x60, 0x80, 0x60, 0x40];
+    for i in 0..bytecode.len().saturating_sub(pattern.len()) {
+        if &bytecode[i..i + pattern.len()] == pattern {
+            return i + 2; // la runtime commence juste après le double RETURN+STOP (pointe sur 0x60 0x80)
+        }
+    }
+    // Fallback : pattern très fréquent (runtime débute 0x60 0x80)
+    for i in 0..bytecode.len().saturating_sub(2) {
+        if bytecode[i] == 0x60 && bytecode[i+1] == 0x80 {
+            // Heuristique : s'assurer que c'est après le code de déploiement
+            if i > 128 { return i; }
+        }
+    }
+    0 // à défaut (si on ne reconnait pas de pattern !)
 }
 
 fn calculate_gas_cost(opcode: u8) -> u64 {
@@ -1114,7 +1132,7 @@ if prog.len() > 100 && prog[0] == 0x60 && prog[2] == 0x60 && prog[4] == 0x52 {
     // Le bytecode commence par: PUSH1 0xa0, PUSH1 0x40, MSTORE
     // → Initialisation standard EVM/Solidity
 }
-
+let runtime_offset = detect_runtime_offset(&prog);
     let debug_evm = true;
     
         // ✅ VERSION FINALE DISPATCHER-READY
@@ -2294,14 +2312,15 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
     }
     let dest = evm_stack.pop().unwrap() as usize;
-if find_valid_jumpdest(dest, prog, &valid_jumpdests) {
-        insn_ptr = dest;
+    let real_dest = runtime_offset + dest;
+    if is_valid_jumpdest(real_dest, prog, &valid_jumpdests) {
+        insn_ptr = real_dest;
         skip_advance = true;
-        println!("✅ [JUMP] vers 0x{:04x}", dest);
+        println!("✅ [JUMP] vers 0x{:04x} (runtime+offset=0x{:04x})", dest, real_dest);
     } else {
-        println!("❌ [JUMP INVALID] Pas de JUMPDEST exact à 0x{:04x}", dest);
+        println!("❌ [JUMP INVALID] Pas de JUMPDEST exact à 0x{:04x} (runtime+offset=0x{:04x})", dest, real_dest);
         return Err(Error::new(ErrorKind::Other, format!(
-            "JUMP interdit: destination 0x{:04x} n'est pas un JUMPDEST", dest)));
+            "JUMP interdit: dest 0x{:04x} runtime_offset 0x{:04x} n'est pas un JUMPDEST", dest, real_dest)));
     }
     consume_gas(&mut execution_context, 8)?;
 },
@@ -2313,15 +2332,16 @@ if find_valid_jumpdest(dest, prog, &valid_jumpdests) {
     }
     let dest = evm_stack.pop().unwrap() as usize;
     let cond = evm_stack.pop().unwrap();
+    let real_dest = runtime_offset + dest;
     if cond != 0 {
-        if find_valid_jumpdest(dest, prog, &valid_jumpdests) {
-            insn_ptr = dest;
+        if is_valid_jumpdest(real_dest, prog, &valid_jumpdests) {
+            insn_ptr = real_dest;
             skip_advance = true;
-            println!("✅ [JUMPI] condition vraie → 0x{:04x}", dest);
+            println!("✅ [JUMPI] condition vraie → 0x{:04x} (runtime+offset=0x{:04x})", dest, real_dest);
         } else {
-            println!("❌ [JUMPI INVALID] Pas de JUMPDEST exact à 0x{:04x}", dest);
+            println!("❌ [JUMPI INVALID] Pas de JUMPDEST exact à 0x{:04x} (runtime+offset=0x{:04x})", dest, real_dest);
             return Err(Error::new(ErrorKind::Other, format!(
-                "JUMPI interdit: destination 0x{:04x} n'est pas un JUMPDEST", dest)));
+                "JUMPI interdit: dest 0x{:04x} runtime_offset 0x{:04x} n'est pas un JUMPDEST", dest, real_dest)));
         }
     }
     consume_gas(&mut execution_context, 10)?;
