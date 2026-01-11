@@ -680,6 +680,146 @@ fn check_mem(
     )))
 }
 
+/// ✅ FONCTION UNIVERSELLE: Trouve le début du runtime code dans n'importe quel bytecode
+fn find_universal_runtime_start(bytecode: &[u8]) -> usize {
+    println! ("🔍 [RUNTIME SEARCH] Recherche dans {} bytes de bytecode", bytecode.len());
+    
+    // ============ MÉTHODE 1: PATTERNS DE DISPATCHER ============
+    let dispatcher_patterns = [
+        // Pattern 1: Dispatcher ERC20 moderne (Solidity 0.8+)
+        &[0x60, 0x80, 0x60, 0x40, 0x52, 0x60, 0x04, 0x36][.. ],
+        
+        // Pattern 2: Dispatcher avec vérification msg.value
+        &[0x34, 0x80, 0x15, 0x61][..],  // CALLVALUE DUP1 ISZERO PUSH2
+        
+        // Pattern 3: Dispatcher minimal
+        &[0x60, 0x04, 0x36, 0x10][..],  // PUSH1 0x04 CALLDATASIZE LT
+        
+        // Pattern 4: Dispatcher ancien (Solidity 0.6/0.7)
+        &[0x60, 0x60, 0x60, 0x40, 0x52, 0x60, 0x04, 0x36][.. ],
+        
+        // Pattern 5: Free memory pointer setup
+        &[0x60, 0x80, 0x60, 0x40, 0x52][..],  // PUSH1 0x80 PUSH1 0x40 MSTORE
+    ];
+    
+    for (i, pattern) in dispatcher_patterns.iter().enumerate() {
+        for pos in 0..bytecode.len().saturating_sub(pattern.len()) {
+            if bytecode[pos..pos + pattern.len()] == **pattern {
+                // Vérifier que c'est après le constructor (position > 100)
+                if pos > 100 {
+                    println!("✅ [PATTERN {}] Dispatcher trouvé à 0x{:x}", i+1, pos);
+                    return pos;
+                }
+            }
+        }
+    }
+    
+    // ============ MÉTHODE 2: RECHERCHE D'OPCODES CLÉS ============
+    
+    // Chercher CALLDATASIZE (0x36) - présent dans tous les dispatchers
+    for (pos, &byte) in bytecode.iter().enumerate().skip(100) {
+        if byte == 0x36 {  // CALLDATASIZE
+            // Vérifier le contexte autour
+            if pos + 3 < bytecode.len() {
+                let next_bytes = &bytecode[pos+1..pos+4];
+                // Pattern:  CALLDATASIZE PUSH1 0x04 LT
+                if next_bytes == [0x60, 0x04, 0x10] {
+                    let start = pos. saturating_sub(8);
+                    println!("🎯 [CALLDATASIZE] Dispatcher à 0x{:x} (ajusté à 0x{:x})", pos, start);
+                    return start;
+                }
+            }
+        }
+    }
+    
+    // ============ MÉTHODE 3: RECHERCHE CALLDATALOAD ============
+    
+    // Chercher CALLDATALOAD (0x35) - pour extraire le selector
+    for (pos, &byte) in bytecode.iter().enumerate().skip(50) {
+        if byte == 0x35 && pos > 100 {  // CALLDATALOAD après constructor
+            // Reculer un peu pour inclure le setup avant CALLDATALOAD
+            let start = pos.saturating_sub(15).max(0);
+            println!("📡 [CALLDATALOAD] Dispatcher à 0x{: x} (ajusté à 0x{:x})", pos, start);
+            return start;
+        }
+    }
+    
+    // ============ MÉTHODE 4: RECHERCHE DE SELECTORS ============
+    
+    // Chercher des selectors ERC20 communs dans le bytecode
+    let common_selectors = [
+        [0x31, 0x3c, 0xe5, 0x67],  // decimals()
+        [0x70, 0xa0, 0x82, 0x31],  // balanceOf(address)
+        [0xa9, 0x05, 0x9c, 0xbb],  // transfer(address,uint256)
+        [0x18, 0x16, 0x0d, 0xdd],  // totalSupply()
+    ];
+    
+    for selector in &common_selectors {
+        for pos in 0..bytecode. len().saturating_sub(4) {
+            if bytecode[pos..pos+4] == *selector {
+                // Remonter pour trouver le début du dispatcher
+                let start = pos.saturating_sub(50).max(0);
+                println!("🔑 [SELECTOR] Trouvé à 0x{: x}, dispatcher estimé à 0x{:x}", pos, start);
+                return start;
+            }
+        }
+    }
+    
+    // ============ MÉTHODE 5: HEURISTIQUES BASÉES SUR LA TAILLE ============
+    
+    // Analyse de la distribution des opcodes pour trouver le changement
+    let mut opcode_density = vec![0; bytecode.len() / 100 + 1];
+    
+    for (pos, &byte) in bytecode.iter().enumerate() {
+        let chunk = pos / 100;
+        if chunk < opcode_density.len() {
+            // Compter les opcodes typiques du runtime
+            if matches!(byte, 0x60.. =0x7f | 0x80..=0x8f | 0x90..=0x9f | 0x50 | 0x51 | 0x52) {
+                opcode_density[chunk] += 1;
+            }
+        }
+    }
+    
+    // Trouver le pic de densité d'opcodes (= début du runtime)
+    if let Some((max_chunk, _)) = opcode_density.iter().enumerate()
+        .skip(1)  // Ignorer le premier chunk (constructor)
+        .max_by_key(|(_, &density)| density) 
+    {
+        let estimated = max_chunk * 100;
+        println!("📊 [HEURISTIC] Densité max à chunk {}, offset estimé: 0x{: x}", max_chunk, estimated);
+        return estimated;
+    }
+    
+    // ============ MÉTHODE 6: FALLBACK INTELLIGENT ============
+    
+    // Estimation basée sur la taille du bytecode
+    let estimated = match bytecode.len() {
+        0..=500 => 80,           // Petit contrat
+        501..=1500 => bytecode.len() / 4,   // Contrat moyen  
+        1501..=5000 => bytecode.len() / 3,  // Gros contrat
+        _ => bytecode.len() / 2,             // Très gros contrat
+    };
+    
+    println! ("⚠️ [FALLBACK] Aucun pattern trouvé, estimation basée sur taille: 0x{:x}", estimated);
+    estimated
+}
+
+/// ✅ HELPER:  Version simple qui utilise juste les patterns principaux
+fn find_runtime_start_simple(bytecode: &[u8]) -> usize {
+    // Pattern le plus commun : dispatcher ERC20
+    let main_pattern = &[0x60, 0x80, 0x60, 0x40, 0x52, 0x60, 0x04, 0x36];
+    
+    for pos in 100..bytecode.len().saturating_sub(main_pattern.len()) {
+        if bytecode[pos..pos + main_pattern.len()] == *main_pattern {
+            println!("✅ [SIMPLE] Runtime trouvé à 0x{:x}", pos);
+            return pos;
+        }
+    }
+    
+    // Fallback
+    bytecode.len() / 3
+}
+
 /// ✅ DÉTECTION UNIVERSELLE: Différencie validation vs erreur métier
 fn detect_validation_error(data: &[u8], len: usize) -> bool {
     // 1. REVERT vide = validation simple
@@ -1099,14 +1239,16 @@ if prog.len() > 100 && prog[0] == 0x60 && prog[2] == 0x60 && prog[4] == 0x52 {
     let debug_evm = true;
     
 let mut insn_ptr = if interpreter_args.function_name.starts_with("function_") {
-    // Si c'est votre contrat VEZ → offset fixe
-    if prog.len() > 3000 && prog[0x421..0x421+4] == [0x60, 0x80, 0x60, 0x40] {
-        0x421  // C'est votre contrat
-    } else {
-        find_universal_runtime_start(prog)  // Autre contrat
-    }
+    // Version complète (recommandée)
+    find_universal_runtime_start(prog)
+    
+    // Ou version simple
+    // find_runtime_start_simple(prog)
+    
+    // Ou votre solution fixe pour VEZ
+    // 0x421
 } else {
-    0  // Constructor
+    0
 };
 println!("🚀 [EXECUTION] Démarrage à PC=0x{:x} pour fonction: {}", 
              insn_ptr, interpreter_args.function_name);
