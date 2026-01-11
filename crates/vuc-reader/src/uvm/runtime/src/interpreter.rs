@@ -2317,12 +2317,12 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
             println!("✅ [JUMPI VALID] → 0x{:04x}", dest);
         } else {
             // Essayons de trouver un vrai dispatcher universel
-            if let Some(dispatcher_dest) = find_real_dispatcher(prog, valid_jumpdests) {
+            if let Some(dispatcher_dest) = find_real_dispatcher(prog, &valid_jumpdests) {
                 insn_ptr = dispatcher_dest;
                 skip_advance = true;
                 println!("✅ [JUMPI DISPATCHER] Pattern reconnu → 0x{:04x}", dispatcher_dest);
             } else if let Some(generic_dest) = resolve_jump_destination_generic(
-                insn_ptr, dest, &evm_stack, valid_jumpdests, prog
+                insn_ptr, dest, &evm_stack, &valid_jumpdests, prog
             ) {
                 insn_ptr = generic_dest;
                 skip_advance = true;
