@@ -1748,37 +1748,42 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
         consume_gas(&mut execution_context, 2)?;
     },
 
- //___ 0x35 CALLDATALOAD - VERSION UNIVERSELLE CORRIGÉE
+ //___ 0x35 CALLDATALOAD - CORRECTION POUR EXTRAIRE LE SELECTOR
 0x35 => {
     if evm_stack.is_empty() {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on CALLDATALOAD"));
     }
     let offset = evm_stack.pop().unwrap() as usize;
     
-    // ✅ UTILISE effective_mbuff au lieu de calldata directement
     let value = if offset == 0 && effective_mbuff.len() >= 4 {
-        // Lit le selector de fonction pour offset 0
-        u32::from_be_bytes([effective_mbuff[0], effective_mbuff[1], effective_mbuff[2], effective_mbuff[3]]) as u64
+        // ✅ CORRECTION:  Lit le selector de fonction (4 premiers bytes)
+        u32::from_be_bytes([
+            effective_mbuff[0], 
+            effective_mbuff[1], 
+            effective_mbuff[2], 
+            effective_mbuff[3]
+        ]) as u64
+    } else if offset + 32 <= effective_mbuff.len() {
+        // ✅ CORRECTION: Lecture 32-byte EVM standard
+        let mut value = 0u64;
+        for i in 0..8 { // Prend les 8 premiers bytes des 32
+            value = (value << 8) | (effective_mbuff[offset + i] as u64);
+        }
+        value
     } else if offset < effective_mbuff.len() {
-        // Lit les données standard depuis l'offset
+        // Lecture partielle
         let mut value = 0u64;
         let end = (offset + 8).min(effective_mbuff.len());
-        for i in offset..end {
+        for i in offset.. end {
             value = (value << 8) | (effective_mbuff[i] as u64);
         }
         value
     } else {
-        0 // EVM spec: retourne 0 pour accès hors borne
+        0 // EVM spec:  retourne 0 pour accès hors borne
     };
     
     evm_stack.push(value);
-    if debug_evm && instruction_count <= 50 {
-        if offset == 0 {
-            println!("📥 [CALLDATALOAD] offset=0 → FUNCTION SELECTOR=0x{:x}", value);
-        } else {
-            println!("📥 [CALLDATALOAD] offset=0x{:x} → value=0x{:x}", offset, value);
-        }
-    }
+    println!("📥 [CALLDATALOAD] offset={} → selector=0x{:x}", offset, value);
 },
     
     //___ 0x36 CALLDATASIZE - CORRECTION POUR CONTRATS UUPS
