@@ -868,6 +868,24 @@ fn safe_u256_to_u64(val: &u256) -> u64 {
     }
 }
 
+fn find_universal_runtime_start(bytecode: &[u8], args: &InterpreterArgs) -> usize {
+    // Si c'est du déploiement
+    if args.function_name. is_empty() || args.function_name == "deploy" {
+        return 0;
+    }
+    
+    // Chercher CALLDATASIZE (0x36) - présent dans tous les dispatchers
+    for (i, &byte) in bytecode.iter().enumerate() {
+        if byte == 0x36 && i > 100 {  // CALLDATASIZE après le constructor
+            println!("✅ [UNIVERSAL] CALLDATASIZE à PC 0x{:x}", i. saturating_sub(10));
+            return i.saturating_sub(10);  // Un peu avant pour être sûr
+        }
+    }
+    
+    // Fallback
+    bytecode.len() / 3
+}
+
 pub fn execute_program(
     prog_: Option<&[u8]>,
     stack_usage: Option<&StackUsage>,
@@ -1074,7 +1092,11 @@ reg[54] = interpreter_args.call_depth as u64;           // Profondeur d'appel
     println!("   Gas limit: {}", interpreter_args.gas_limit);
     println!("   Valeur: {}", interpreter_args.value);
 
-    let mut pc: usize = 0;
+    let mut insn_ptr = find_universal_runtime_start(prog, args);
+    
+    println!("🚀 [EXECUTION] Démarrage à PC=0x{:x} pour fonction: {}", 
+             insn_ptr, args.function_name);
+    
     let mut evm_stack: Vec<u64> = Vec::with_capacity(1024);
 // FIX FINAL – calldata size sur la pile pour TOUTES les fonctions EVM
 evm_stack.push(effective_mbuff.len() as u64);
