@@ -1098,7 +1098,7 @@ if prog.len() > 100 && prog[0] == 0x60 && prog[2] == 0x60 && prog[4] == 0x52 {
 
     let debug_evm = true;
     
-let mut insn_ptr = if args.function_name.starts_with("function_") {
+let mut insn_ptr = if interpreter_args.function_name.starts_with("function_") {
     // Si c'est votre contrat VEZ → offset fixe
     if prog.len() > 3000 && prog[0x421..0x421+4] == [0x60, 0x80, 0x60, 0x40] {
         0x421  // C'est votre contrat
