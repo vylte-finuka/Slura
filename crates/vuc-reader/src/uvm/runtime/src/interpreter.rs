@@ -1099,7 +1099,8 @@ if prog.len() > 100 && prog[0] == 0x60 && prog[2] == 0x60 && prog[4] == 0x52 {
 
     let debug_evm = true;
     
-        let mut insn_ptr = 0;
+        let starting_pc = interpreter_args.function_offset.unwrap_or(0);
+    let mut insn_ptr: usize = starting_pc; // ⬅️ UTILISE L'OFFSET AU LIEU DE 0
 
 println!("🚀 [DÉMARRAGE] PC=0x{:04x}", insn_ptr);
 
