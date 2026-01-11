@@ -1750,13 +1750,13 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
 
  //___ 0x35 CALLDATALOAD - FIX CRITIQUE POUR LE SELECTOR
 0x35 => {
-    if evm_stack.is_empty() {
+    if evm_stack. is_empty() {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on CALLDATALOAD"));
     }
-    let offset = evm_stack.pop().unwrap() as usize;
+    let offset = evm_stack. pop().unwrap() as usize;
     
     let value = if offset == 0 && effective_mbuff.len() >= 4 {
-        // ✅ FIX CRITIQUE: Extrait le SELECTOR, pas la SIZE ! 
+        // ✅ FIX CRITIQUE:  Extrait le SELECTOR, pas la SIZE ! 
         let selector_bytes = [
             effective_mbuff[0], 
             effective_mbuff[1], 
@@ -1764,12 +1764,12 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
             effective_mbuff[3]
         ];
         let selector = u32::from_be_bytes(selector_bytes) as u64;
-        println!("📥 [CALLDATALOAD] offset=0 → SELECTOR=0x{:08x}", selector);
+        println! ("📥 [CALLDATALOAD] offset=0 → SELECTOR=0x{:08x}", selector);
         selector
     } else if offset + 32 <= effective_mbuff. len() {
         // Lecture normale 32 bytes
         let mut value = 0u64;
-        for i in 0..8 {
+        for i in 0.. 8 {
             value = (value << 8) | (effective_mbuff[offset + i] as u64);
         }
         value
@@ -1780,6 +1780,7 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     evm_stack.push(value);
     if debug_evm && instruction_count <= 50 {
         println!("📥 [CALLDATALOAD] offset=0x{: x} → value=0x{:x}", offset, value);
+        //                               ↑ Pas d'espace      ↑ Pas d'espace
     }
 },
     
