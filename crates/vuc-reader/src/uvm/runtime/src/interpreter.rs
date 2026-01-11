@@ -269,7 +269,7 @@ fn extract_function_selector_from_name(function_name: &str) -> Option<u32> {
 
 /// Helper universel : trouve le JUMPDEST à la destination demandée,
 /// ou le JUMPDEST immédiatement suivant si la destination n'est pas un label.
-fn find_valid_jumpdest(dest: usize, prog: &[u8], valid_jumpdests: &std::collections::HashSet<usize>) -> Option<usize> {
+fn find_valid_jumpdest(dest: usize, prog: &[u8], valid_jumpdests: &HashSet<usize>) -> Option<usize> {
     // 1. Destination pile un vrai JUMPDEST ?
     if valid_jumpdests.contains(&dest) && prog.get(dest) == Some(&0x5b) {
         return Some(dest);
