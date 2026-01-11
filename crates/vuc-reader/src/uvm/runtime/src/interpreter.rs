@@ -1075,9 +1075,7 @@ reg[54] = interpreter_args.call_depth as u64;           // Profondeur d'appel
     println!("   Valeur: {}", interpreter_args.value);
 
     let mut pc: usize = 0;
-    let mut evm_stack: Vec<u64> = Vec::with_capacity(1024);
-// FIX FINAL – calldata size sur la pile pour TOUTES les fonctions EVM
-evm_stack.push(effective_mbuff.len() as u64);
+    let mut evm_stack: Vec<u64> = Vec::with_capacity(1024); // FIX FINAL – calldata size sur la pile pour TOUTES les fonctions EVM
 reg[1] = effective_mbuff.len() as u64;
 println!("📏 [FINAL FIX] CALLDATASIZE = {} bytes poussé sur la pile → DUP1 sauvé", effective_mbuff.len());
     let mut natural_exit_detected = false;
