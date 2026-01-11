@@ -2286,7 +2286,7 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     
     consume_gas(&mut execution_context, 8)?;
 },
-
+        
         //___ 0x57 JUMPI - MÊME LOGIQUE GÉNÉRIQUE
 0x57 => {
     if evm_stack.len() < 2 {
