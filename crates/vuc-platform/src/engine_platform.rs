@@ -2022,24 +2022,6 @@ pub async fn verify_contract_deployment(&self, contract_address: &str) -> Result
                 }
             }
         }
-    
-        // Fallback: transfert natif VEZ
-        let vez_contract_addr = "0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448";
-        let args = vec![
-            serde_json::Value::String(to_addr.clone()),
-            serde_json::Value::Number(serde_json::Number::from(value)),
-        ];
-        match vm_sim.execute_module(vez_contract_addr, "transfer", args, Some(&from_addr)) {
-            Ok(result) => {
-                let result_hex = match result {
-                    serde_json::Value::Number(n) => format!("0x{:064x}", n.as_u64().unwrap_or(0)),
-                    serde_json::Value::String(s) => format!("0x{}", hex::encode(s.as_bytes())),
-                    _ => "0x".to_string(),
-                };
-                Ok(result_hex)
-            }
-            Err(e) => Err(format!("Erreur VM transfer: {}", e)),
-        }
     }
     
         /// ✅ Estimation du gas
