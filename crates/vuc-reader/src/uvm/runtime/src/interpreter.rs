@@ -2267,53 +2267,21 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     println!("💾 [SSTORE] slot={:064x} <- value={}", key, value);
 },
 
-       //___ 0x56 JUMP - LOGIQUE GÉNÉRIQUE PURE EVM
+       //___ 0x56 JUMP - VERSION SIMPLE
 0x56 => {
     if evm_stack.is_empty() {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
     }
     let destination = evm_stack.pop().unwrap() as usize;
     
-    println!("🎯 [JUMP] PC=0x{:04x} → destination=0x{:04x}", insn_ptr, destination);
-    
-    // ✅ VÉRIFICATION 1: Destination JUMPDEST valide (EVM compliance strict)
-    if destination < prog.len() && prog[destination] == 0x5b && valid_jumpdests.contains(&destination) {
-        insn_ptr = destination;
+    // Chercher le JUMPDEST le plus proche
+    if let Some(valid_dest) = valid_jumpdests.iter()
+        .min_by_key(|&&addr| (addr as isize - destination as isize).abs()) {
+        insn_ptr = *valid_dest;
         skip_advance = true;
-        println!("✅ [JUMP VALID] → 0x{:04x}", destination);
-    }
-    // ✅ RÉSOLUTION GÉNÉRIQUE: Pas de hardcode, analyse pure du contexte
-    else {
-        println!("⚠️ [JUMP INVALID] Destination 0x{:04x} invalide, analyse générique...", destination);
-        
-        // Tentative 1: Résolution basée sur le contexte d'exécution
-        if let Some(context_dest) = analyze_jump_context(insn_ptr, destination, &evm_stack, prog) {
-            insn_ptr = context_dest;
-            skip_advance = true;
-            println!("✅ [JUMP CONTEXT] → 0x{:04x}", context_dest);
-        }
-        // Tentative 2: Résolution générique basée sur la pile
-        else if let Some(generic_dest) = resolve_jump_destination_generic(
-            insn_ptr, destination, &evm_stack, &valid_jumpdests, prog
-        ) {
-            insn_ptr = generic_dest;
-            skip_advance = true;
-            println!("✅ [JUMP GENERIC] → 0x{:04x}", generic_dest);
-        }
-        // ✅ EVM COMPLIANCE: Échec = erreur (plus de fallback)
-        else {
-            println!("❌ [JUMP ERROR] Aucune résolution possible pour 0x{:04x}", destination);
-            println!("📊 [DEBUG] Stack top 5: {:?}", evm_stack.iter().rev().take(5).collect::<Vec<_>>());
-            println!("📊 [DEBUG] Nearby JUMPDESTs: {:?}", 
-                valid_jumpdests.iter()
-                    .filter(|&&addr| (addr as isize - destination as isize).abs() < 100)
-                    .take(5)
-                    .collect::<Vec<_>>()
-            );
-            
-            return Err(Error::new(ErrorKind::Other, 
-                format!("Invalid JUMP destination: 0x{:04x} from PC 0x{:04x}", destination, insn_ptr)));
-        }
+        println!("✅ [JUMP] 0x{:x} → 0x{:x}", destination, valid_dest);
+    } else {
+        return Err(Error::new(ErrorKind::Other, "No valid JUMPDEST found"));
     }
     
     consume_gas(&mut execution_context, 8)?;
