@@ -796,7 +796,7 @@ pub fn execute_ubf_program_secure(
     pub unsafe fn execute_program_jit(
         &mut self,
         mem: &mut [u8],
-        mbuff: &'a mut [u8],
+        mbuff: &mut [u8],
     ) -> Result<u64, Error> {
         // If packet data is empty, do not send the address of an empty slice; send a null pointer
         //  as first argument instead, as this is uBPF's behavior (empty packet should not happen
