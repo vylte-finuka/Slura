@@ -2311,58 +2311,47 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     println!("💾 [SSTORE] slot={:064x} <- value={}", key, value);
 },
 
-    //___ 0x56 JUMP
+//___ 0x56 JUMP
 0x56 => {
-            if evm_stack.is_empty() {
-                return Err(Error::new(ErrorKind::Other, "STACK underflow on JUMP"));
-            }
-            let dest = evm_stack.pop().unwrap() as usize;
-
-            if dest >= prog.len() {
-                println!("⚠️ JUMP to out-of-bounds (0x{:x}) → treated as intentional revert (common in onlyOwner)", dest);
-                return Err(Error::new(ErrorKind::Other, "Intentional revert via invalid JUMP"));
-            }
-
-            if prog[dest] != 0x5b {
-                // Pattern très courant : si condition fausse → JUMP à une adresse invalide (souvent 0)
-                println!("⚠️ JUMP to invalid dest 0x{:04x} (not JUMPDEST) → intentional revert (modifier protection)", dest);
-                return Err(Error::new(ErrorKind::Other, "Intentional revert via invalid JUMP destination"));
-            }
-
-            println!("✅ Valid JUMP → 0x{:04x}", dest);
-            insn_ptr = dest;
-            continue;
-        },
+    if evm_stack.is_empty() {
+        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
+    }
+    let dest = evm_stack.pop().unwrap() as usize;
+    let real_dest = dest;
+    if is_valid_jumpdest(real_dest, prog, &valid_jumpdests) {
+        insn_ptr = real_dest;
+        skip_advance = true;
+        println!("✅ [JUMP] vers 0x{:04x} (runtime+offset=0x{:04x})", dest, real_dest);
+    } else {
+        println!("❌ [JUMP INVALID] Pas de JUMPDEST exact à 0x{:04x} (runtime+offset=0x{:04x})", dest, real_dest);
+        return Err(Error::new(ErrorKind::Other, format!(
+            "JUMP interdit: dest 0x{:04x} runtime_offset 0x{:04x} n'est pas un JUMPDEST", dest, real_dest)));
+    }
+    consume_gas(&mut execution_context, 8)?;
+},
         
 //___ 0x57 JUMPI
 0x57 => {
-            if evm_stack.len() < 2 {
-                return Err(Error::new(ErrorKind::Other, "STACK underflow on JUMPI"));
-            }
-            let condition = evm_stack.pop().unwrap();
-            let dest = evm_stack.pop().unwrap() as usize;
-
-            if condition != 0 {
-                if dest >= prog.len() || prog[dest] != 0x5b {
-                    // Condition vraie mais destination invalide → c’est un revert intentionnel
-                    println!("⚠️ JUMPI true → invalid dest 0x{:04x} → intentional revert", dest);
-                    return Err(Error::new(ErrorKind::Other, "Intentional revert via invalid JUMPI"));
-                }
-                println!("✅ JUMPI true → jump to 0x{:04x}", dest);
-                insn_ptr = dest;
-                continue;
-            } else {
-                // Condition fausse → on skip simplement le PUSH de la destination
-                println!("🔀 JUMPI false → continue (skip destination PUSH)");
-                if insn_ptr + 1 < prog.len() {
-                    let next = prog[insn_ptr + 1];
-                    if (0x60..=0x7f).contains(&next) {
-                        advance += (next - 0x5f) as usize; // skip PUSH1..32
-                    }
-                }
-            }
-        },
-      
+    if evm_stack.len() < 2 {
+        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMPI"));
+    }
+    let dest = evm_stack.pop().unwrap() as usize;
+    let cond = evm_stack.pop().unwrap();
+    let real_dest = dest;
+    if cond != 0 {
+        if is_valid_jumpdest(real_dest, prog, &valid_jumpdests) {
+            insn_ptr = real_dest;
+            skip_advance = true;
+            println!("✅ [JUMPI] condition vraie → 0x{:04x} (runtime+offset=0x{:04x})", dest, real_dest);
+        } else {
+            println!("❌ [JUMPI INVALID] Pas de JUMPDEST exact à 0x{:04x} (runtime+offset=0x{:04x})", dest, real_dest);
+            return Err(Error::new(ErrorKind::Other, format!(
+                "JUMPI interdit: dest 0x{:04x} runtime_offset 0x{:04x} n'est pas un JUMPDEST", dest, real_dest)));
+        }
+    }
+    consume_gas(&mut execution_context, 10)?;
+},
+        
     //___ 0x58 PC
 0x58 => {
     let pc = insn_ptr as u64;
