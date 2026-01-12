@@ -1240,31 +1240,10 @@ impl LurosonieManager {
     pub async fn execute_transaction_in_block(&self, tx: &TxRequest) -> Result<serde_json::Value, String> {
     let mut vm = self.vm.write().await;
 
-    // Adresse du contrat cible (optionnelle)
     let contract_addr = tx.contract_addr.as_deref();
-    let data_field = tx.data.clone().unwrap_or_default();
-
-    // Détection du selector si possible
-    let function =
-        // Si function_name déjà fourni, l'utiliser
-        if let Some(fname) = tx.function_name.as_deref() {
-            fname
-        } else if !data_field.is_empty() && data_field.len() >= 10 {
-            // data: "0xabcdef01...." → extract selector
-            let selector_hex = &data_field[2..10];
-            let selector = u32::from_str_radix(selector_hex, 16).unwrap_or(0);
-            &format!("function_{:08x}", selector)
-        } else {
-            "function_unknown"
-        };
-
+    let function = tx.function_name.as_deref();
     let to_addr = tx.receiver_op.clone();
     let value = tx.value_tx.parse::<u128>().unwrap_or(0);
-
-    // Vérifie si l'adresse cible est un contrat déployé
-    let is_contract = contract_addr
-        .and_then(|addr| vm.modules.get(addr))
-        .is_some();
 
     println!(
         "🔁 Exécution tx {} sur {} : {} -> {} (valeur {})",
@@ -1275,45 +1254,36 @@ impl LurosonieManager {
         value
     );
 
-    if is_contract {
-        // Exécution sur le contrat cible
-        let args = tx.arguments.clone().unwrap_or_else(|| {
-            vec![
-                serde_json::Value::String(to_addr.clone()),
-                serde_json::Value::Number(serde_json::Number::from(value)),
-            ]
-        });
-        match vm.execute_module(contract_addr.unwrap(), function, args, Some(&tx.from_op)) {
-            Ok(result) => {
-                println!("✅ VM {} ok pour tx {}", function, tx.hash);
-                Ok(serde_json::json!({
-                    "status": "success",
-                    "from": tx.from_op,
-                    "to": to_addr,
-                    "value": value,
-                    "nonce": tx.nonce_tx,
-                    "hash": tx.hash,
-                    "result": result
-                }))
-            }
-            Err(e) => {
-                error!("❌ VM.execute_module {} failed for tx {}: {}", function, tx.hash, e);
-                Err(format!("execute_module failed: {}", e))
+    // Exécution exclusivement sur un vrai contrat + nom de fonction explicite
+    match (contract_addr, function) {
+        (Some(addr), Some(fn_name)) => {
+            let args = tx.arguments.clone().unwrap_or_else(|| vec![]);
+            match vm.execute_module(addr, fn_name, args, Some(&tx.from_op)) {
+                Ok(result) => {
+                    println!("✅ VM {} ok pour tx {}", fn_name, tx.hash);
+                    Ok(serde_json::json!({
+                        "status": "success",
+                        "from": tx.from_op,
+                        "to": to_addr,
+                        "value": value,
+                        "nonce": tx.nonce_tx,
+                        "hash": tx.hash,
+                        "result": result
+                    }))
+                }
+                Err(e) => {
+                    error!("❌ VM.execute_module {} failed for tx {}: {}", fn_name, tx.hash, e);
+                    Err(format!("execute_module failed: {}", e))
+                }
             }
         }
-    } else {
-        // STRICT : refuse toute tx non-contractuelle sans fallback natif ni auto-fonction transfer
-        error!(
-            "❌ execute_transaction_in_block: destination {} n'est pas un contrat déployé",
-            contract_addr.unwrap_or(&to_addr)
-        );
-        Err(format!(
-            "Execution failed: destination {} is not a deployed contract",
-            contract_addr.unwrap_or(&to_addr)
-        ))
+        // STRICT : pas de fallback, pas de transfer automatique
+        _ => {
+            Err("Execution refused: contract address or function name missing or invalid. No default transfer/fallback allowed.".to_string())
+        }
     }
 }
-    
+
     /// ✅ NOUVELLE: Méthode de transfert natif en fallback
     async fn execute_native_transfer(&self, from: &str, to: &str, amount: u64) -> Result<(), String> {
         // Mise à jour simple des balances dans self.balances
