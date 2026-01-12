@@ -2317,28 +2317,15 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
     }
     let dest = evm_stack.pop().unwrap() as usize;
-
-    // PATCH: autorise le saut si c'est la destination d'un selector connu
-    if let Some(sel) = current_selector {
-        if let Some(&expected_dest) = selector_jump_map.get(&sel) {
-            if dest == expected_dest {
-                insn_ptr = dest;
-                skip_advance = true;
-                println!("✅ [JUMP SELECTOR] Saut autorisé pour selector 0x{:08x} vers 0x{:04x}", sel, dest);
-                continue;
-            }
-        }
-    }
-
-    // Sinon, comportement standard
-    if is_valid_jumpdest(dest, prog, &valid_jumpdests) {
-        insn_ptr = dest;
+    let real_dest = runtime_offset + dest;
+    if is_valid_jumpdest(real_dest, prog, &valid_jumpdests) {
+        insn_ptr = real_dest;
         skip_advance = true;
-        println!("✅ [JUMP] vers 0x{:04x}", dest);
+        println!("✅ [JUMP] vers 0x{:04x} (runtime+offset=0x{:04x})", dest, real_dest);
     } else {
-        println!("❌ [JUMP INVALID] Pas de JUMPDEST exact à 0x{:04x}", dest);
+        println!("❌ [JUMP INVALID] Pas de JUMPDEST exact à 0x{:04x} (runtime+offset=0x{:04x})", dest, real_dest);
         return Err(Error::new(ErrorKind::Other, format!(
-            "JUMP interdit: dest 0x{:04x} n'est pas un JUMPDEST", dest)));
+            "JUMP interdit: dest 0x{:04x} runtime_offset 0x{:04x} n'est pas un JUMPDEST", dest, real_dest)));
     }
     consume_gas(&mut execution_context, 8)?;
 },
@@ -2357,14 +2344,14 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
             skip_advance = true;
             println!("✅ [JUMPI] condition vraie → 0x{:04x} (runtime+offset=0x{:04x})", dest, real_dest);
         } else {
-            println!("❌ [JUMPI INVALID] Pas de JUMPDEST exact à 0x{:04x} (runtime+offset)", real_dest);
+            println!("❌ [JUMPI INVALID] Pas de JUMPDEST exact à 0x{:04x} (runtime+offset=0x{:04x})", dest, real_dest);
             return Err(Error::new(ErrorKind::Other, format!(
-                "JUMPI interdit: dest 0x{:04x} n'est pas un JUMPDEST", real_dest)));
+                "JUMPI interdit: dest 0x{:04x} runtime_offset 0x{:04x} n'est pas un JUMPDEST", dest, real_dest)));
         }
     }
     consume_gas(&mut execution_context, 10)?;
 },
-
+        
     //___ 0x58 PC
 0x58 => {
     let pc = insn_ptr as u64;
