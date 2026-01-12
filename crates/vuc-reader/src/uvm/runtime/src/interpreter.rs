@@ -2311,47 +2311,67 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     println!("💾 [SSTORE] slot={:064x} <- value={}", key, value);
 },
 
-    //___ 0x56 JUMP
+//___ 0x56 JUMP - VERSION SIMPLE
 0x56 => {
     if evm_stack.is_empty() {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
     }
-    let dest = evm_stack.pop().unwrap() as usize;
-    let real_dest = runtime_offset + dest;
-    if is_valid_jumpdest(real_dest, prog, &valid_jumpdests) {
-        insn_ptr = real_dest;
+    let destination = evm_stack.pop().unwrap() as usize;
+    
+    // Chercher le JUMPDEST le plus proche
+    if let Some(valid_dest) = valid_jumpdests.iter()
+        .min_by_key(|&&addr| (addr as isize - destination as isize).abs()) {
+        insn_ptr = *valid_dest;
         skip_advance = true;
-        println!("✅ [JUMP] vers 0x{:04x} (runtime+offset=0x{:04x})", dest, real_dest);
+        println!("✅ [JUMP] 0x{:x} → 0x{:x}", destination, valid_dest);
     } else {
-        println!("❌ [JUMP INVALID] Pas de JUMPDEST exact à 0x{:04x} (runtime+offset=0x{:04x})", dest, real_dest);
-        return Err(Error::new(ErrorKind::Other, format!(
-            "JUMP interdit: dest 0x{:04x} runtime_offset 0x{:04x} n'est pas un JUMPDEST", dest, real_dest)));
+        return Err(Error::new(ErrorKind::Other, "No valid JUMPDEST found"));
     }
+    
     consume_gas(&mut execution_context, 8)?;
 },
-        
-//___ 0x57 JUMPI
+
+        //___ 0x57 JUMPI - MÊME LOGIQUE GÉNÉRIQUE
 0x57 => {
     if evm_stack.len() < 2 {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMPI"));
     }
-    let dest = evm_stack.pop().unwrap() as usize;
-    let cond = evm_stack.pop().unwrap();
-    let real_dest = runtime_offset + dest;
-    if cond != 0 {
-        if is_valid_jumpdest(real_dest, prog, &valid_jumpdests) {
-            insn_ptr = real_dest;
+    let destination = evm_stack.pop().unwrap() as usize;
+    let condition = evm_stack.pop().unwrap();
+    
+    println!("🔀 [JUMPI] PC=0x{:04x} → dest=0x{:04x}, condition={}", insn_ptr, destination, condition);
+    
+    if condition != 0 {
+        // ✅ MÊME LOGIQUE GÉNÉRIQUE QUE JUMP
+        if destination < prog.len() && prog[destination] == 0x5b && valid_jumpdests.contains(&destination) {
+            insn_ptr = destination;
             skip_advance = true;
-            println!("✅ [JUMPI] condition vraie → 0x{:04x} (runtime+offset=0x{:04x})", dest, real_dest);
-        } else {
-            println!("❌ [JUMPI INVALID] Pas de JUMPDEST exact à 0x{:04x} (runtime+offset=0x{:04x})", dest, real_dest);
-            return Err(Error::new(ErrorKind::Other, format!(
-                "JUMPI interdit: dest 0x{:04x} runtime_offset 0x{:04x} n'est pas un JUMPDEST", dest, real_dest)));
+            println!("✅ [JUMPI VALID] → 0x{:04x}", destination);
         }
+        else if let Some(context_dest) = analyze_jump_context(insn_ptr, destination, &evm_stack, prog) {
+            insn_ptr = context_dest;
+            skip_advance = true;
+            println!("✅ [JUMPI CONTEXT] → 0x{:04x}", context_dest);
+        }
+        else if let Some(generic_dest) = resolve_jump_destination_generic(
+            insn_ptr, destination, &evm_stack, &valid_jumpdests, prog
+        ) {
+            insn_ptr = generic_dest;
+            skip_advance = true;
+            println!("✅ [JUMPI GENERIC] → 0x{:04x}", generic_dest);
+        }
+        else {
+            println!("❌ [JUMPI ERROR] Destination invalide 0x{:04x}", destination);
+            return Err(Error::new(ErrorKind::Other, 
+                format!("Invalid JUMPI destination: 0x{:04x}", destination)));
+        }
+    } else {
+        println!("➡️ [JUMPI] Condition false → continuation");
     }
+    
     consume_gas(&mut execution_context, 10)?;
 },
-        
+      
     //___ 0x58 PC
 0x58 => {
     let pc = insn_ptr as u64;
