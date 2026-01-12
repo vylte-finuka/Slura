@@ -16,6 +16,7 @@
 //! value. Hence some helpers have unused arguments, or return a 0 value in all cases, in order to
 //! respect this convention.
 
+use std::io::Write;
 #[cfg(feature = "std")]
 use crate::lib::*;
 
@@ -274,4 +275,44 @@ pub fn rand(min: u64, max: u64, unused3: u64, unused4: u64, unused5: u64) -> u64
         n = n % (max + 1 - min) + min;
     };
     n
+}
+
+/// Helper sluBPF pour envoyer un paquet TCP/UDP (SLU-IP 450)
+#[cfg(feature = "std")]
+pub fn slu_ip450_send(addr_ptr: u64, port: u64, data_ptr: u64, data_len: u64, proto: u64) -> u64 {
+    use std::net::{TcpStream, UdpSocket};
+    use std::slice;
+
+    // Récupère l'adresse IP depuis addr_ptr (string null-terminated)
+    let addr = unsafe {
+        let mut v = Vec::new();
+        let mut p = addr_ptr as *const u8;
+        while *p != 0 {
+            v.push(*p);
+            p = p.add(1);
+        }
+        String::from_utf8_lossy(&v).to_string()
+    };
+
+    let port = port as u16;
+    let data = unsafe { slice::from_raw_parts(data_ptr as *const u8, data_len as usize) };
+
+    match proto {
+        0 => { // TCP
+            if let Ok(mut stream) = TcpStream::connect((addr.as_str(), port)) {
+                if let Ok(_) = stream.write(data) {
+                    return 1;
+                }
+            }
+        }
+        1 => { // UDP
+            if let Ok(socket) = UdpSocket::bind("0.0.0.0:0") {
+                if let Ok(_) = socket.send_to(data, (addr.as_str(), port)) {
+                    return 1;
+                }
+            }
+        }
+        _ => {}
+    }
+    0
 }

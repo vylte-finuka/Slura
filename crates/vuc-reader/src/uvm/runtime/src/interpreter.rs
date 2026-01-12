@@ -291,11 +291,9 @@ fn build_universal_calldata(args: &InterpreterArgs) -> Vec<u8> {
     println!("🎯 [FUNCTION SELECTOR] {} → 0x{:08x}", args.function_name, selector);
 
     // ✅ WORKAROUND UNIVERSEL POUR TOUTES LES FONCTIONS VIEW/PURE SANS PARAMÈTRES
-    if args.args.is_empty() && args.function_name.starts_with("function_") {
-        // Force 68 bytes → 4 selector + 64 padding
-        calldata.resize(68, 0u8);
-        println!("🔧 [VIEW FUNCTION WORKAROUND] Calldata forcé à 68 bytes (selector + 64 padding)");
-        println!("📡 [CALLDATA UNIVERSEL] 68 bytes pour éviter stack underflow sur DUP1");
+     if args.args.is_empty() && args.function_name.starts_with("function_") {
+        calldata.resize(4, 0u8); // 4 bytes: selector seul
+        println!("🔧 [VIEW FUNCTION FIX] Calldata forcé à 4 bytes (selector seul)");
         return calldata;
     }
 
@@ -913,7 +911,7 @@ pub fn execute_program(
 
     mem: &[u8],
     mbuff: &[u8],
-    helpers: &HashMap<u32, ebpf::Helper>,
+    helpers: &mut HashMap<u32, ebpf::Helper>,
 
     allowed_memory: &HashSet<Range<u64>>,
 
@@ -924,6 +922,8 @@ pub fn execute_program(
 ) -> Result<serde_json::Value, Error> {
     const U32MAX: u64 = u32::MAX as u64;
     const SHIFT_MASK_64: u64 = 0x3f;
+
+    helpers.insert(0x450, crate::helpers::slu_ip450_send); // 0x450 = SLU-IP 450 SEND
 
     let prog = match prog_ {
         Some(prog) => prog,
@@ -1076,36 +1076,9 @@ reg[54] = interpreter_args.call_depth as u64;           // Profondeur d'appel
     // ✅ Hachages d'adresses pour compatibilité
     let mut contract_hasher = DefaultHasher::new();
     interpreter_args.contract_address.hash(&mut contract_hasher);
-    let contract_hash = contract_hasher.finish();
     
     let mut sender_hasher = DefaultHasher::new();
     interpreter_args.sender_address.hash(&mut sender_hasher);
-    let sender_hash = sender_hasher.finish();
-
-    let check_mem_load = |addr: u64, len: usize, insn_ptr: usize| {
-        check_mem(
-            addr,
-            len,
-            "load",
-            insn_ptr,
-            &mbuff,
-            mem,
-            &stack,
-            allowed_memory,
-        )
-    };
-    let check_mem_store = |addr: u64, len: usize, insn_ptr: usize| {
-        check_mem(
-            addr,
-            len,
-            "store",
-            insn_ptr,
-            &mbuff,
-            mem,
-            &stack,
-            allowed_memory,
-        )
-    };
 
     println!("🚀 DÉBUT EXÉCUTION UVM");
     println!("   Fonction: {}", interpreter_args.function_name);
@@ -1113,12 +1086,26 @@ reg[54] = interpreter_args.call_depth as u64;           // Profondeur d'appel
     println!("   Gas limit: {}", interpreter_args.gas_limit);
     println!("   Valeur: {}", interpreter_args.value);
 
-    let mut pc: usize = 0;
     let mut evm_stack: Vec<u64> = Vec::with_capacity(1024); // FIX FINAL – calldata size sur la pile pour TOUTES les fonctions EVM
-println!("📏 [FINAL FIX] CALLDATASIZE = {} bytes poussé sur la pile → DUP1 sauvé", effective_mbuff.len());
     let mut natural_exit_detected = false;
     let mut exit_value = 0u64;
-
+ // ✅ LOG DEBUG : Liste tous les sélecteurs PUSH4 présents dans le bytecode
+    let mut selectors_found = Vec::new();
+    for i in 0..prog.len().saturating_sub(4) {
+        if prog[i] == 0x63 {
+            let selector = u32::from_be_bytes([prog[i+1], prog[i+2], prog[i+3], prog[i+4]]);
+            selectors_found.push(selector);
+        }
+    }
+    if !selectors_found.is_empty() {
+        println!("🧩 [SELECTEURS BYTECODE] Sélecteurs PUSH4 détectés dans le bytecode :");
+        for sel in &selectors_found {
+            println!("   - 0x{:08x}", sel);
+        }
+    } else {
+        println!("🧩 [SELECTEURS BYTECODE] Aucun PUSH4 détecté dans le bytecode.");
+    }
+    
 // ✅ SUPPRIME COMPLÈTEMENT l'initialisation spéciale
 println!("🟢 [EVM INIT] Pile EVM vide, mémoire initialisée");
 
@@ -1132,11 +1119,32 @@ if prog.len() > 100 && prog[0] == 0x60 && prog[2] == 0x60 && prog[4] == 0x52 {
     // Le bytecode commence par: PUSH1 0xa0, PUSH1 0x40, MSTORE
     // → Initialisation standard EVM/Solidity
 }
+
+// Map selector -> destination (dispatch EVM)
+let mut selector_jump_map = std::collections::HashMap::<u32, usize>::new();
+for i in 0..prog.len().saturating_sub(16) {
+    // Cherche PUSH4 <selector>
+    if prog[i] == 0x63 {
+        let selector = u32::from_be_bytes([prog[i+1], prog[i+2], prog[i+3], prog[i+4]]);
+        // Cherche dans les 12 bytes suivants un PUSH2 <dest> suivi d'un JUMPI
+        for j in 5..16 {
+            if i + j + 3 < prog.len() && prog[i + j] == 0x61 && prog[i + j + 3] == 0x57 {
+                let dest = ((prog[i + j + 1] as usize) << 8) | (prog[i + j + 2] as usize);
+                selector_jump_map.insert(selector, dest);
+                println!("🧭 [DISPATCHER] selector 0x{:08x} → dest 0x{:04x}", selector, dest);
+                break;
+            }
+        }
+    }
+}
+
+// Variable pour stocker le selector courant
+let mut current_selector: Option<u32> = None;
+
 let runtime_offset = detect_runtime_offset(&prog);
     let debug_evm = true;
     
         // ✅ VERSION FINALE DISPATCHER-READY
-// ✅ VERSION SIMPLE SANS COMPLEXITÉ DE TYPES
 let mut insn_ptr = if interpreter_args.function_name. starts_with("function_") {
     // Cherche juste le pattern principal
     if let Some(pos) = prog.windows(8).enumerate().skip(100)
@@ -1183,7 +1191,13 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     }
 
     let opcode = prog[insn_ptr];
-    let insn = ebpf::get_insn(prog, insn_ptr);
+    // Correction ici :
+    let insn = if insn_ptr % ebpf::INSN_SIZE == 0 && insn_ptr / ebpf::INSN_SIZE < prog.len() / ebpf::INSN_SIZE {
+        ebpf::get_insn(prog, insn_ptr / ebpf::INSN_SIZE)
+    } else {
+        // Fabrique un insn factice pour les opcodes EVM purs
+        ebpf::Insn { opc: opcode, dst: 0, src: 0, off: 0, imm: 0 }
+};
     let _dst = insn.dst as usize;
     let _src = insn.src as usize;
 
@@ -1615,15 +1629,26 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     }
     let shift = evm_stack.pop().unwrap();
     let value = evm_stack.pop().unwrap();
-    
-    // ✅ SÉCURISATION: EVM spec limite à 255, mais on clamp à 63 pour u64
-    let safe_shift = if shift > 63 { 63 } else { shift };
-    let res = value >> safe_shift;
-    
-    evm_stack.push(res);
-    reg[0] = res;
-    
-    println!("🔄 [SHR] {} >> {} (clamped to {}) = {}", value, shift, safe_shift, res);
+
+    // PATCH UNIVERSEL: Si la pile contient un sélecteur EVM (4 bytes) et shift == 224, ignore le SHR
+    if shift == 224 && effective_mbuff.len() == 4 && value == u32::from_be_bytes([
+        effective_mbuff[0], effective_mbuff[1], effective_mbuff[2], effective_mbuff[3]
+    ]) as u64 {
+        evm_stack.push(value);
+        reg[0] = value;
+        println!("🔄 [SHR PATCH] Sélecteur détecté, SHR ignoré → 0x{:x}", value);
+    } else {
+        // Comportement EVM standard
+        let value_u256 = ethereum_types::U256::from(value);
+        let shift_u256 = ethereum_types::U256::from(shift);
+        let res_u256 = value_u256 >> shift_u256;
+        let res = res_u256.low_u64();
+
+        evm_stack.push(res);
+        reg[0] = res;
+
+        println!("🔄 [SHR] {} >> {} (EVM 256-bit) = {}", value, shift, res);
+    }
 },
         
 //___ 0x1d SAR - VERSION SÉCURISÉE POUR SHIFT ARITHMÉTIQUE
@@ -1701,21 +1726,17 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
         }
         
         // ✅ DONNÉES: Priorité calldata puis global_mem
-        let data = if offset + len <= mbuff.len() {
-            &mbuff[offset..offset + len]
-        } else if offset + len <= global_mem.len() {
-            &global_mem[offset..offset + len]
-        } else if offset < mbuff.len() {
-            // Lecture partielle depuis calldata
-            &mbuff[offset..]
-        } else if offset < global_mem.len() {
-            // Lecture partielle depuis global_mem
-            &global_mem[offset..]
-        } else {
-            // Données par défaut si hors limites
-            println!("⚠️ [KECCAK256] Offset hors limites → hash de zéros");
-            &[0u8; 32][..len.min(32)]
-        };
+      let data = if offset + len <= effective_mbuff.len() {
+    &effective_mbuff[offset..offset + len]
+} else if offset + len <= global_mem.len() {
+    &global_mem[offset..offset + len]
+} else if offset < effective_mbuff.len() {
+    &effective_mbuff[offset..]
+} else if offset < global_mem.len() {
+    &global_mem[offset..]
+} else {
+    &[0u8; 32][..len.min(32)]
+};
         
         let mut hasher = Keccak::v256();
         let mut hash = [0u8; 32];
@@ -1784,59 +1805,43 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
         consume_gas(&mut execution_context, 2)?;
     },
 
- //___ 0x35 CALLDATALOAD - FIX CRITIQUE POUR LE SELECTOR
+//___ 0x35 CALLDATALOAD - FIX CRITIQUE POUR LE SELECTOR
 0x35 => {
-    if evm_stack. is_empty() {
+    if evm_stack.is_empty() {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on CALLDATALOAD"));
     }
-    let offset = evm_stack. pop().unwrap() as usize;
-    
-    let value = if offset == 0 && effective_mbuff.len() >= 4 {
-        // ✅ FIX CRITIQUE:  Extrait le SELECTOR, pas la SIZE ! 
-        let selector_bytes = [
-            effective_mbuff[0], 
-            effective_mbuff[1], 
-            effective_mbuff[2], 
-            effective_mbuff[3]
-        ];
-        let selector = u32::from_be_bytes(selector_bytes) as u64;
-        println! ("📥 [CALLDATALOAD] offset=0 → SELECTOR=0x{:08x}", selector);
-        selector
-    } else if offset + 32 <= effective_mbuff. len() {
-        // Lecture normale 32 bytes
-        let mut value = 0u64;
-        for i in 0.. 8 {
-            value = (value << 8) | (effective_mbuff[offset + i] as u64);
-        }
-        value
+    let offset = evm_stack.pop().unwrap() as usize;
+
+    let mut data = [0u8; 32];
+    if offset + 32 <= effective_mbuff.len() {
+        data.copy_from_slice(&effective_mbuff[offset..offset + 32]);
+    } else if offset < effective_mbuff.len() {
+        let available = effective_mbuff.len() - offset;
+        data[..available].copy_from_slice(&effective_mbuff[offset..]);
+    }
+    // Correction ici : extraire le selector si offset == 0 et calldata == 4 bytes
+    let value_u64 = if offset == 0 && effective_mbuff.len() == 4 {
+        // Selector = 4 premiers octets
+        let selector = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+        current_selector = Some(selector); // <-- Ajout : mémorise le selector courant
+        selector as u64
     } else {
-        0 // EVM spec
+        // Sinon, on prend les 8 derniers octets (standard)
+        u64::from_be_bytes([data[24], data[25], data[26], data[27], data[28], data[29], data[30], data[31]])
     };
-    
-    evm_stack.push(value);
+    evm_stack.push(value_u64);
     if debug_evm && instruction_count <= 50 {
-        println!("📥 [CALLDATALOAD] offset=0x{:x} → value=0x{:x}", offset, value);
-        //                              
+        println!("📥 [CALLDATALOAD] offset=0x{:x} → value=0x{:x} (raw: {:?})", offset, value_u64, &data[..]);
     }
 },
     
     //___ 0x36 CALLDATASIZE - CORRECTION POUR CONTRATS UUPS
     0x36 => {
-        // ✅ CORRECTION: Assure-toi que calldata a au minimum 4 bytes pour les contrats
-        let actual_size = calldata.len() as u64;
-        
-        // ✅ Si les calldata sont trop courtes pour un appel de fonction valide, 
-        // simule des calldata complètes avec seulement le selector
-        let safe_size = if actual_size < 4 && !interpreter_args.function_name.is_empty() {
-            println!("⚠️ [CALLDATASIZE FIX] {} bytes → forcé à 4 bytes (minimum pour fonction)", actual_size);
-            4 // Minimum EVM pour un appel de fonction
-        } else {
-            actual_size
-        };
-        
-        evm_stack.push(safe_size);
-        reg[0] = safe_size;
-        println!("📏 [CALLDATASIZE] → {} bytes (original: {})", safe_size, actual_size);
+        // Utilise la taille réelle du calldata généré
+        let calldata_size = effective_mbuff.len() as u64;
+        evm_stack.push(calldata_size);
+        reg[0] = calldata_size;
+        println!("📏 [CALLDATASIZE] → {} bytes", calldata_size);
     },
 
     //___ 0x37 CALLDATACOPY
@@ -1844,12 +1849,12 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
         let dst = reg[_dst] as usize; // treat as offset into global_mem
         let src = reg[_src] as usize; // treat as offset into mbuff
         let len = insn.imm as usize;
-        if src + len <= mbuff.len() && dst + len <= global_mem.len() {
-            let data = &mbuff[src..src + len];
-            global_mem[dst..dst + len].copy_from_slice(data);
-        } else {
-            return Err(Error::new(ErrorKind::Other, format!("CALLDATACOPY OOB src={} len={} mbuff={} dst={} global_mem={}", src, len, mbuff.len(), dst, global_mem.len())));
-        }
+        if src + len <= effective_mbuff.len() && dst + len <= global_mem.len() {
+    let data = &effective_mbuff[src..src + len];
+    global_mem[dst..dst + len].copy_from_slice(data);
+} else {
+    return Err(Error::new(ErrorKind::Other, format!("CALLDATACOPY OOB src={} len={} mbuff={} dst={} global_mem={}", src, len, effective_mbuff.len(), dst, global_mem.len())));
+}
         let gas = 3 + 3 * ((len + 31) / 32) as u64;
         //consume_gas(&mut execution_context, gas)?;
     },
@@ -2312,15 +2317,28 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
     }
     let dest = evm_stack.pop().unwrap() as usize;
-    let real_dest = runtime_offset + dest;
-    if is_valid_jumpdest(real_dest, prog, &valid_jumpdests) {
-        insn_ptr = real_dest;
+
+    // PATCH: autorise le saut si c'est la destination d'un selector connu
+    if let Some(sel) = current_selector {
+        if let Some(&expected_dest) = selector_jump_map.get(&sel) {
+            if dest == expected_dest {
+                insn_ptr = dest;
+                skip_advance = true;
+                println!("✅ [JUMP SELECTOR] Saut autorisé pour selector 0x{:08x} vers 0x{:04x}", sel, dest);
+                continue;
+            }
+        }
+    }
+
+    // Sinon, comportement standard
+    if is_valid_jumpdest(dest, prog, &valid_jumpdests) {
+        insn_ptr = dest;
         skip_advance = true;
-        println!("✅ [JUMP] vers 0x{:04x} (runtime+offset=0x{:04x})", dest, real_dest);
+        println!("✅ [JUMP] vers 0x{:04x}", dest);
     } else {
-        println!("❌ [JUMP INVALID] Pas de JUMPDEST exact à 0x{:04x} (runtime+offset=0x{:04x})", dest, real_dest);
+        println!("❌ [JUMP INVALID] Pas de JUMPDEST exact à 0x{:04x}", dest);
         return Err(Error::new(ErrorKind::Other, format!(
-            "JUMP interdit: dest 0x{:04x} runtime_offset 0x{:04x} n'est pas un JUMPDEST", dest, real_dest)));
+            "JUMP interdit: dest 0x{:04x} n'est pas un JUMPDEST", dest)));
     }
     consume_gas(&mut execution_context, 8)?;
 },
@@ -2339,21 +2357,23 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
             skip_advance = true;
             println!("✅ [JUMPI] condition vraie → 0x{:04x} (runtime+offset=0x{:04x})", dest, real_dest);
         } else {
-            println!("❌ [JUMPI INVALID] Pas de JUMPDEST exact à 0x{:04x} (runtime+offset=0x{:04x})", dest, real_dest);
+            println!("❌ [JUMPI INVALID] Pas de JUMPDEST exact à 0x{:04x} (runtime+offset)", real_dest);
             return Err(Error::new(ErrorKind::Other, format!(
-                "JUMPI interdit: dest 0x{:04x} runtime_offset 0x{:04x} n'est pas un JUMPDEST", dest, real_dest)));
+                "JUMPI interdit: dest 0x{:04x} n'est pas un JUMPDEST", real_dest)));
         }
     }
     consume_gas(&mut execution_context, 10)?;
 },
-        
-    //___ 0x58 PC
-    0x58 => {
-        reg[_dst] = (insn_ptr * ebpf::INSN_SIZE) as u64;
-        //consume_gas(&mut execution_context, 2)?;
-    },
 
-    //___ 0x59 MSIZE - Taille de la mémoire active
+    //___ 0x58 PC
+0x58 => {
+    let pc = insn_ptr as u64;
+    evm_stack.push(pc);
+    reg[0] = pc;
+    println!("📍 [PC] Pushed PC = 0x{:x}", pc);
+},
+
+//___ 0x59 MSIZE - Taille de la mémoire active
 0x59 => {
     let memory_size = global_mem.len() as u64;
     evm_stack.push(memory_size);
@@ -2537,6 +2557,19 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     consume_gas(&mut execution_context, 100)?;
 },
 
+//___ 0xf1 FFI_CALL - ENVOI TCP/UDP VIA SLU-IP
+0xf1 => {
+    // FFI_CALL: args sur la pile ou registres
+    let addr_ptr = reg[3];
+    let port = reg[4];
+    let data_ptr = reg[5];
+    let data_len = reg[6];
+    let proto = reg[7];
+    let res = helpers.get(&0x450).map(|f| f(addr_ptr, port, data_ptr, data_len, proto)).unwrap_or(0);
+    evm_stack.push(res);
+    println!("🌐 [SLU-IP 450] TCP/UDP send → result={}", res);
+},
+
 //___ 0xf3 RETURN - DÉTECTION INTELLIGENTE DES VALEURS DE FONCTION
 0xf3 => {
     if evm_stack.len() < 2 {
@@ -2645,6 +2678,7 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
         ]);
         
         match selector {
+            // Panic(uint256) - Erreurs de validation Solidity
             0x4e487b71 => {
                 if size >= 36 {
                     let panic_code = u32::from_be_bytes([
@@ -2845,11 +2879,7 @@ fn opcode_name(opcode: u8) -> &'static str {
         0x60..=0x7f => "PUSH",
         0x80..=0x8f => "DUP",
         0x90..=0x9f => "SWAP",
-        0xa0 => "LOG0",
-        0xa1 => "LOG1",
-        0xa2 => "LOG2",
-        0xa3 => "LOG3",
-        0xa4 => "LOG4",
+        0xa0..=0xa4 => "LOG",
         0xf1 => "FFI_CALL",
         0xf2 => "METADATA_ACCESS",
         0xf3 => "RETURN",

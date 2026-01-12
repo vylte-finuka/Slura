@@ -679,7 +679,7 @@ impl SimpleInterpreter {
             stack_usage,
             &mem,
             mbuff,
-            &self.uvm_helpers,
+            &mut self.uvm_helpers,
             &self.allowed_memory,
             return_type,
             &exports,

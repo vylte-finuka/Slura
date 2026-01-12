@@ -234,18 +234,18 @@ impl UbfContext {
     }
 
     /// Validate the UbfContext
-    pub fn is_valid(&self) -> bool {
+    pub fn is_valid(&mut self) -> bool {
         // Basic validation - can be extended as needed
         self.limits.iter().all(|&limit| limit > 0)
     }
 
     /// Get context metadata as string (if valid UTF-8)
-    pub fn meta_as_string(&self) -> Option<String> {
+    pub fn meta_as_string(&mut self) -> Option<String> {
         String::from_utf8(self.meta.clone()).ok()
     }
 
     /// Check if a specific permission is enabled
-    pub fn has_permission(&self, permission_mask: u8) -> bool {
+    pub fn has_permission(&mut self, permission_mask: u8) -> bool {
         (self.permissions & permission_mask) == permission_mask
     }
 
@@ -287,7 +287,7 @@ impl Default for UbfContext {
 
 // ✅ AJOUT: Implémentation Debug pour UbfContext (utile pour le debugging)
 impl std::fmt::Debug for UbfContext {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(& self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("UbfContext")
             .field("meta_len", &self.meta.len())
             .field("permissions", &format!("0x{:02x}", self.permissions))
@@ -629,7 +629,7 @@ impl<'a> EbpfVmMbuff<'a> {
     /// assert_eq!(res, 0x2211);
     /// ```
 pub fn execute_ubf_program_secure(
-    &self,
+    &mut self,
     ulbf_elf: &[u8],
     mem: &[u8],
     mbuff: &[u8],
@@ -678,8 +678,8 @@ pub fn execute_ubf_program_secure(
         stack_usage.or(self.stack_usage.as_ref()),
         mem,
         mbuff,
-        &self.helpers,
-        &self.allowed_memory,
+        &mut self.helpers,
+        &mut self.allowed_memory,
         Some("json"),
         &hashbrown::HashMap::new(),
         args,
@@ -718,7 +718,7 @@ pub fn execute_ubf_program_secure(
         };
         #[cfg(feature = "std")]
         {
-            self.jit = Some(jit::JitMemory::new(prog, &self.helpers, true, false)?);
+            self.jit = Some(jit::JitMemory::new(prog, &mut self.helpers, true, false)?);
         }
         #[cfg(not(feature = "std"))]
         {
@@ -732,7 +732,7 @@ pub fn execute_ubf_program_secure(
             self.jit = Some(jit::JitMemory::new(
                 prog,
                 exec_memory,
-                &self.helpers,
+                &mut self.helpers,
                 true,
                 false,
             )?);
@@ -794,7 +794,7 @@ pub fn execute_ubf_program_secure(
     /// ```
     #[cfg(not(windows))]
     pub unsafe fn execute_program_jit(
-        &self,
+        &mut self,
         mem: &mut [u8],
         mbuff: &'a mut [u8],
     ) -> Result<u64, Error> {
@@ -809,7 +809,7 @@ pub fn execute_ubf_program_secure(
         // The last two arguments are not used in this function. They would be used if there was a
         // need to indicate to the JIT at which offset in the mbuff mem_ptr and mem_ptr + mem.len()
         // should be stored; this is what happens with struct EbpfVmFixedMbuff.
-        match &self.jit {
+        match &mut self.jit {
             Some(jit) => Ok(jit.get_prog()(
                 mbuff.as_ptr() as *mut u8,
                 mbuff.len(),
@@ -905,7 +905,7 @@ pub fn execute_ubf_program_secure(
     /// ```
     #[cfg(feature = "cranelift")]
     pub fn execute_program_cranelift(
-        &self,
+        &mut self,
         mem: &mut [u8],
         mbuff: &'a mut [u8],
     ) -> Result<u64, Error> {
@@ -921,7 +921,7 @@ pub fn execute_ubf_program_secure(
         // The last two arguments are not used in this function. They would be used if there was a
         // need to indicate to the JIT at which offset in the mbuff mem_ptr and mem_ptr + mem.len()
         // should be stored; this is what happens with struct EbpfVmFixedMbuff.
-        match &self.cranelift_prog {
+        match &mut self.cranelift_prog {
             Some(prog) => {
                 Ok(prog.execute(mem_ptr, mem.len(), mbuff.as_ptr() as *mut u8, mbuff.len()))
             }
@@ -1320,7 +1320,7 @@ impl<'a> EbpfVmFixedMbuff<'a> {
         // If you want to use the loaded program as ELF, you need to pass it here.
         // For example, if self.parent.prog is Some(prog), use prog as ulbf_elf:
         match self.parent.prog {
-            Some(ulbf_elf) => self.parent.execute_ubf_program_secure(ulbf_elf, mem, &self.mbuff.buffer, None, None, initial_storage),
+            Some(ulbf_elf) => self.parent.execute_ubf_program_secure(ulbf_elf, mem, &mut self.mbuff.buffer, None, None, initial_storage),
             None => Err(Error::new(ErrorKind::Other, "No ELF buffer available for execution")),
         }
     }
@@ -1359,7 +1359,7 @@ impl<'a> EbpfVmFixedMbuff<'a> {
         };
         #[cfg(feature = "std")]
         {
-            self.parent.jit = Some(jit::JitMemory::new(prog, &self.parent.helpers, true, true)?);
+            self.parent.jit = Some(jit::JitMemory::new(prog, &mut self.parent.helpers, true, true)?);
         }
         #[cfg(not(feature = "std"))]
         {
@@ -1373,7 +1373,7 @@ impl<'a> EbpfVmFixedMbuff<'a> {
             self.parent.jit = Some(jit::JitMemory::new(
                 prog,
                 exec_memory,
-                &self.parent.helpers,
+                &mut self.parent.helpers,
                 true,
                 true,
             )?);
@@ -1440,7 +1440,7 @@ impl<'a> EbpfVmFixedMbuff<'a> {
             _ => mem.as_ptr() as *mut u8,
         };
 
-        match &self.parent.jit {
+        match &mut self.parent.jit {
             Some(jit) => Ok(jit.get_prog()(
                 self.mbuff.buffer.as_ptr() as *mut u8,
                 self.mbuff.buffer.len(),
@@ -1557,7 +1557,7 @@ impl<'a> EbpfVmFixedMbuff<'a> {
             mem.as_ptr() as u64 + mem.len() as u64,
         );
 
-        match &self.parent.cranelift_prog {
+        match &mut self.parent.cranelift_prog {
             Some(prog) => Ok(prog.execute(
                 mem_ptr,
                 mem.len(),
@@ -1846,7 +1846,7 @@ impl<'a> EbpfVmRaw<'a> {
     /// assert_eq!(res, 0x22cc);
     /// ```
     pub fn execute_program(
-        &self,
+        &mut self,
         mem: &'a mut [u8],
         initial_storage: Option<hashbrown::HashMap<String, hashbrown::HashMap<String, Vec<u8>>>>,
     ) -> Result<serde_json::Value, Error> {
@@ -1890,7 +1890,7 @@ impl<'a> EbpfVmRaw<'a> {
         {
             self.parent.jit = Some(jit::JitMemory::new(
                 prog,
-                &self.parent.helpers,
+                &mut self.parent.helpers,
                 false,
                 false,
             )?);
@@ -1907,7 +1907,7 @@ impl<'a> EbpfVmRaw<'a> {
             self.parent.jit = Some(jit::JitMemory::new(
                 prog,
                 exec_memory,
-                &self.parent.helpers,
+                &mut self.parent.helpers,
                 false,
                 false,
             )?);
@@ -1953,7 +1953,7 @@ impl<'a> EbpfVmRaw<'a> {
     /// }
     /// ```
     #[cfg(not(windows))]
-    pub unsafe fn execute_program_jit(&self, mem: &'a mut [u8]) -> Result<u64, Error> {
+    pub unsafe fn execute_program_jit(&mut self, mem: &'a mut [u8]) -> Result<u64, Error> {
         let mut mbuff = vec![];
         self.parent.execute_program_jit(mem, &mut mbuff)
     }
@@ -2021,7 +2021,7 @@ impl<'a> EbpfVmRaw<'a> {
     /// assert_eq!(res, 0x22cc);
     /// ```
     #[cfg(feature = "cranelift")]
-    pub fn execute_program_cranelift(&self, mem: &'a mut [u8]) -> Result<u64, Error> {
+    pub fn execute_program_cranelift(&mut self, mem: &'a mut [u8]) -> Result<u64, Error> {
         let mut mbuff = vec![];
         self.parent.execute_program_cranelift(mem, &mut mbuff)
     }
@@ -2328,7 +2328,7 @@ impl<'a> EbpfVmNoData<'a> {
     /// assert_eq!(res, 0x1122);
     /// ```
     pub fn execute_program(
-        &self,
+        &mut self,
         initial_storage: Option<hashbrown::HashMap<String, hashbrown::HashMap<String, Vec<u8>>>>,
     ) -> Result<serde_json::Value, Error> {
         self.parent.execute_program(&mut [], initial_storage)
@@ -2367,7 +2367,7 @@ impl<'a> EbpfVmNoData<'a> {
     /// }
     /// ```
     #[cfg(not(windows))]
-    pub unsafe fn execute_program_jit(&self) -> Result<u64, Error> {
+    pub unsafe fn execute_program_jit(&mut self) -> Result<u64, Error> {
         self.parent.execute_program_jit(&mut [])
     }
 
@@ -2415,7 +2415,7 @@ impl<'a> EbpfVmNoData<'a> {
     /// assert_eq!(res, 0x1122);
     /// ```
     #[cfg(feature = "cranelift")]
-    pub fn execute_program_cranelift(&self) -> Result<u64, Error> {
+    pub fn execute_program_cranelift(&mut self) -> Result<u64, Error> {
         self.parent.execute_program_cranelift(&mut [])
     }
 }
