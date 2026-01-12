@@ -33,35 +33,6 @@ pub struct BlockInfo {
     pub prev_randao: [u8; 32], // EIP-4399 (added for compatibility)
 }
 
-pub struct SluBPFBridge {
-    /// Offset (PC) EVM --> index sluBPF (offset instruction dans la VM sluBPF)
-    pub evm_pc_to_slubpf_idx: HashMap<usize, usize>,
-    /// Index sluBPF (offset instruction) --> offset EVM (pour debug)
-    pub slubpf_idx_to_evm_pc: HashMap<usize, usize>,
-}
-
-impl SluBPFBridge {
-    pub fn new() -> Self {
-        Self {
-            evm_pc_to_slubpf_idx: HashMap::new(),
-            slubpf_idx_to_evm_pc: HashMap::new(),
-        }
-    }
-    /// Enregistre la correspondance lors de la génération/transpilation
-    pub fn map(&mut self, evm_pc: usize, slubpf_idx: usize) {
-        self.evm_pc_to_slubpf_idx.insert(evm_pc, slubpf_idx);
-        self.slubpf_idx_to_evm_pc.insert(slubpf_idx, evm_pc);
-    }
-    /// Cherche la destination sluBPF pour un PC EVM
-    pub fn slubpf_for_evm(&self, evm_pc: usize) -> Option<usize> {
-        self.evm_pc_to_slubpf_idx.get(&evm_pc).copied()
-    }
-    /// Debug: récupère le PC EVM pour un index sluBPF
-    pub fn evm_for_slubpf(&self, slubpf_idx: usize) -> Option<usize> {
-        self.slubpf_idx_to_evm_pc.get(&slubpf_idx).copied()
-    }
-}
-
 /// ✅ NOUVEAU: Décodage de tout le storage final en map slot -> heuristique décodée
 fn decode_storage_map(storage: &HashMap<String, Vec<u8>>) -> serde_json::Map<String, JsonValue> {
     let mut map = serde_json::Map::new();
@@ -2341,24 +2312,15 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
     }
     let dest = evm_stack.pop().unwrap() as usize;
-
-    // 🟦 Version pont sluBPFBridge : saute à l'index sluBPF correspondant au PC EVM
-    if let Some(slubpf_dest) = slubpf_bridge.slubpf_for_evm(dest) {
-        if slubpf_dest < slubpf_program.len() { // slubpf_program : Vec de tes instructions sluBPF
-            insn_ptr = slubpf_dest;
-            skip_advance = true;
-            let evm_pc = slubpf_bridge.evm_for_slubpf(slubpf_dest).unwrap_or(dest);
-            println!("✅ [JUMP sluBPF] vers sluBPF_idx=0x{:04x} (EVM PC=0x{:04x})", slubpf_dest, evm_pc);
-        } else {
-            return Err(Error::new(ErrorKind::Other, format!(
-                "sluBPF: destination 0x{:04x} est hors du code généré (sluBPF idx = {})", dest, slubpf_dest
-            )));
-        }
+    let real_dest = runtime_offset + dest;
+    if is_valid_jumpdest(real_dest, prog, &valid_jumpdests) {
+        insn_ptr = real_dest;
+        skip_advance = true;
+        println!("✅ [JUMP] vers 0x{:04x} (runtime+offset=0x{:04x})", dest, real_dest);
     } else {
-        println!("❌ [JUMP sluBPF] Aucun mapping sluBPF pour EVM PC=0x{:04x}", dest);
+        println!("❌ [JUMP INVALID] Pas de JUMPDEST exact à 0x{:04x} (runtime+offset=0x{:04x})", dest, real_dest);
         return Err(Error::new(ErrorKind::Other, format!(
-            "sluBPF: Aucun mapping sluBPF pour EVM PC=0x{:04x}", dest
-        )));
+            "JUMP interdit: dest 0x{:04x} runtime_offset 0x{:04x} n'est pas un JUMPDEST", dest, real_dest)));
     }
     consume_gas(&mut execution_context, 8)?;
 },
