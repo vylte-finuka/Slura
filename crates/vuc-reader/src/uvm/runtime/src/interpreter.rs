@@ -2311,66 +2311,57 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     println!("💾 [SSTORE] slot={:064x} <- value={}", key, value);
 },
 
-//___ 0x56 JUMP - VERSION SIMPLE
+    //___ 0x56 JUMP
 0x56 => {
-    if evm_stack.is_empty() {
-        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
-    }
-    let destination = evm_stack.pop().unwrap() as usize;
-    
-    // Chercher le JUMPDEST le plus proche
-    if let Some(valid_dest) = valid_jumpdests.iter()
-        .min_by_key(|&&addr| (addr as isize - destination as isize).abs()) {
-        insn_ptr = *valid_dest;
-        skip_advance = true;
-        println!("✅ [JUMP] 0x{:x} → 0x{:x}", destination, valid_dest);
-    } else {
-        return Err(Error::new(ErrorKind::Other, "No valid JUMPDEST found"));
-    }
-    
-    consume_gas(&mut execution_context, 8)?;
-},
+            if evm_stack.is_empty() {
+                return Err(Error::new(ErrorKind::Other, "STACK underflow on JUMP"));
+            }
+            let dest = evm_stack.pop().unwrap() as usize;
 
-        //___ 0x57 JUMPI - MÊME LOGIQUE GÉNÉRIQUE
+            if dest >= prog.len() {
+                println!("⚠️ JUMP to out-of-bounds (0x{:x}) → treated as intentional revert (common in onlyOwner)", dest);
+                return Err(Error::new(ErrorKind::Other, "Intentional revert via invalid JUMP"));
+            }
+
+            if prog[dest] != 0x5b {
+                // Pattern très courant : si condition fausse → JUMP à une adresse invalide (souvent 0)
+                println!("⚠️ JUMP to invalid dest 0x{:04x} (not JUMPDEST) → intentional revert (modifier protection)", dest);
+                return Err(Error::new(ErrorKind::Other, "Intentional revert via invalid JUMP destination"));
+            }
+
+            println!("✅ Valid JUMP → 0x{:04x}", dest);
+            insn_ptr = dest;
+            continue;
+        },
+        
+//___ 0x57 JUMPI
 0x57 => {
-    if evm_stack.len() < 2 {
-        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMPI"));
-    }
-    let destination = evm_stack.pop().unwrap() as usize;
-    let condition = evm_stack.pop().unwrap();
-    
-    println!("🔀 [JUMPI] PC=0x{:04x} → dest=0x{:04x}, condition={}", insn_ptr, destination, condition);
-    
-    if condition != 0 {
-        // ✅ MÊME LOGIQUE GÉNÉRIQUE QUE JUMP
-        if destination < prog.len() && prog[destination] == 0x5b && valid_jumpdests.contains(&destination) {
-            insn_ptr = destination;
-            skip_advance = true;
-            println!("✅ [JUMPI VALID] → 0x{:04x}", destination);
-        }
-        else if let Some(context_dest) = analyze_jump_context(insn_ptr, destination, &evm_stack, prog) {
-            insn_ptr = context_dest;
-            skip_advance = true;
-            println!("✅ [JUMPI CONTEXT] → 0x{:04x}", context_dest);
-        }
-        else if let Some(generic_dest) = resolve_jump_destination_generic(
-            insn_ptr, destination, &evm_stack, &valid_jumpdests, prog
-        ) {
-            insn_ptr = generic_dest;
-            skip_advance = true;
-            println!("✅ [JUMPI GENERIC] → 0x{:04x}", generic_dest);
-        }
-        else {
-            println!("❌ [JUMPI ERROR] Destination invalide 0x{:04x}", destination);
-            return Err(Error::new(ErrorKind::Other, 
-                format!("Invalid JUMPI destination: 0x{:04x}", destination)));
-        }
-    } else {
-        println!("➡️ [JUMPI] Condition false → continuation");
-    }
-    
-    consume_gas(&mut execution_context, 10)?;
-},
+            if evm_stack.len() < 2 {
+                return Err(Error::new(ErrorKind::Other, "STACK underflow on JUMPI"));
+            }
+            let condition = evm_stack.pop().unwrap();
+            let dest = evm_stack.pop().unwrap() as usize;
+
+            if condition != 0 {
+                if dest >= prog.len() || prog[dest] != 0x5b {
+                    // Condition vraie mais destination invalide → c’est un revert intentionnel
+                    println!("⚠️ JUMPI true → invalid dest 0x{:04x} → intentional revert", dest);
+                    return Err(Error::new(ErrorKind::Other, "Intentional revert via invalid JUMPI"));
+                }
+                println!("✅ JUMPI true → jump to 0x{:04x}", dest);
+                insn_ptr = dest;
+                continue;
+            } else {
+                // Condition fausse → on skip simplement le PUSH de la destination
+                println!("🔀 JUMPI false → continue (skip destination PUSH)");
+                if insn_ptr + 1 < prog.len() {
+                    let next = prog[insn_ptr + 1];
+                    if (0x60..=0x7f).contains(&next) {
+                        advance += (next - 0x5f) as usize; // skip PUSH1..32
+                    }
+                }
+            }
+        },
       
     //___ 0x58 PC
 0x58 => {
