@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+6use std::collections::HashMap;
 use std::sync::Arc;
 use base64::Engine as _;
 use chrono::Utc;
@@ -1286,7 +1286,7 @@ impl LurosonieManager {
                 serde_json::Value::String(to_addr.clone()),
                 serde_json::Value::Number(serde_json::Number::from(value)),
             ];
-            match vm.execute_module(vez_contract_addr, "function_a9059cbb", args, Some(&tx.from_op)) {
+            match vm.execute_module(vez_contract_addr, "transfer", args, Some(&tx.from_op)) {
                 Ok(result) => {
                     println!("✅ VM transfer ok pour tx {}", tx.hash);
                     Ok(serde_json::json!({
@@ -1517,4 +1517,4 @@ impl LurosonieManager {
         println!("✅ [DB SYNC] Synchronisation terminée");
         Ok(())
     }
-}
+            }
