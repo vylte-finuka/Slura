@@ -1240,47 +1240,53 @@ impl LurosonieManager {
     pub async fn execute_transaction_in_block(&self, tx: &TxRequest) -> Result<serde_json::Value, String> {
     let mut vm = self.vm.write().await;
 
+    // Adresse du contrat cible (optionnelle)
     let contract_addr = tx.contract_addr.as_deref();
-    let function = tx.function_name.as_deref();
+    let function = tx.function_name.as_deref().unwrap_or("transfer");
     let to_addr = tx.receiver_op.clone();
     let value = tx.value_tx.parse::<u128>().unwrap_or(0);
 
-    println!(
-        "🔁 Exécution tx {} sur {} : {} -> {} (valeur {})",
-        tx.hash,
-        contract_addr.unwrap_or(&to_addr),
-        tx.from_op,
-        to_addr,
-        value
-    );
+    println!("🔁 Exécution tx {} sur {} : {} -> {} (valeur {})", tx.hash, contract_addr.unwrap_or(&to_addr), tx.from_op, to_addr, value);
 
-    // Exécution exclusivement sur un vrai contrat + nom de fonction explicite
-    match (contract_addr, function) {
-        (Some(addr), Some(fn_name)) => {
-            let args = tx.arguments.clone().unwrap_or_else(|| vec![]);
-            match vm.execute_module(addr, fn_name, args, Some(&tx.from_op)) {
-                Ok(result) => {
-                    println!("✅ VM {} ok pour tx {}", fn_name, tx.hash);
-                    Ok(serde_json::json!({
-                        "status": "success",
-                        "from": tx.from_op,
-                        "to": to_addr,
-                        "value": value,
-                        "nonce": tx.nonce_tx,
-                        "hash": tx.hash,
-                        "result": result
-                    }))
-                }
-                Err(e) => {
-                    error!("❌ VM.execute_module {} failed for tx {}: {}", fn_name, tx.hash, e);
-                    Err(format!("execute_module failed: {}", e))
-                }
+    if let Some(addr) = contract_addr {
+        // Cas d'un contrat déployé
+        let args = tx.arguments.clone().unwrap_or_else(|| {
+            vec![
+                serde_json::Value::String(to_addr.clone()),
+                serde_json::Value::Number(serde_json::Number::from(value)),
+            ]
+        });
+
+        // Utilise function_*
+        let fn_name = "function_a9059cbb" {
+            function
+        } else {
+            // On ne prend aucun fallback implicite, mais tu peux forcer ici
+            function
+        };
+
+        match vm.execute_module(addr, fn_name, args, Some(&tx.from_op)) {
+            Ok(result) => {
+                println!("✅ VM {} ok pour tx {}", fn_name, tx.hash);
+                Ok(serde_json::json!({
+                    "status": "success",
+                    "from": tx.from_op,
+                    "to": to_addr,
+                    "value": value,
+                    "nonce": tx.nonce_tx,
+                    "hash": tx.hash,
+                    "result": result
+                }))
+            }
+            Err(e) => {
+                error!("❌ VM.execute_module {} failed for tx {}: {}", fn_name, tx.hash, e);
+                Err(format!("execute_module failed: {}", e))
             }
         }
-        // STRICT : pas de fallback, pas de transfer automatique
-        _ => {
-            Err("Execution refused: contract address or function name missing or invalid. No default transfer/fallback allowed.".to_string())
-        }
+    } else {
+        // STRICT : plus de fallback VEZ natif ou de transfert natif !
+        // → Ici on refuse explicitement la transaction
+        Err("Execution refused: contract address not a known deployed contract. No fallback supported.".to_string())
     }
 }
 
