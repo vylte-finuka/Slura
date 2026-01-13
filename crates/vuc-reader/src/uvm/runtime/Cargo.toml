@@ -33,7 +33,6 @@ combine = { version = "4.6", default-features = false }
 # Optional Dependencies when using the standard library
 libc = { version = "0.2", optional = true }
 time = { version = "0.2", optional = true }
-goblin = "0.3"
 
 # Optional Dependencies for the CraneLift JIT
 cranelift-codegen = { version = "0.99", optional = true }
@@ -45,9 +44,10 @@ hashbrown = { version = "0.15", features = ["serde"] }
 sha3.workspace = true
 hex.workspace = true
 rand.workspace = true
-tiny-keccak = "2.0.2"
 ethereum-types = "0.16.0"
 i256 = "0.2.3"
+goblin = "0.10.4"
+tiny-keccak = "2.0.2"
 
 [dev-dependencies]
 libc = { version = "0.2" }
