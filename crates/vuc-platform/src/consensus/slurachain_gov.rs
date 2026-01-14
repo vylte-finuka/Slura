@@ -33,7 +33,7 @@ impl slurachainGovernance {
             .ok_or_else(|| anyhow::anyhow!("Adresse du module vezcur non trouvée"))?;
         let module_path = format!("{}::vez_std_gov", module_address);
         let function_name = "stake";
-        vm.execute_module(&module_path, function_name, vec![], Some(&self.account_address)).map_err(anyhow::Error::msg)?;
+        vm.execute_module(&module_path, function_name, vec![], Some(&self.account_address)).map_err(anyhow::Error::msg).await?;
         self.vez_stacking_locked += amount;
         self.vez_stacking_unlocked = self.vez_stacking_unlocked.saturating_sub(amount);
         Ok(())
@@ -48,7 +48,7 @@ impl slurachainGovernance {
             .ok_or_else(|| anyhow::anyhow!("Adresse du module vezcur non trouvée"))?;
         let module_path = format!("{}::vez_std_gov", module_address);
         let function_name = "unstake";
-        vm.execute_module(&module_path, function_name, vec![], Some(&self.account_address)).map_err(anyhow::Error::msg)?;
+        vm.execute_module(&module_path, function_name, vec![], Some(&self.account_address)).map_err(anyhow::Error::msg).await?;
         self.vez_stacking_locked = self.vez_stacking_locked.saturating_sub(amount);
         self.vez_stacking_unlocked += amount;
         Ok(())
@@ -65,7 +65,7 @@ impl slurachainGovernance {
             .ok_or_else(|| anyhow::anyhow!("Adresse du module vezcur non trouvée"))?;
         let module_path = format!("{}::vez_std_gov", module_address);
         let function_name = "vote";
-        vm.execute_module(&module_path, function_name, vec![], Some(&self.account_address)).map_err(anyhow::Error::msg)?;
+        vm.execute_module(&module_path, function_name, vec![], Some(&self.account_address)).map_err(anyhow::Error::msg).await?;
         Ok(())
     }
 

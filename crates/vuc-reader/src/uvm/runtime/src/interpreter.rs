@@ -284,13 +284,6 @@ fn build_universal_calldata(args: &InterpreterArgs) -> Vec<u8> {
 
     println!("🎯 [FUNCTION SELECTOR] {} → 0x{:08x}", args.function_name, selector);
 
-    // ✅ WORKAROUND UNIVERSEL POUR TOUTES LES FONCTIONS VIEW/PURE SANS PARAMÈTRES
-     if args.args.is_empty() && args.function_name.starts_with("function_") {
-        calldata.resize(4, 0u8); // 4 bytes: selector seul
-        println!("🔧 [VIEW FUNCTION FIX] Calldata forcé à 4 bytes (selector seul)");
-        return calldata;
-    }
-
     // Pour les fonctions avec arguments → ABI standard
     for arg in &args.args {
         let encoded = encode_generic_abi_argument(arg);

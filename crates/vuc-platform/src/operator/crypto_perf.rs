@@ -92,7 +92,7 @@ pub async fn generate_and_create_account(vm: &mut SlurachainVm, _contract_info: 
             "initialize",
             vec![],
             Some("system")
-        ).ok();
+        ).await.ok();
     }
 
     // Mint 10_000_000 VEZ pour le nouveau compte
@@ -101,7 +101,7 @@ pub async fn generate_and_create_account(vm: &mut SlurachainVm, _contract_info: 
         "mint",
         vec![serde_json::Value::String(eth_address.clone()), serde_json::Value::Number(10_000_000u64.into())],
         Some("system") // doit être owner !
-    ).map_err(anyhow::Error::msg)?;
+    ).await.map_err(anyhow::Error::msg)?;
 
     Ok((eth_address, privkey_hex))
 }
@@ -116,7 +116,7 @@ pub async fn mint_act(vm: &mut SlurachainVm, value: u64, sender: &str) -> Result
         "mint",
         vec![serde_json::Value::Number(value.into())],
         Some(sender)
-    ).map_err(anyhow::Error::msg)?;
+    ).await.map_err(anyhow::Error::msg)?;
     Ok(())
 }
 
@@ -130,7 +130,7 @@ pub async fn burn_act(vm: &mut SlurachainVm, value: u64, sender: &str) -> Result
         "burn",
         vec![serde_json::Value::Number(value.into())],
         Some(sender)
-    ).map_err(anyhow::Error::msg)?;
+    ).await.map_err(anyhow::Error::msg)?;
     Ok(())
 }
 
@@ -147,7 +147,7 @@ pub async fn deliver(vm: &mut SlurachainVm, to: &str, value: u64, sender: &str) 
             serde_json::Value::Number(value.into())
         ],
         Some(sender)
-    ).map_err(anyhow::Error::msg)?;
+    ).await.map_err(anyhow::Error::msg)?;
     Ok(())
 }
 
@@ -165,7 +165,7 @@ pub async fn deliver_from(vm: &mut SlurachainVm, from: &str, to: &str, value: u6
             serde_json::Value::Number(value.into())
         ],
         Some(sender)
-    ).map_err(anyhow::Error::msg)?;
+    ).await.map_err(anyhow::Error::msg)?;
     Ok(())
 }
 
@@ -179,7 +179,7 @@ pub async fn allow(vm: &mut SlurachainVm, account: &str, sender: &str) -> Result
         "unBlacklist",
         vec![serde_json::Value::String(account.to_string())],
         Some(sender)
-    ).map_err(anyhow::Error::msg)?;
+    ).await.map_err(anyhow::Error::msg)?;
     Ok(())
 }
 
@@ -193,7 +193,7 @@ pub async fn disallow(vm: &mut SlurachainVm, account: &str, sender: &str) -> Res
         "blacklist",
         vec![serde_json::Value::String(account.to_string())],
         Some(sender)
-    ).map_err(anyhow::Error::msg)?;
+    ).await.map_err(anyhow::Error::msg)?;
     Ok(())
 }
 
@@ -207,7 +207,7 @@ pub async fn solde_of(vm: &mut SlurachainVm, account: &str) -> Result<u64, anyho
         "balanceOf",
         vec![serde_json::Value::String(account.to_string())],
         Some("system")
-    ).map_err(anyhow::Error::msg)?;
+    ).await.map_err(anyhow::Error::msg)?;
     match res {
         serde_json::Value::Number(n) => Ok(n.as_u64().unwrap_or(0)),
         _ => Ok(0),

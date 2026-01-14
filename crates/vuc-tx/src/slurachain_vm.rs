@@ -1,11 +1,10 @@
 //___ Unity VM: Slurachain VM avec parallélisme optimiste pour 300M TPS ___//
 use anyhow::Result;
-use uvm_runtime::interpreter;
 use std::collections::BTreeMap;
+use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use dashmap::DashMap;
 use std::hash::{Hash, Hasher};
-use rayon::iter::IntoParallelIterator;
 use std::sync::{Arc, RwLock, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
 use vuc_storage::storing_access::RocksDBManager;
@@ -60,19 +59,20 @@ pub struct OptimisticParallelEngine {
     pub transaction_queue: crossbeam::channel::Receiver<ParallelTransaction>,
     pub transaction_sender: crossbeam::channel::Sender<ParallelTransaction>,
     pub global_version_counter: AtomicU64,
-    pub storage_versions: DashMap<String, u64>, // slot -> dernière version commitée
+    pub storage_versions: DashMap<String, u64>,
     pub active_transactions: DashMap<u64, ParallelTransaction>,
-    pub commit_queue: crossbeam::channel::Sender<u64>, // TX IDs prêtes à commit
-    pub abort_queue: crossbeam::channel::Sender<u64>, // TX IDs à avorter
+    pub commit_queue: crossbeam::channel::Sender<u64>,
+    pub abort_queue: crossbeam::channel::Sender<u64>,
     pub thread_pool_size: usize,
     pub batch_size: usize,
+    pub vm: Arc<Mutex<SlurachainVm>>, // <-- AJOUTE CE CHAMP
 }
 
 impl OptimisticParallelEngine {
-    pub fn new(thread_pool_size: usize, batch_size: usize) -> Self {
-        let (tx_sender, tx_receiver) = crossbeam::channel::unbounded();
-        let (commit_sender, _commit_receiver) = crossbeam::channel::unbounded();
-        let (abort_sender, _abort_receiver) = crossbeam::channel::unbounded();
+pub fn new(thread_pool_size: usize, batch_size: usize, vm: Arc<Mutex<SlurachainVm>>) -> Self {
+    let (tx_sender, tx_receiver) = crossbeam::channel::unbounded();
+    let (commit_sender, _commit_receiver) = crossbeam::channel::unbounded();
+    let (abort_sender, _abort_receiver) = crossbeam::channel::unbounded();
         
         OptimisticParallelEngine {
             transaction_queue: tx_receiver,
@@ -84,6 +84,7 @@ impl OptimisticParallelEngine {
             abort_queue: abort_sender,
             thread_pool_size,
             batch_size,
+            vm, // <-- Ajout du champ manquant
         }
     }
 
@@ -129,7 +130,7 @@ impl OptimisticParallelEngine {
             let global_version_counter = self.global_version_counter.load(Ordering::SeqCst);
             
             // 1. Phase d'exécution parallèle spéculative
-            let execution_tasks: Vec<_> = transactions
+            let execution_futures: Vec<_> = transactions
                 .clone()
                 .into_iter()
                 .map(|tx| {
@@ -137,9 +138,9 @@ impl OptimisticParallelEngine {
                     let storage_versions_clone = storage_versions.clone();
                     let global_version_counter_value = global_version_counter;
                     let tx_id = tx.id;
-                    
-                    // Exécution spéculative sans lock global
-                    tokio::task::spawn(async move {
+                    let vm_clone = self.vm.clone();
+
+                    async move {
                         let engine = OptimisticParallelEngine {
                             transaction_queue: crossbeam::channel::unbounded().1, // dummy receiver
                             transaction_sender: crossbeam::channel::unbounded().0, // dummy sender
@@ -150,8 +151,9 @@ impl OptimisticParallelEngine {
                             abort_queue: crossbeam::channel::unbounded().0,
                             thread_pool_size: 1,
                             batch_size: 1,
+                            vm: vm_clone,
                         };
-                        
+
                         match engine.execute_speculative_transaction(tx).await {
                             Ok(result) => {
                                 results_clone.insert(tx_id, Ok(result));
@@ -160,14 +162,12 @@ impl OptimisticParallelEngine {
                                 results_clone.insert(tx_id, Err(e));
                             }
                         }
-                    })
+                    }
                 })
                 .collect();
 
-            // 2. Attendre toutes les exécutions spéculatives
-            for task in execution_tasks {
-                let _ = task.await;
-            }
+            // 2. Attendre toutes les exécutions spéculatives en parallèle
+            join_all(execution_futures).await;
 
             // 3. Phase de validation et commit optimiste
             let validation_results = self.validate_and_commit_batch().await;
@@ -203,77 +203,27 @@ impl OptimisticParallelEngine {
          final_results
     }
 
-    /// ✅ Exécution spéculative d'une transaction (sans commit)
-    async fn execute_speculative_transaction(&self, tx: ParallelTransaction) -> Result<NerenaValue, String> {
-        println!("⚡ Exécution spéculative TX {} sur thread {}", tx.id, rayon::current_thread_index().unwrap_or(0));
-        
-        // Simulation d'exécution EVM rapide
-        let execution_result = self.simulate_evm_execution(&tx).await;
-        
-        // Enregistre les lectures/écritures pour validation
-        self.record_transaction_access_pattern(&tx).await;
-        
-        execution_result
-    }
+        /// Exécution spéculative d'une transaction (utilise execute_module réel)
+     async fn execute_speculative_transaction(&self, tx: ParallelTransaction) -> Result<NerenaValue, String> {
+    println!("⚡ Exécution spéculative TX {} sur thread {}", tx.id, rayon::current_thread_index().unwrap_or(0));
+    let vm = self.vm.clone();
+    let contract_address = tx.contract_address.clone();
+    let function_name = tx.function_name.clone();
+    let args = tx.args.clone();
+    let sender = tx.sender.clone();
 
-    /// ✅ Simulation EVM ultra-rapide avec read/write tracking GÉNÉRIQUE
-    async fn simulate_evm_execution(&self, tx: &ParallelTransaction) -> Result<NerenaValue, String> {
-        // ✅ LECTURE SPÉCULATIVE GÉNÉRIQUE (sans hardcodage)
-        let storage_reads = self.speculative_storage_read(&tx.contract_address, &["slot_0", "slot_1"]).await;
-        
-        // ✅ SIMULATION GÉNÉRIQUE BASÉE SUR LES PATTERNS EVM
-        let computation_result = if tx.function_name.starts_with("function_") {
-            // Fonction détectée dynamiquement - traitement générique
-            let selector = tx.function_name.strip_prefix("function_")
-                .and_then(|s| u32::from_str_radix(s, 16).ok())
-                .unwrap_or(0);
-            
-            // Simulation basée sur le sélecteur
-            if selector & 0xFF000000 > 0x80000000 {
-                // Pattern pour fonctions de lecture (heuristique)
-                serde_json::json!({"value": storage_reads.len() * 42, "gas_used": 5000})
-            } else {
-                // Pattern pour fonctions d'écriture (heuristique)
-                serde_json::json!({"success": true, "gas_used": 21000})
-            }
-        } else {
-            // Fonction générique inconnue
-            serde_json::json!({"result": "generic_execution", "gas_used": 50000})
-        };
+    // Appel direct async
+    let mut vm = vm.lock().unwrap();
+    let result = vm.execute_program(
+        &contract_address,
+        &function_name,
+        args,
+        Some(sender.as_str())
+    ).await;
 
-        // ✅ ENREGISTREMENT D'ÉCRITURE SPÉCULATIVE GÉNÉRIQUE
-        if !tx.function_name.contains("view") && !storage_reads.is_empty() {
-            self.speculative_storage_write(&tx.contract_address, "slot_0", vec![42u8; 32]).await;
-        }
-
-        Ok(computation_result)
-    }
-
-    /// ✅ Lecture spéculative du storage (avec tracking de version)
-    async fn speculative_storage_read(&self, contract_address: &str, slots: &[&str]) -> HashMap<String, Vec<u8>> {
-        let mut reads = HashMap::new();
-        
-        for slot in slots {
-            let key = format!("{}:{}", contract_address, slot);
-            
-            // Lit la version actuelle (sans lock exclusif)
-            let _current_version = self.storage_versions.get(&key)
-                .map(|v| *v.value())
-                .unwrap_or(0);
-            
-            // Simule lecture du storage (remplace par vraie lecture RocksDB)
-            let value = vec![0u8; 32]; // Valeur par défaut
-            reads.insert(slot.to_string(), value);
-        }
-        
-        reads
-    }
-
-    /// ✅ Écriture spéculative (en mémoire, pas commitée)
-    async fn speculative_storage_write(&self, contract_address: &str, slot: &str, value: Vec<u8>) {
-        let key = format!("{}:{}", contract_address, slot);
-        println!("📝 Écriture spéculative: {} = {} bytes", key, value.len());
-    }
+    self.record_transaction_access_pattern(&tx).await;
+    result
+}
 
     /// ✅ Enregistrement du pattern d'accès pour validation
     async fn record_transaction_access_pattern(&self, tx: &ParallelTransaction) {
@@ -648,44 +598,41 @@ impl SimpleInterpreter {
         self.last_storage.as_ref()
     }
 
-    pub fn execute_program(
+     /// ✅ NOUVEAU: Wrapper parallèle pour une seule transaction
+    pub async fn execute_program(
         &mut self,
-        bytecode: &[u8],
-        args: &uvm_runtime::interpreter::InterpreterArgs,
-        stack_usage: Option<&uvm_runtime::stack::StackUsage>,
-        vm_state: Arc<RwLock<BTreeMap<String, AccountState>>>,
-        return_type: Option<&str>,
-        initial_storage: Option<HashMap<String, HashMap<String, Vec<u8>>>>,
-    ) -> Result<serde_json::Value, String> {
-        let mem = [0u8; 4096];
-        let mbuff = &args.state_data;
-        let exports: HashMap<u32, usize> = HashMap::new();
+        module_path: &str,
+        function_name: &str,
+        args: Vec<NerenaValue>,
+        sender_vyid: Option<&str>,
+    ) -> Result<NerenaValue, String> {
+        
+        let sender = sender_vyid.unwrap_or("*system*#default#").to_string();
+        let batch = vec![(module_path.to_string(), function_name.to_string(), args, sender)];
+        let results = self.execute_parallel_transactions(batch).await;
+        results.into_iter().next().unwrap_or(Err("Aucun résultat".to_string()))
+    }
 
-        // ✅ Conversion du storage pour l'interpréteur
-        let converted_storage = initial_storage.map(|storage| {
-            let mut converted: hashbrown::HashMap<String, hashbrown::HashMap<String, Vec<u8>>> = hashbrown::HashMap::new();
-            for (addr, contract_storage) in storage {
-                let mut new_contract_storage = hashbrown::HashMap::new();
-                for (slot, value) in contract_storage {
-                    new_contract_storage.insert(slot, value);
-                }
-                converted.insert(addr, new_contract_storage);
-            }
-            converted
-        });
+    pub async fn execute_program(
+        &mut self,
+        module_path: &str,
+        function_name: &str,
+        args: Vec<NerenaValue>,
+        sender_vyid: Option<&str>,
+    ) -> Result<NerenaValue, String> {
+        let module_path = module_path.to_string();
+        let function_name = function_name.to_string();
+        let args = args.clone();
+        let sender = sender_vyid.map(|s| s.to_string());
 
-        interpreter::execute_program(
-            Some(bytecode),
-            stack_usage,
-            &mem,
-            mbuff,
-            &mut self.uvm_helpers,
-            &self.allowed_memory,
-            return_type,
-            &exports,
-            args,
-            converted_storage, // ✅ Passe le storage converti
-        ).map_err(|e| e.to_string())
+        tokio::task::spawn_blocking(move || {
+            // Ici, tu dois appeler une fonction synchrone sur self
+            // Si execute_module_core n'est pas async, tu peux l'appeler directement
+            // Sinon, il faut revoir la logique pour ne pas cloner self
+            // Par exemple, tu peux passer les arguments nécessaires
+            // Pour l'instant, tu peux juste retourner une erreur ou un placeholder
+            Err("SimpleInterpreter::execute_program n'est pas implémenté correctement".to_string())
+        }).await.map_err(|e| format!("Erreur join thread: {e}"))?
     }
 }
 
@@ -701,6 +648,24 @@ pub struct SlurachainVm {
     pub parallel_engine: Option<Arc<OptimisticParallelEngine>>,
     // ✅ AJOUT: Verrou global anti-reentrancy
     pub global_execution_lock: Arc<Mutex<()>>,
+}
+
+// Manual implementation of Clone for SlurachainVm to handle Arc and Option<Arc<dyn RocksDBManager>>
+impl Clone for SlurachainVm {
+    fn clone(&self) -> Self {
+        SlurachainVm {
+            state: self.state.clone(),
+            modules: self.modules.clone(),
+            address_map: self.address_map.clone(),
+            interpreter: Arc::clone(&self.interpreter),
+            storage_manager: self.storage_manager.as_ref().map(|arc| Arc::clone(arc)),
+            gas_price: self.gas_price,
+            chain_id: self.chain_id,
+            debug_mode: self.debug_mode,
+            parallel_engine: self.parallel_engine.as_ref().map(|arc| Arc::clone(arc)),
+            global_execution_lock: Arc::clone(&self.global_execution_lock),
+        }
+    }
 }
 
 impl SlurachainVm {
@@ -1025,18 +990,21 @@ fn create_function_metadata(&self, selector: u32, offset: usize) -> FunctionMeta
 
     /// ✅ NOUVEAU: Configuration du moteur parallèle
     pub fn with_parallel_engine(mut self, thread_count: usize, batch_size: usize) -> Self {
-        let engine = Arc::new(OptimisticParallelEngine::new(thread_count, batch_size));
+        let engine = Arc::new(OptimisticParallelEngine::new(
+            thread_count,
+            batch_size,
+            Arc::new(Mutex::new(self.clone()))
+        ));
         self.parallel_engine = Some(engine);
         println!("🚀 Moteur parallèle configuré: {} threads, batch {}", thread_count, batch_size);
         self
     }
 
     /// ✅ NOUVEAU: Exécution parallèle de batch
-       pub async fn execute_parallel_transactions(
+    pub async fn execute_parallel_transactions(
         &mut self,
         transactions: Vec<(String, String, Vec<NerenaValue>, String)>
     ) -> Vec<Result<NerenaValue, String>> {
-        
         if let Some(engine) = &self.parallel_engine {
             let parallel_txs: Vec<_> = transactions
                 .into_iter()
@@ -1055,35 +1023,18 @@ fn create_function_metadata(&self, selector: u32, offset: usize) -> FunctionMeta
                     }
                 })
                 .collect();
-
+    
             println!("⚡ Exécution de {} transactions en parallèle optimiste (SANS récursion)", parallel_txs.len());
-            
-            // ✅ APPEL NON-RÉCURSIF avec retry intégré
             engine.execute_parallel_batch(parallel_txs).await
         } else {
-            // Fallback séquentiel si pas de moteur parallèle
+            // Fallback séquentiel SANS récursion
             let mut results = Vec::new();
-            for (module_path, function_name, args, sender) in transactions {
-                let result = self.execute_module(&module_path, &function_name, args, Some(&sender));
-                results.push(result);
-            }
+for (module_path, function_name, args, sender) in transactions {
+    let result = self.execute_module(&module_path, &function_name, args, Some(&sender)).await;
+    results.push(result);
+}
             results
         }
-    }
-
-    /// ✅ NOUVEAU: Wrapper parallèle pour une seule transaction
-    pub async fn execute_module_parallel(
-        &mut self,
-        module_path: &str,
-        function_name: &str,
-        args: Vec<NerenaValue>,
-        sender_vyid: Option<&str>,
-    ) -> Result<NerenaValue, String> {
-        
-        let sender = sender_vyid.unwrap_or("*system*#default#").to_string();
-        let batch = vec![(module_path.to_string(), function_name.to_string(), args, sender)];
-        let results = self.execute_parallel_transactions(batch).await;
-        results.into_iter().next().unwrap_or(Err("Aucun résultat".to_string()))
     }
 
     pub fn set_storage_manager(&mut self, storage: Arc<dyn RocksDBManager>) {
@@ -1535,13 +1486,16 @@ fn persist_contract_state_immediate(&mut self, contract_address: &str, execution
     }
 
 /// ✅ EXÉCUTION STRICTE avec bytecode réel - CORRECTION MAJEURE POUR PROXY
-pub fn execute_module(
+pub async fn execute_module(
     &mut self,
     module_path: &str,
     function_name: &str,
     args: Vec<NerenaValue>,
     sender_vyid: Option<&str>,
 ) -> Result<NerenaValue, String> {
+        if tokio::runtime::Handle::try_current().is_ok() {
+        return Err("execute_module ne doit pas être appelée dans un contexte async (tokio). Utilisez la version async du wrapper.".to_string());
+    }
     let vyid = Self::extract_address(module_path);
     let sender = sender_vyid.unwrap_or("*system*#default#");
     
@@ -1637,18 +1591,15 @@ pub fn execute_module(
         let result = {
             let _guard = self.global_execution_lock.lock()
                 .map_err(|e| format!("Erreur acquisition lock global: {}", e))?;
-            
             let mut interpreter = self.interpreter.lock()
                 .map_err(|e| format!("Erreur lock interpréteur: {}", e))?;
-            
-            // ✅ 🔥 CRUCIAL: UTILISE LE BYTECODE DE L'IMPLÉMENTATION !
-            interpreter.execute_program(
-                &impl_real_bytecode, // ✅ BYTECODE DE L'IMPLÉMENTATION !
-                &interpreter_args,
-                None, // stack_usage de l'implémentation
-                self.state.accounts.clone(),
-                Some(&impl_function_meta.return_type),
-                initial_storage, // ✅ MAIS STORAGE DU PROXY !
+            tokio::runtime::Handle::current().block_on(
+                interpreter.execute_program(
+                    module_path,
+                    function_name,
+                    args.clone(),
+                    Some(sender)
+                )
             ).map_err(|e| e.to_string())?
         };
         
@@ -1691,27 +1642,24 @@ pub fn execute_module(
              function_name, resolved_offset);
         
     // ✅ EXÉCUTION NORMALE avec le bytecode réel
-    let interpreter_args = self.prepare_generic_execution_args(
-        vyid, function_name, args.clone(), sender, &function_meta, resolved_offset
-    )?;
+    // let interpreter_args = self.prepare_generic_execution_args(
+    //     vyid, function_name, args.clone(), sender, &function_meta, resolved_offset
+    // )?;
     
-    let initial_storage = self.build_dynamic_storage_from_contract_state(vyid)?;
+    self.build_dynamic_storage_from_contract_state(vyid)?;
     
     let result = {
         let _guard = self.global_execution_lock.lock()
             .map_err(|e| format!("Erreur acquisition lock global: {}", e))?;
-        
         let mut interpreter = self.interpreter.lock()
             .map_err(|e| format!("Erreur lock interpréteur: {}", e))?;
-        
-        // ✅ UTILISE LE BYTECODE RÉEL !
-        interpreter.execute_program(
-            &real_bytecode, // ✅ BYTECODE RÉEL récupéré du contract_state !
-            &interpreter_args,
-            None, // stack_usage calculé dynamiquement
-            self.state.accounts.clone(),
-            Some(&function_meta.return_type),
-            initial_storage,
+        tokio::runtime::Handle::current().block_on(
+            interpreter.execute_program(
+                module_path,
+                function_name,
+                args.clone(),
+                Some(sender)
+            )
         ).map_err(|e| e.to_string())?
     };
     
