@@ -579,10 +579,10 @@ impl SimpleInterpreter {
         interpreter
     }
 
-        /// ✅ NOUVEAU: Exécution parallèle de batch
+    /// ✅ NOUVEAU: Exécution parallèle de batch
     pub async fn execute_parallel_transactions(
         &mut self,
-        transactions: Vec<(String, String, Vec<NerenaValue>, String)>
+        transactions: Vec<(String, String, Vec<NerenaValue>, String)>,
     ) -> Vec<Result<NerenaValue, String>> {
         if let Some(engine) = &self.parallel_engine {
             let parallel_txs: Vec<_> = transactions
@@ -602,27 +602,36 @@ impl SimpleInterpreter {
                     }
                 })
                 .collect();
-    
-            println!("⚡ Exécution de {} transactions en parallèle optimiste (SANS récursion)", parallel_txs.len());
+
+            println!(
+                "⚡ Exécution de {} transactions en parallèle optimiste (SANS récursion)",
+                parallel_txs.len()
+            );
             engine.execute_parallel_batch(parallel_txs).await
         } else {
             // Fallback séquentiel SANS récursion
             let mut results = Vec::new();
-for (module_path, function_name, args, sender) in transactions {
-    let result = self.execute_module(&module_path, &function_name, args, Some(&sender)).await;
-    results.push(result);
-}
+            for (module_path, function_name, args, sender) in transactions {
+                let result = self
+                    .execute_module(&module_path, &function_name, args, Some(&sender))
+                    .await;
+                results.push(result);
+            }
             results
         }
     }
-
 
     fn setup_uvm_helpers(&mut self) {
         // ✅ SYSTÈME 100% GÉNÉRIQUE - Aucun hardcodage
         println!("✅ Interpréteur UVM initialisé");
     }
 
-    pub fn add_function_helper(&mut self, selector: u32, function_name: &str, helper: fn(u64, u64, u64, u64, u64) -> u64) {
+    pub fn add_function_helper(
+        &mut self,
+        selector: u32,
+        function_name: &str,
+        helper: fn(u64, u64, u64, u64, u64) -> u64,
+    ) {
         self.uvm_helpers.insert(selector, helper);
         println!("📋 Helper générique ajouté pour {} (0x{:08x})", function_name, selector);
     }
@@ -636,7 +645,7 @@ for (module_path, function_name, args, sender) in transactions {
         self.last_storage.as_ref()
     }
 
-     /// ✅ NOUVEAU: Wrapper parallèle pour une seule transaction
+    /// ✅ NOUVEAU: Wrapper parallèle pour une seule transaction
     pub async fn execute_program(
         &mut self,
         module_path: &str,
@@ -644,12 +653,12 @@ for (module_path, function_name, args, sender) in transactions {
         args: Vec<NerenaValue>,
         sender_vyid: Option<&str>,
     ) -> Result<NerenaValue, String> {
-        
         let sender = sender_vyid.unwrap_or("*system*#default#").to_string();
         let batch = vec![(module_path.to_string(), function_name.to_string(), args, sender)];
         let results = self.execute_parallel_transactions(batch).await;
         results.into_iter().next().unwrap_or(Err("Aucun résultat".to_string()))
     }
+}
 
 pub struct SlurachainVm {
     pub state: VmState,
