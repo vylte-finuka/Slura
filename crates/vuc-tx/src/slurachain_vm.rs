@@ -579,6 +579,44 @@ impl SimpleInterpreter {
         interpreter
     }
 
+        /// ✅ NOUVEAU: Exécution parallèle de batch
+    pub async fn execute_parallel_transactions(
+        &mut self,
+        transactions: Vec<(String, String, Vec<NerenaValue>, String)>
+    ) -> Vec<Result<NerenaValue, String>> {
+        if let Some(engine) = &self.parallel_engine {
+            let parallel_txs: Vec<_> = transactions
+                .into_iter()
+                .enumerate()
+                .map(|(i, (module_path, function_name, args, sender))| {
+                    ParallelTransaction {
+                        id: i as u64,
+                        contract_address: Self::extract_address(&module_path).to_string(),
+                        function_name,
+                        args,
+                        sender,
+                        version: AtomicU64::new(0),
+                        read_set: Arc::new(RwLock::new(HashMap::new())),
+                        write_set: Arc::new(RwLock::new(HashMap::new())),
+                        dependencies: Arc::new(RwLock::new(HashSet::new())),
+                    }
+                })
+                .collect();
+    
+            println!("⚡ Exécution de {} transactions en parallèle optimiste (SANS récursion)", parallel_txs.len());
+            engine.execute_parallel_batch(parallel_txs).await
+        } else {
+            // Fallback séquentiel SANS récursion
+            let mut results = Vec::new();
+for (module_path, function_name, args, sender) in transactions {
+    let result = self.execute_module(&module_path, &function_name, args, Some(&sender)).await;
+    results.push(result);
+}
+            results
+        }
+    }
+
+
     fn setup_uvm_helpers(&mut self) {
         // ✅ SYSTÈME 100% GÉNÉRIQUE - Aucun hardcodage
         println!("✅ Interpréteur UVM initialisé");
@@ -612,29 +650,6 @@ impl SimpleInterpreter {
         let results = self.execute_parallel_transactions(batch).await;
         results.into_iter().next().unwrap_or(Err("Aucun résultat".to_string()))
     }
-
-    pub async fn execute_program(
-        &mut self,
-        module_path: &str,
-        function_name: &str,
-        args: Vec<NerenaValue>,
-        sender_vyid: Option<&str>,
-    ) -> Result<NerenaValue, String> {
-        let module_path = module_path.to_string();
-        let function_name = function_name.to_string();
-        let args = args.clone();
-        let sender = sender_vyid.map(|s| s.to_string());
-
-        tokio::task::spawn_blocking(move || {
-            // Ici, tu dois appeler une fonction synchrone sur self
-            // Si execute_module_core n'est pas async, tu peux l'appeler directement
-            // Sinon, il faut revoir la logique pour ne pas cloner self
-            // Par exemple, tu peux passer les arguments nécessaires
-            // Pour l'instant, tu peux juste retourner une erreur ou un placeholder
-            Err("SimpleInterpreter::execute_program n'est pas implémenté correctement".to_string())
-        }).await.map_err(|e| format!("Erreur join thread: {e}"))?
-    }
-}
 
 pub struct SlurachainVm {
     pub state: VmState,
