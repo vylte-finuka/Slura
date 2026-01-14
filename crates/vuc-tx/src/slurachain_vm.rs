@@ -1024,43 +1024,6 @@ fn create_function_metadata(&self, selector: u32, offset: usize) -> FunctionMeta
         self
     }
 
-    /// ✅ NOUVEAU: Exécution parallèle de batch
-    pub async fn execute_parallel_transactions(
-        &mut self,
-        transactions: Vec<(String, String, Vec<NerenaValue>, String)>
-    ) -> Vec<Result<NerenaValue, String>> {
-        if let Some(engine) = &self.parallel_engine {
-            let parallel_txs: Vec<_> = transactions
-                .into_iter()
-                .enumerate()
-                .map(|(i, (module_path, function_name, args, sender))| {
-                    ParallelTransaction {
-                        id: i as u64,
-                        contract_address: Self::extract_address(&module_path).to_string(),
-                        function_name,
-                        args,
-                        sender,
-                        version: AtomicU64::new(0),
-                        read_set: Arc::new(RwLock::new(HashMap::new())),
-                        write_set: Arc::new(RwLock::new(HashMap::new())),
-                        dependencies: Arc::new(RwLock::new(HashSet::new())),
-                    }
-                })
-                .collect();
-    
-            println!("⚡ Exécution de {} transactions en parallèle optimiste (SANS récursion)", parallel_txs.len());
-            engine.execute_parallel_batch(parallel_txs).await
-        } else {
-            // Fallback séquentiel SANS récursion
-            let mut results = Vec::new();
-for (module_path, function_name, args, sender) in transactions {
-    let result = self.execute_module(&module_path, &function_name, args, Some(&sender)).await;
-    results.push(result);
-}
-            results
-        }
-    }
-
     pub fn set_storage_manager(&mut self, storage: Arc<dyn RocksDBManager>) {
         self.storage_manager = Some(storage);
     }
