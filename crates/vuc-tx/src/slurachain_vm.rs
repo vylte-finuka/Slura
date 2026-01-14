@@ -1581,7 +1581,7 @@ pub async fn execute_module(
             let mut interpreter = self.interpreter.lock()
                 .map_err(|e| format!("Erreur lock interpréteur: {}", e))?;
             tokio::runtime::Handle::current().block_on(
-                interpreter.execute_program(
+                uvm_runtime::interpreter::execute_program(
                     module_path,
                     function_name,
                     args.clone(),
@@ -1641,7 +1641,7 @@ pub async fn execute_module(
         let mut interpreter = self.interpreter.lock()
             .map_err(|e| format!("Erreur lock interpréteur: {}", e))?;
         tokio::runtime::Handle::current().block_on(
-            interpreter.execute_program(
+            uvm_runtime::interpreter::execute_program(
                 module_path,
                 function_name,
                 args.clone(),
