@@ -858,7 +858,6 @@ fn persist_contract_state_immediate(&mut self, contract_address: &str, execution
 
     Ok(())
 }
-
                 /// ✅ NOUVEAU: Construction du storage dynamique depuis l'état du contrat
  fn build_dynamic_storage_from_contract_state(&self, contract_address: &str) -> Result<Option<HashMap<String, HashMap<String, Vec<u8>>>>, String> {
         if let Ok(accounts) = self.state.accounts.read() {
