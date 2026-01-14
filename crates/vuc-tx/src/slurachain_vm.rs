@@ -749,6 +749,116 @@ impl SlurachainVm {
         vm
     }
 
+    /// ✅ VERSION 100% EVM-COMPLIANT – Slot ERC-1967 implementation écrit comme Solidity le fait
+fn persist_contract_state_immediate(&mut self, contract_address: &str, execution_result: &serde_json::Value) -> Result<(), String> {
+    let storage_manager = match &self.storage_manager {
+        Some(m) => m,
+        None => return Ok(()),
+    };
+
+    // Récupère le storage (normal ou decoded)
+    let storage_obj = execution_result
+        .get("storage")
+        .and_then(|v| v.as_object())
+        .or_else(|| execution_result.get("storage_decoded").and_then(|v| v.as_object()));
+
+    if storage_obj.is_none() {
+        return Ok(());
+    }
+    let storage_obj = storage_obj.unwrap();
+
+    // ====================================================================
+    // 1. Persistance normale de tous les slots (inchangée)
+    // ====================================================================
+    for (key, value_json) in storage_obj {
+        let canonical_slot = self.map_resource_key_to_slot(key);
+        let storage_key = format!("storage:{}:{}", contract_address, canonical_slot);
+
+        let value_bytes = match value_json {
+            serde_json::Value::String(s) if s.starts_with("0x") => {
+                let clean = s.trim_start_matches("0x");
+                if clean.len() <= 64 && clean.chars().all(|c| c.is_ascii_hexdigit()) {
+                    let mut bytes = vec![0u8; 32];
+                    let decoded_len = (clean.len() + 1) / 2;
+                    let start = 32 - decoded_len;
+                    let _ = hex::decode_to_slice(clean, &mut bytes[start..]);
+                    bytes
+                } else {
+                    s.as_bytes().iter().cloned().chain(std::iter::repeat(0)).take(32).collect()
+                }
+            }
+            serde_json::Value::Number(n) if n.is_u64() => {
+                let mut bytes = vec![0u8; 32];
+                bytes[24..32].copy_from_slice(&n.as_u64().unwrap().to_be_bytes());
+                bytes
+            }
+            _ => vec![0u8; 32],
+        };
+
+        let _ = storage_manager.write(&storage_key, value_bytes);
+    }
+
+    // ====================================================================
+    // 2. FORÇAGE ABSOLU ET CONFORME EVM DU SLOT ERC-1967 IMPLEMENTATION
+    // ====================================================================
+    let impl_slot_key = ERC1967_IMPLEMENTATION_SLOT; // "360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
+
+    // On cherche l'implémentation sous TOUS les noms possibles
+    let candidate = [
+        "implementation", "impl", "logic", "target", "masterCopy",
+        "_implementation", "_impl", impl_slot_key
+    ].iter()
+     .find_map(|&k| storage_obj.get(k))
+     .and_then(|v| v.as_str())
+     .map(|s| s.trim_start_matches("0x").to_ascii_lowercase());
+
+    if let Some(hex) = candidate {
+        if hex.is_empty() || hex == "0" || hex == "0000000000000000000000000000000000000000" {
+            println!("⚠️ Implémentation = zéro → proxy reste vide (Panic 0x22 normal)");
+            return Ok(());
+        }
+
+        // Décodage strict 20 bytes → padding droit à 32 bytes (EXACTEMENT comme Solidity)
+        let mut impl_bytes = [0u8; 32];
+        if hex.len() <= 40 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            let addr_bytes = hex::decode(&hex).expect("hex valide");
+            impl_bytes[12..32].copy_from_slice(&addr_bytes); // right-padded comme EVM
+        } else {
+            // fallback sécurisé si trop long
+            let truncated = &hex::decode(&hex).unwrap_or_default()[..20.min(hex.len()/2)];
+            impl_bytes[12..32].copy_from_slice(&truncated);
+        }
+
+        // Écriture au slot CANONIQUE ERC-1967 (clé exacte utilisée par delegatecall)
+        let canonical_key = format!("storage:{}:{}", contract_address, impl_slot_key);
+        storage_manager.write(&canonical_key, impl_bytes.to_vec()).ok();
+
+        let impl_addr = format!("0x{}", hex::encode(&impl_bytes[12..32]));
+
+        println!("✅ [EVM-COMPLIANT] Slot ERC-1967 implementation écrit correctement");
+        println!("   Slot : {}", impl_slot_key);
+        println!("   Adresse impl : {}", impl_addr);
+
+        // Mise à jour des resources VM (à la fois canonique et logique)
+        if let Ok(mut accounts) = self.state.accounts.write() {
+            if let Some(acc) = accounts.get_mut(contract_address) {
+                acc.resources.insert(
+                    impl_slot_key.to_string(),
+                    serde_json::Value::String(format!("0x{}", hex::encode(impl_bytes))),
+                );
+                acc.resources.insert(
+                    "implementation".to_string(),
+                    serde_json::Value::String(impl_addr.clone()),
+                );
+            }
+        }
+    } else {
+        println!("⚠️ Aucune clé implementation trouvée → proxy reste vide");
+    }
+
+    Ok(())
+}
+    
                 /// ✅ NOUVEAU: Construction du storage dynamique depuis l'état du contrat
  fn build_dynamic_storage_from_contract_state(&self, contract_address: &str) -> Result<Option<HashMap<String, HashMap<String, Vec<u8>>>>, String> {
         if let Ok(accounts) = self.state.accounts.read() {
@@ -1206,116 +1316,6 @@ fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<us
     
     println!("❌ [NOT FOUND] Sélecteur 0x{:08x} non résolu dynamiquement", selector);
     None
-}
-
-        /// ✅ VERSION 100% EVM-COMPLIANT – Slot ERC-1967 implementation écrit comme Solidity le fait
-fn persist_contract_state_immediate(&mut self, contract_address: &str, execution_result: &serde_json::Value) -> Result<(), String> {
-    let storage_manager = match &self.storage_manager {
-        Some(m) => m,
-        None => return Ok(()),
-    };
-
-    // Récupère le storage (normal ou decoded)
-    let storage_obj = execution_result
-        .get("storage")
-        .and_then(|v| v.as_object())
-        .or_else(|| execution_result.get("storage_decoded").and_then(|v| v.as_object()));
-
-    if storage_obj.is_none() {
-        return Ok(());
-    }
-    let storage_obj = storage_obj.unwrap();
-
-    // ====================================================================
-    // 1. Persistance normale de tous les slots (inchangée)
-    // ====================================================================
-    for (key, value_json) in storage_obj {
-        let canonical_slot = self.map_resource_key_to_slot(key);
-        let storage_key = format!("storage:{}:{}", contract_address, canonical_slot);
-
-        let value_bytes = match value_json {
-            serde_json::Value::String(s) if s.starts_with("0x") => {
-                let clean = s.trim_start_matches("0x");
-                if clean.len() <= 64 && clean.chars().all(|c| c.is_ascii_hexdigit()) {
-                    let mut bytes = vec![0u8; 32];
-                    let decoded_len = (clean.len() + 1) / 2;
-                    let start = 32 - decoded_len;
-                    let _ = hex::decode_to_slice(clean, &mut bytes[start..]);
-                    bytes
-                } else {
-                    s.as_bytes().iter().cloned().chain(std::iter::repeat(0)).take(32).collect()
-                }
-            }
-            serde_json::Value::Number(n) if n.is_u64() => {
-                let mut bytes = vec![0u8; 32];
-                bytes[24..32].copy_from_slice(&n.as_u64().unwrap().to_be_bytes());
-                bytes
-            }
-            _ => vec![0u8; 32],
-        };
-
-        let _ = storage_manager.write(&storage_key, value_bytes);
-    }
-
-    // ====================================================================
-    // 2. FORÇAGE ABSOLU ET CONFORME EVM DU SLOT ERC-1967 IMPLEMENTATION
-    // ====================================================================
-    let impl_slot_key = ERC1967_IMPLEMENTATION_SLOT; // "360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
-
-    // On cherche l'implémentation sous TOUS les noms possibles
-    let candidate = [
-        "implementation", "impl", "logic", "target", "masterCopy",
-        "_implementation", "_impl", impl_slot_key
-    ].iter()
-     .find_map(|&k| storage_obj.get(k))
-     .and_then(|v| v.as_str())
-     .map(|s| s.trim_start_matches("0x").to_ascii_lowercase());
-
-    if let Some(hex) = candidate {
-        if hex.is_empty() || hex == "0" || hex == "0000000000000000000000000000000000000000" {
-            println!("⚠️ Implémentation = zéro → proxy reste vide (Panic 0x22 normal)");
-            return Ok(());
-        }
-
-        // Décodage strict 20 bytes → padding droit à 32 bytes (EXACTEMENT comme Solidity)
-        let mut impl_bytes = [0u8; 32];
-        if hex.len() <= 40 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
-            let addr_bytes = hex::decode(&hex).expect("hex valide");
-            impl_bytes[12..32].copy_from_slice(&addr_bytes); // right-padded comme EVM
-        } else {
-            // fallback sécurisé si trop long
-            let truncated = &hex::decode(&hex).unwrap_or_default()[..20.min(hex.len()/2)];
-            impl_bytes[12..32].copy_from_slice(&truncated);
-        }
-
-        // Écriture au slot CANONIQUE ERC-1967 (clé exacte utilisée par delegatecall)
-        let canonical_key = format!("storage:{}:{}", contract_address, impl_slot_key);
-        storage_manager.write(&canonical_key, impl_bytes.to_vec()).ok();
-
-        let impl_addr = format!("0x{}", hex::encode(&impl_bytes[12..32]));
-
-        println!("✅ [EVM-COMPLIANT] Slot ERC-1967 implementation écrit correctement");
-        println!("   Slot : {}", impl_slot_key);
-        println!("   Adresse impl : {}", impl_addr);
-
-        // Mise à jour des resources VM (à la fois canonique et logique)
-        if let Ok(mut accounts) = self.state.accounts.write() {
-            if let Some(acc) = accounts.get_mut(contract_address) {
-                acc.resources.insert(
-                    impl_slot_key.to_string(),
-                    serde_json::Value::String(format!("0x{}", hex::encode(impl_bytes))),
-                );
-                acc.resources.insert(
-                    "implementation".to_string(),
-                    serde_json::Value::String(impl_addr.clone()),
-                );
-            }
-        }
-    } else {
-        println!("⚠️ Aucune clé implementation trouvée → proxy reste vide");
-    }
-
-    Ok(())
 }
     
 /// Mappe une clé logique (ex: "implementation", "admin") vers un slot 32 bytes hex canonique.
