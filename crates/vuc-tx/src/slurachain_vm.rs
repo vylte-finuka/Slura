@@ -613,6 +613,10 @@ pub struct SlurachainVm {
     pub gas_price: u64,
     pub chain_id: u64,
     pub debug_mode: bool,
+    pub helpers: HashMap<u32, fn(u64, u64, u64, u64, u64) -> u64>,
+    pub allowed_memory: HashSet<std::ops::Range<u64>>,
+    pub uvm_helpers: HashMap<u32, fn(u64, u64, u64, u64, u64) -> u64>,
+    pub last_storage: Option<HashMap<String, Vec<u8>>>,
     pub parallel_engine: Option<Arc<OptimisticParallelEngine>>,
     // ✅ AJOUT: Verrou global anti-reentrancy
     pub global_execution_lock: Arc<Mutex<()>>,
@@ -647,6 +651,10 @@ impl SlurachainVm {
             gas_price: 1,
             chain_id: 45056,
             debug_mode: true,
+            helpers: HashMap::new(),
+            allowed_memory: HashSet::new(),
+            uvm_helpers: HashMap::new(),
+            last_storage: None,
             parallel_engine: None,
             global_execution_lock: Arc::new(Mutex::new(())), // ✅ Init du lock
         };
@@ -1642,12 +1650,17 @@ pub async fn execute_module(
             .map_err(|e| format!("Erreur lock interpréteur: {}", e))?;
         tokio::runtime::Handle::current().block_on(
             uvm_runtime::interpreter::execute_program(
-                module_path,
-                function_name,
-                args.clone(),
-                Some(sender)
-            )
-        ).map_err(|e| e.to_string())?
+                Some(bytecode),
+            stack_usage,
+            &mem,
+            mbuff,
+            &self.uvm_helpers,
+            &self.allowed_memory,
+            return_type,
+            &exports,
+            args,
+            converted_storage, // ✅ Passe le storage converti
+        ).map_err(|e| e.to_string())
     };
     
     self.process_execution_result_generically(vyid, &result, &function_meta)?;
