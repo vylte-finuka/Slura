@@ -1648,7 +1648,7 @@ pub async fn execute_module(
             .map_err(|e| format!("Erreur acquisition lock global: {}", e))?;
         let mut interpreter = self.interpreter.lock()
             .map_err(|e| format!("Erreur lock interpréteur: {}", e))?;
-        tokio::runtime::Handle::current().block_on(
+        tokio::runtime::Handle::current().block_on()
             uvm_runtime::interpreter::execute_program(
                 Some(bytecode),
             stack_usage,
