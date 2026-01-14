@@ -1482,12 +1482,17 @@ fn persist_contract_state_immediate(&mut self, contract_address: &str, execution
 
 /// ✅ EXÉCUTION STRICTE avec bytecode réel - CORRECTION MAJEURE POUR PROXY
 pub async fn execute_module(
-    &mut self,
-    module_path: &str,
-    function_name: &str,
-    args: Vec<NerenaValue>,
-    sender_vyid: Option<&str>,
-) -> Result<NerenaValue, String> {
+            &mut self,
+        bytecode: &[u8],
+        args: &uvm_runtime::interpreter::InterpreterArgs,
+        stack_usage: Option<&uvm_runtime::stack::StackUsage>,
+        vm_state: Arc<RwLock<BTreeMap<String, AccountState>>>,
+        return_type: Option<&str>,
+        initial_storage: Option<HashMap<String, HashMap<String, Vec<u8>>>>,
+    ) -> Result<serde_json::Value, String> {
+        let mem = [0u8; 4096];
+        let mbuff = &args.state_data;
+        let exports: HashMap<u32, usize> = HashMap::new();
         if tokio::runtime::Handle::try_current().is_ok() {
         return Err("execute_module ne doit pas être appelée dans un contexte async (tokio). Utilisez la version async du wrapper.".to_string());
     }
@@ -1588,14 +1593,19 @@ pub async fn execute_module(
                 .map_err(|e| format!("Erreur acquisition lock global: {}", e))?;
             let mut interpreter = self.interpreter.lock()
                 .map_err(|e| format!("Erreur lock interpréteur: {}", e))?;
-            tokio::runtime::Handle::current().block_on(
+            tokio::runtime::Handle::current().block_on();
                 uvm_runtime::interpreter::execute_program(
-                    module_path,
-                    function_name,
-                    args.clone(),
-                    Some(sender)
-                )
-            ).map_err(|e| e.to_string())?
+                    Some(bytecode),
+            stack_usage,
+            &mem,
+            mbuff,
+            &self.uvm_helpers,
+            &self.allowed_memory,
+            return_type,
+            &exports,
+            args,
+            converted_storage, // ✅ Passe le storage converti
+        ).map_err(|e| e.to_string())
         };
         
         // ✅ POST-TRAITEMENT SUR LE PROXY (pas l'implémentation)
