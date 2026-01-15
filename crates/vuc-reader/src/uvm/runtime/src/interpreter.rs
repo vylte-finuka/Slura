@@ -1612,7 +1612,6 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     println!("🔄 [SHL] {} << {} (clamped to {}) = {}", value, shift, safe_shift, res);
 },
 
-//___ 0x1c SHR - CORRECTION POUR SELECTOR ET EVM 256-BIT
 0x1c => {
     if evm_stack.len() < 2 {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on SHR"));
@@ -1620,13 +1619,31 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     let shift = evm_stack.pop().unwrap();
     let value = evm_stack.pop().unwrap();
 
+    // Cas très fréquent pour extraire selector: shift == 224
     if shift == 224 {
-        // Correction : utiliser U256 pour éviter l'overflow
+        // Essayer la voie U256 (la correcte si value représente un 256-bit word)
         let value_u256 = ethereum_types::U256::from(value);
-        let selector = (value_u256 >> 224).low_u32() as u64;
-        evm_stack.push(selector);
-        reg[0] = selector;
-        println!("🔄 [SHR PATCH] SHR 224 → selector 0x{:08x}", selector);
+        let selector_from_u256 = (value_u256 >> 224).low_u32() as u64;
+
+        if selector_from_u256 != 0 {
+            evm_stack.push(selector_from_u256);
+            reg[0] = selector_from_u256;
+            println!("🔄 [SHR] SHR 224 → selector (from U256) 0x{:08x}", selector_from_u256);
+        } else {
+            // Fallback : certains chemins empilent le selector en (selector << 32) dans u64.
+            // Dans ce cas, extraire depuis les bits 32..63.
+            let selector_fallback = (value >> 32) as u32;
+            if selector_fallback != 0 {
+                evm_stack.push(selector_fallback as u64);
+                reg[0] = selector_fallback as u64;
+                println!("🔄 [SHR PATCH] fallback selector from 64-bit middle bytes 0x{:08x}", selector_fallback);
+            } else {
+                // Si tout donne zéro, on garde le comportement neutre
+                evm_stack.push(0);
+                reg[0] = 0;
+                println!("⚠️ [SHR] SHR 224 → no selector found (value=0x{:016x})", value);
+            }
+        }
     } else {
         let value_u256 = ethereum_types::U256::from(value);
         let shift_u256 = ethereum_types::U256::from(shift);
@@ -1639,7 +1656,6 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
         println!("🔄 [SHR] {} >> {} (EVM 256-bit) = {}", value, shift, res);
     }
 },
-// ...existing code...
         
 //___ 0x1d SAR - VERSION SÉCURISÉE POUR SHIFT ARITHMÉTIQUE
 0x1d => {
@@ -1796,6 +1812,7 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     },
 
 //___ 0x35 CALLDATALOAD - PATCH selector EVM
+// --- Remplacez le bloc CALLDATALOAD existant par ce bloc (section 0x35) ---
 0x35 => {
     if evm_stack.is_empty() {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on CALLDATALOAD"));
@@ -1807,21 +1824,29 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
         let available = (effective_mbuff.len() - offset).min(32);
         data[..available].copy_from_slice(&effective_mbuff[offset..offset + available]);
     }
-    // PATCH: Pour le dispatch EVM, si le calldata fait 4 octets, on pousse le selector direct
+    // Récupère le selector (les 4 premiers octets du mot 32 bytes)
     let selector = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+
+    // Note : on ne peut pas représenter un word 256-bit complet dans un u64.
+    // Beaucoup de contrats et du code ici utilisent une représentation "compacte"
+    // (selector placé dans les bits 32..63) — on conserve cela pour compatibilité,
+    // mais SHR (>>224) a maintenant un fallback pour en tenir compte.
+    // Si le calldata est exactement 4 bytes et offset==0, on stocke juste le selector
+    // dans la partie basse pour signifier "calldata small".
     let value = if effective_mbuff.len() == 4 && offset == 0 {
+        // petit calldata → marqueur compact
         selector as u64
     } else {
-        // Comportement standard: placer le selector dans les 4 octets de poids fort
+        // représentation "middle" déjà utilisée : selector dans bits 32..63
         (selector as u64) << 32
     };
+
     evm_stack.push(value);
     if debug_evm && instruction_count <= 50 {
-        println!("📥 [CALLDATALOAD] offset=0x{:x} → selector=0x{:08x} (u64=0x{:x}) (raw: {:?})", offset, selector, value, &data[..]);
+        println!("📥 [CALLDATALOAD] offset=0x{:x} → selector=0x{:08x} (u64=0x{:016x}) (raw: {:?})", offset, selector, value, &data[..]);
     }
 },
-// ...existing code...
-    
+
     //___ 0x36 CALLDATASIZE - CORRECTION POUR CONTRATS UUPS
     0x36 => {
         // Utilise la taille réelle du calldata généré
