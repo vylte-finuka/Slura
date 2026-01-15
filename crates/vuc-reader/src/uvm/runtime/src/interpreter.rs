@@ -1611,8 +1611,8 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     
     println!("🔄 [SHL] {} << {} (clamped to {}) = {}", value, shift, safe_shift, res);
 },
-        
-//___ 0x1c SHR - VERSION SÉCURISÉE
+
+//___ 0x1c SHR - CORRECTION POUR SELECTOR ET EVM 256-BIT
 0x1c => {
     if evm_stack.len() < 2 {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on SHR"));
@@ -1620,15 +1620,14 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     let shift = evm_stack.pop().unwrap();
     let value = evm_stack.pop().unwrap();
 
-    // PATCH UNIVERSEL: Si la pile contient un sélecteur EVM (4 bytes) et shift == 224, ignore le SHR
-    if shift == 224 && effective_mbuff.len() == 4 && value == u32::from_be_bytes([
-        effective_mbuff[0], effective_mbuff[1], effective_mbuff[2], effective_mbuff[3]
-    ]) as u64 {
-        evm_stack.push(value);
-        reg[0] = value;
-        println!("🔄 [SHR PATCH] Sélecteur détecté, SHR ignoré → 0x{:x}", value);
+    if shift == 224 {
+        // Correction : utiliser U256 pour éviter l'overflow
+        let value_u256 = ethereum_types::U256::from(value);
+        let selector = (value_u256 >> 224).low_u32() as u64;
+        evm_stack.push(selector);
+        reg[0] = selector;
+        println!("🔄 [SHR PATCH] SHR 224 → selector 0x{:08x}", selector);
     } else {
-        // Comportement EVM standard
         let value_u256 = ethereum_types::U256::from(value);
         let shift_u256 = ethereum_types::U256::from(shift);
         let res_u256 = value_u256 >> shift_u256;
@@ -1640,6 +1639,7 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
         println!("🔄 [SHR] {} >> {} (EVM 256-bit) = {}", value, shift, res);
     }
 },
+// ...existing code...
         
 //___ 0x1d SAR - VERSION SÉCURISÉE POUR SHIFT ARITHMÉTIQUE
 0x1d => {
@@ -1795,7 +1795,7 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
         consume_gas(&mut execution_context, 2)?;
     },
 
-//___ 0x35 CALLDATALOAD - FIX CRITIQUE POUR LE SELECTOR
+//___ 0x35 CALLDATALOAD - PATCH selector EVM
 0x35 => {
     if evm_stack.is_empty() {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on CALLDATALOAD"));
@@ -1803,27 +1803,24 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     let offset = evm_stack.pop().unwrap() as usize;
 
     let mut data = [0u8; 32];
-    if offset + 32 <= effective_mbuff.len() {
-        data.copy_from_slice(&effective_mbuff[offset..offset + 32]);
-    } else if offset < effective_mbuff.len() {
-        let available = effective_mbuff.len() - offset;
-        data[..available].copy_from_slice(&effective_mbuff[offset..]);
+    if offset < effective_mbuff.len() {
+        let available = (effective_mbuff.len() - offset).min(32);
+        data[..available].copy_from_slice(&effective_mbuff[offset..offset + available]);
     }
-    // Correction ici : extraire le selector si offset == 0 et calldata == 4 bytes
-    let value_u64 = if offset == 0 && effective_mbuff.len() == 4 {
-        // Selector = 4 premiers octets
-        let selector = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-        current_selector = Some(selector); // <-- Ajout : mémorise le selector courant
+    // PATCH: Pour le dispatch EVM, si le calldata fait 4 octets, on pousse le selector direct
+    let selector = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+    let value = if effective_mbuff.len() == 4 && offset == 0 {
         selector as u64
     } else {
-        // Sinon, on prend les 8 derniers octets (standard)
-        u64::from_be_bytes([data[24], data[25], data[26], data[27], data[28], data[29], data[30], data[31]])
+        // Comportement standard: placer le selector dans les 4 octets de poids fort
+        (selector as u64) << 32
     };
-    evm_stack.push(value_u64);
+    evm_stack.push(value);
     if debug_evm && instruction_count <= 50 {
-        println!("📥 [CALLDATALOAD] offset=0x{:x} → value=0x{:x} (raw: {:?})", offset, value_u64, &data[..]);
+        println!("📥 [CALLDATALOAD] offset=0x{:x} → selector=0x{:08x} (u64=0x{:x}) (raw: {:?})", offset, selector, value, &data[..]);
     }
 },
+// ...existing code...
     
     //___ 0x36 CALLDATASIZE - CORRECTION POUR CONTRATS UUPS
     0x36 => {

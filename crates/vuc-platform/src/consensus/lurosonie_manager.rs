@@ -313,11 +313,11 @@ impl LurosonieManager {
     async fn calculate_total_vez_supply(&self) -> Result<u128, String> {
         let accounts: Vec<(String, u64)> = {
             let vm = self.vm.read().await;
-            let accounts = vm.state.accounts.read().unwrap();
-            accounts.iter()
+            let accounts = vm.state.accounts.read();
+            let x =accounts.await.iter()
                 .filter(|(address, _)| *address != "system" && *address != "0x0")
                 .map(|(address, account)| (address.clone(), account.balance as u64))
-                .collect()
+                .collect(); x
         };
         
         let mut total_supply = 0u64;
@@ -498,8 +498,8 @@ impl LurosonieManager {
         // 1. Récupère l'état courant des comptes
         let accounts = {
             let vm = self.vm.read().await;
-            let accounts = vm.state.accounts.read().unwrap();
-            accounts.clone()
+            let accounts = vm.state.accounts.read();
+            let x = accounts.await.clone(); x
         };
 
         // 2. Calcule le Patricia Trie root pour l'état au bloc donné
@@ -665,8 +665,8 @@ impl LurosonieManager {
     async fn sync_relay_validators_from_vm(&self) -> Result<(), String> {
         let accounts: Vec<String> = {
             let vm = self.vm.read().await;
-            let state = vm.state.accounts.read().unwrap();
-            state.keys().cloned().collect()
+            let state = vm.state.accounts.read();
+            let x = state.await.keys().cloned().collect(); x
         };
         
         let mut new_validators = HashMap::new();
@@ -1468,13 +1468,12 @@ impl LurosonieManager {
         let vm = self.vm.clone();
         let mut vm_write = vm.write().await;
         
-        if let Ok(accounts) = vm_write.state.accounts.read() {
-            for (contract_addr, _) in accounts.iter() {
-                if contract_addr.starts_with("0x") && contract_addr.len() == 42 {
-                    if let Some(contract_state) = self.load_contract_state_from_db(contract_addr, None).await {
-                        println!("🔄 [DB SYNC] Synchronisation état contrat {} : {} slots", contract_addr, contract_state.len());
-                        // Synchronise avec l'état VM si nécessaire
-                    }
+        let accounts = vm_write.state.accounts.read().await;
+        for (contract_addr, _) in accounts.iter() {
+            if contract_addr.starts_with("0x") && contract_addr.len() == 42 {
+                if let Some(contract_state) = self.load_contract_state_from_db(contract_addr, None).await {
+                    println!("🔄 [DB SYNC] Synchronisation état contrat {} : {} slots", contract_addr, contract_state.len());
+                    // Synchronise avec l'état VM si nécessaire
                 }
             }
         }

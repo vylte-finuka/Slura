@@ -349,7 +349,7 @@ impl EnginePlatform {
         /// ✅ NOUVEAU: Restauration d'un compte
         async fn restore_account_from_data(&self, address: &str, account_data: &serde_json::Value) -> Result<bool, String> {
             let mut vm = self.vm.write().await;
-            let mut accounts = vm.state.accounts.write().unwrap();
+            let mut accounts = vm.state.accounts.write().await;
             
             let account = vuc_tx::slurachain_vm::AccountState {
                 address: address.to_string(),
@@ -581,7 +581,7 @@ impl EnginePlatform {
                     gas_used: 0,
                 };
 
-                vm.state.accounts.write().unwrap().insert(contract_address.clone(), account_state);
+                vm.state.accounts.write().await.insert(contract_address.clone(), account_state);
 
                // ✅ AJOUT : Exécution du constructeur ou initialize (si présent)
         // 1. Détection automatique de la fonction d'init
@@ -797,7 +797,7 @@ impl EnginePlatform {
                 let nonce = format!("0x{:016x}", rand::random::<u64>());
                 let accounts = {
                     let vm = self.vm.read().await;
-                    let accounts = vm.state.accounts.read().unwrap();
+                    let accounts = vm.state.accounts.read().await;
                     accounts.clone()
                 };
                 let hashed_state = vuc_tx::slura_merkle::build_state_trie(&accounts);
@@ -1278,7 +1278,7 @@ pub async fn get_transaction_count(&self, address: &str) -> Result<u64, String> 
         }
         
         // ✅ Insert dans la VM
-        vm.state.accounts.write().unwrap().insert(contract_address.to_string(), account_state.clone());
+        vm.state.accounts.write().await.insert(contract_address.to_string(), account_state.clone());
                 
         Ok(true)
     }
@@ -1286,7 +1286,7 @@ pub async fn get_transaction_count(&self, address: &str) -> Result<u64, String> 
 /// ✅ NOUVEAU: Vérification de déploiement post-redémarrage
 pub async fn verify_contract_deployment(&self, contract_address: &str) -> Result<serde_json::Value, String> {
     let vm = self.vm.read().await;
-    let accounts = vm.state.accounts.read().unwrap();
+    let accounts = vm.state.accounts.read().await;
     
     if let Some(account) = accounts.get(contract_address) {
         Ok(serde_json::json!({
@@ -1416,7 +1416,7 @@ pub async fn verify_contract_deployment(&self, contract_address: &str) -> Result
                             // 🔥 VÉRIFICATION D'UNICITÉ GARANTIE
                             {
                                 let vm = self.vm.read().await;
-                                let accounts = vm.state.accounts.read().unwrap();
+                                let accounts = vm.state.accounts.read().await;
                                 let mut attempts: i32 = 0;
                                 let mut final_address = contract_address.clone();
                                 
@@ -1478,7 +1478,7 @@ pub async fn verify_contract_deployment(&self, contract_address: &str) -> Result
                             
                             // 2. Insère dans l'état VM
                             {
-                                let mut accounts = vm.state.accounts.write().unwrap();
+                                let mut accounts = vm.state.accounts.write().await;
                                 accounts.insert(contract_address.clone(), contract_account.clone());
                             }
                             
@@ -1635,7 +1635,7 @@ pub async fn verify_contract_deployment(&self, contract_address: &str) -> Result
         // 🔥 MISE À JOUR NONCE : UNIQUEMENT si le compte existe déjà
         {
             let vm = self.vm.write().await;
-            let mut accounts = vm.state.accounts.write().unwrap();
+            let mut accounts = vm.state.accounts.write().await;
             
             if let Some(account) = accounts.get_mut(&from_addr) {
                 account.nonce = std::cmp::max(account.nonce, final_nonce + 1);
@@ -2712,7 +2712,7 @@ module.register_async_method("eth_getCode", move |params, _meta, _| {
         // Timeout sur la lecture VM
         let code_opt = match timeout(Duration::from_secs(20), async {
             let vm = engine_platform.vm.read().await;
-            let accounts = vm.state.accounts.read().unwrap();
+            let accounts = vm.state.accounts.read().await;
             accounts.get(&address).map(|account| account.contract_state.clone())
         }).await {
             Ok(result) => result,
@@ -2943,7 +2943,8 @@ pub fn assign_private_key_to_system_account(vm: &mut SlurachainVm) -> Result<Str
     let eth_address = format!("0x{}", hex::encode(&hash[12..]));
 
     // Enregistre la clé privée dans le champ resources du compte validateur
-    vm.state.accounts.write().unwrap().insert(
+    let mut accounts = futures::executor::block_on(vm.state.accounts.write());
+    accounts.insert(
         eth_address.clone().to_lowercase(),
         vuc_tx::slurachain_vm::AccountState {
             address: eth_address.clone().to_lowercase(),
@@ -2991,7 +2992,7 @@ mod tests {
         // Setup VM minimal pour les tests
         {
             let mut vm_guard = vm.write().await;
-            vm_guard.state.accounts.write().unwrap().insert(
+            vm_guard.state.accounts.write().await.insert(
                 validator_address.clone(),
                 vuc_tx::slurachain_vm::AccountState {
                     address: validator_address.clone(),
@@ -3044,7 +3045,7 @@ mod tests {
                         let mut vm_guard = vm_clone.write().await;
                         
                         // Simulation d'exécution de transaction (pas de vraie transaction)
-                        let success = vm_guard.state.accounts.read().unwrap().contains_key(&validator_clone);
+                        let success = vm_guard.state.accounts.read().await.contains_key(&validator_clone);
                         if success { 1u64 } else { 0u64 }
                     };
                     result
@@ -3121,7 +3122,7 @@ mod tests {
         // ✅ VÉRIFICATIONS D'INTÉGRITÉ
         let final_accounts = {
             let vm_read = vm.read().await;
-            let x = vm_read.state.accounts.read().unwrap().len(); x
+            let x = vm_read.state.accounts.read().await.len(); x
         };
         
         println!("🔍 INTÉGRITÉ FINALE:");
@@ -3154,7 +3155,7 @@ async fn main() {
     tracing_subscriber::fmt::init();
     println!("🚀 Starting Slurachain network with Lurosonie consensus...");
 
-    // ✅ CHOIX EXPLICITE DU CLUSTER/RÉSEAU (AVANT TOUTE AUTRE INITIALISATION)
+    // Sélection du cluster
     let cluster = match std::env::var("SLURACHAIN_NETWORK") {
         Ok(network) => match network.to_lowercase().as_str() {
             "mainnet" => Network::Mainnet,
@@ -3173,49 +3174,42 @@ async fn main() {
 
     let cluster_str = match cluster {
         Network::Mainnet => "mainnet",
-        Network::Testnet => "testnet", 
+        Network::Testnet => "testnet",
         Network::Devnet => "devnet",
     };
 
-    println!("🌐 Réseau Slurachain sélectionné: {} ({})", cluster_str, match cluster {
-        Network::Mainnet => "Production - Réseau principal",
-        Network::Testnet => "Test - Réseau de test public (Charène)", 
-        Network::Devnet => "Développement - Réseau local",
-    });
-
-    // ✅ CONFIGURATION SPÉCIFIQUE PAR RÉSEAU
     let (default_port, default_chain_id, consensus_mode) = match cluster {
         Network::Mainnet => (8080, 45056, "Lurosonie_bft"),
         Network::Testnet => (8081, 45057, "Lurosonie_bft"),
         Network::Devnet => (8082, 45058, "Lurosonie_bft"),
     };
 
-    println!("⚙️ Configuration réseau:");
-    println!("   • Port RPC: {}", default_port);
-    println!("   • Chain ID: 0x{:x} ({})", default_chain_id, default_chain_id);
-    println!("   • Mode consensus: {}", consensus_mode);
-
-    // ✅ Ouvre RocksDB UNE SEULE FOIS et partage l'Arc partout
+    // Initialisation du storage manager
     let storage: Arc<RocksDBManagerImpl> = Arc::new(RocksDBManagerImpl::new());
     println!("✅ RocksDB storage manager initialisé");
 
-    // ✅ INITIALISATION UNIQUE DE LA VM avec cluster ET storage manager
-    let vm = Arc::new(TokioRwLock::new(SlurachainVm::new_with_cluster(cluster_str)));
+    // Initialisation de la VM avec cluster et storage manager
+    let mut vm = SlurachainVm::new_with_cluster(cluster_str);
+
+    // 🔥 Activation du moteur parallèle (4 threads, batch de 32)
+    let cpu_count = num_cpus::get().max(4); // Utilise au moins 4 threads
+    println!("🖥️ Détection automatique : {} threads CPU pour le moteur parallèle", cpu_count);
+    vm = vm.with_parallel_engine(cpu_count, 32);
+
+    let vm = Arc::new(TokioRwLock::new(vm));
     let mut validator_address_generated = String::new();
-    
+
     {
         let mut vm_guard = vm.write().await;
-        
-        // ✅ CRITIQUE : ATTACHER LE STORAGE MANAGER IMMÉDIATEMENT
         vm_guard.set_storage_manager(storage.clone());
         println!("✅ Storage manager attaché à la VM");
-        
-        // ✅ CRÉATION DU COMPTE SYSTÈME
+
+        // Création du compte système
         println!("🏛️ Creating system account...");
         validator_address_generated = {
             match assign_private_key_to_system_account(&mut vm_guard) {
                 Ok(privkey_hex) => {
-                    let accounts = vm_guard.state.accounts.read().unwrap();
+                    let accounts = vm_guard.state.accounts.read().await;
                     accounts.iter()
                         .find(|(_, acc)| acc.resources.get("private_key").map(|v| v.as_str().unwrap_or("")) == Some(privkey_hex.as_str()))
                         .map(|(addr, _)| addr.clone())
@@ -3409,7 +3403,7 @@ async fn main() {
                     // Mise à jour du slot implementation
                     {
                         let mut vm = value.vm.write().await;
-                        let mut accounts = vm.state.accounts.write().unwrap();
+                        let mut accounts = vm.state.accounts.write().await;
                         if let Some(proxy_account) = accounts.get_mut(&proxy_addr) {
                             proxy_account.resources.insert(
                                 "implementation".to_string(),
@@ -3527,7 +3521,7 @@ async fn main() {
     // ✅ Informations sur les tokens et comptes
     {
         let vm_read = vm.read().await;
-        let accounts = vm_read.state.accounts.read().unwrap();
+        let accounts = vm_read.state.accounts.read().await;
         
         if let Some(vez_contract) = accounts.get("0xe3cf7102e5f8dfd6ec247daea8ca3e96579e8448") {
             if let Some(total_supply) = vez_contract.resources.get("total_supply") {
@@ -3648,7 +3642,7 @@ async fn main() {
 
     let final_accounts_count = {
         let vm_read = vm.read().await;
-        let accounts = vm_read.state.accounts.read().unwrap();
+        let accounts = vm_read.state.accounts.read().await;
         accounts.len()
     };
     
@@ -3690,7 +3684,7 @@ async fn create_initial_accounts_with_vez(vm: &mut SlurachainVm, validator_addre
         (validator_address, 888_000_000_000_000_000_000_000_000u128), // <-- 888 VEZ
     ];
 
-    let mut accounts = vm.state.accounts.write().unwrap();
+    let mut accounts = vm.state.accounts.write().await;
 
     for (account_eth, initial_balance) in initial_accounts {
         let account = AccountState {
@@ -3732,7 +3726,7 @@ async fn save_system_state(
     println!("💾 Saving system state...");
     
     let vm_read = vm.read().await;
-    let accounts = vm_read.state.accounts.read().unwrap();
+    let accounts = vm_read.state.accounts.read().await;
     
     // ✅ Sauvegarde du contrat VEZ et des comptes système
     for (address, account) in accounts.iter() {
@@ -3754,7 +3748,7 @@ async fn save_system_state(
 
 async fn validate_system_integrity(vm: &Arc<TokioRwLock<SlurachainVm>>, validator_address: &str) -> Result<(), String> {
     let vm_read = vm.read().await;
-    let accounts = vm_read.state.accounts.read().unwrap();
+    let accounts = vm_read.state.accounts.read().await;
     
     // ✅ Vérification du contrat VEZ
 

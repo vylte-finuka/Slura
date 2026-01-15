@@ -1,11 +1,12 @@
 //___ Unity VM: Slurachain VM avec parallélisme optimiste pour 300M TPS ___//
 use anyhow::Result;
 use std::collections::BTreeMap;
-use futures::future::join_all;
+use futures::{future::join_all, FutureExt};
 use serde::{Deserialize, Serialize};
 use dashmap::DashMap;
 use std::hash::{Hash, Hasher};
-use std::sync::{Arc, RwLock, Mutex};
+use std::sync::Arc;
+use tokio::sync::{Mutex, RwLock};
 use std::sync::atomic::{AtomicU64, Ordering};
 use vuc_storage::storing_access::RocksDBManager;
 use hashbrown::{HashSet, HashMap};
@@ -89,35 +90,35 @@ pub fn new(thread_pool_size: usize, batch_size: usize, vm: Arc<Mutex<SlurachainV
     }
 
       /// ✅ NOUVEAU: Collecte des transactions en conflit SANS récursion
-    async fn collect_conflicted_transactions_non_recursive(
-        &self, 
-        validation_results: &[bool], 
-        original_transactions: &[ParallelTransaction]
-    ) -> Vec<ParallelTransaction> {
-        let mut conflicted = Vec::new();
-        
-        for (i, &is_valid) in validation_results.iter().enumerate() {
-            if !is_valid && i < original_transactions.len() {
-                let mut retry_tx = original_transactions[i].clone();
-                // Incrémente la version pour le retry
-                retry_tx.version.store(
-                    retry_tx.version.load(Ordering::SeqCst) + 1, 
-                    Ordering::SeqCst
-                );
-                // Clear read/write sets pour le retry
-                if let Ok(mut read_set) = retry_tx.read_set.write() {
-                    read_set.clear();
-                }
-                if let Ok(mut write_set) = retry_tx.write_set.write() {
-                    write_set.clear();
-                }
-                
-                conflicted.push(retry_tx);
+  async fn collect_conflicted_transactions_non_recursive(
+    &self, 
+    validation_results: &[bool], 
+    original_transactions: &[ParallelTransaction]
+) -> Vec<ParallelTransaction> {
+    let mut conflicted = Vec::new();
+    
+    for (i, &is_valid) in validation_results.iter().enumerate() {
+        if !is_valid && i < original_transactions.len() {
+            let mut retry_tx = original_transactions[i].clone();
+            // Incrémente la version pour le retry
+            retry_tx.version.store(
+                retry_tx.version.load(Ordering::SeqCst) + 1, 
+                Ordering::SeqCst
+            );
+            // Clear read/write sets pour le retry
+            {
+                let mut read_set = retry_tx.read_set.write().await;
+                read_set.clear();
             }
+            {
+                let mut write_set = retry_tx.write_set.write().await;
+                write_set.clear();
+            }
+            conflicted.push(retry_tx);
         }
-        
-        conflicted
     }
+    conflicted
+}
 
     /// ✅ Exécution parallèle optimiste de batch de transactions (SANS récursion)
     pub async fn execute_parallel_batch(&self, mut transactions: Vec<ParallelTransaction>) -> Vec<Result<NerenaValue, String>> {
@@ -204,7 +205,7 @@ pub fn new(thread_pool_size: usize, batch_size: usize, vm: Arc<Mutex<SlurachainV
     }
 
         /// Exécution spéculative d'une transaction (utilise execute_module réel)
-     async fn execute_speculative_transaction(&self, tx: ParallelTransaction) -> Result<NerenaValue, String> {
+   async fn execute_speculative_transaction(&self, tx: ParallelTransaction) -> Result<NerenaValue, String> {
     println!("⚡ Exécution spéculative TX {} sur thread {}", tx.id, rayon::current_thread_index().unwrap_or(0));
     let vm = self.vm.clone();
     let contract_address = tx.contract_address.clone();
@@ -213,8 +214,8 @@ pub fn new(thread_pool_size: usize, batch_size: usize, vm: Arc<Mutex<SlurachainV
     let sender = tx.sender.clone();
 
     // Appel direct async
-    let mut vm = vm.lock().unwrap();
-    let result = vm.execute_program(
+    let mut vm = vm.lock().await;
+    let result = vm.execute_module(
         &contract_address,
         &function_name,
         args,
@@ -265,34 +266,26 @@ pub fn new(thread_pool_size: usize, batch_size: usize, vm: Arc<Mutex<SlurachainV
     /// ✅ Validation des conflits de concurrence
     async fn validate_transaction_conflicts(&self, tx: &ParallelTransaction) -> bool {
         // Vérifie si les versions lues sont encore valides
-        let read_set = tx.read_set.read().unwrap();
-        
+        let read_set = tx.read_set.read().await;
         for (slot, version_read) in read_set.iter() {
             let current_version = self.storage_versions.get(slot)
                 .map(|v| *v.value())
                 .unwrap_or(0);
-            
             if current_version != *version_read {
                 println!("⚠️  Conflit détecté sur slot {} : lu v{}, actuel v{}", 
                         slot, version_read, current_version);
                 return false;
             }
         }
-        
         true
     }
 
     /// ✅ Commit atomique des changements d'une transaction
     async fn commit_transaction_changes(&self, tx: &ParallelTransaction) {
-        let write_set = tx.write_set.read().unwrap();
-        
+        let write_set = tx.write_set.read().await;
         for (slot, new_value) in write_set.iter() {
-            // Incrémente la version globale
             let new_version = self.global_version_counter.fetch_add(1, Ordering::SeqCst);
-            
-            // Update la version du slot
             self.storage_versions.insert(slot.clone(), new_version);
-            
             println!("💾 Commit slot {} -> v{} ({} bytes)", slot, new_version, new_value.len());
         }
     }
@@ -634,6 +627,10 @@ impl Clone for SlurachainVm {
             gas_price: self.gas_price,
             chain_id: self.chain_id,
             debug_mode: self.debug_mode,
+            helpers: self.helpers.clone(),
+            allowed_memory: self.allowed_memory.clone(),
+            uvm_helpers: self.uvm_helpers.clone(),
+            last_storage: self.last_storage.clone(),
             parallel_engine: self.parallel_engine.as_ref().map(|arc| Arc::clone(arc)),
             global_execution_lock: Arc::clone(&self.global_execution_lock),
         }
@@ -724,7 +721,15 @@ impl SlurachainVm {
             let mut results = Vec::new();
             for (module_path, function_name, args, sender) in transactions {
                 let result = self
-                    .execute_module(&module_path, &function_name, args, Some(&sender))
+                    .execute_program(
+                        &module_path, 
+                        &function_name, 
+                        args, 
+                        Some(&sender),
+                        None, // stack_usage: Option<&uvm_runtime::stack::StackUsage>
+                        None, // return_type: Option<&str>
+                        None  // initial_storage: Option<HashMap<String, HashMap<String, Vec<u8>>>>
+                    )
                     .await;
                 results.push(result);
             }
@@ -742,7 +747,7 @@ impl SlurachainVm {
         
             // assure qu'il y a un AccountState pour remplir
             let mut account = {
-                let mut accounts = self.state.accounts.write().map_err(|e| format!("Lock accounts failed: {}", e))?;
+                let mut accounts = futures::executor::block_on(self.state.accounts.write());
                 accounts.entry(contract_address.to_string()).or_insert_with(|| AccountState {
                     address: contract_address.to_string(),
                     balance: 0,
@@ -772,7 +777,6 @@ impl SlurachainVm {
                 match storage_manager.read(key) {
                     Ok(bytes) if !bytes.is_empty() => {
                         found_code = Some(bytes);
-                        println!("🔎 Bytecode trouvé pour {} via clé '{}'", contract_address, key);
                         break;
                     }
                     _ => {}
@@ -835,7 +839,7 @@ impl SlurachainVm {
         
             // 5) Ecrit l'AccountState mis à jour dans l'état global
             {
-                let mut accounts = self.state.accounts.write().map_err(|e| format!("Lock accounts failed: {}", e))?;
+                let mut accounts = futures::executor::block_on(self.state.accounts.write());
                 accounts.insert(contract_address.to_string(), account.clone());
             }
         
@@ -872,7 +876,7 @@ impl SlurachainVm {
         }
 
     /// ✅ NOUVEAU: Wrapper parallèle pour une seule transaction
-    pub async fn execute_program(
+    pub async fn execute_module(
         &mut self,
         module_path: &str,
         function_name: &str,
@@ -887,18 +891,17 @@ impl SlurachainVm {
 
                 /// ✅ NOUVEAU: Construction du storage dynamique depuis l'état du contrat
  fn build_dynamic_storage_from_contract_state(&self, contract_address: &str) -> Result<Option<HashMap<String, HashMap<String, Vec<u8>>>>, String> {
-        if let Ok(accounts) = self.state.accounts.read() {
-            if let Some(account) = accounts.get(contract_address) {
-                let mut storage = HashMap::new();
-                let mut contract_storage = HashMap::new();
-                // Convertit les resources en storage bytes
-                for (key, value) in &account.resources {
-                    let storage_bytes = self.convert_resource_to_storage_bytes(value);
-                    contract_storage.insert(key.clone(), storage_bytes);
-                }
-                storage.insert(contract_address.to_string(), contract_storage);
-                return Ok(Some(storage));
+        let accounts = futures::executor::block_on(self.state.accounts.read());
+        if let Some(account) = accounts.get(contract_address) {
+            let mut storage = HashMap::new();
+            let mut contract_storage = HashMap::new();
+            // Convertit les resources en storage bytes
+            for (key, value) in &account.resources {
+                let storage_bytes = self.convert_resource_to_storage_bytes(value);
+                contract_storage.insert(key.clone(), storage_bytes);
             }
+            storage.insert(contract_address.to_string(), contract_storage);
+            return Ok(Some(storage));
         }
         Ok(None)
     }
@@ -1294,7 +1297,7 @@ fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<us
 }
 
         /// ✅ VERSION 100% EVM-COMPLIANT – Slot ERC-1967 implementation écrit comme Solidity le fait
-fn persist_contract_state_immediate(&mut self, contract_address: &str, execution_result: &serde_json::Value) -> Result<(), String> {
+async fn persist_contract_state_immediate(&mut self, contract_address: &str, execution_result: &serde_json::Value) -> Result<(), String> {
     let storage_manager = match &self.storage_manager {
         Some(m) => m,
         None => return Ok(()),
@@ -1311,9 +1314,7 @@ fn persist_contract_state_immediate(&mut self, contract_address: &str, execution
     }
     let storage_obj = storage_obj.unwrap();
 
-    // ====================================================================
     // 1. Persistance normale de tous les slots (inchangée)
-    // ====================================================================
     for (key, value_json) in storage_obj {
         let canonical_slot = self.map_resource_key_to_slot(key);
         let storage_key = format!("storage:{}:{}", contract_address, canonical_slot);
@@ -1342,12 +1343,9 @@ fn persist_contract_state_immediate(&mut self, contract_address: &str, execution
         let _ = storage_manager.write(&storage_key, value_bytes);
     }
 
-    // ====================================================================
     // 2. FORÇAGE ABSOLU ET CONFORME EVM DU SLOT ERC-1967 IMPLEMENTATION
-    // ====================================================================
-    let impl_slot_key = ERC1967_IMPLEMENTATION_SLOT; // "360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
+    let impl_slot_key = ERC1967_IMPLEMENTATION_SLOT;
 
-    // On cherche l'implémentation sous TOUS les noms possibles
     let candidate = [
         "implementation", "impl", "logic", "target", "masterCopy",
         "_implementation", "_impl", impl_slot_key
@@ -1362,18 +1360,15 @@ fn persist_contract_state_immediate(&mut self, contract_address: &str, execution
             return Ok(());
         }
 
-        // Décodage strict 20 bytes → padding droit à 32 bytes (EXACTEMENT comme Solidity)
         let mut impl_bytes = [0u8; 32];
         if hex.len() <= 40 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
             let addr_bytes = hex::decode(&hex).expect("hex valide");
-            impl_bytes[12..32].copy_from_slice(&addr_bytes); // right-padded comme EVM
+            impl_bytes[12..32].copy_from_slice(&addr_bytes);
         } else {
-            // fallback sécurisé si trop long
             let truncated = &hex::decode(&hex).unwrap_or_default()[..20.min(hex.len()/2)];
             impl_bytes[12..32].copy_from_slice(&truncated);
         }
 
-        // Écriture au slot CANONIQUE ERC-1967 (clé exacte utilisée par delegatecall)
         let canonical_key = format!("storage:{}:{}", contract_address, impl_slot_key);
         storage_manager.write(&canonical_key, impl_bytes.to_vec()).ok();
 
@@ -1384,17 +1379,16 @@ fn persist_contract_state_immediate(&mut self, contract_address: &str, execution
         println!("   Adresse impl : {}", impl_addr);
 
         // Mise à jour des resources VM (à la fois canonique et logique)
-        if let Ok(mut accounts) = self.state.accounts.write() {
-            if let Some(acc) = accounts.get_mut(contract_address) {
-                acc.resources.insert(
-                    impl_slot_key.to_string(),
-                    serde_json::Value::String(format!("0x{}", hex::encode(impl_bytes))),
-                );
-                acc.resources.insert(
-                    "implementation".to_string(),
-                    serde_json::Value::String(impl_addr.clone()),
-                );
-            }
+        let mut accounts = self.state.accounts.write().await;
+        if let Some(acc) = accounts.get_mut(contract_address) {
+            acc.resources.insert(
+                impl_slot_key.to_string(),
+                serde_json::Value::String(format!("0x{}", hex::encode(impl_bytes))),
+            );
+            acc.resources.insert(
+                "implementation".to_string(),
+                serde_json::Value::String(impl_addr.clone()),
+            );
         }
     } else {
         println!("⚠️ Aucune clé implementation trouvée → proxy reste vide");
@@ -1422,46 +1416,44 @@ fn persist_contract_state_immediate(&mut self, contract_address: &str, execution
             }
         }
     }
-
-     /// ✅ NOUVEAU: Détection intelligente des contrats proxy
-    fn is_proxy_contract(&self, contract_address: &str) -> bool {
-        if let Ok(accounts) = self.state.accounts.read() {
-            if let Some(account) = accounts.get(contract_address) {
-                // ✅ Vérifie les patterns de proxy standards
-                return account.resources.contains_key("implementation") ||
-                       account.resources.contains_key("admin") ||
-                       account.resources.contains_key("beacon") ||
-                       account.resources.contains_key(ERC1967_IMPLEMENTATION_SLOT) ||
-                       account.resources.contains_key(ERC1967_ADMIN_SLOT) ||
-                       account.resources.contains_key(ERC1967_BEACON_SLOT);
-            }
+ 
+    /// ✅ NOUVEAU: Détection intelligente des contrats proxy
+    async fn is_proxy_contract(&self, contract_address: &str) -> bool {
+        let accounts = self.state.accounts.read().await;
+        if let Some(account) = accounts.get(contract_address) {
+            // ✅ Vérifie les patterns de proxy standards
+            return account.resources.contains_key("implementation") ||
+                   account.resources.contains_key("admin") ||
+                   account.resources.contains_key("beacon") ||
+                   account.resources.contains_key(ERC1967_IMPLEMENTATION_SLOT) ||
+                   account.resources.contains_key(ERC1967_ADMIN_SLOT) ||
+                   account.resources.contains_key(ERC1967_BEACON_SLOT);
         }
         false
     }
     
     /// ✅ NOUVEAU: Récupération intelligente de l'adresse d'implémentation
-    fn get_implementation_address(&self, proxy_address: &str) -> Option<String> {
-        if let Ok(accounts) = self.state.accounts.read() {
-            if let Some(account) = accounts.get(proxy_address) {
-                // ✅ Recherche dans l'ordre de priorité
-                let implementation_keys = [
-                    "implementation",
-                    ERC1967_IMPLEMENTATION_SLOT,
-                    "logic",
-                    "target",
-                    "masterCopy"
-                ];
-                
-                for key in &implementation_keys {
-                    if let Some(impl_value) = account.resources.get(*key) {
-                        if let Some(impl_str) = impl_value.as_str() {
-                            let cleaned = impl_str.trim();
-                            if !cleaned.is_empty() && 
-                               cleaned != "0x0000000000000000000000000000000000000000" &&
-                               cleaned != "0x0" {
-                                println!("✅ [PROXY] Implémentation trouvée via clé '{}': {}", key, cleaned);
-                                return Some(cleaned.to_string());
-                            }
+    async fn get_implementation_address(&self, proxy_address: &str) -> Option<String> {
+        let accounts = self.state.accounts.read().await;
+        if let Some(account) = accounts.get(proxy_address) {
+            // ✅ Recherche dans l'ordre de priorité
+            let implementation_keys = [
+                "implementation",
+                ERC1967_IMPLEMENTATION_SLOT,
+                "logic",
+                "target",
+                "masterCopy"
+            ];
+            
+            for key in &implementation_keys {
+                if let Some(impl_value) = account.resources.get(*key) {
+                    if let Some(impl_str) = impl_value.as_str() {
+                        let cleaned = impl_str.trim();
+                        if !cleaned.is_empty() && 
+                           cleaned != "0x0000000000000000000000000000000000000000" &&
+                           cleaned != "0x0" {
+                            println!("✅ [PROXY] Implémentation trouvée via clé '{}': {}", key, cleaned);
+                            return Some(cleaned.to_string());
                         }
                     }
                 }
@@ -1471,31 +1463,28 @@ fn persist_contract_state_immediate(&mut self, contract_address: &str, execution
     }
     
     /// ✅ NOUVEAU: Validation de l'adresse d'implémentation
-    fn validate_implementation_address(&self, impl_address: &str) -> bool {
-        if let Ok(accounts) = self.state.accounts.read() {
-            if let Some(impl_account) = accounts.get(impl_address) {
-                return impl_account.is_contract && !impl_account.contract_state.is_empty();
-            }
+    async fn validate_implementation_address(&self, impl_address: &str) -> bool {
+        let accounts = self.state.accounts.read().await;
+        if let Some(impl_account) = accounts.get(&impl_address.to_string()) {
+            return impl_account.is_contract && !impl_account.contract_state.is_empty();
         }
         false
     }
 
 /// ✅ EXÉCUTION STRICTE avec bytecode réel - CORRECTION MAJEURE POUR PROXY
-pub async fn execute_module(
+pub async fn execute_program(
             &mut self,
-        bytecode: &[u8],
-        args: &uvm_runtime::interpreter::InterpreterArgs,
+        module_path: &str,
+        function_name: &str,
+        args: Vec<NerenaValue>,
+        sender_vyid: Option<&str>,
         stack_usage: Option<&uvm_runtime::stack::StackUsage>,
-        vm_state: Arc<RwLock<BTreeMap<String, AccountState>>>,
         return_type: Option<&str>,
         initial_storage: Option<HashMap<String, HashMap<String, Vec<u8>>>>,
     ) -> Result<serde_json::Value, String> {
         let mem = [0u8; 4096];
-        let mbuff = &args.state_data;
+        let mbuff = &[];
         let exports: HashMap<u32, usize> = HashMap::new();
-        if tokio::runtime::Handle::try_current().is_ok() {
-        return Err("execute_module ne doit pas être appelée dans un contexte async (tokio). Utilisez la version async du wrapper.".to_string());
-    }
     let vyid = Self::extract_address(module_path);
     let sender = sender_vyid.unwrap_or("*system*#default#");
     
@@ -1503,10 +1492,9 @@ pub async fn execute_module(
     
     // ✅ ÉTAPE CRUCIALE : RÉCUPÈRE LE BYTECODE RÉEL du contrat
     let real_bytecode = {
-        let accounts = self.state.accounts.read()
-            .map_err(|e| format!("Erreur lecture accounts: {}", e))?;
+        let accounts = self.state.accounts.read();
         
-        if let Some(account) = accounts.get(vyid) {
+        if let Some(account) = accounts.await.get(vyid) {
             if account.is_contract && !account.contract_state.is_empty() {
                 account.contract_state.clone() // ✅ BYTECODE RÉEL
             } else {
@@ -1524,9 +1512,8 @@ pub async fn execute_module(
     
     // ✅ 🔥 NOUVEAU: DÉTECTION PROXY ET UTILISATION DU BYTECODE DE L'IMPLÉMENTATION
     let impl_addr_opt = {
-        let accounts = self.state.accounts.read()
-            .map_err(|e| format!("Erreur lecture accounts proxy: {}", e))?;
-        accounts.get(vyid)
+        let accounts = self.state.accounts.read();
+        accounts.await.get(vyid)
             .and_then(|acc| acc.resources.get("implementation"))
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty() && *s != "0x0000000000000000000000000000000000000000")
@@ -1539,9 +1526,8 @@ pub async fn execute_module(
         
         // ✅ RÉCUPÈRE LE BYTECODE RÉEL DE L'IMPLÉMENTATION
         let impl_real_bytecode = {
-            let impl_accounts = self.state.accounts.read()
-                .map_err(|e| format!("Erreur lecture accounts impl: {}", e))?;
-            if let Some(impl_account) = impl_accounts.get(&impl_addr) {
+            let impl_accounts = self.state.accounts.read();
+            if let Some(impl_account) = impl_accounts.await.get(&impl_addr) {
                 if !impl_account.contract_state.is_empty() {
                     impl_account.contract_state.clone()
                 } else {
@@ -1569,48 +1555,54 @@ pub async fn execute_module(
             .ok_or_else(|| format!(
                 "Fonction '{}' (sélecteur 0x{:08x}) introuvable dans le bytecode d'implémentation {} ({} bytes). \
                 L'implémentation ne contient pas cette fonction.",
-                function_name, impl_function_meta.selector, impl_addr, impl_real_bytecode.len()
+                function_name, impl_function_meta.selector, impl_addr.as_str(), impl_real_bytecode.len()
             ))?;
         
         println!("🎯 [IMPL EXECUTION] Fonction {} trouvée à l'offset 0x{:04x} dans bytecode d'implémentation", 
                  function_name, impl_resolved_offset);
         
         // ✅ EXÉCUTION AVEC CONTEXTE PROXY (storage du proxy) MAIS BYTECODE DE L'IMPLÉMENTATION
-        let interpreter_args = self.prepare_generic_execution_args(
-            vyid, // ✅ GARDE L'ADRESSE DU PROXY pour le contexte de storage
-            function_name, 
-            args.clone(), 
-            sender, 
-            &impl_function_meta, 
-            impl_resolved_offset
-        )?;
-        
-        // ✅ STORAGE DU PROXY (pas de l'implémentation)
-        let initial_storage = self.build_dynamic_storage_from_contract_state(vyid)?;
-        
-        let result = {
-            let _guard = self.global_execution_lock.lock()
-                .map_err(|e| format!("Erreur acquisition lock global: {}", e))?;
-            let mut interpreter = self.interpreter.lock()
-                .map_err(|e| format!("Erreur lock interpréteur: {}", e))?;
-            tokio::runtime::Handle::current().block_on();
-                uvm_runtime::interpreter::execute_program(
-                    Some(bytecode),
-            stack_usage,
-            &mem,
-            mbuff,
-            &self.uvm_helpers,
-            &self.allowed_memory,
-            return_type,
-            &exports,
-            args,
-            converted_storage, // ✅ Passe le storage converti
-        ).map_err(|e| e.to_string())
-        };
-        
-        // ✅ POST-TRAITEMENT SUR LE PROXY (pas l'implémentation)
-        self.process_execution_result_generically(vyid, &result, &impl_function_meta)?;
-        return Ok(result);
+    // 1. Prépare les arguments d'exécution
+
+// Build dynamic storage for the proxy contract (vyid)
+let converted_storage = self.build_dynamic_storage_from_contract_state(vyid)?
+    .unwrap_or_else(|| HashMap::new());
+
+let interpreter_args = self.prepare_generic_execution_args(
+    vyid,
+    function_name,
+    args.clone(),
+    sender,
+    &impl_function_meta, // ou &function_meta selon le contexte
+    impl_resolved_offset // ou resolved_offset
+).await?;
+
+// 2. Appelle execute_program avec &interpreter_args et &mut self.uvm_helpers
+let result = {
+    let _guard = self.global_execution_lock.lock().await;
+    let mut interpreter = self.interpreter.lock().await;
+    uvm_runtime::interpreter::execute_program(
+        Some(&real_bytecode),
+        stack_usage,
+        &mem,
+        mbuff,
+        &mut self.uvm_helpers,
+        &self.allowed_memory,
+        return_type,
+        &exports,
+        &interpreter_args, // <-- Correction ici
+        Some(converted_storage),
+    )
+    .map_err(|e| e.to_string())
+};
+
+// 3. Passe le résultat JSON à process_execution_result_generically
+if let Ok(ref val) = result {
+    self.process_execution_result_generically(vyid, val, &impl_function_meta).await?; // ou &function_meta
+} else {
+    return result;
+}
+return result;
     }
     
     // ✅ EXÉCUTION NORMALE (pas de proxy) - Code existant inchangé
@@ -1647,84 +1639,81 @@ pub async fn execute_module(
              function_name, resolved_offset);
         
     // ✅ EXÉCUTION NORMALE avec le bytecode réel
-    // let interpreter_args = self.prepare_generic_execution_args(
-    //     vyid, function_name, args.clone(), sender, &function_meta, resolved_offset
-    // )?;
+    let interpreter_args = self.prepare_generic_execution_args(
+        vyid, function_name, args.clone(), sender, &function_meta, resolved_offset
+    ).await?;
     
-    self.build_dynamic_storage_from_contract_state(vyid)?;
+    // Build dynamic storage for the contract
+    let converted_storage = self.build_dynamic_storage_from_contract_state(vyid)?
+        .unwrap_or_else(|| HashMap::new());
     
     let result = {
-        let _guard = self.global_execution_lock.lock()
-            .map_err(|e| format!("Erreur acquisition lock global: {}", e))?;
-        let mut interpreter = self.interpreter.lock()
-            .map_err(|e| format!("Erreur lock interpréteur: {}", e))?;
-        tokio::runtime::Handle::current().block_on()
-            uvm_runtime::interpreter::execute_program(
-                Some(bytecode),
-            stack_usage,
-            &mem,
-            mbuff,
-            &self.uvm_helpers,
-            &self.allowed_memory,
-            return_type,
-            &exports,
-            args,
-            converted_storage, // ✅ Passe le storage converti
-        ).map_err(|e| e.to_string())
+        let _guard = self.global_execution_lock.lock();
+        let exec_future =     uvm_runtime::interpreter::execute_program(
+        Some(&real_bytecode),
+        stack_usage,
+        &mem,
+        mbuff,
+        &mut self.uvm_helpers,
+        &self.allowed_memory,
+        return_type,
+        &exports,
+        &interpreter_args, // <-- Correction ici
+        Some(converted_storage),
+    );
+        exec_future.map_err(|e| e.to_string())
     };
     
-    self.process_execution_result_generically(vyid, &result, &function_meta)?;
-    Ok(result)
+    if let Ok(ref val) = result {
+        self.process_execution_result_generically(vyid, val, &function_meta).await?;
+    } else {
+        return result;
+    }
+    Ok(result?)
 }
 
     /// ✅ NOUVEAU: Post-processing générique des résultats d'exécution
-  fn process_execution_result_generically(
-        &mut self,
-        contract_address: &str,
-        result: &serde_json::Value,
-        function_meta: &FunctionMetadata,
-    ) -> Result<(), String> {
-        println!("🔄 [POST-PROCESS] Traitement du résultat pour {}", function_meta.name);
-        // Persistance immédiate si storage manager disponible
-        if let Some(storage_manager) = &self.storage_manager {
-            self.persist_result_to_storage(storage_manager, contract_address, result)?;
-            // Persiste aussi le state logique/decoded dans RocksDB + met à jour resources VM
-            self.persist_contract_state_immediate(contract_address, result)?;
-        }
-        // Mise à jour des logs si nécessaire
-        if let Some(logs) = result.get("logs").and_then(|v| v.as_array()) {
-            if let Ok(mut pending_logs) = self.state.pending_logs.write() {
-                for log in logs {
-                    if let (Some(address), Some(topics)) = (
-                        log.get("address").and_then(|v| v.as_str()),
-                        log.get("topics").and_then(|v| v.as_array())
-                    ) {
-                        let topics_str: Vec<String> = topics.iter()
-                            .filter_map(|t| t.as_str())
-                            .map(|s| s.to_string())
-                            .collect();
-                        pending_logs.push(UvmLog {
-                            address: address.to_string(),
-                            topics: topics_str,
-                            data: log.get("data")
-                                .and_then(|d| hex::decode(d.as_str().unwrap_or("")).ok())
-                                .unwrap_or_default(),
-                        });
-                    }
-                }
-            }
-        }
-        // Mise à jour du gas utilisé
-        if let Some(gas_used) = result.get("gas_used").and_then(|v| v.as_u64()) {
-            if let Ok(mut accounts) = self.state.accounts.write() {
-                if let Some(account) = accounts.get_mut(contract_address) {
-                    account.gas_used = gas_used;
-                }
-            }
-        }
-        println!("✅ [POST-PROCESS] Traitement terminé pour {}", function_meta.name);
-        Ok(())
+async fn process_execution_result_generically(
+    &mut self,
+    contract_address: &str,
+    result: &serde_json::Value,
+    function_meta: &FunctionMetadata,
+) -> Result<(), String> {
+    println!("🔄 [POST-PROCESS] Traitement du résultat pour {}", function_meta.name);
+    if let Some(storage_manager) = &self.storage_manager {
+        self.persist_result_to_storage(storage_manager, contract_address, result)?;
+        self.persist_contract_state_immediate(contract_address, result).await?;
     }
+    if let Some(logs) = result.get("logs").and_then(|v| v.as_array()) {
+        let mut pending_logs = self.state.pending_logs.write().await;
+        for log in logs {
+            if let (Some(address), Some(topics)) = (
+                log.get("address").and_then(|v| v.as_str()),
+                log.get("topics").and_then(|v| v.as_array())
+            ) {
+                let topics_str: Vec<String> = topics.iter()
+                    .filter_map(|t| t.as_str())
+                    .map(|s| s.to_string())
+                    .collect();
+                pending_logs.push(UvmLog {
+                    address: address.to_string(),
+                    topics: topics_str,
+                    data: log.get("data")
+                        .and_then(|d| hex::decode(d.as_str().unwrap_or("")).ok())
+                        .unwrap_or_default(),
+                });
+            }
+        }
+    }
+    if let Some(gas_used) = result.get("gas_used").and_then(|v| v.as_u64()) {
+        let mut accounts = self.state.accounts.write().await;
+        if let Some(account) = accounts.get_mut(contract_address) {
+            account.gas_used = gas_used;
+        }
+    }
+    println!("✅ [POST-PROCESS] Traitement terminé pour {}", function_meta.name);
+    Ok(())
+}
 
     /// ✅ NOUVEAU: Conversion des resources en bytes de storage
  fn convert_resource_to_storage_bytes(&self, value: &serde_json::Value) -> Vec<u8> {
@@ -1753,22 +1742,21 @@ pub async fn execute_module(
     }
 
     /// ✅ NOUVEAU: Préparation des arguments d'exécution génériques
-   fn prepare_generic_execution_args(
+async fn prepare_generic_execution_args(
     &self,
     contract_address: &str,
     function_name: &str,
     args: Vec<NerenaValue>,
     sender: &str,
     function_meta: &FunctionMetadata,
-    resolved_offset: usize, // <-- utilise ce paramètre !
+    resolved_offset: usize,
 ) -> Result<uvm_runtime::interpreter::InterpreterArgs, String> {
-        let current_time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let block_number = self.state.block_info.read()
-            .map(|b| b.number)
-            .unwrap_or(1);
+    let current_time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let block_info = self.state.block_info.read().await;
+    let block_number = block_info.number;
 
         // ✅ CALDATA ABI 100% CORRECT ET GÉNÉRIQUE (selector UNE SEULE FOIS)
         let min_calldata_len = if args.is_empty() { 68 } else { 4 + args.len() * 32 };
@@ -1836,27 +1824,26 @@ pub async fn execute_module(
     }
 
 /// ✅ Lookup générique dans les resources d'un compte
-    fn lookup_value_from_resources(&self, address: &str, key: &str) -> Result<NerenaValue, String> {
-        if let Ok(accounts) = self.state.accounts.read() {
-            if let Some(account) = accounts.get(address) {
-                // Cherche directement la clé
-                if let Some(value) = account.resources.get(key) {
-                    return Ok(value.clone());
+    async fn lookup_value_from_resources(&self, address: &str, key: &str) -> Result<NerenaValue, String> {
+        let accounts = self.state.accounts.read().await;
+        if let Some(account) = accounts.get(address) {
+            // Cherche directement la clé
+            if let Some(value) = account.resources.get(key) {
+                return Ok(value.clone());
+            }
+    
+            // Cherche des variantes de la clé (case insensitive, préfixes)
+            let key_lower = key.to_lowercase();
+            for (res_key, res_val) in &account.resources {
+                let res_lower = res_key.to_lowercase();
+                if res_lower == key_lower || res_lower.contains(&key_lower) {
+                    return Ok(res_val.clone());
                 }
-
-                // Cherche des variantes de la clé (case insensitive, préfixes)
-                let key_lower = key.to_lowercase();
-                for (res_key, res_val) in &account.resources {
-                    let res_lower = res_key.to_lowercase();
-                    if res_lower == key_lower || res_lower.contains(&key_lower) {
-                        return Ok(res_val.clone());
-                    }
-                }
-
-                // Cherche dans les slots de storage
-                if let Some(slot_value) = self.find_in_storage_slots(account, key) {
-                    return Ok(slot_value);
-                }
+            }
+    
+            // Cherche dans les slots de storage
+            if let Some(slot_value) = self.find_in_storage_slots(account, key) {
+                return Ok(slot_value);
             }
         }
         Ok(serde_json::Value::Null)

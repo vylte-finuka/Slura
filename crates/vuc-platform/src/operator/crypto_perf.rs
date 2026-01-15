@@ -55,8 +55,8 @@ pub async fn generate_and_create_account(vm: &mut SlurachainVm, _contract_info: 
 
     // 4. Ajoute le compte dans la VM
     {
-        let mut state_guard = vm.state.accounts.write().unwrap();
-        state_guard.insert(
+        let mut state_guard = vm.state.accounts.write();
+        state_guard.await.insert(
             eth_address.clone(),
             AccountState {
                 address: eth_address.clone(),
@@ -79,7 +79,7 @@ pub async fn generate_and_create_account(vm: &mut SlurachainVm, _contract_info: 
         .ok_or_else(|| anyhow::anyhow!("Adresse du module vezcur non trouvée"))?
         .clone();
 
-    let vez_contract = vm.state.accounts.read().unwrap().get(&vezcur_address).cloned();
+    let vez_contract = vm.state.accounts.read().await.get(&vezcur_address).cloned();
     let already_initialized = vez_contract
         .and_then(|acc| acc.resources.get("initialized").cloned())
         .and_then(|v| v.as_bool())
