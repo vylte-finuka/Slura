@@ -1435,21 +1435,22 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     println!("🔧 [SIGNEXTEND] b={}, x=0x{:x} → 0x{:x}", b, x, res);
 },
 
-0x10 => {
+        //___ 0x10 LT 
+    0x10 => {  // LT - Less Than
     if evm_stack.len() < 2 {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on LT"));
     }
-    let b = evm_stack.pop().unwrap();
-    let a = evm_stack.pop().unwrap();
-    
-    // ✅ EVM SPEC PURE: comparaison réelle
+    let b = evm_stack.pop().unwrap();  // second opérande (sommet de pile)
+    let a = evm_stack.pop().unwrap();  // premier opérande
     let res = if a < b { 1 } else { 0 };
     
     evm_stack.push(res);
     reg[0] = res;
     
+    // DEBUG TEMPORAIRE – À LAISSER POUR LE PROCHAIN RUN
+    println!("🔥 [LT DEBUG] a={} (calldatasize) < b={} (4) → {} → res = {}", a, b, a < b, res);
+    
     consume_gas(&mut execution_context, 3)?;
-       println!("  [LT] {} < {} → {}", b, a, res);
 },
         
              //___ 0x11 GT - EVM SPEC PURE 100% STANDARD
