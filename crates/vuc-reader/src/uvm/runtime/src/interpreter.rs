@@ -1435,7 +1435,6 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     println!("🔧 [SIGNEXTEND] b={}, x=0x{:x} → 0x{:x}", b, x, res);
 },
 
-//___ 0x10 LT - EVM STANDARD CONFORME
 0x10 => {
     if evm_stack.len() < 2 {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on LT"));
