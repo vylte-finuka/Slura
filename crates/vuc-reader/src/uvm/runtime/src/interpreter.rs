@@ -2383,71 +2383,17 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     let cond = evm_stack.pop().unwrap();
 
     if cond != 0 {
-        // Condition vraie : saute uniquement si la destination est valide
         if is_valid_jumpdest(dest, prog, &valid_jumpdests) {
             insn_ptr = dest;
             skip_advance = true;
             println!("✅ [JUMPI] condition vraie → JUMPDEST exact 0x{:04x}", dest);
         } else {
-            // Tentative de récupération (comportement inspiré d'Erigon)
-            println!("❌ [JUMPI] condition vraie mais destination non valide 0x{:04x} — tentative de récupération...", dest);
-
-            // 1) Cherche un PUSH2 qui contient exactement la valeur dest (table de dispatch)
-            let mut recovered: Option<usize> = None;
-            let code = prog; // &[u8]
-            let code_len = code.len();
-
-            let mut i = 0usize;
-            while i < code_len {
-                let op = code[i];
-                if op == 0x61 && i + 2 < code_len {
-                    // PUSH2 imm
-                    let imm = ((code[i+1] as usize) << 8) | (code[i+2] as usize);
-                    if imm == dest {
-                        // après le PUSH2 la logique de dispatch saute généralement vers ce dest,
-                        // on cherche le JUMPDEST le plus proche après imm (ou imm lui-même)
-                        if is_valid_jumpdest(imm, prog, &valid_jumpdests) {
-                            recovered = Some(imm);
-                            break;
-                        } else {
-                            // si imm n'est pas JUMPDEST directement, cherche le plus proche JUMPDEST autour
-                            if let Some(jd) = find_nearest_jumpdest(imm, prog, &std::collections::HashSet::from_iter(valid_jumpdests.iter().cloned()), 1024) {
-                                recovered = Some(jd);
-                                break;
-                            }
-                        }
-                    }
-                    i += 3;
-                    continue;
-                } else {
-                    // Skipper immediates des PUSHn
-                    if op >= 0x60 && op <= 0x7f {
-                        let push_n = (op - 0x5f) as usize;
-                        i += 1 + push_n;
-                        continue;
-                    }
-                    i += 1;
-                }
-            }
-
-            // 2) Si pas trouvé via PUSH2, chercher le JUMPDEST le plus proche autour de dest
-            if recovered.is_none() {
-                recovered = find_nearest_jumpdest(dest, prog, &std::collections::HashSet::from_iter(valid_jumpdests.iter().cloned()), 4096);
-            }
-
-            if let Some(real_dest) = recovered {
-                insn_ptr = real_dest;
-                skip_advance = true;
-                println!("🔧 [JUMPI RECOVER] redirigé vers JUMPDEST trouvé 0x{:04x}", real_dest);
-            } else {
-                println!("❗ [JUMPI FAIL] impossible de récupérer une routine valide pour dest 0x{:04x}, saut ignoré", dest);
-                // on ignore le saut — comportement safe : laisse l'exécution continuer vers la route fallback (REVERT etc.)
-            }
+            println!("⏩ [JUMPI] destination non valide 0x{:04x} ignorée (pattern dispatcher ou fallback)", dest);
+            // On ignore le saut, on continue la boucle
         }
     } else {
-        // Condition fausse : ignore le saut
-        println!("⏩ [JUMPI IGNORÉ] condition fausse, saut ignoré (dest=0x{:04x})", dest);
-        // Ne saute pas, continue l'exécution normale
+        // Condition fausse : ne saute jamais
+        println!("⏩ [JUMPI] condition fausse, saut ignoré (EVM strict)");
     }
 
     consume_gas(&mut execution_context, 10)?;
