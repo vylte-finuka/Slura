@@ -3456,7 +3456,7 @@ async fn main() {
                         "value": "0x0",
                         "data": format!("0x{}", mint_calldata)
                     });
-                    // ...existing code...
+
                     let mint_hash = value.send_transaction(mint_tx).await.unwrap();
                     
                     println!("🪙 888 000 000.000000000000000000 VEZ mintés avec succès !");
