@@ -1031,7 +1031,7 @@ fn create_function_metadata(&self, selector: u32, offset: usize) -> FunctionMeta
             Arc::new(Mutex::new(self.clone()))
         ));
         self.parallel_engine = Some(engine);
-        println!("🚀 Moteur parallèle configuré: {} threads, batch {}", thread_count, batch_size);
+        println!("⚡ Moteur parallèle configuré: {} threads, batch {}", thread_count, batch_size);
         self
     }
 

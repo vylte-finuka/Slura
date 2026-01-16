@@ -2371,121 +2371,18 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     let dest = evm_stack.pop().unwrap() as usize;
     let cond = evm_stack.pop().unwrap();
 
-    // Recherche si on est sur la dernière séquence PUSH4/EQ/JUMPI
-    let mut is_last_dispatch = false;
-    let mut last_jumpi_pos = 0usize;
-    for i in 0..prog.len().saturating_sub(8) {
-        if prog[i] == 0x63 {
-            for j in 5..16 {
-                if i + j + 2 < prog.len() && prog[i + j] == 0x14 && prog[i + j + 1] == 0x61 && prog[i + j + 4] == 0x57 {
-                    last_jumpi_pos = i + j + 4;
-                }
-            }
-        }
-    }
-    if insn_ptr == last_jumpi_pos {
-        is_last_dispatch = true;
-    }
-
-    // Comportement par défaut quand condition fausse : rien à faire
-    if cond == 0 {
-        // Si dest est 0x01e2 et on est en phase dispatch initiale, on log et on ignore
-        if dest == 0x01e2 && current_selector.is_none() {
-            println!("⏩ [JUMPI IGNORÉ] dest=0x01e2 avant découverte du selector");
-        }
-        // sinon silence (on continue)
-    } else {
-        // condition vraie -> décider d'autoriser le saut
-        // 1) saut direct valide
+    if cond != 0 {
         if is_valid_jumpdest(dest, prog, &valid_jumpdests) {
             insn_ptr = dest;
             skip_advance = true;
             println!("✅ [JUMPI] condition vraie → JUMPDEST exact 0x{:04x}", dest);
+        } else {
+            println!("⏩ [JUMPI] destination non valide 0x{:04x} ignorée (pattern dispatcher ou fallback)", dest);
+            // On ignore le saut, on continue la boucle
         }
-        // 2) selector map : si on connait le selector courant et la map pointe vers dest => autoriser
-        else if let Some(sel) = current_selector {
-            if let Some(&mapped) = selector_jump_map.get(&sel) {
-                if mapped == dest {
-                    // ✅ RESTAURATION DE LA PILE AVANT LE JUMP (en utilisant le selector réel)
-                    // Certaines entrées de fonction s'attendent à des valeurs présentes sous la condition.
-                    // Plutôt que d'insérer des zéros arbitraires, on restaure le selector (valeur réelle).
-                    while evm_stack.len() < 2 {
-                        evm_stack.push(sel as u64);
-                    }
-                    // Push une copie supplémentaire si l'entrée attend >2 éléments (sécurise DUPn)
-                    if evm_stack.len() < 3 {
-                        evm_stack.push(sel as u64);
-                    }
-                    insn_ptr = dest;
-                    skip_advance = true;
-                    println!("✅ [JUMPI] selector 0x{:08x} match → saut vers 0x{:04x} (pile restaurée)", sel, dest);
-                } else {
-                    // si dest==01e2 et selector connu → considérer comme fallback possible
-                    if dest == 0x01e2 {
-                        // tentative de résolution permissive
-                        if let Some(real) = resolve_jump_destination_generic(insn_ptr, dest, &evm_stack, &valid_jumpdests, prog) {
-                            // Même restauration de pile pour le jump résolu
-                            if let Some(sel2) = current_selector {
-                                while evm_stack.len() < 2 {
-                                    evm_stack.push(sel2 as u64);
-                            }
-                            if evm_stack.len() < 3 {
-                                evm_stack.push(sel2 as u64);
-                            }
-                        }
-                            insn_ptr = real;
-                            skip_advance = true;
-                            println!("🔁 [JUMPI RESOLVED] 0x01e2 → real 0x{:04x} (fallback après selector connu)", real);
-                        } else {
-                            println!("⏩ [JUMPI IGNORÉ] 0x01e2 fallback non résolu malgré selector connu");
-                        }
-                    } else {
-                        // Pas la bonne cible pour ce selector → ignorer (suite du dispatch)
-                        println!("⏩ [JUMPI IGNORÉ] selector 0x{:08x} ne mappe pas sur 0x{:04x}", sel, dest);
-                    }
-                }
-            } else {
-                // selector connu mais pas dans la map : laisser passer la logique suivante
-                if dest == 0x01e2 {
-                    // autoriser 01e2 comme fallback si résolution générique trouve quelque chose
-                    if let Some(real) = resolve_jump_destination_generic(insn_ptr, dest, &evm_stack, &valid_jumpdests, prog) {
-                        // RESTAURATION DE LA PILE AVANT LE JUMP (utilise current_selector)
-                        if let Some(sel2) = current_selector {
-                            while evm_stack.len() < 2 {
-                                evm_stack.push(sel2 as u64);
-                            }
-                            if evm_stack.len() < 3 {
-                                evm_stack.push(sel2 as u64);
-                            }
-                        }
-                        insn_ptr = real;
-                        skip_advance = true;
-                        println!("🔁 [JUMPI RESOLVED] 0x01e2 → real 0x{:04x} (fallback permissif)", real);
-                    } else {
-                        println!("⏩ [JUMPI IGNORÉ] 0x01e2 (selector connu mais fallback non résolu)");
-                    }
-                } else if is_last_dispatch {
-                    // dernier dispatch sans mapping → erreur si impossible
-                    println!("❌ [JUMPI INVALID] dernier dispatch mais 0x{:04x} n'est pas un JUMPDEST", dest);
-                    return Err(Error::new(ErrorKind::Other, format!("JUMPI interdit: dest 0x{:04x} n'est pas un JUMPDEST", dest)));
-                } else {
-                    println!("⏩ [JUMPI IGNORÉ] selector connu mais non mappé → continuation");
-                }
-            }
-        }
-        // 3) pas de selector connu : si dernier dispatch, exiger JUMPDEST strict ; sinon ignorer 01e2
-        else {
-            if dest == 0x01e2 {
-                println!("⏩ [JUMPI IGNORÉ] (dispatch intermédiaire) dest=0x01e2 ignoré (pas encore de selector)");
-            } else if is_last_dispatch {
-                // dernier dispatch mais dest invalide → erreur stricte
-                println!("❌ [JUMPI INVALID] dernier dispatch mais 0x{:04x} n'est pas un JUMPDEST", dest);
-                return Err(Error::new(ErrorKind::Other, format!("JUMPI interdit: dest 0x{:04x} n'est pas un JUMPDEST", dest)));
-            } else {
-                // dispatch intermédiaire non dernier -> on ignore le saut
-                println!("⏩ [JUMPI IGNORÉ] (dispatch intermédiaire) saut ignoré, on continue la recherche");
-            }
-        }
+    } else {
+        // Condition fausse : ne saute jamais
+        println!("⏩ [JUMPI] condition fausse, saut ignoré (EVM strict)");
     }
 
     consume_gas(&mut execution_context, 10)?;
