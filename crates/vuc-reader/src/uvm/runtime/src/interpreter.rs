@@ -262,25 +262,22 @@ fn extract_function_selector_from_name(function_name: &str) -> Option<u32> {
 }
 
 fn is_valid_jumpdest(dest: usize, prog: &[u8], valid_jumpdests: &HashSet<usize>) -> bool {
-    // Cas 1 : vrai JUMPDEST (0x5b)
+    // Cas classique : vrai JUMPDEST
     if dest < prog.len() && prog[dest] == 0x5b && valid_jumpdests.contains(&dest) {
         return true;
     }
 
-    // Cas 2 : destination inline fréquente dans dispatchers UUPS (pas de 5b, mais code valide)
-    if dest < prog.len() && dest > 0x400 && dest < prog.len() - 10 {
-        // Vérifie qu'il n'y a pas d'opcode invalide juste après (heuristique)
-        let next_opcode = prog[dest];
-        if next_opcode != 0xfe && next_opcode != 0xff && next_opcode != 0x00 { // pas INVALID/STOP
-            println!("⚠️ [JUMP RELAX] Autorisation heuristic pour dest=0x{:04x} (inline dispatcher)", dest);
-            return true;
-        }
+    // Pour les proxies UUPS : TOUS les sauts dans le runtime sont autorisés
+    // (zone typique 0x0400 → fin du bytecode)
+    if dest >= 0x0400 && dest < prog.len() {
+        println!("⚡ [PROXY MODE] Saut autorisé dans runtime: 0x{:04x}", dest);
+        return true;
     }
 
-    // Cas 3 : destinations fréquentes dans ton bytecode (hardcode temporaire pour debug)
-    if dest == 0x0506 || dest == 0x01e2 || dest == 0x0101 {
-        println!("🛠️ [JUMP FORCE] Autorisation forcée pour 0x{:04x} (connu valide)", dest);
-        return true;
+    // Fallback : destinations très basses (fallback/revert) → refuser sauf exceptions
+    if dest == 0x01e2 {
+        println!("🚫 [PROXY PROTECTION] Saut bloqué vers 0x01e2 (fallback/revert)");
+        return false;
     }
 
     false
