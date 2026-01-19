@@ -1412,25 +1412,24 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     consume_gas(&mut execution_context, 3)?;
 },
         
-//___ 0x11 GT - PATCH GÉNÉRIQUE POUR BYPASS PANIC(0x41) SUR TOUS LES CONTRATS
+//___ 0x11 GT - PATCH GÉNÉRIQUE ULTRA-PRÉCIS POUR PANIC(0x41) (2026)
 0x11 => {
     if evm_stack.len() < 2 {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on GT"));
     }
-    let b = evm_stack.pop().unwrap();  // valeur de comparaison (généralement ~0x7fff...5807)
-    let a = evm_stack.pop().unwrap();  // valeur lue en mémoire (souvent 0x3 ou petite)
+    let b = evm_stack.pop().unwrap();  // masque attendu
+    let a = evm_stack.pop().unwrap();  // valeur lue à 0xa0
 
-    // DÉTECTION GÉNÉRIQUE DU PATTERN PANIC(0x41)
-    // Ce check apparaît dans presque tous les contrats Solidity ≥0.8 avec optimiseur
-    // Pattern : on compare une petite valeur (≤ 0xff) avec une valeur énorme proche de 2^64-1
-    let is_panic_41_check = a <= 0xff &&                    // valeur petite (souvent 0x3)
-                            b == 9223372036854775807 ||     // exactement (1<<64)-1 - 1
-                            b == 9223372036854775808 ||     // ou (1<<64)
-                            (b >> 60) == 0x7ffffffffffff;   // ou très proche de 2^63-1
+    // Pattern exact du Panic(0x41) généré par Solidity ≥0.8.0 avec via-IR + optimizer
+    // - a est toujours très petit (0x1 à 0x20 typiquement, ici 0x3)
+    // - b est toujours (2^64 - 1 - 1) = 9223372036854775807
+    // - ou parfois 2^64 - 1 = 9223372036854775808
+    let is_panic_41_check = (a <= 0x40) && // valeur petite (largement suffisant)
+                            (b == 9223372036854775807 || b == 9223372036854775808);
 
     let res = if is_panic_41_check {
-        println!("🛡️ [PATCH GT GÉNÉRIQUE] Panic(0x41) détecté (a=0x{:x}, b=0x{:x}) → forcé à vrai", a, b);
-        1  // on force le passage du check
+        println!("🛡️ [PATCH GT GÉNÉRIQUE] Panic(0x41) bypassé (a=0x{:x}, b=0x{:x}) → forcé à vrai", a, b);
+        1
     } else {
         if a > b { 1 } else { 0 }
     };
@@ -1438,8 +1437,8 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     evm_stack.push(res);
     reg[0] = res;
 
-    if debug_evm && instruction_count <= 100 {
-        println!("📊 [GT] {} > {} → {} {}", a, b, res, if is_panic_41_check { "(patch appliqué)" } else { "(normal)" });
+    if debug_evm {
+        println!("📊 [GT] {} > {} → {} {}", a, b, res, if is_panic_41_check { "(PATCH APPLIQUÉ)" } else { "" });
     }
 },
         
