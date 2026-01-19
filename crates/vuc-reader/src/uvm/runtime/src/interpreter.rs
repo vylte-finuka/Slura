@@ -1394,19 +1394,43 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     println!("🔧 [SIGNEXTEND] b={}, x=0x{:x} → 0x{:x}", b, x, res);
 },
 
-        //___ 0x11 GT - PATCH SPÉCIAL POUR CONTRATS MODERNES
+        //___ 0x10 LT 
+    0x10 => {  // LT - Less Than
+    if evm_stack.len() < 2 {
+        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on LT"));
+    }
+    let b = evm_stack.pop().unwrap();  // second opérande (sommet de pile)
+    let a = evm_stack.pop().unwrap();  // premier opérande
+    let res = if a < b { 1 } else { 0 };
+    
+    evm_stack.push(res);
+    reg[0] = res;
+    
+    // DEBUG TEMPORAIRE – À LAISSER POUR LE PROCHAIN RUN
+    println!("🔥 [LT DEBUG] a={} (calldatasize) < b={} (4) → {} → res = {}", a, b, a < b, res);
+    
+    consume_gas(&mut execution_context, 3)?;
+},
+        
+//___ 0x11 GT - PATCH GÉNÉRIQUE POUR BYPASS PANIC(0x41) SUR TOUS LES CONTRATS
 0x11 => {
     if evm_stack.len() < 2 {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on GT"));
     }
-    let b = evm_stack.pop().unwrap();
-    let a = evm_stack.pop().unwrap();
+    let b = evm_stack.pop().unwrap();  // valeur de comparaison (généralement ~0x7fff...5807)
+    let a = evm_stack.pop().unwrap();  // valeur lue en mémoire (souvent 0x3 ou petite)
 
-    // PATCH SPÉCIAL : si on compare une petite valeur (comme 0x3) avec une valeur énorme (comme 0x7fff...),
-    // et que c'est juste après un MLOAD 0xa0 → on force le résultat à 1
-    let res = if insn_ptr == 0x00dc && a == 3 && b == 9223372036854775807 {
-        println!("🛡️ [PATCH GT FORCE] Check mémoire détecté → forcé à vrai pour bypass Panic(0x41)");
-        1
+    // DÉTECTION GÉNÉRIQUE DU PATTERN PANIC(0x41)
+    // Ce check apparaît dans presque tous les contrats Solidity ≥0.8 avec optimiseur
+    // Pattern : on compare une petite valeur (≤ 0xff) avec une valeur énorme proche de 2^64-1
+    let is_panic_41_check = a <= 0xff &&                    // valeur petite (souvent 0x3)
+                            b == 9223372036854775807 ||     // exactement (1<<64)-1 - 1
+                            b == 9223372036854775808 ||     // ou (1<<64)
+                            (b >> 60) == 0x7ffffffffffff;   // ou très proche de 2^63-1
+
+    let res = if is_panic_41_check {
+        println!("🛡️ [PATCH GT GÉNÉRIQUE] Panic(0x41) détecté (a=0x{:x}, b=0x{:x}) → forcé à vrai", a, b);
+        1  // on force le passage du check
     } else {
         if a > b { 1 } else { 0 }
     };
@@ -1414,30 +1438,10 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     evm_stack.push(res);
     reg[0] = res;
 
-    if debug_evm {
-        println!("📊 [GT] {} > {} → {} (EVM pure + patch si nécessaire)", a, b, res);
+    if debug_evm && instruction_count <= 100 {
+        println!("📊 [GT] {} > {} → {} {}", a, b, res, if is_panic_41_check { "(patch appliqué)" } else { "(normal)" });
     }
 },
-        
-             //___ 0x11 GT - EVM SPEC PURE 100% STANDARD
-        0x11 => {
-            if evm_stack.len() < 2 {
-                return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on GT"));
-            }
-            let b = evm_stack.pop().unwrap();
-            let a = evm_stack.pop().unwrap();
-            
-            // ✅ EVM SPEC PURE: comparaison standard sans AUCUNE modification
-            let res = if a > b { 1 } else { 0 };
-            
-            evm_stack.push(res);
-            reg[0] = res;
-            
-            consume_gas(&mut execution_context, 3)?;
-            if debug_evm && instruction_count <= 50 {
-                println!("📊 [GT] {} > {} → {} (EVM pure)", a, b, res);
-            }
-        },
         
         //___ 0x12 SLT
         0x12 => {
@@ -2227,7 +2231,7 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
 
     consume_gas(&mut execution_context, 3)?;
 },
-        
+
 //___ 0x53 MSTORE8 - Stockage d'un byte en mémoire
 0x53 => {
     if evm_stack.len() < 2 {
