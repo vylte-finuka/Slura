@@ -1167,7 +1167,7 @@ fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<us
     
     // ✅ PHASE 1: Recherche pattern dispatcher principal 0x0421-0x0603
     // Basé sur le désassemblage: dispatcher commence à 0x0421
-    let dispatcher_start = 0x0421;
+    let dispatcher_start = 0x0000;
     if dispatcher_start >= len {
         println!("❌ [NO DISPATCHER] Dispatcher start 0x{:04x} dépasse bytecode length", dispatcher_start);
         return None;
