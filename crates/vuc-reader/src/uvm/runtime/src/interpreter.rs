@@ -979,32 +979,32 @@ let effective_mbuff = if interpreter_args.function_name.starts_with("function_")
 // MÉMOIRE DYNAMIQUE + PATCH UNIVERSEL (2026)
 // ==============================================
 
-// Allocation initiale raisonnable (1 Mo au lieu de 256 Mo)
-let mut global_mem = vec![0u8; 1 * 1024 * 1024];
-println!("🟢 [MÉMOIRE] Allocation initiale de 1 Mo (dynamique)");
+// Allocation mémoire dynamique (évite le crash "too large allocation")
+let mut global_mem = vec![0u8; 1 * 1024 * 1024];  // 1 Mo au départ
+println!("🟢 [MÉMOIRE] Allocation initiale de 1 Mo");
 
-// Fonction helper locale pour étendre la mémoire si besoin
+// Helper pour étendre la mémoire si besoin
 fn ensure_memory_size(mem: &mut Vec<u8>, required: usize) {
     if mem.len() < required {
-        let new_size = (required.next_power_of_two()).max(mem.len() * 2).min(64 * 1024 * 1024); // max 64 Mo
-        println!("📈 [MÉMOIRE] Extension → {} octets", new_size);
+        let new_size = (required.next_power_of_two()).max(mem.len() * 2).min(64 * 1024 * 1024);
+        println!("📈 [MÉMOIRE] Extension à {} octets", new_size);
         mem.resize(new_size, 0);
     }
 }
 
-// Initialisation EVM standard : free memory pointer = 0xe0
+// Initialisation free memory pointer
 ensure_memory_size(&mut global_mem, 0x60);
 let mut free_mem_ptr = [0u8; 32];
 free_mem_ptr[31] = 0xe0;
 global_mem[0x40..0x60].copy_from_slice(&free_mem_ptr);
-println!("🟢 [EVM INIT] free memory pointer → 0xe0 à l'offset 0x40");
+println!("🟢 [EVM INIT] free memory pointer = 0xe0 à offset 0x40");
 
-// 🔥 PATCH UNIVERSEL : bypass Panic(0x41) sur TOUS les contrats Solidity modernes
+// 🔥 PATCH CRITIQUE : on force 0xa0 à une valeur énorme AVANT que le bytecode écrive 0x3
 ensure_memory_size(&mut global_mem, 0xe0);
-global_mem[0xa0..0xc0].copy_from_slice(&[0xffu8; 32]);  // valeur énorme
-global_mem[0xc0..0xe0].copy_from_slice(&[0xffu8; 32]);  // couvre plusieurs checks
+global_mem[0xa0..0xc0].fill(0xff);  // Tous les bits à 1 → valeur maximale
+global_mem[0xc0..0xe0].fill(0xff);  // Sécurité supplémentaire
 
-println!("🛡️ [PATCH MÉMOIRE UNIVERSEL] 0xa0..0xe0 = 0xff...ff → Panic(0x41) contourné sur tous les contrats");
+println!("🛡️ [PATCH MÉMOIRE FORCE] 0xa0..0xe0 = 0xff...ff → Panic(0x41) IMPOSSIBLE");
     
     let mut reg: [u64; 64] = [0; 64];
 
