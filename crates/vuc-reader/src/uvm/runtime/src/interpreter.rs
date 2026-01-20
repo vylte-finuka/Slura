@@ -157,7 +157,7 @@ impl Default for InterpreterArgs {
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
-                .as_secs(),
+                .as_secs().into(),
             // ✅ CORRECTION SIMPLE: Adresses valides au lieu de "{}"
             caller: "0x1234567890123456789012345678901234567890".to_string(),
             origin: "0x1234567890123456789012345678901234567890".to_string(),
@@ -195,11 +195,11 @@ impl Default for UvmWorldState {
             storage: HashMap::new(),
             code: HashMap::new(),
             block_info: BlockInfo {
-                number: 1,
+                number: u256::from(1),
                 timestamp: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
-                    .as_secs(),
+                    .as_secs().into(),
                 gas_limit: u256::from(30000000u64),
                 difficulty: u256::from(1),
                 coinbase: "*coinbase*#miner#".to_string(),
@@ -466,12 +466,12 @@ fn decode_return_data_generic(data: &[u8], len: usize) -> JsonValue {
 }
 
 fn transfer_value(world_state: &mut UvmWorldState, from: &str, to: &str, amount: u256) -> Result<(), Error> {
-    let from_balance = get_balance(world_state, from);
+    let from_balance = u256::from(get_balance(world_state, from));
     if from_balance < amount {
         return Err(Error::new(ErrorKind::Other, "Insufficient balance"));
     }
     
-    let to_balance = get_balance(world_state, to);
+    let to_balance = u256::from(get_balance(world_state, to));
     set_balance(world_state, from, from_balance - amount);
     set_balance(world_state, to, to_balance + amount);
     
@@ -760,8 +760,8 @@ pub fn execute_program(
     interpreter_args: &InterpreterArgs,
     initial_storage: Option<HashMap<String, HashMap<String, Vec<u8>>>>,
 ) -> Result<serde_json::Value, Error> {
-    const U32MAX: u256 = (u32::MAX as u64);
-    const SHIFT_MASK_64: u256 = 0x3f;
+    const U32MAX: u256 = u256::from(u32::MAX);
+    const SHIFT_MASK_64: u256 = u256([0x3f, 0, 0, 0]);
 
     helpers.insert(0x450, crate::helpers::slu_ip450_send);
 
@@ -776,7 +776,7 @@ pub fn execute_program(
     println!("🧮 [BYTECODE SIZE] {} bytes", prog.len());
 
     let default_stack_usage = StackUsage::new();
-    let stack_usage = stack_usage.unwrap_or_default();
+    let stack_usage = stack_usage.unwrap_or(&default_stack_usage);
 
     let mut execution_context = UvmExecutionContext {
         world_state: {
@@ -801,7 +801,7 @@ pub fn execute_program(
     set_balance(&mut execution_context.world_state, &interpreter_args.sender_address, u256::from(1000000u64));
     set_balance(&mut execution_context.world_state, &interpreter_args.contract_address, u256::zero());
 
-    if interpreter_args.value > 0 {
+    if interpreter_args.value > u256::zero() {
         transfer_value(
             &mut execution_context.world_state,
             &interpreter_args.caller,
@@ -826,7 +826,7 @@ pub fn execute_program(
     global_mem[0x40..0x60].copy_from_slice(&free_mem_ptr);
 
 let mut reg: [u256; 64] = [u256::zero(); 64];
-    reg[10] = ((stack.as_ptr() as usize) + stack.len()) as u64;
+    reg[10] = u256::from(((stack.as_ptr() as usize) + stack.len()) as u64);
     reg[8] = u256::zero();
     reg[1] = u256::zero();
 
@@ -860,17 +860,17 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
     let mut valid_jumpdests = scan_valid_jumpdests(prog);
 
     let mut evm_stack: Vec<u256> = Vec::with_capacity(1024);
-
+    
     let mut natural_exit_detected = false;
     let mut exit_value = 0u64;
-
+    
     let mut insn_ptr = 0usize;
     let mut loop_detection: HashMap<usize, u32> = HashMap::new();
     let mut instruction_count = 0u64;
-    const MAX_INSTRUCTIONS: u256 = 100_000;
+    const MAX_INSTRUCTIONS: u64 = 100_000;
     const MAX_SAME_PC: u32 = 1000;
-
-    while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS.low_u64() {
+    
+    while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
         instruction_count += 1;
 
         let pc_count = loop_detection.entry(insn_ptr).or_insert(0);
@@ -956,7 +956,7 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
     let a = evm_stack.pop().unwrap();
     let res = a.overflowing_sub(b).0;
     evm_stack.push(res);
-    reg[0] = res.low_u64();
+    reg[0] = u256::from(res.low_u64());
     consume_gas(&mut execution_context, opcode)?;
 },
 
@@ -967,7 +967,7 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
     let a = evm_stack.pop().unwrap();
     let res = if b.is_zero() { u256::zero() } else { a / b };
     evm_stack.push(res);
-    reg[0] = res.low_u64();
+    reg[0] = u256::from(res.low_u64());
     consume_gas(&mut execution_context, opcode)?;
 },
 
@@ -982,7 +982,7 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
         let b_i256 = I256::from(b.as_u64() as i64);
         let res = if b_i256 == I256::from(0) { I256::from(0) } else { a_i256 / b_i256 };
         evm_stack.push(u256::from(res.as_u64()));
-        reg[0] = res.as_u64();
+        reg[0] = u256::from(res.as_u64());
     },
 
     //___ 0x06 MOD - EVM STANDARD PUR
@@ -1016,7 +1016,7 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
         // ✅ EVM SPEC: smod par zéro = 0 (comportement défini)
         let result = if b_i256 == I256::from(0) { I256::from(0) } else { a_i256 % b_i256 };
         evm_stack.push(u256::from(result.as_u64()));
-        reg[0] = result.as_u64();
+        reg[0] = u256::from(result.as_u64());
 
         println!("🔢 [SMOD] {} % {} = {}", a, b, result);
     },
@@ -1031,7 +1031,7 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
         let n = ethereum_types::U256::from(evm_stack.pop().unwrap());
         let res = if n.is_zero() { ethereum_types::U256::zero() } else { (a + b) % n };
         evm_stack.push(u256::from(res.low_u64()));
-        reg[0] = res.low_u64();
+        reg[0] = u256::from(res.low_u64());
     },
 
     // ___ 0x09 MULMOD
@@ -1087,7 +1087,7 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
     };
 
     evm_stack.push(result);
-    reg[0] = result.low_u64();  // compatibilité temporaire avec tes reg[u64]
+    reg[0] = u256::from(result.low_u64());  // compatibilité temporaire avec tes reg[u64]
 
     // Gas : approximation EVM réelle (10 + 50 × bits à 1 dans l'exposant)
     let exp_bits = exponent.bits() as u64;
@@ -1194,7 +1194,7 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
     if evm_stack.len() < 2 {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on SGT"));
     }
-    let b = evm_stack.pop().unwrap();
+    let b: primitive_types::U256 = evm_stack.pop().unwrap();
     let a = evm_stack.pop().unwrap();
 
     // Convert U256 to I256 using from_be_bytes for proper sign interpretation
@@ -1232,7 +1232,7 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
     let a = evm_stack.pop().unwrap();
     let res = if a.is_zero() { u256::one() } else { u256::zero() };
     evm_stack.push(res);
-    reg[0] = res.low_u64();
+    reg[0] = res.low_u64().into();
     consume_gas(&mut execution_context, opcode)?;
 },
 
@@ -1243,7 +1243,7 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
     let a = evm_stack.pop().unwrap();
     let res = a & b;
     evm_stack.push(res);
-    reg[0] = res.low_u64();
+    reg[0] = res.low_u64().into();
     consume_gas(&mut execution_context, opcode)?;
 },
         
@@ -1468,15 +1468,15 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
     let addr_hash = match interpreter_args.contract_address.as_str() {
         // Adresse Ethereum standard
         addr if addr.starts_with("0x") && addr.len() == 42 => {
-            encode_ethereum_address_to_u64(addr)
+            u256::from(encode_ethereum_address_to_u64(addr))
         },
         // Adresse UIP-10 (*...#...#)
         addr if is_valid_uip10_address(addr) => {
-            u256::from(encode_uip10_address_to_u64(addr) as u64)
+            u256::from(encode_uip10_address_to_u64(addr))
         },
         // Format arbitraire
         addr => {
-            encode_address_to_u64(addr) // Fallback hash générique
+            u256::from(encode_address_to_u64(addr))
         }
     };
     
@@ -1589,7 +1589,7 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
 } else {
     return Err(Error::new(ErrorKind::Other, format!("CALLDATACOPY OOB src={} len={} mbuff={} dst={} global_mem={}", src, len, effective_mbuff.len(), dst, global_mem.len())));
 }
-        let gas = 3 + 3 * u256::from((len + 31) / 32);
+        let gas = u256::from(3) + u256::from(3) * u256::from((len + 31) / 32);
         //consume_gas(&mut execution_context, gas)?;
     },
 
@@ -1778,7 +1778,7 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
     
     // EVM spec: seulement les 256 blocs les plus récents
     let block_hash = if block_number < current_block && 
-                        current_block - block_number <= 256 {
+                        (current_block.low_u64().saturating_sub(block_number.low_u64()) <= 256) {
         // Stub: génère un hash déterministe basé sur le numéro de bloc
         let mut hash_input = block_number.to_be_bytes();
         use tiny_keccak::{Hasher, Keccak};
@@ -1885,9 +1885,9 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
 
       //___ 0x51 MLOAD - CORRECTION SIMILAIRE POUR LA COHÉRENCE
 0x51 => { // MLOAD – offset brut, U256
-    if evm_stack.is_empty() { return Err(
-    "EVM STACK underflow on MLOAD"
-    ); }
+    if evm_stack.is_empty() { 
+        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on MLOAD")); 
+    }
     let offset = evm_stack.pop().unwrap().as_u64() as usize;
 
     ensure_memory_size(&mut global_mem, offset + 32);
@@ -1906,7 +1906,7 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
     }
 
     let raw_offset = evm_stack.pop().unwrap().low_u64();
-    let value = evm_stack.pop().unwrap().low_u64();
+    let value = evm_stack.pop().unwrap();
 
     // Offset mémoire sécurisé
     let safe_offset = if raw_offset > 0x1000000 {
@@ -1917,7 +1917,7 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
 
     // Toujours écrire la valeur sur 32 octets, big-endian, à l’offset demandé
     let mut value_bytes = [0u8; 32];
-    primitive_types::U256::from(value).to_big_endian(&mut value_bytes);
+    value.to_big_endian(&mut value_bytes);
 
     // Vérification taille mémoire
     if safe_offset + 32 > global_mem.len() {
@@ -2000,10 +2000,10 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
     let key = evm_stack.pop().unwrap();
     let slot = format!("{:064x}", key);
     
-    let mut value_bytes = vec![0u8; 32];
+    let mut value_bytes = [0u8; 32];
     value.to_big_endian(&mut value_bytes);
     
-    set_storage(&mut execution_context.world_state, &interpreter_args.contract_address, &slot, value_bytes);
+    set_storage(&mut execution_context.world_state, &interpreter_args.contract_address, &slot, value_bytes.to_vec());
     consume_gas(&mut execution_context, 20000)?;
     println!("💾 [SSTORE] slot={:064x} <- value={}", key, value);
 },
@@ -2014,7 +2014,7 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
                 }
                 let dest = evm_stack.pop().unwrap().low_u64() as usize;
 
-                if is_valid_jumpdest(dest, prog, &valid_jumpdests) {
+                if is_valid_jumpdest(dest, &prog, &valid_jumpdests) {
                     insn_ptr = dest;
                     skip_advance = true;
                     println!("✅ [JUMP] vers 0x{:04x}", dest);
@@ -2033,8 +2033,8 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
                 let dest = evm_stack.pop().unwrap().low_u64() as usize;
                 let cond = evm_stack.pop().unwrap();
 
-                if cond != 0 {
-                    if is_valid_jumpdest(dest, prog, &valid_jumpdests) {
+                if cond != u256::zero() {
+                    if is_valid_jumpdest(dest, &prog, &valid_jumpdests) {
                         insn_ptr = dest;
                         skip_advance = true;
                         println!("✅ [JUMPI] condition vraie → 0x{:04x}", dest);
@@ -2241,7 +2241,7 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
     let address = evm_stack.pop().unwrap();
     let gas = evm_stack.pop().unwrap();
     // Stub: push success=1
-    evm_stack.push(1);
+    evm_stack.push(u256::from(1u64));
     consume_gas(&mut execution_context, 100)?;
 },
 
@@ -2253,7 +2253,15 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
     let data_ptr = reg[5];
     let data_len = reg[6];
     let proto = reg[7];
-    let res = helpers.get(&0x450).map(|f| f(addr_ptr, port, data_ptr, data_len, proto)).unwrap_or(0);
+    let res = helpers.get(&0x450)
+        .map(|f| f(
+            addr_ptr.low_u64(),
+            port.low_u64(),
+            data_ptr.low_u64(),
+            data_len.low_u64(),
+            proto.low_u64(),
+        ))
+        .unwrap_or(0);
     evm_stack.push(res.into());
     println!("🌐 [SLU-IP 450] TCP/UDP send → result={}", res);
 },
@@ -2520,16 +2528,20 @@ fn compute_mapping_slot(base_slot: u256, keys: &[serde_json::Value]) -> String {
             }
             serde_json::Value::Number(n) => {
                 let mut num_bytes = [0u8; 32];
-                num_bytes[24..32].copy_from_slice(&n.as_u64().unwrap_or(0).to_be_bytes());
+                let mut tmp = [0u8; 8];
+                let mut tmp = [0u8; 8];
+                let val = n.as_u64().unwrap_or(0);
+                tmp.copy_from_slice(&val.to_be_bytes());
+                num_bytes[24..32].copy_from_slice(&tmp);
                 buf.extend_from_slice(&num_bytes);
             }
             _ => {}
         }
     }
-    // Ajoute le slot de base à la fin
-    let mut slot_bytes = [0u8; 32];
-    slot_bytes[24..32].copy_from_slice(&base_slot.to_be_bytes());
-    buf.extend_from_slice(&slot_bytes);
+    let mut base_bytes = [0u8; 32];
+    let slot_bytes = base_slot.to_be_bytes();
+    base_bytes.copy_from_slice(&slot_bytes);
+    buf.extend_from_slice(&base_bytes);
 
     use tiny_keccak::{Hasher, Keccak};
     let mut hasher = Keccak::v256();
