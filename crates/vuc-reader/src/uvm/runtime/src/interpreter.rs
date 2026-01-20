@@ -1208,7 +1208,7 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
     let res = if a_signed > b_signed { u256::one() } else { u256::zero() };
 
     evm_stack.push(res);
-    reg[0execution_context.into();
+    reg[0] = res.low_u64();
     consume_gas(&mut execution_context, opcode)?;
     println!("🔍 [SGT] {} >s {} → {}", a, b, res);
 },
