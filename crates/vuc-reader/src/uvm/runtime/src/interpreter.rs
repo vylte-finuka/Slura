@@ -1208,7 +1208,7 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
     let res = if a_signed > b_signed { u256::one() } else { u256::zero() };
 
     evm_stack.push(res);
-    reg[0] = res.low_u64();
+    reg[0execution_context.into();
     consume_gas(&mut execution_context, opcode)?;
     println!("🔍 [SGT] {} >s {} → {}", a, b, res);
 },
@@ -1373,7 +1373,7 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
         }
     };
     evm_stack.push(res);
-    reg[0] = res.low_u64();
+    reg[0] = res.low_u64().into();
     consume_gas(&mut execution_context, opcode)?;
 },
 
@@ -1400,7 +1400,7 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
             count
         };
         evm_stack.push((clz as u64).into());
-        reg[0] = clz as u64;
+        reg[0] = (clz as u64).into();
     },
 
        //___ 0x20 KECCAK256 - CORRECTION COMPLÈTE POUR EVM
@@ -1429,7 +1429,7 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
             hasher.finalize(&mut hash);
             let result = safe_u256_to_u64(&u256::from_big_endian(&hash));
             evm_stack.push(result.into());
-            reg[0] = result;
+            reg[0] = result.into();
             consume_gas(&mut execution_context, 30 + 6)?;
             continue;
         }
@@ -1454,10 +1454,10 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
         
         let result = safe_u256_to_u64(&u256::from_big_endian(&hash));
         evm_stack.push(result.into());
-        reg[0] = result;
+        reg[0] = result.into();
         
         let gas = 30 + 6 * ((len + 31) / 32) as u64;
-        consume_gas(&mut execution_context, gas)?;
+        consume_gas(&mut execution_context, gas).try_into().unwrap()?;
         
         println!("🔒 [KECCAK256] → 0x{:x} (len={})", result, len);
     },
@@ -1488,7 +1488,7 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
     //___ 0x31 BALANCE
     0x31 => {
         let addr = format!("addr_{:x}", reg[_dst]);
-        reg[_dst] = get_balance(&execution_context.world_state, &addr);
+        reg[_dst] = get_balance(&execution_context.world_state, &addr).into();
         //consume_gas(&mut execution_context, 700)?;
     },
 
@@ -1509,7 +1509,7 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
     //___ 0x34 CALLVALUE
     0x34 => {
         evm_stack.push(interpreter_args.value);
-        reg[0] = interpreter_args.value.low_u64();
+        reg[0] = interpreter_args.value.low_u64().into();
         println!("💰 [CALLVALUE] msg.value = {} pushed to stack", interpreter_args.value);
         consume_gas(&mut execution_context, 2)?;
     },
@@ -1762,7 +1762,7 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
     };
     
     evm_stack.push(u256::from(code_hash));
-    reg[0] = code_hash;
+    reg[0] = code_hash.into();
     println!("🔷 [EXTCODEHASH] address={} → 0x{:x}", addr_str, code_hash);
     
     consume_gas(&mut execution_context, 100)?;
@@ -1819,7 +1819,7 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
     // Post-Merge: PREVRANDAO, Pré-Merge: DIFFICULTY
     let prevrandao = safe_u256_to_u64(&u256::from_big_endian(&execution_context.world_state.block_info.prev_randao));
     evm_stack.push(u256::from(prevrandao));
-    reg[0] = prevrandao;
+    reg[0] = prevrandao.knto();
     println!("🎲 [PREVRANDAO] → 0x{:x}", prevrandao);
 },
 
@@ -1862,7 +1862,7 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
     };
     
     evm_stack.push(u256::from(blob_hash));
-    reg[0] = blob_hash;
+    reg[0] = blob_hash.into();
     println!("🔷 [BLOBHASH] index={} → 0x{:x}", index, blob_hash);
 },
 
@@ -1870,7 +1870,7 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
 0x4a => {
     let blob_base_fee = safe_u256_to_u64(&execution_context.world_state.block_info.blob_base_fee);
     evm_stack.push(u256::from(blob_base_fee));
-    reg[0] = blob_base_fee;
+    reg[0] = blob_base_fee.into();
     println!("💰 [BLOBBASEFEE] → {} wei", blob_base_fee);
 },
 
@@ -1982,7 +1982,7 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
     let loaded_u64 = loaded_u256.low_u64();
 
     evm_stack.push(u256::from(loaded_u64));
-    reg[0] = loaded_u64;
+    reg[0] = loaded_u64.into();
     if _dst < reg.len() {
         reg[_dst] = loaded_u64;
     }
