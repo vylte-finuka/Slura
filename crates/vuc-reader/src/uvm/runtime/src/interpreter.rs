@@ -10,16 +10,17 @@ use core::ops::Range;
 use std::hash::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use ethereum_types::U256 as u256;
+use goblin::pe::debug;
 use i256::I256;
 use serde_json::Value as JsonValue;
 use std::str;
 
 #[derive(Clone, Debug)]
 pub struct BlockInfo {
-    pub number: u64,
-    pub timestamp: u64,
-    pub gas_limit: u64,
-    pub difficulty: u64,
+    pub number: u256,
+    pub timestamp: u256,
+    pub gas_limit: u256,
+    pub difficulty: u256,
     pub coinbase: String,
     pub base_fee: u256,         // EIP-1559
     pub blob_base_fee: u256,    // EIP-7516
@@ -78,7 +79,7 @@ fn decode_bytes_heuristic(bytes: &[u8]) -> Option<JsonValue> {
     // uint64 plausible (utilise derniers 8 octets)
     if bytes.len() >= 8 {
         let tail = &bytes[bytes.len()-8..];
-        let v = u64::from_be_bytes([
+        let v = u256::from_be_bytes([
             tail[0], tail[1], tail[2], tail[3], tail[4], tail[5], tail[6], tail[7]
         ]);
         if v > 0 && v < 9_000_000_000_000_000_000u64 {
@@ -110,7 +111,7 @@ fn refund_contract_balance_to_owner(
     if contract_balance > 0 {
         let owner_balance = get_balance(world_state, owner_address);
         set_balance(world_state, contract_address, 0);
-        set_balance(world_state, owner_address, owner_balance.saturating_add(contract_balance));
+        set_balance(world_state, owner_address, u256::from(owner_balance.saturating_add(contract_balance)));
         println!(
             "💸 [REFUND] Transferred {} from contract {} to owner {}",
             contract_balance, contract_address, owner_address
@@ -126,18 +127,18 @@ pub struct InterpreterArgs {
     pub sender_address: String,
     pub args: Vec<serde_json::Value>,
     pub state_data: Vec<u8>, // calldata complet
-    pub gas_limit: u64,
-    pub gas_price: u64,
-    pub value: u64,
-    pub call_depth: u64,
-    pub block_number: u64,
-    pub timestamp: u64,
+    pub gas_limit: u256,
+    pub gas_price: u256,
+    pub value: u256,
+    pub call_depth: u256,
+    pub block_number: u256,
+    pub timestamp: u256,
     pub caller: String,
     pub origin: String,
     pub beneficiary: String,
     pub function_offset: Option<usize>,
-    pub base_fee: Option<u64>,
-    pub blob_base_fee: Option<u64>,
+    pub base_fee: Option<u256>,
+    pub blob_base_fee: Option<u256>,
     pub blob_hash: Option<[u8; 32]>,
 }
 impl Default for InterpreterArgs {
@@ -148,11 +149,11 @@ impl Default for InterpreterArgs {
             sender_address: "*sender*#default#".to_string(),
             args: vec![],
             state_data: vec![0; 1024],
-            gas_limit: 1000000,
-            gas_price: 1,
-            value: 0,
-            call_depth: 0,
-            block_number: 1,
+            gas_limit: u256::from(1000000),
+            gas_price: u256::from(1),
+            value: u256::zero(),
+            call_depth: u256::zero(),
+            block_number: u256::from(1),
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -162,8 +163,8 @@ impl Default for InterpreterArgs {
             origin: "0x1234567890123456789012345678901234567890".to_string(),
             beneficiary: "0x1234567890123456789012345678901234567890".to_string(),
             function_offset: None,
-            base_fee: Some(0),
-            blob_base_fee: Some(0),
+            base_fee: Some(u256::zero()),
+            blob_base_fee: Some(u256::zero()),
             blob_hash: Some([0u8; 32]),
         }
     }
@@ -176,13 +177,13 @@ pub struct UvmWorldState {
     pub storage: HashMap<String, HashMap<String, Vec<u8>>>, // contract_addr -> slot -> value
     pub code: HashMap<String, Vec<u8>>, // contract_addr -> code
     pub block_info: BlockInfo,
-    pub chain_id: u64, // Added field for chain ID
+    pub chain_id: u256, // Added field for chain ID
 }
 
 #[derive(Clone, Debug)]
 pub struct AccountState {
-    pub balance: u64,
-    pub nonce: u64,
+    pub balance: u256,
+    pub nonce: u256,
     pub code: Vec<u8>,
     pub storage_root: String,
     pub is_contract: bool,
@@ -199,15 +200,15 @@ impl Default for UvmWorldState {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs(),
-                gas_limit: 30000000,
-                difficulty: 1,
+                gas_limit: u256::from(30000000u64),
+                difficulty: u256::from(1),
                 coinbase: "*coinbase*#miner#".to_string(),
                 base_fee: u256::zero(),
                 blob_base_fee: u256::zero(),
                 blob_hash: [0u8; 32],
                 prev_randao: [0u8; 32],
             },
-            chain_id: 45056,
+            chain_id: u256::from(45056u64),
         }
     }
 }
@@ -224,8 +225,8 @@ enum MemoryOffsetType {
 #[derive(Clone)]
 pub struct UvmExecutionContext {
     pub world_state: UvmWorldState,
-    pub gas_used: u64,
-    pub gas_remaining: u64,
+    pub gas_used: u256,
+    pub gas_remaining: u256,
     pub logs: Vec<UvmLog>,
     pub return_data: Vec<u8>,
     pub call_stack: Vec<CallFrame>,
@@ -242,8 +243,8 @@ pub struct UvmLog {
 pub struct CallFrame {
     pub caller: String,
     pub contract: String,
-    pub value: u64,
-    pub gas_limit: u64,
+    pub value: u256,
+    pub gas_limit: u256,
     pub input_data: Vec<u8>,
 }
 
@@ -330,111 +331,26 @@ fn is_valid_utf8(bytes: &[u8]) -> bool {
 }
 
 // ✅ AJOUT: Fonctions d'aide pour gestion du gas
-fn consume_gas(context: &mut UvmExecutionContext, amount: u64) -> Result<(), Error> {
-    // ✅ Exception VEZ: pas de Out of gas si gas_price == 0 et gas_limit élevé
-    if context.gas_remaining > 9_000_000 && context.gas_used == 0 {
-        // On ignore la consommation de gas pour la première exécution (déploiement/init VEZ)
-        return Ok(());
+fn consume_gas(context: &mut UvmExecutionContext, opcode: u8) -> Result<(), Error> {
+    let cost = match opcode {
+        0x00 => 0,      // STOP
+        0x01..=0x0b => 3..=10, // arithmétique de base
+        0x10..=0x1d => 3,
+        0x20 => 30,     // KECCAK
+        0x30..=0x48 => 2..=700,
+        0x54 => 200,    // SLOAD (avant Berlin)
+        0x55 => 20000,  // SSTORE
+        0x56..=0x57 => 8..=10,
+        0xf3 | 0xfd => 0,
+        _ => 1,
+    };
+    context.gas_used += cost;
+    context.gas_remaining = context.gas_remaining.saturating_sub(cost);
+    if context.gas_remaining == 0 {
+        return Err(Error::new(ErrorKind::Other, "Out of gas"));
     }
-    //if context.gas_remaining < amount {
-    //    return Err(Error::new(ErrorKind::Other, "Out of gas"));
-    //}
-    //context.gas_remaining -= amount;
-    //context.gas_used += amount;
     Ok(())
 }
-
-// ✅ NOUVELLE APPROCHE: Résolution purement basée sur la pile EVM et JUMPDEST
-fn resolve_jump_destination_generic(
-    pc: usize,
-    invalid_destination: usize,
-    evm_stack: &[u64],
-    valid_jumpdests: &HashSet<usize>,
-    bytecode: &[u8]
-) -> Option<usize> {
-    
-    println!("🔧 [GENERIC RESOLVE] PC=0x{:04x}, dest=0x{:04x}", pc, invalid_destination);
-    
-    // ✅ STRATÉGIE 1: Si destination == valeur calculée, chercher dans la pile
-    if invalid_destination < 100 {
-        println!("🔧 [CALCULATED VALUE] Destination {} semble être un résultat de calcul", invalid_destination);
-        
-        // Scan pile pour trouver une adresse de retour valide
-        for (i, &stack_val) in evm_stack.iter().rev().enumerate() {
-            if valid_jumpdests.contains(&(stack_val as usize)) && stack_val as usize > pc {
-                println!("✅ [STACK RETURN] Trouvé adresse retour valide: 0x{:04x} (depth {})", stack_val, i);
-                return Some(stack_val as usize);
-            }
-        }
-    }
-    
-    // ✅ STRATÉGIE 2: Si destination > bytecode, c'est une adresse contractuelle
-    if invalid_destination > bytecode.len() {
-        println!("🔧 [CONTRACT ADDRESS] Destination 0x{:x} > bytecode size, probablement adresse", invalid_destination);
-        
-        // Chercher dans la pile une vraie destination de saut
-        for &stack_val in evm_stack.iter().rev() {
-            let addr = stack_val as usize;
-            if valid_jumpdests.contains(&addr) && addr < bytecode.len() {
-                println!("✅ [REAL DESTINATION] Trouvé vraie destination: 0x{:04x}", addr);
-                return Some(addr);
-            }
-        }
-    }
-    
-    // ✅ STRATÉGIE 3: Prochain JUMPDEST dans la direction normale d'exécution
-    for next_pc in (pc + 1)..(pc + 200).min(bytecode.len()) {
-        if valid_jumpdests.contains(&next_pc) {
-            println!("✅ [FORWARD JUMPDEST] Prochain JUMPDEST trouvé: 0x{:04x}", next_pc);
-            return Some(next_pc);
-        }
-    }
-    
-    None
-}
-
-// ✅ NOUVELLE FONCTION: Analyse pure du contexte de saut sans hardcode
-fn analyze_jump_context(
-    pc: usize,
-    destination: usize,
-    evm_stack: &[u64],
-    bytecode: &[u8]
-) -> Option<usize> {
-    
-    // Analyser les instructions autour du PC pour comprendre le contexte
-    let scan_start = pc.saturating_sub(10);
-    let scan_end = (pc + 10).min(bytecode.len());
-    
-    println!("🔍 [CONTEXT ANALYSIS] Scanning PC 0x{:04x}-0x{:04x} for patterns", scan_start, scan_end);
-    
-    // Chercher des patterns PUSH + valeur qui pourraient être des destinations
-    for i in scan_start..scan_end {
-        if i + 2 < bytecode.len() {
-            match bytecode[i] {
-                // PUSH1 à PUSH4 (destinations typiques)
-                0x60..=0x63 => {
-                    let push_size = (bytecode[i] - 0x60 + 1) as usize;
-                    if i + push_size < bytecode.len() {
-                        let mut pushed_value = 0usize;
-                        for j in 0..push_size {
-                            pushed_value = (pushed_value << 8) | (bytecode[i + 1 + j] as usize);
-                        }
-                        
-                        // Si cette valeur est dans la pile ET c'est un JUMPDEST valide
-                        if evm_stack.contains(&(pushed_value as u64)) && pushed_value < bytecode.len() && bytecode[pushed_value] == 0x5b {
-                            println!("✅ [CONTEXT MATCH] Trouvé destination contextuelle: 0x{:04x}", pushed_value);
-                            return Some(pushed_value);
-                        }
-                    }
-                },
-                _ => {}
-            }
-        }
-    }
-    
-    None
-}
-
 
 /// ✅ AJOUT: Scan préalable de tous les JUMPDEST valides au début de l'exécution
 fn scan_valid_jumpdests(prog: &[u8]) -> HashSet<usize> {
@@ -465,68 +381,11 @@ fn scan_valid_jumpdests(prog: &[u8]) -> HashSet<usize> {
     valid_jumpdests
 }
 
-fn calculate_gas_cost(opcode: u8) -> u64 {
-    match opcode {
-        // Instructions de base
-        ebpf::ADD64_IMM | ebpf::ADD64_REG => 3,
-        ebpf::SUB64_IMM | ebpf::SUB64_REG => 3,
-        ebpf::MUL64_IMM | ebpf::MUL64_REG => 5,
-        ebpf::DIV64_IMM | ebpf::DIV64_REG => 5,
-        
-        // Accès mémoire
-        ebpf::LD_DW_REG | ebpf::ST_DW_REG => 3,
-        ebpf::LD_W_REG | ebpf::ST_W_REG => 3,
-        
-        // Appels et sauts
-        ebpf::CALL => 40,
-        ebpf::JEQ_IMM | ebpf::JNE_IMM => 10,
-        
-        // Instructions personnalisées UVM
-        0xf1 => 700,  // Appel FFI
-        0xf2 => 2,    // Accès aux métadonnées
-        
-        // ✅ OPCODES EVM CRITIQUES MANQUANTS
-        // SSTORE (0x55) - Stockage persistant EVM
-        0x55 => 20000,
-        
-        // SLOAD (0x54) - Chargement depuis storage EVM
-        0x54 => 800,
-        
-        // CALLER (0x33) - msg.sender EVM
-        0x33 => 2,
-        
-        // ORIGIN (0x32) - tx.origin EVM  
-        0x32 => 2,
-        
-        // CALLVALUE (0x34) - msg.value EVM
-        0x34 => 2,
-        
-        // GASPRICE (0x3A) - tx.gasprice EVM
-        0x3a => 2,
-        
-        // GASLIMIT (0x45) - block.gaslimit EVM
-        0x45 => 2,
-        
-        // NUMBER (0x43) - block.number EVM
-        0x43 => 2,
-        
-        // TIMESTAMP (0x42) - block.timestamp EVM
-        0x42 => 2,
-        
-        // DIFFICULTY (0x44) - block.difficulty EVM
-        0x44 => 2,
-        
-        // COINBASE (0x41) - block.coinbase EVM
-        0x41 => 2,
-        
-        // BALANCE (0x31) - address(x).balance EVM
-        0x31 => 700,
-        
-        // RETURNDATASIZE (0x3D) - returndatasize EVM
-        0x3d => 2,
-        
-        // Instructions par défaut
-        _ => 1, // Coût par défaut
+// Avant chaque écriture mémoire (MSTORE, MSTORE8, CODECOPY, etc.)
+fn ensure_memory_size(mem: &mut Vec<u8>, needed: usize) {
+    if needed > mem.len() {
+        let new_size = ((needed + 0x1FFF) / 0x2000) * 0x2000; // arrondi à 8KB
+        mem.resize(new_size, 0);
     }
 }
 
@@ -537,7 +396,7 @@ fn get_balance(world_state: &UvmWorldState, address: &str) -> u64 {
         .unwrap_or(0)
 }
 
-fn set_balance(world_state: &mut UvmWorldState, address: &str, balance: u64) {
+fn set_balance(world_state: &mut UvmWorldState, address: &str, balance: u256) {
     let account = world_state.accounts.entry(address.to_string())
         .or_insert_with(|| AccountState {
             balance: 0,
@@ -606,7 +465,7 @@ fn decode_return_data_generic(data: &[u8], len: usize) -> JsonValue {
     }
 }
 
-fn transfer_value(world_state: &mut UvmWorldState, from: &str, to: &str, amount: u64) -> Result<(), Error> {
+fn transfer_value(world_state: &mut UvmWorldState, from: &str, to: &str, amount: u256) -> Result<(), Error> {
     let from_balance = get_balance(world_state, from);
     if from_balance < amount {
         return Err(Error::new(ErrorKind::Other, "Insufficient balance"));
@@ -633,14 +492,14 @@ fn set_storage(world_state: &mut UvmWorldState, contract: &str, slot: &str, valu
 }
 
             // Stub implementation for get_block_hash
-            fn get_block_hash(world_state: &UvmWorldState, block_number: u64) -> Option<[u8; 32]> {
+            fn get_block_hash(world_state: &UvmWorldState, block_number: u256) -> Option<[u8; 32]> {
                 // This is a stub. In a real implementation, this would look up the block hash.
                 Some([0u8; 32]) // Return a dummy hash for demonstration
             }
 
 #[allow(clippy::too_many_arguments)]
 fn check_mem(
-    addr: u64,
+    addr: u256,
     len: usize,
     access_type: &str,
     insn_ptr: usize,
@@ -654,8 +513,9 @@ fn check_mem(
             "Error: memory access size invalid ({} bytes) at insn #{}", len, insn_ptr
         )));
     }
-    if let Some(addr_end) = addr.checked_add(len as u64) {
-        let offset = addr as usize;
+    let addr_u64 = addr.low_u64();
+    if let Some(addr_end) = addr_u64.checked_add(len as u64) {
+        let offset = addr_u64 as usize;
         // calldata first (offset semantics)
         if offset + len <= mbuff.len() {
             return Ok(());
@@ -669,11 +529,11 @@ fn check_mem(
             return Ok(());
         }
         // allowed_memory ranges (treated as offset ranges)
-        if allowed_memory.iter().any(|range| range.contains(&addr)) {
+        if allowed_memory.iter().any(|range| range.contains(&addr_u64)) {
             return Ok(());
         }
         // PATCH: autorise lecture limitée si calldata vide (EVM-style permissif pour reads courtes)
-        if mbuff.len() == 0 && addr < 32 && addr_end <= 32 {
+        if mbuff.len() == 0 && addr_u64 < 32 && addr_end <= 32 {
             return Ok(());
         }
     }
@@ -846,8 +706,9 @@ fn encode_uip10_address_to_u64(addr: &str) -> u64 {
 }
 
 /// Détection intelligente du type d'offset mémoire
-fn classify_memory_offset(offset: u64) -> MemoryOffsetType {
-    match offset {
+fn classify_memory_offset(offset: u256) -> MemoryOffsetType {
+    let offset_u64 = offset.low_u64();
+    match offset_u64 {
         0..=0xFFFF => MemoryOffsetType::Normal,
         0x10000..=0xFFFFF => MemoryOffsetType::Extended,
         0x100000..=0xFFFFFF => MemoryOffsetType::Large,
@@ -890,22 +751,19 @@ fn safe_u256_to_u64(val: &u256) -> u64 {
 pub fn execute_program(
     prog_: Option<&[u8]>,
     stack_usage: Option<&StackUsage>,
-
     mem: &[u8],
     mbuff: &[u8],
     helpers: &mut HashMap<u32, ebpf::Helper>,
-
     allowed_memory: &HashSet<Range<u64>>,
-
     ret_type: Option<&str>,
     exports: &HashMap<u32, usize>,
     interpreter_args: &InterpreterArgs,
     initial_storage: Option<HashMap<String, HashMap<String, Vec<u8>>>>,
 ) -> Result<serde_json::Value, Error> {
-    const U32MAX: u64 = u32::MAX as u64;
-    const SHIFT_MASK_64: u64 = 0x3f;
+    const U32MAX: u256 = (u32::MAX as u64).into();
+    const SHIFT_MASK_64: u256 = 0x3f;
 
-    helpers.insert(0x450, crate::helpers::slu_ip450_send); // 0x450 = SLU-IP 450 SEND
+    helpers.insert(0x450, crate::helpers::slu_ip450_send);
 
     let prog = match prog_ {
         Some(prog) => prog,
@@ -915,13 +773,11 @@ pub fn execute_program(
         )),
     };
 
-    // ✅ LOG TAILLE BYTECODE
-println!("🧮 [BYTECODE SIZE] {} bytes", prog.len());
+    println!("🧮 [BYTECODE SIZE] {} bytes", prog.len());
 
     let default_stack_usage = StackUsage::new();
-    let stack_usage = stack_usage.unwrap_or(&default_stack_usage);
+    let stack_usage = stack_usage.unwrap_or_default();
 
-    // ✅ AJOUT: Initialisation du contexte d'exécution UVM
     let mut execution_context = UvmExecutionContext {
         world_state: {
             let mut ws = UvmWorldState::default();
@@ -930,21 +786,21 @@ println!("🧮 [BYTECODE SIZE] {} bytes", prog.len());
             }
             ws
         },
-        gas_used: 0,
+        gas_used: u256::zero(),
         gas_remaining: interpreter_args.gas_limit,
         logs: vec![],
         return_data: vec![],
         call_stack: vec![],
     };
 
-    // ✅ AJOUT: Bootstrap minimal comme Erigon (SEULEMENT le slot owner nécessaire)
-    execution_context.bootstrap_essential_storage(&interpreter_args.contract_address, &interpreter_args.sender_address);
+    execution_context.bootstrap_essential_storage(
+        &interpreter_args.contract_address,
+        &interpreter_args.sender_address,
+    );
 
-    // ✅ Configuration comptes initiaux
-    set_balance(&mut execution_context.world_state, &interpreter_args.sender_address, 1000000);
-    set_balance(&mut execution_context.world_state, &interpreter_args.contract_address, 0);
+    set_balance(&mut execution_context.world_state, &interpreter_args.sender_address, u256::from(1000000u64));
+    set_balance(&mut execution_context.world_state, &interpreter_args.contract_address, u256::zero());
 
-    // ✅ Transfert de valeur si spécifié
     if interpreter_args.value > 0 {
         transfer_value(
             &mut execution_context.world_state,
@@ -956,221 +812,88 @@ println!("🧮 [BYTECODE SIZE] {} bytes", prog.len());
 
     let stack = vec![0u8; ebpf::STACK_SIZE];
 
-    // ✅ CONSTRUCTION CALLDATA UNIVERSELLE GÉNÉRIQUE
-    let calldata = build_universal_calldata(interpreter_args);
+    // ────────────────────────────────────────────────
+    // IMPORTANT : on utilise le calldata réel (pas de forçage)
+    // ────────────────────────────────────────────────
+    let effective_mbuff = mbuff;
+    println!("📡 [CALLDATA UTILISÉ] {} bytes (réel, non forcé)", effective_mbuff.len());
 
-// ██████████████████████████████████████████████████████████████
-// FIX UNIVERSEL – TOUTES les fonctions EVM (view + mutables) passent
-// ██████████████████████████████████████████████████████████████
-let effective_mbuff = if interpreter_args.function_name.starts_with("function_") {
-    println!("🔥 [UNIVERSAL FIX] Fonction EVM détectée ({}) → force calldata construite", interpreter_args.function_name);
-    &calldata
-} else if mbuff.is_empty() || mbuff.len() < 4 {
-    println!("🔧 [MBUFF VIDE] → force calldata construite");
-    &calldata
-} else {
-    mbuff
-};
+    let mut global_mem = vec![0u8; 256 * 1024 * 1024];
 
-    println!("📡 [CALLDATA UNIVERSEL] Construit automatiquement {} bytes", calldata.len());
-    println!("📡 [MBUFF EFFECTIF] Utilise {} bytes", effective_mbuff.len());
+    // Free memory pointer initial (conforme Solidity >= 0.8)
+    let mut free_mem_ptr = [0u8; 32];
+    free_mem_ptr[31] = 0xe0;
+    global_mem[0x40..0x60].copy_from_slice(&free_mem_ptr);
 
-// ==============================================
-// MÉMOIRE DYNAMIQUE + PATCH UNIVERSEL (2026)
-// ==============================================
+let mut reg: [u256; 64] = [u256::zero(); 64];
+    reg[10] = ((stack.as_ptr() as usize) + stack.len()) as u64;
+    reg[8] = u256::zero();
+    reg[1] = u256::zero();
 
-// Allocation mémoire dynamique (évite le crash "too large allocation")
-let mut global_mem = vec![0u8; 1 * 1024 * 1024];  // 1 Mo au départ
-println!("🟢 [MÉMOIRE] Allocation initiale de 1 Mo");
+    reg[50] = execution_context.gas_remaining;
+    reg[51] = interpreter_args.value;
+    reg[52] = interpreter_args.block_number;
+    reg[53] = interpreter_args.timestamp;
+    reg[54] = interpreter_args.call_depth as u256;
 
-// Helper pour étendre la mémoire si besoin
-fn ensure_memory_size(mem: &mut Vec<u8>, required: usize) {
-    if mem.len() < required {
-        let new_size = (required.next_power_of_two()).max(mem.len() * 2).min(64 * 1024 * 1024);
-        println!("📈 [MÉMOIRE] Extension à {} octets", new_size);
-        mem.resize(new_size, 0);
-    }
-}
+    reg[2] = u256::from(interpreter_args.args.len() as u64);
 
-// Initialisation free memory pointer
-ensure_memory_size(&mut global_mem, 0x60);
-let mut free_mem_ptr = [0u8; 32];
-free_mem_ptr[31] = 0xe0;
-global_mem[0x40..0x60].copy_from_slice(&free_mem_ptr);
-println!("🟢 [EVM INIT] free memory pointer = 0xe0 à offset 0x40");
-
-// 🔥 PATCH CRITIQUE : on force 0xa0 à une valeur énorme AVANT que le bytecode écrive 0x3
-ensure_memory_size(&mut global_mem, 0xe0);
-global_mem[0xa0..0xc0].fill(0xff);  // Tous les bits à 1 → valeur maximale
-global_mem[0xc0..0xe0].fill(0xff);  // Sécurité supplémentaire
-
-println!("🛡️ [PATCH MÉMOIRE FORCE] 0xa0..0xe0 = 0xff...ff → Panic(0x41) IMPOSSIBLE");
-    
-    let mut reg: [u64; 64] = [0; 64];
-
-// ✅ Configuration registres UVM-compatibles
-reg[10] = stack.as_ptr() as u64 + stack.len() as u64; // Stack pointer
-reg[8] = 0; // Global memory offset EVM = 0
-reg[1] = 0; // Calldata/memory offset EVM = 0
-
-// ✅ Registres spéciaux UVM (compatibles pile)
-reg[50] = execution_context.gas_remaining;              // Gas disponible
-reg[51] = interpreter_args.value;                       // Valeur transférée
-reg[52] = interpreter_args.block_number;                // Numéro de bloc
-reg[53] = interpreter_args.timestamp;                   // Timestamp
-reg[54] = interpreter_args.call_depth as u64;           // Profondeur d'appel
-
-    // ✅ Arguments dans la convention UVM
-    reg[2] = interpreter_args.args.len() as u64;
-
-    // Encodage des arguments dans global_mem
+    // Encodage arguments (inchangé)
     let mut arg_offset = 0;
     for (i, arg) in interpreter_args.args.iter().enumerate().take(5) {
         let reg_idx = 3 + i;
         match arg {
-            serde_json::Value::Number(n) => {
-                reg[reg_idx] = n.as_u64().unwrap_or(0);
-            },
+            serde_json::Value::Number(n) => reg[reg_idx] = n.as_u64().unwrap_or(0).into(),
             serde_json::Value::String(s) => {
                 let bytes = s.as_bytes();
                 let len = bytes.len().min(global_mem.len() - arg_offset - 1);
                 global_mem[arg_offset..arg_offset + len].copy_from_slice(&bytes[..len]);
-                println!("📝 [ARGS] Argument string: \"{}\" (hex: {})", s, hex::encode(&bytes[..len]));
                 global_mem[arg_offset + len] = 0;
                 reg[reg_idx] = reg[8] + arg_offset as u64;
                 arg_offset += len + 1;
-            },
-            serde_json::Value::Bool(b) => {
-                reg[reg_idx] = if *b { 1 } else { 0 };
-                println!("📝 [ARGS] Argument bool: {} (as u64: {})", b, reg[reg_idx]);
-            },
-            _ => reg[reg_idx] = 0,
+            }
+            serde_json::Value::Bool(b) => reg[reg_idx] = u256::from(if *b { 1 } else { 0 }),
+            _ => reg[reg_idx] = u256::zero(),
         }
     }
 
-       // ✅ SCAN PRÉALABLE DES JUMPDEST AVANT L'EXÉCUTION
     let mut valid_jumpdests = scan_valid_jumpdests(prog);
 
-    // ✅ Hachages d'adresses pour compatibilité
-    let mut contract_hasher = DefaultHasher::new();
-    interpreter_args.contract_address.hash(&mut contract_hasher);
-    
-    let mut sender_hasher = DefaultHasher::new();
-    interpreter_args.sender_address.hash(&mut sender_hasher);
+    let mut evm_stack: Vec<u256> = Vec::with_capacity(1024);
 
-    println!("🚀 DÉBUT EXÉCUTION UVM");
-    println!("   Fonction: {}", interpreter_args.function_name);
-    println!("   Contrat: {}", interpreter_args.contract_address);
-    println!("   Gas limit: {}", interpreter_args.gas_limit);
-    println!("   Valeur: {}", interpreter_args.value);
-
-    let mut evm_stack: Vec<u64> = Vec::with_capacity(1024); // FIX FINAL – calldata size sur la pile pour TOUTES les fonctions EVM
     let mut natural_exit_detected = false;
     let mut exit_value = 0u64;
- // ✅ LOG DEBUG : Liste tous les sélecteurs PUSH4 présents dans le bytecode
-    let mut selectors_found = Vec::new();
-    for i in 0..prog.len().saturating_sub(4) {
-        if prog[i] == 0x63 {
-            let selector = u32::from_be_bytes([prog[i+1], prog[i+2], prog[i+3], prog[i+4]]);
-            selectors_found.push(selector);
-        }
-    }
-    if !selectors_found.is_empty() {
-        println!("🧩 [SELECTEURS BYTECODE] Sélecteurs PUSH4 détectés dans le bytecode :");
-        for sel in &selectors_found {
-            println!("   - 0x{:08x}", sel);
-        }
-    } else {
-        println!("🧩 [SELECTEURS BYTECODE] Aucun PUSH4 détecté dans le bytecode.");
-    }
-    
-// ✅ SUPPRIME COMPLÈTEMENT l'initialisation spéciale
-println!("🟢 [EVM INIT] Pile EVM vide, mémoire initialisée");
 
-// ✅ Registres UVM compatibles EVM
-reg[0] = 0; // Accumulator 
-reg[8] = 0; // Memory base offset
-
-// ✅ Configuration spéciale pour contrats Slura (proxy UUPS)
-if prog.len() > 100 && prog[0] == 0x60 && prog[2] == 0x60 && prog[4] == 0x52 {
-    println!("🎯 [Slura CONTRACT] Détecté: contrat Slura avec proxy UUPS");
-    // Le bytecode commence par: PUSH1 0xa0, PUSH1 0x40, MSTORE
-    // → Initialisation standard EVM/Solidity
-}
-
-// Map selector -> destination (dispatch EVM)
-let mut selector_jump_map = std::collections::HashMap::<u32, usize>::new();
-for i in 0..prog.len().saturating_sub(16) {
-    // Cherche PUSH4 <selector>
-    if prog[i] == 0x63 {
-        let selector = u32::from_be_bytes([prog[i+1], prog[i+2], prog[i+3], prog[i+4]]);
-        // Cherche dans les 12 bytes suivants un PUSH2 <dest> suivi d'un JUMPI
-        for j in 5..16 {
-            if i + j + 3 < prog.len() && prog[i + j] == 0x61 && prog[i + j + 3] == 0x57 {
-                let dest = ((prog[i + j + 1] as usize) << 8) | (prog[i + j + 2] as usize);
-                selector_jump_map.insert(selector, dest);
-                println!("🧭 [DISPATCHER] selector 0x{:08x} → dest 0x{:04x}", selector, dest);
-                break;
-            }
-        }
-    }
-}
-
-// ✅ PATCH: Ajoute dynamiquement tous les offsets de handler de fonction comme JUMPDEST valides
-for &dest in selector_jump_map.values() {
-    valid_jumpdests.insert(dest); // Ajoute même si ce n'est pas un vrai JUMPDEST
-    if dest < prog.len() && prog[dest] == 0x5b {
-        println!("🛠️ [PATCH JUMPDEST] Handler ajouté: 0x{:04x}", dest);
-    } else {
-        println!("🛠️ [PATCH JUMPDEST] Handler ajouté (sans 0x5b): 0x{:04x}", dest);
-    }
-}
-
-    let debug_evm = true;
-    
-        // ✅ VERSION FINALE DISPATCHER-READY
-let mut insn_ptr = 0;
-
-    // ✅ DÉTECTION ANTI-BOUCLE INFINIE
+    let mut insn_ptr = 0usize;
     let mut loop_detection: HashMap<usize, u32> = HashMap::new();
     let mut instruction_count = 0u64;
-    const MAX_INSTRUCTIONS: u64 = 100_000; // Limite sécuritaire
-    const MAX_SAME_PC: u32 = 1000; // Max 1000 fois le même PC
+    const MAX_INSTRUCTIONS: u256 = 100_000;
+    const MAX_SAME_PC: u32 = 1000;
 
-while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
-    // ✅ COMPTEURS DE SÉCURITÉ
-    instruction_count += 1;
-    
-    // ✅ DÉTECTION BOUCLE INFINIE PAR PC
-    let pc_count = loop_detection.entry(insn_ptr).or_insert(0);
-    *pc_count += 1;
-    
-    if *pc_count > MAX_SAME_PC {
-        println!("🔴 [BOUCLE INFINIE] PC=0x{:04x} exécuté {} fois → ARRÊT FORCÉ", insn_ptr, pc_count);
-        println!("🔴 [STACK OVERFLOW] Taille pile EVM: {} (probablement stack overflow)", evm_stack.len());
-        break;
-    }
-    
-    // ✅ DÉTECTION STACK OVERFLOW
-    if evm_stack.len() > 1024 {
-        println!("🔴 [STACK OVERFLOW] Pile EVM trop grande: {} éléments → ARRÊT FORCÉ", evm_stack.len());
-        break;
-    }
-    
-    // ✅ TOUTES LES 10000 instructions, log l'état
-    if instruction_count % 10000 == 0 {
-        println!("📊 [PROGRESS] {} instructions exécutées, PC=0x{:04x}, Stack={}", 
-                 instruction_count, insn_ptr, evm_stack.len());
-    }
+    while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS.low_u64() {
+        instruction_count += 1;
 
-    let opcode = prog[insn_ptr];
-    // Correction ici :
-    let insn = if insn_ptr % ebpf::INSN_SIZE == 0 && insn_ptr / ebpf::INSN_SIZE < prog.len() / ebpf::INSN_SIZE {
-        ebpf::get_insn(prog, insn_ptr / ebpf::INSN_SIZE)
-    } else {
-        // Fabrique un insn factice pour les opcodes EVM purs
-        ebpf::Insn { opc: opcode, dst: 0, src: 0, off: 0, imm: 0 }
-};
+        let pc_count = loop_detection.entry(insn_ptr).or_insert(0);
+        *pc_count += 1;
+        if *pc_count > MAX_SAME_PC {
+            println!("🔴 [BOUCLE INFINIE] PC=0x{:04x} → arrêt forcé", insn_ptr);
+            break;
+        }
+
+        if evm_stack.len() > 1024 {
+            println!("🔴 [STACK OVERFLOW] {} éléments → arrêt forcé", evm_stack.len());
+            break;
+        }
+
+        let opcode = prog[insn_ptr];
+        let insn = if insn_ptr % ebpf::INSN_SIZE == 0 && insn_ptr / ebpf::INSN_SIZE < prog.len() / ebpf::INSN_SIZE {
+            ebpf::get_insn(prog, insn_ptr / ebpf::INSN_SIZE)
+        } else {
+            ebpf::Insn { opc: opcode, dst: 0, src: 0, off: 0, imm: 0 }
+        };
+
+        let debug_evm = true;
+
     let _dst = insn.dst as usize;
     let _src = insn.src as usize;
 
@@ -1187,78 +910,65 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
         }
     }
 
-    // initialise directement le flag (plus de loop imbriquée)
-    let mut skip_advance = false;
-    let mut advance = 1;
-     //___ Pectra/Charène opcodes ___
-    match opcode {
-        // 0x00 STOP
-        0x00 => {
-            println!("✅ [STOP] Fin naturelle d'exécution");
-            natural_exit_detected = true;
-            exit_value = if !evm_stack.is_empty() { 
-                evm_stack.pop().unwrap() 
-            } else { 
-                1 // Succès par défaut
-            };
-            break;
-        },
+        let mut skip_advance = false;
+        let mut advance = 1;
 
-    //___ 0x01 ADD
+ //___ Pectra/Charène opcodes ___
+        match opcode {
+            // ────────────────────────────────────────────────
+            //  Opérations conservées mais corrigées pour conformité
+            // ────────────────────────────────────────────────
+
+            0x00 => { /* STOP */ 
+                natural_exit_detected = true;
+                exit_value = evm_stack.pop().map(|v| v.low_u64()).unwrap_or(1);
+                break;
+            }
+
+               //___ 0x01 ADD
 0x01 => {
-    if evm_stack.len() < 2 {
-        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on ADD"));
-    }
+    if evm_stack.len() < 2 { return Err(Error::new(ErrorKind::Other, "Underflow ADD")); }
     let b = evm_stack.pop().unwrap();
     let a = evm_stack.pop().unwrap();
     let res = a.overflowing_add(b).0;
     evm_stack.push(res);
-    reg[0] = res;
+    reg[0] = u256::from(res.low_u64()).into();
+    consume_gas(&mut execution_context, opcode)?;
 },
 
     //___ 0x02 MUL
-    0x02 => {
-        if evm_stack.len() < 2 {
-            return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on MUL"));
-        }
-        let b = evm_stack.pop().unwrap();
-        let a = evm_stack.pop().unwrap();
-        
-        // ✅ VRAIE multiplication U256 EVM
-        let a_u256 = ethereum_types::U256::from(a);
-        let b_u256 = ethereum_types::U256::from(b);
-        let res_u256 = a_u256.overflowing_mul(b_u256).0;
-        let result = res_u256.low_u64(); // Tronque à u64 pour compatibilité
-        
-        evm_stack.push(result);
-        reg[0] = result;
-        println!("✖️ [MUL] {} * {} = {} (U256: {})", a, b, result, res_u256);
-    },
-
-    //___ 0x03 SUB
-    0x03 => {
-        if evm_stack.len() < 2 {
-            return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on SUB"));
-        }
-        let a = ethereum_types::U256::from(evm_stack.pop().unwrap());
-        let b = ethereum_types::U256::from(evm_stack.pop().unwrap());
-        let res = a.overflowing_sub(b).0;
-        evm_stack.push(res.low_u64());
-        reg[0] = res.low_u64();
-    },
-
-//___ 0x04 DIV - EVM COMPLIANT (retourne 0 si division par zéro)
-0x04 => {
-    if evm_stack.len() < 2 {
-        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on DIV"));
-    }
+0x02 => {
+    if evm_stack.len() < 2 { return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on MUL")); }
     let b = evm_stack.pop().unwrap();
     let a = evm_stack.pop().unwrap();
-    let result = if b == 0 { 0 } else { a / b }; // EVM: 0 si div/0
-    evm_stack.push(result);
-    reg[0] = result;
-    consume_gas(&mut execution_context, 5)?;
-    println!("➗ [DIV] {} / {} = {}", a, b, result);
+    let res = a.overflowing_mul(b).0;
+    evm_stack.push(res);
+    reg[0] = u256::from(res.low_u64()).into();
+    consume_gas(&mut execution_context, opcode)?;
+},
+
+    //___ 0x03 SUB
+0x03 => {
+    if evm_stack.len() < 2 { return Err(
+        Error::new(ErrorKind::Other, "EVM STACK underlow on SUB")
+    ); }
+    let b = evm_stack.pop().unwrap();
+    let a = evm_stack.pop().unwrap();
+    let res = a.overflowing_sub(b).0;
+    evm_stack.push(res);
+    reg[0] = res.low_u64();
+    consume_gas(&mut execution_context, opcode)?;
+},
+
+//___ 0x04 DIV - EVM COMPLIANT (retourne 0 si division par zéro)
+0x04 => { // DIV
+    if evm_stack.len() < 2 { return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on DIV")); }
+    let b = evm_stack.pop().unwrap();
+    let a = evm_stack.pop().unwrap();
+    let res = if b.is_zero() { u256::zero() } else { a / b };
+    evm_stack.push(res);
+    reg[0] = res.low_u64();
+    consume_gas(&mut execution_context, opcode)?;
 },
 
     //___ 0x05 SDIV
@@ -1266,10 +976,12 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
         if evm_stack.len() < 2 {
             return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on SDIV"));
         }
-        let a = I256::from(evm_stack.pop().unwrap());
-        let b = I256::from(evm_stack.pop().unwrap());
-        let res = if b == I256::from(0) { I256::from(0) } else { a / b };
-        evm_stack.push(res.as_u64());
+        let b = evm_stack.pop().unwrap();
+        let a = evm_stack.pop().unwrap();
+        let a_i256 = I256::from(a.as_u64() as i64);
+        let b_i256 = I256::from(b.as_u64() as i64);
+        let res = if b_i256 == I256::from(0) { I256::from(0) } else { a_i256 / b_i256 };
+        evm_stack.push(u256::from(res.as_u64()));
         reg[0] = res.as_u64();
     },
 
@@ -1282,7 +994,7 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
         let a = evm_stack.pop().unwrap();
         
         // ✅ EVM SPEC: modulo par zéro = 0 (comportement défini)
-        let result = if b == 0 { 0 } else { a % b };
+        let result = if b == u256::zero() { u256::zero() } else { a % b };
         evm_stack.push(result);
         reg[0] = result;
         
@@ -1294,14 +1006,18 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
         if evm_stack.len() < 2 {
             return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on SMOD"));
         }
-        let b = evm_stack.pop().unwrap() as i64;
-        let a = evm_stack.pop().unwrap() as i64;
-        
+        let b = evm_stack.pop().unwrap();
+        let a = evm_stack.pop().unwrap();
+
+        // Convert U256 to I256 using as_u64 (may not be fully correct for negative values, but matches original intent)
+        let a_i256 = I256::from(a.as_u64() as i64);
+        let b_i256 = I256::from(b.as_u64() as i64);
+
         // ✅ EVM SPEC: smod par zéro = 0 (comportement défini)
-        let result = if b == 0 { 0 } else { a % b };
-        evm_stack.push(result as u64);
-        reg[0] = result as u64;
-        
+        let result = if b_i256 == I256::from(0) { I256::from(0) } else { a_i256 % b_i256 };
+        evm_stack.push(u256::from(result.as_u64()));
+        reg[0] = result.as_u64();
+
         println!("🔢 [SMOD] {} % {} = {}", a, b, result);
     },
 
@@ -1314,7 +1030,7 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
         let b = ethereum_types::U256::from(evm_stack.pop().unwrap());
         let n = ethereum_types::U256::from(evm_stack.pop().unwrap());
         let res = if n.is_zero() { ethereum_types::U256::zero() } else { (a + b) % n };
-        evm_stack.push(res.low_u64());
+        evm_stack.push(u256::from(res.low_u64()));
         reg[0] = res.low_u64();
     },
 
@@ -1327,40 +1043,62 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
         let b = ethereum_types::U256::from(evm_stack.pop().unwrap());
         let n = ethereum_types::U256::from(evm_stack.pop().unwrap());
         let res = if n.is_zero() { ethereum_types::U256::zero() } else { (a * b) % n };
-        evm_stack.push(res.low_u64());
+        evm_stack.push(u256::from(res.low_u64()));
         reg[0] = res.low_u64();
     },
 
-     //___ 0x0a EXP - CORRECTION POUR ÉVITER LE CAS 0^256
-    0x0a => {
-        if evm_stack.len() < 2 {
-            return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on EXP"));
+//___ 0x0a EXP - VERSION 100 % EVM COMPLIANT avec U256
+0x0a => {
+    if evm_stack.len() < 2 {
+        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on EXP"));
+    }
+
+    let exponent = evm_stack.pop().unwrap();  // U256
+    let base     = evm_stack.pop().unwrap();  // U256
+
+    let result: u256 = if exponent.is_zero() {
+        // n^0 = 1 (même si n = 0)
+        u256::one()
+    } else if base.is_zero() {
+        // 0^n = 0 pour n > 0
+        u256::zero()
+    } else if base == u256::one() {
+        // 1^n = 1
+        u256::one()
+    } else {
+        // Cas général : base^exponent mod 2^256
+        // U256 n'a pas de pow() natif avec modulo 2^256 automatique,
+        // mais on peut utiliser une exponentiation modulaire simple
+        // (ou la méthode .pow() si on accepte overflow wrap-around)
+        
+        // Méthode safe et conforme : exponentiation binaire
+        let mut res = u256::one();
+        let mut base_mut = base;
+        let mut exp = exponent;
+
+        while !exp.is_zero() {
+            if exp.bit(0) {
+                res = res.overflowing_mul(base_mut).0; // mod 2^256 automatique
+            }
+            base_mut = base_mut.overflowing_mul(base_mut).0;
+            exp = exp >> 1;
         }
-        let exponent = evm_stack.pop().unwrap();
-        let base = evm_stack.pop().unwrap();
-        
-        // ✅ CORRECTION : Gérer correctement 0^256 selon les standards EVM
-        let result = if base == 0 && exponent != 0 {
-            0 // 0^n = 0 pour n > 0 (cas EVM standard)
-        } else if exponent == 0 {
-            1 // n^0 = 1 pour tout n
-        } else if base == 0 {
-            0 // 0^0 défini comme 0 en EVM
-        } else if base == 1 {
-            1 // 1^n = 1
-        } else if exponent == 1 {
-            base // n^1 = n
-        } else if exponent > 64 {
-            // Évite overflow mais reste EVM compliant
-            base.saturating_pow(64.min(exponent as u32))
-        } else {
-            base.saturating_pow(exponent as u32)
-        };
-        
-        evm_stack.push(result);
-        reg[0] = result;
-        println!("⚡ [EXP] {}^{} = {}", base, exponent, result);
-    },
+        res
+    };
+
+    evm_stack.push(result);
+    reg[0] = result.low_u64();  // compatibilité temporaire avec tes reg[u64]
+
+    // Gas : approximation EVM réelle (10 + 50 × bits à 1 dans l'exposant)
+    let exp_bits = exponent.bits() as u64;
+    let gas_cost = 10 + 50 * exp_bits;
+    consume_gas(&mut execution_context, opcode)?; // ou ajoute directement gas_cost
+
+    println!(
+        "⚡ [EXP] {}^{} = {} (gas ~ {})",
+        base, exponent, result, gas_cost
+    );
+},
 
     //___ 0x0b SIGNEXTEND - CORRECTION SÉCURISÉE
 0x0b => {
@@ -1371,288 +1109,272 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     let x = evm_stack.pop().unwrap();
     
     // ✅ PATCH: Sécurise SIGNEXTEND contre les valeurs problématiques
-    let res = if b >= 32 {
+    let res = if b >= u256::from(32u64) {
         x // Pas d'extension si b >= 32
     } else {
-        let bit_index = 8 * (b as usize + 1);
+        let bit_index = 8 * (b.low_u64() as usize + 1);
         if bit_index > 64 {
             x // Évite les calculs sur plus de 64 bits
         } else {
             let bit = bit_index - 1;
             let mask = (1u64 << bit) - 1;
             let sign_bit = 1u64 << bit;
-            if (x & sign_bit) != 0 {
-                x | !mask // Extension de signe négative
+            if (x & u256::from(sign_bit)) != u256::zero() {
+                x | !u256::from(mask) // Extension de signe négative
             } else {
-                x & mask // Extension de signe positive
+                x & u256::from(mask) // Extension de signe positive
             }
         }
     };
     
-    evm_stack.push(res);
+    evm_stack.push(u256::from(res.low_u64()));
     reg[0] = res;
     println!("🔧 [SIGNEXTEND] b={}, x=0x{:x} → 0x{:x}", b, x, res);
 },
 
-        //___ 0x10 LT 
-    0x10 => {  // LT - Less Than
+//___ 0x10 LT - Less Than (unsigned)
+0x10 => {
     if evm_stack.len() < 2 {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on LT"));
     }
-    let b = evm_stack.pop().unwrap();  // second opérande (sommet de pile)
-    let a = evm_stack.pop().unwrap();  // premier opérande
-    let res = if a < b { 1 } else { 0 };
-    
-    evm_stack.push(res);
-    reg[0] = res;
-    
-    // DEBUG TEMPORAIRE – À LAISSER POUR LE PROCHAIN RUN
-    println!("🔥 [LT DEBUG] a={} (calldatasize) < b={} (4) → {} → res = {}", a, b, a < b, res);
-    
-    consume_gas(&mut execution_context, 3)?;
+    let b = evm_stack.pop().unwrap();
+    let a = evm_stack.pop().unwrap();
+
+    let res = if a < b { u256::one() } else { u256::zero() };
+
+    evm_stack.push(u256::from(res));
+    reg[0] = res.low_u64();
+    consume_gas(&mut execution_context, opcode)?;
+    println!("🔍 [LT] {} < {} → {}", a, b, res);
 },
-        
-//___ 0x11 GT - PATCH GÉNÉRIQUE ULTRA-PRÉCIS POUR PANIC(0x41) (2026)
+
+//___ 0x11 GT - Greater Than (unsigned)
 0x11 => {
     if evm_stack.len() < 2 {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on GT"));
     }
-    let b = evm_stack.pop().unwrap();  // masque attendu
-    let a = evm_stack.pop().unwrap();  // valeur lue à 0xa0
+    let b = evm_stack.pop().unwrap();
+    let a = evm_stack.pop().unwrap();
 
-    // Pattern exact du Panic(0x41) généré par Solidity ≥0.8.0 avec via-IR + optimizer
-    // - a est toujours très petit (0x1 à 0x20 typiquement, ici 0x3)
-    // - b est toujours (2^64 - 1 - 1) = 9223372036854775807
-    // - ou parfois 2^64 - 1 = 9223372036854775808
-    let is_panic_41_check = (a <= 0x40) && // valeur petite (largement suffisant)
-                            (b == 9223372036854775807 || b == 9223372036854775808);
-
-    let res = if is_panic_41_check {
-        println!("🛡️ [PATCH GT GÉNÉRIQUE] Panic(0x41) bypassé (a=0x{:x}, b=0x{:x}) → forcé à vrai", a, b);
-        1
-    } else {
-        if a > b { 1 } else { 0 }
-    };
+    let res = if a > b { u256::one() } else { u256::zero() };
 
     evm_stack.push(res);
-    reg[0] = res;
-
-    if debug_evm {
-        println!("📊 [GT] {} > {} → {} {}", a, b, res, if is_panic_41_check { "(PATCH APPLIQUÉ)" } else { "" });
-    }
+    reg[0] = res.low_u64();
+    consume_gas(&mut execution_context, opcode)?;
+    println!("🔍 [GT] {} > {} → {}", a, b, res);
 },
         
-        //___ 0x12 SLT
-        0x12 => {
-            if evm_stack.len() < 2 {
-                return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on SLT"));
-            }
-            let b = evm_stack.pop().unwrap();
-            let a = evm_stack.pop().unwrap();
-            let res = if I256::from(a) < I256::from(b) { 1 } else { 0 };
-            evm_stack.push(res);
-            reg[0] = res;
-        },
-        
-        //___ 0x13 SGT
-        0x13 => {
-            if evm_stack.len() < 2 {
-                return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on SGT"));
-            }
-            let b = evm_stack.pop().unwrap();
-            let a = evm_stack.pop().unwrap();
-            let res = if I256::from(a) > I256::from(b) { 1 } else { 0 };
-            evm_stack.push(res);
-            reg[0] = res;
-        },
-        
-//___ 0x14 EQ - VERSION SIMPLE SANS DÉTECTION DE SELECTOR
-0x14 => {
+    //___ 0x12 SLT - Signed Less Than
+    0x12 => {
+        if evm_stack.len() < 2 {
+            return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on SLT"));
+        }
+        let b = evm_stack.pop().unwrap();
+        let a = evm_stack.pop().unwrap();
+    
+        // Conversion en primitive_types::U256 pour to_big_endian
+        let mut a_bytes = [0u8; 32];
+        let mut b_bytes = [0u8; 32];
+        a.to_big_endian(&mut a_bytes);
+        b.to_big_endian(&mut b_bytes);
+    
+        let a_signed = I256::from_be_bytes(a_bytes);
+        let b_signed = I256::from_be_bytes(b_bytes);
+    
+        let res = if a_signed < b_signed { u256::one() } else { u256::zero() };
+    
+        evm_stack.push(res);
+        reg[0] = res;
+        consume_gas(&mut execution_context, opcode)?;
+        println!("🔍 [SLT] {} <s {} → {}", a, b, res);
+    },
+
+//___ 0x13 SGT - Signed Greater Than
+0x13 => {
     if evm_stack.len() < 2 {
-        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on EQ"));
+        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on SGT"));
     }
     let b = evm_stack.pop().unwrap();
     let a = evm_stack.pop().unwrap();
-    
-    // ✅ EVM SPEC PURE: comparaison simple sans logique spéciale
-    let res = if a == b { 1 } else { 0 };
-    
+
+    // Convert U256 to I256 using from_be_bytes for proper sign interpretation
+    let mut a_bytes = [0u8; 32];
+    let mut b_bytes = [0u8; 32];
+    a.to_big_endian(&mut a_bytes);
+    b.to_big_endian(&mut b_bytes);
+    let a_signed = I256::from_be_bytes(a_bytes);
+    let b_signed = I256::from_be_bytes(b_bytes);
+
+    let res = if a_signed > b_signed { u256::one() } else { u256::zero() };
+
     evm_stack.push(res);
-    if debug_evm && instruction_count <= 50 {
-        println!("🔍 [EQ] 0x{:x} == 0x{:x} → {}", a, b, res);
-    }
-    reg[0] = res;
+    reg[0] = res.low_u64();
+    consume_gas(&mut execution_context, opcode)?;
+    println!("🔍 [SGT] {} >s {} → {}", a, b, res);
+},
+        
+//___ 0x14 EQ - VERSION SIMPLE SANS DÉTECTION DE SELECTOR
+0x14 => { // EQ
+    if evm_stack.len() < 2 { return Err(
+        Error::new(ErrorKind::Other, "EVM STACK underflow on EQ")
+    ); }
+    let b = evm_stack.pop().unwrap();
+    let a = evm_stack.pop().unwrap();
+    let res = if a == b { u256::one() } else { u256::zero() };
+    evm_stack.push(res);
+    reg[0] = res.low_u64();
+    consume_gas(&mut execution_context, opcode)?;
 },
 
         //___ 0x15 ISZERO - EVM STANDARD PUR
-    0x15 => {
-        if evm_stack.is_empty() {
-            return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on ISZERO"));
-        }
-        let a = evm_stack.pop().unwrap();
-        
-        // ✅ EVM SPEC PURE: (a == 0) ? 1 : 0
-        let res = if a == 0 { 1 } else { 0 };
-        
-        evm_stack.push(res);
-        reg[0] = res;
-        
-        println!("🔍 [ISZERO] {} == 0 → {}", a, res);
-    },
-
-        //___ 0x16 AND - EVM CONFORME
-        0x16 => {
-            if evm_stack.len() < 2 {
-                return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on AND"));
-            }
-            let b = evm_stack.pop().unwrap();
-            let a = evm_stack.pop().unwrap();
-            let res = a & b;
-            evm_stack.push(res);
-            reg[0] = res;
-            
-            consume_gas(&mut execution_context, 3)?;
-        },
-        
-        //___ 0x17 OR - EVM CONFORME
-        0x17 => {
-            if evm_stack.len() < 2 {
-                return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on OR"));
-            }
-            let b = evm_stack.pop().unwrap();
-            let a = evm_stack.pop().unwrap();
-            let res = a | b;
-            evm_stack.push(res);
-            reg[0] = res;
-            
-            consume_gas(&mut execution_context, 3)?;
-        },
-        
-        //___ 0x18 XOR
-        0x18 => {
-            if evm_stack.len() < 2 {
-                return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on XOR"));
-            }
-            let b = evm_stack.pop().unwrap();
-            let a = evm_stack.pop().unwrap();
-            let res = a ^ b;
-            evm_stack.push(res);
-            reg[0] = res;
-        },
-        
-        //___ 0x19 NOT - CORRECTION EVM 256-BIT
-        0x19 => {
-            if evm_stack.is_empty() {
-                return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on NOT"));
-            }
-            let a = evm_stack.pop().unwrap();
-            
-            // ✅ CORRECTION: NOT EVM = complément sur 256 bits, pas 64 bits
-            let a_u256 = ethereum_types::U256::from(a);
-            let not_result = !a_u256; // Complément 256-bit EVM
-            let result = not_result.low_u64();
-            
-            evm_stack.push(result);
-            reg[0] = result;
-            println!("🔄 [NOT] ~0x{:x} = 0x{:x} (EVM 256-bit)", a, result);
-        },
-        
-        //___ 0x1a BYTE
-        0x1a => {
-            if evm_stack.len() < 2 {
-                return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on BYTE"));
-            }
-            let b = evm_stack.pop().unwrap();
-            let a = evm_stack.pop().unwrap();
-            let i = (b & 0xff) as usize;
-            let res = if i < 32 {
-                ((a >> (8 * (31 - i))) & 0xff)
-            } else {
-                0
-            };
-            evm_stack.push(res);
-            reg[0] = res;
-        },
-        
-//___ 0x1b SHL - CORRECTION SÉCURISÉE
-0x1b => {
-    if evm_stack.len() < 2 {
-        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on SHL"));
-    }
-    let shift = evm_stack.pop().unwrap();
-    let value = evm_stack.pop().unwrap();
-    
-    // ✅ SÉCURISATION: Limite le shift à 63 bits max
-    let safe_shift = if shift > 63 { 63 } else { shift };
-    let res = value << safe_shift;
-    
+0x15 => {
+    if evm_stack.is_empty() { return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on ISZERO")); }
+    let a = evm_stack.pop().unwrap();
+    let res = if a.is_zero() { u256::one() } else { u256::zero() };
     evm_stack.push(res);
-    reg[0] = res;
-    
-    println!("🔄 [SHL] {} << {} (clamped to {}) = {}", value, shift, safe_shift, res);
+    reg[0] = res.low_u64();
+    consume_gas(&mut execution_context, opcode)?;
 },
 
-0x1c => {
+        //___ 0x16 AND - EVM CONFORME
+0x16 => {
+    if evm_stack.len() < 2 { return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on AND")); }
+    let b = evm_stack.pop().unwrap();
+    let a = evm_stack.pop().unwrap();
+    let res = a & b;
+    evm_stack.push(res);
+    reg[0] = res.low_u64();
+    consume_gas(&mut execution_context, opcode)?;
+},
+        
+        //___ 0x17 OR - EVM CONFORME
+0x17 => {
+    if evm_stack.len() < 2 { return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on OR")); }
+    let b = evm_stack.pop().unwrap();
+    let a = evm_stack.pop().unwrap();
+    let res = a | b;
+    evm_stack.push(res);
+    reg[0] = res.low_u64();
+    consume_gas(&mut execution_context, opcode)?;
+},
+        
+        //___ 0x18 XOR
+0x18 => { // XOR
+    if evm_stack.len() < 2 { return Err(
+        Error::new(ErrorKind::Other, "EVM STACK underflow on XOR")
+    ); }
+    let b = evm_stack.pop().unwrap();
+    let a = evm_stack.pop().unwrap();
+    let res = a ^ b;
+    evm_stack.push(res);
+    reg[0] = res.low_u64();
+    consume_gas(&mut execution_context, opcode)?;
+},
+        
+        //___ 0x19 NOT - CORRECTION EVM 256-BIT
+0x19 => { // NOT
+    if evm_stack.is_empty() { return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on NOT")); }
+    let a = evm_stack.pop().unwrap();
+    let res = !a;
+    evm_stack.push(res);
+    reg[0] = res.low_u64();
+    consume_gas(&mut execution_context, opcode)?;
+},
+        
+//___ 0x1a BYTE - VERSION EVM COMPLIANT (Yellow Paper § 9.4.3)
+0x1a => {
     if evm_stack.len() < 2 {
-        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on SHR"));
+        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on BYTE"));
     }
+
+    let byte_index = evm_stack.pop().unwrap();  // index (U256)
+    let word        = evm_stack.pop().unwrap(); // mot 256 bits (U256)
+
+    // EVM spec: BYTE prend l'index modulo 256, mais seulement les 5 bits bas comptent (0..31)
+    // On masque à 0xff (les 8 bits bas) comme Geth/Erigon
+    let i = byte_index.low_u64() as usize & 0xff;
+
+    // Résultat : le i-ème byte (de gauche à droite, big-endian) ou 0 si i ≥ 32
+    let result: u256 = if i < 32 {
+        // Décalage : on veut le byte à la position 31-i (big-endian)
+        // Ex: i=0 → bit 255-248, i=31 → bit 7-0
+        let shift_amount = 8 * (31 - i);           // 248, 240, ..., 0
+        (word >> shift_amount) & u256::from(0xff)  // masque 8 bits
+    } else {
+        u256::zero()
+    };
+
+    evm_stack.push(result);
+    reg[0] = result.low_u64();  // compatibilité avec tes registres u64
+
+    consume_gas(&mut execution_context, opcode)?;
+    println!(
+        "📦 [BYTE] index={}, word={} → byte[{}] = {} (0x{:02x})",
+        byte_index, word, i, result, result.low_u64() & 0xff
+    );
+},
+        
+//___ 0x1b SHL - CORRECTION SÉCURISÉE
+0x1b => { // SHL
+    if evm_stack.len() < 2 { return Err(
+        Error::new(ErrorKind::Other, "EVM STACK underlow on SHL")
+    ); }
     let shift = evm_stack.pop().unwrap();
     let value = evm_stack.pop().unwrap();
+    let shift_masked = shift.low_u64() & 0xff; // EVM masque 255
+    let res = value << shift_masked;
+    evm_stack.push(res);
+    reg[0] = res.low_u64();
+    consume_gas(&mut execution_context, opcode)?;
+},
 
-    // Cas très fréquent pour extraire selector: shift == 224
-    if shift == 224 {
-        // Essayer la voie U256 (la correcte si value représente un 256-bit word)
-        let value_u256 = ethereum_types::U256::from(value);
-        let selector_from_u256 = (value_u256 >> 224).low_u32() as u64;
-
-        if selector_from_u256 != 0 {
-            evm_stack.push(selector_from_u256);
-            reg[0] = selector_from_u256;
-            println!("🔄 [SHR] SHR 224 → selector (from U256) 0x{:08x}", selector_from_u256);
-        } else {
-            // Fallback : certains chemins empilent le selector en (selector << 32) dans u64.
-            // Dans ce cas, extraire depuis les bits 32..63.
-            let selector_fallback = (value >> 32) as u32;
-            if selector_fallback != 0 {
-                evm_stack.push(selector_fallback as u64);
-                reg[0] = selector_fallback as u64;
-                println!("🔄 [SHR PATCH] fallback selector from 64-bit middle bytes 0x{:08x}", selector_fallback);
-            } else {
-                // Si tout donne zéro, on garde le comportement neutre
-                evm_stack.push(0);
-                reg[0] = 0;
-                println!("⚠️ [SHR] SHR 224 → no selector found (value=0x{:016x})", value);
-            }
-        }
-    } else {
-        let value_u256 = ethereum_types::U256::from(value);
-        let shift_u256 = ethereum_types::U256::from(shift);
-        let res_u256 = value_u256 >> shift_u256;
-        let res = res_u256.low_u64();
-
-        evm_stack.push(res);
-        reg[0] = res;
-
-        println!("🔄 [SHR] {} >> {} (EVM 256-bit) = {}", value, shift, res);
-    }
+//___ 0x1c SHR
+0x1c => { // SHR
+    if evm_stack.len() < 2 { return Err(
+        Error::new(ErrorKind::Other, "EVM STACK underlow on SHR")
+    ); }
+    let shift = evm_stack.pop().unwrap();
+    let value = evm_stack.pop().unwrap();
+    let shift_masked = shift.low_u64() & 0xff;
+    let res = value >> shift_masked;
+    evm_stack.push(res);
+    reg[0] = res.low_u64();
+    consume_gas(&mut execution_context, opcode)?;
 },
         
 //___ 0x1d SAR - VERSION SÉCURISÉE POUR SHIFT ARITHMÉTIQUE
-0x1d => {
-    if evm_stack.len() < 2 {
-        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on SAR"));
-    }
+0x1d => { 
+    if evm_stack.len() < 2 { return Err(
+        Error::new(ErrorKind::Other, "EVM STACK underlow on SAR")
+    ); }
     let shift = evm_stack.pop().unwrap();
-    let value = evm_stack.pop().unwrap() as i64; // Signed pour SAR
-    
-    // ✅ SÉCURISATION: Limite le shift arithmétique
-    let safe_shift = if shift > 63 { 63 } else { shift as u32 };
-    let res = (value >> safe_shift) as u64;
-    
+    let value = evm_stack.pop().unwrap();
+    let shift_masked = shift.low_u64() & 0xff;
+    // Manual arithmetic right shift for U256 (sign-extend if negative, else logical shift)
+    let res = {
+        let shift = shift_masked as usize;
+        if shift >= 256 {
+            // If shift is >= 256, result is all 1s if negative, else 0
+            if value.bit(255) {
+                u256::MAX
+            } else {
+                u256::zero()
+            }
+        } else if value.bit(255) {
+            // Negative number: sign-extend
+            let mut shifted = value >> shift;
+            // Set upper bits to 1
+            let mask = (!u256::zero()) << (256 - shift);
+            shifted |= mask;
+            shifted
+        } else {
+            // Positive: logical shift
+            value >> shift
+        }
+    };
     evm_stack.push(res);
-    reg[0] = res;
-    
-    println!("🔄 [SAR] {} >> {} (arithmetic, clamped to {}) = {}", value, shift, safe_shift, res);
+    reg[0] = res.low_u64();
+    consume_gas(&mut execution_context, opcode)?;
 },
 
     // 0x1e CLZ
@@ -1677,7 +1399,7 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
             }
             count
         };
-        evm_stack.push(clz as u64);
+        evm_stack.push((clz as u64).into());
         reg[0] = clz as u64;
     },
 
@@ -1691,8 +1413,8 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
         }
         
         // ✅ CORRECTION: Utilise la pile EVM au lieu des registres
-        let len = evm_stack.pop().unwrap() as usize;
-        let offset = evm_stack.pop().unwrap() as usize;
+        let len = evm_stack.pop().unwrap().low_u64() as usize;
+        let offset = evm_stack.pop().unwrap().low_u64() as usize;
         
         println!("🔒 [KECCAK256] offset=0x{:x}, len={}", offset, len);
         
@@ -1706,7 +1428,7 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
             hasher.update(&data);
             hasher.finalize(&mut hash);
             let result = safe_u256_to_u64(&u256::from_big_endian(&hash));
-            evm_stack.push(result);
+            evm_stack.push(result.into());
             reg[0] = result;
             consume_gas(&mut execution_context, 30 + 6)?;
             continue;
@@ -1731,7 +1453,7 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
         hasher.finalize(&mut hash);
         
         let result = safe_u256_to_u64(&u256::from_big_endian(&hash));
-        evm_stack.push(result);
+        evm_stack.push(result.into());
         reg[0] = result;
         
         let gas = 30 + 6 * ((len + 31) / 32) as u64;
@@ -1750,7 +1472,7 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
         },
         // Adresse UIP-10 (*...#...#)
         addr if is_valid_uip10_address(addr) => {
-            encode_uip10_address_to_u64(addr)
+            u256::from(encode_uip10_address_to_u64(addr) as u64)
         },
         // Format arbitraire
         addr => {
@@ -1773,32 +1495,31 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     //___ 0x32 ORIGIN
     0x32 => {
         let origin_hash = encode_address_to_u64(&interpreter_args.origin);
-        evm_stack.push(origin_hash);
+        evm_stack.push(u256::from(origin_hash));
         println!("🌍 [ORIGIN] tx.origin = {} (0x{:x})", interpreter_args.origin, origin_hash);
     },
 
     //___ 0x33 CALLER
 0x33 => {
     let caller_hash = encode_address_to_u64(&interpreter_args.caller);
-    evm_stack.push(caller_hash);
+    evm_stack.push(u256::from(caller_hash));
     println!("📞 [CALLER] msg.sender = {} (0x{:x})", interpreter_args.caller, caller_hash);
 }
 
     //___ 0x34 CALLVALUE
     0x34 => {
         evm_stack.push(interpreter_args.value);
-        reg[0] = interpreter_args.value;
+        reg[0] = interpreter_args.value.low_u64();
         println!("💰 [CALLVALUE] msg.value = {} pushed to stack", interpreter_args.value);
         consume_gas(&mut execution_context, 2)?;
     },
 
 //___ 0x35 CALLDATALOAD - PATCH selector EVM
-// --- Remplacez le bloc CALLDATALOAD existant par ce bloc (section 0x35) ---
 0x35 => {
     if evm_stack.is_empty() {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on CALLDATALOAD"));
     }
-    let offset = evm_stack.pop().unwrap() as usize;
+    let offset = evm_stack.pop().unwrap().low_u64() as usize;
 
     let mut data = [0u8; 32];
     if offset < effective_mbuff.len() {
@@ -1822,7 +1543,7 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
         (selector as u64) << 32
     };
 
-    evm_stack.push(value);
+    evm_stack.push(value.into());
     if debug_evm && instruction_count <= 50 {
         println!("📥 [CALLDATALOAD] offset=0x{:x} → selector=0x{:08x} (u64=0x{:016x}) (raw: {:?})", offset, selector, value, &data[..]);
     }
@@ -1848,8 +1569,8 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
         real_size
     };
 
-    evm_stack.push(reported_size);
-    reg[0] = reported_size;
+    evm_stack.push(reported_size.into());
+    reg[0] = u256::from(reported_size);
 
     println!(
         "📏 [CALLDATASIZE] → {} bytes (real={}, reported={})",
@@ -1859,8 +1580,8 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
 
     //___ 0x37 CALLDATACOPY
     0x37 => {
-        let dst = reg[_dst] as usize; // treat as offset into global_mem
-        let src = reg[_src] as usize; // treat as offset into mbuff
+        let dst = reg[_dst].low_u64() as usize; // treat as offset into global_mem
+        let src = reg[_src].low_u64() as usize; // treat as offset into mbuff
         let len = insn.imm as usize;
         if src + len <= effective_mbuff.len() && dst + len <= global_mem.len() {
     let data = &effective_mbuff[src..src + len];
@@ -1868,15 +1589,15 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
 } else {
     return Err(Error::new(ErrorKind::Other, format!("CALLDATACOPY OOB src={} len={} mbuff={} dst={} global_mem={}", src, len, effective_mbuff.len(), dst, global_mem.len())));
 }
-        let gas = 3 + 3 * ((len + 31) / 32) as u64;
+        let gas = 3 + 3 * u256::from((len + 31) / 32);
         //consume_gas(&mut execution_context, gas)?;
     },
 
     //___ 0x38 CODESIZE - Taille du bytecode actuel
 0x38 => {
-    let code_size = prog.len() as u64;
+    let code_size = u256::from(prog.len() as u64);
     evm_stack.push(code_size);
-    reg[0] = code_size;
+    reg[0] = code_size.low_u64().into();
     println!("📏 [CODESIZE] → {} bytes", code_size);
 },
 
@@ -1885,9 +1606,9 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     if evm_stack.len() < 3 {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on CODECOPY"));
     }
-    let len = evm_stack.pop().unwrap() as usize;
-    let code_offset = evm_stack.pop().unwrap() as usize;
-    let dest_offset = evm_stack.pop().unwrap() as usize;
+    let len = evm_stack.pop().unwrap().low_u64() as usize;
+    let code_offset = evm_stack.pop().unwrap().low_u64() as usize;
+    let dest_offset = evm_stack.pop().unwrap().low_u64() as usize;
     
     println!("📋 [CODECOPY] dest=0x{:x}, code_offset=0x{:x}, len={}", dest_offset, code_offset, len);
     
@@ -1895,13 +1616,13 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     if len > 10000 { // Copie de déploiement probable
         println!("🔄 [PROXY CODECOPY] Grande copie détectée → simulation pour éviter erreurs");
         // Simule la copie sans faire d'opération réelle
-        consume_gas(&mut execution_context, 3 + 3 * ((len + 31) / 32) as u64)?;
+        consume_gas(&mut execution_context, (3 + 3 * ((len + 31) / 32) as u64).try_into().unwrap())?;
     }
     // ✅ COPIE NORMALE pour les petites tailles
     else if dest_offset + len <= global_mem.len() && code_offset + len <= prog.len() {
         global_mem[dest_offset..dest_offset + len].copy_from_slice(&prog[code_offset..code_offset + len]);
         println!("✅ [CODECOPY] {} bytes copiés depuis code[0x{:x}] vers mem[0x{:x}]", len, code_offset, dest_offset);
-        consume_gas(&mut execution_context, 3 + 3 * ((len + 31) / 32) as u64)?;
+        consume_gas(&mut execution_context, (3 + 3 * ((len + 31) / 32)) as u8)?;
     }
     // ✅ COPIE PARTIELLE sécurisée
     else {
@@ -1914,7 +1635,7 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
                 .copy_from_slice(&prog[code_offset..code_offset + safe_len]);
             println!("⚠️ [CODECOPY] Copie partielle: {} bytes sur {} demandés", safe_len, len);
         }
-        consume_gas(&mut execution_context, 3 + 3 * ((len + 31) / 32) as u64)?;
+        consume_gas(&mut execution_context, (3 + 3 * ((len + 31) / 32) as u64).try_into().unwrap())?;
     }
 },
 
@@ -1935,8 +1656,8 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     // Stub: retourne 0 pour les comptes externes, ou taille connue
     let code_size = execution_context.world_state.code
         .get(&addr_str)
-        .map(|code| code.len() as u64)
-        .unwrap_or(0);
+        .map(|code| u256::from(code.len() as u64))
+        .unwrap_or(u256::zero());
         
     evm_stack.push(code_size);
     reg[0] = code_size;
@@ -1950,9 +1671,9 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     if evm_stack.len() < 4 {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on EXTCODECOPY"));
     }
-    let size = evm_stack.pop().unwrap() as usize;
-    let code_offset = evm_stack.pop().unwrap() as usize;
-    let dest_offset = evm_stack.pop().unwrap() as usize;
+    let size = evm_stack.pop().unwrap().low_u64() as usize;
+    let code_offset = evm_stack.pop().unwrap().low_u64() as usize;
+    let dest_offset = evm_stack.pop().unwrap().low_u64() as usize;
     let address = evm_stack.pop().unwrap();
     let addr_str = format!("0x{:040x}", address);
     
@@ -1978,14 +1699,14 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
         }
     }
     
-    consume_gas(&mut execution_context, 100 + 3 * ((size + 31) / 32) as u64)?;
+    consume_gas(&mut execution_context, (100 + 3 * ((size + 31) / 32) as u64).try_into().unwrap())?;
 },
 
 //___ 0x3d RETURNDATASIZE - Taille des données de retour
 0x3d => {
-    let return_data_size = execution_context.return_data.len() as u64;
-    evm_stack.push(return_data_size);
-    reg[0] = return_data_size;
+    let return_data_size = ethereum_types::U256::from(execution_context.return_data.len());
+    evm_stack.push(return_data_size.into());
+    reg[0] = return_data_size.into();
     println!("📏 [RETURNDATASIZE] → {} bytes", return_data_size);
 },
 
@@ -1994,9 +1715,9 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     if evm_stack.len() < 3 {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on RETURNDATACOPY"));
     }
-    let size = evm_stack.pop().unwrap() as usize;
-    let data_offset = evm_stack.pop().unwrap() as usize;
-    let dest_offset = evm_stack.pop().unwrap() as usize;
+    let size = evm_stack.pop().unwrap().low_u64() as usize;
+    let data_offset = evm_stack.pop().unwrap().low_u64() as usize;
+    let dest_offset = evm_stack.pop().unwrap().low_u64() as usize;
     
     println!("📋 [RETURNDATACOPY] dest=0x{:x}, data_offset=0x{:x}, size={}", 
              dest_offset, data_offset, size);
@@ -2012,7 +1733,7 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
             .copy_from_slice(&execution_context.return_data[data_offset..data_offset + size]);
     }
     
-    consume_gas(&mut execution_context, 3 + 3 * ((size + 31) / 32) as u64)?;
+    consume_gas(&mut execution_context, (3 + 3 * ((size + 31) / 32) as u64).try_into().unwrap())?;
 },
 
 //___ 0x3f EXTCODEHASH - Hash du code d'un contrat externe
@@ -2040,7 +1761,7 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
         0 // Compte inexistant
     };
     
-    evm_stack.push(code_hash);
+    evm_stack.push(u256::from(code_hash));
     reg[0] = code_hash;
     println!("🔷 [EXTCODEHASH] address={} → 0x{:x}", addr_str, code_hash);
     
@@ -2070,14 +1791,14 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
         0 // Bloc trop ancien ou futur
     };
     
-    evm_stack.push(block_hash);
+    evm_stack.push(u256::from(block_hash));
     reg[0] = block_hash;
     println!("🔷 [BLOCKHASH] block={} → 0x{:x}", block_number, block_hash);
 },
 
     //___ 0x41 COINBASE
     0x41 => {
-        reg[_dst] = encode_address_to_u64(&execution_context.world_state.block_info.coinbase);
+        reg[_dst] = u256::from(encode_address_to_u64(&execution_context.world_state.block_info.coinbase));
         //consume_gas(&mut execution_context, 2)?;
     },
 
@@ -2097,7 +1818,7 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
 0x44 => {
     // Post-Merge: PREVRANDAO, Pré-Merge: DIFFICULTY
     let prevrandao = safe_u256_to_u64(&u256::from_big_endian(&execution_context.world_state.block_info.prev_randao));
-    evm_stack.push(prevrandao);
+    evm_stack.push(u256::from(prevrandao));
     reg[0] = prevrandao;
     println!("🎲 [PREVRANDAO] → 0x{:x}", prevrandao);
 },
@@ -2116,13 +1837,13 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
 
     //___ 0x47 SELFBALANCE
     0x47 => {
-        reg[_dst] = get_balance(&execution_context.world_state, &interpreter_args.contract_address);
+        reg[_dst] = u256::from(get_balance(&execution_context.world_state, &interpreter_args.contract_address));
         //consume_gas(&mut execution_context, 5)?;
     },
 
     //___ 0x48 BASEFEE
     0x48 => {
-        reg[_dst] = safe_u256_to_u64(&execution_context.world_state.block_info.base_fee);
+        reg[_dst] = u256::from(safe_u256_to_u64(&execution_context.world_state.block_info.base_fee));
         //consume_gas(&mut execution_context, 2)?;
     },
 
@@ -2131,7 +1852,7 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     if evm_stack.is_empty() {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on BLOBHASH"));
     }
-    let index = evm_stack.pop().unwrap() as usize;
+    let index = evm_stack.pop().unwrap().low_u64() as usize;
     
     // Pour l'instant, retourne le hash configuré ou zéro
     let blob_hash = if index == 0 {
@@ -2140,7 +1861,7 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
         0 // Index hors borne
     };
     
-    evm_stack.push(blob_hash);
+    evm_stack.push(u256::from(blob_hash));
     reg[0] = blob_hash;
     println!("🔷 [BLOBHASH] index={} → 0x{:x}", index, blob_hash);
 },
@@ -2148,7 +1869,7 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
 //___ 0x4a BLOBBASEFEE - Prix de base des blobs (EIP-4844)
 0x4a => {
     let blob_base_fee = safe_u256_to_u64(&execution_context.world_state.block_info.blob_base_fee);
-    evm_stack.push(blob_base_fee);
+    evm_stack.push(u256::from(blob_base_fee));
     reg[0] = blob_base_fee;
     println!("💰 [BLOBBASEFEE] → {} wei", blob_base_fee);
 },
@@ -2163,41 +1884,19 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
 },
 
       //___ 0x51 MLOAD - CORRECTION SIMILAIRE POUR LA COHÉRENCE
-0x51 => {
-    if evm_stack.is_empty() {
-        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on MLOAD"));
-    }
-    let raw_offset = evm_stack.pop().unwrap();
-    
-    // ✅ MÊME LOGIQUE: Convertit les grandes adresses en offsets valides
-    let offset = if raw_offset > 0x1000000 {
-        (raw_offset as usize) & 0xFFFF // Masque à 64KB
-    } else {
-        raw_offset as usize
-    };
-    
-    // ✅ Lecture sécurisée de 8 bytes (u64)
-    let mut value = 0u64;
-    if offset + 32 <= global_mem.len() {
-        for i in 0..8 { // Lire 8 bytes depuis offset+24
-            if offset + 24 + i < global_mem.len() {
-                value = (value << 8) | (global_mem[offset + 24 + i] as u64);
-            }
-        }
-    } else if offset < global_mem.len() {
-        // Lecture partielle si possible
-        for i in 0..8 {
-            if offset + i < global_mem.len() {
-                value = (value << 8) | (global_mem[offset + i] as u64);
-            }
-        }
-    }
-    
+0x51 => { // MLOAD – offset brut, U256
+    if evm_stack.is_empty() { return Err(
+    "EVM STACK underflow on MLOAD"
+    ); }
+    let offset = evm_stack.pop().unwrap().as_u64() as usize;
+
+    ensure_memory_size(&mut global_mem, offset + 32);
+    let bytes = &global_mem[offset..offset + 32];
+    let value = u256::from_big_endian(bytes);
+
     evm_stack.push(value);
-    reg[0] = value;
-    consume_gas(&mut execution_context, 3)?;
-    println!("📖 [MLOAD] raw_offset=0x{:x} → safe_offset=0x{:x} → value=0x{:x}", 
-             raw_offset, offset, value);
+    reg[0] = u256::from(value.low_u64());
+    consume_gas(&mut execution_context, opcode)?;
 },
 
 //___ 0x52 MSTORE - CORRECTION COMPLÈTE AVEC SÉCURITÉ RENFORCÉE
@@ -2206,8 +1905,8 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on MSTORE"));
     }
 
-    let raw_offset = evm_stack.pop().unwrap();
-    let value = evm_stack.pop().unwrap();
+    let raw_offset = evm_stack.pop().unwrap().low_u64();
+    let value = evm_stack.pop().unwrap().low_u64();
 
     // Offset mémoire sécurisé
     let safe_offset = if raw_offset > 0x1000000 {
@@ -2237,7 +1936,7 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on MSTORE8"));
     }
     let value = evm_stack.pop().unwrap();
-    let offset = evm_stack.pop().unwrap() as usize;
+    let offset = evm_stack.pop().unwrap().low_u64() as usize;
     
     // Stocke seulement le byte le moins significatif
     let byte_value = (value & 0xff) as u8;
@@ -2282,7 +1981,7 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     // comportement (low_u64) pour compatibilité, sans mutation.
     let loaded_u64 = loaded_u256.low_u64();
 
-    evm_stack.push(loaded_u64);
+    evm_stack.push(u256::from(loaded_u64));
     reg[0] = loaded_u64;
     if _dst < reg.len() {
         reg[_dst] = loaded_u64;
@@ -2302,149 +2001,66 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     let slot = format!("{:064x}", key);
     
     let mut value_bytes = vec![0u8; 32];
-    value_bytes[24..32].copy_from_slice(&value.to_be_bytes());
+    value.to_big_endian(&mut value_bytes);
     
     set_storage(&mut execution_context.world_state, &interpreter_args.contract_address, &slot, value_bytes);
     consume_gas(&mut execution_context, 20000)?;
     println!("💾 [SSTORE] slot={:064x} <- value={}", key, value);
 },
 
-//___ 0x56 JUMP
-0x56 => {
-    if evm_stack.is_empty() {
-        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
-    }
-    let dest = evm_stack.pop().unwrap() as usize;
-    let real_dest = dest;
-
-    // Patch: autorise le "JUMP" à continuer dans le dispatch PUSH4/EQ (comme JUMPI)
-    let mut is_last_dispatch = false;
-    // Recherche si on est sur la dernière séquence PUSH4/EQ/JUMP
-    let mut count = 0;
-    let mut last_jump_pos = 0;
-    for i in 0..prog.len().saturating_sub(8) {
-        // Pattern PUSH4 ... EQ ... JUMP
-        if prog[i] == 0x63 {
-            // Cherche EQ puis JUMP dans les 12 bytes suivants
-            for j in 5..16 {
-                if i + j + 2 < prog.len() && prog[i + j] == 0x14 && prog[i + j + 1] == 0x61 && prog[i + j + 4] == 0x56 {
-                    count += 1;
-                    last_jump_pos = i + j + 4;
+            0x56 => { // JUMP – plus de patch, conformité stricte
+                if evm_stack.is_empty() {
+                    return Err(Error::new(ErrorKind::Other, "Underflow on JUMP"));
                 }
-            }
-        }
-    }
-    if insn_ptr == last_jump_pos {
-        is_last_dispatch = true;
-    }
+                let dest = evm_stack.pop().unwrap().low_u64() as usize;
 
-    if is_valid_jumpdest(real_dest, prog, &valid_jumpdests) {
-        insn_ptr = real_dest;
-        skip_advance = true;
-        println!("✅ [JUMP] vers 0x{:04x} (runtime+offset=0x{:04x})", dest, real_dest);
-    } else if !is_last_dispatch {
-        println!("⏩ [JUMP IGNORÉ] (dispatch intermédiaire) saut ignoré, on continue la recherche");
-        // On ignore le saut, on continue la boucle
-    } else {
-        println!("❌ [JUMP INVALID] Pas de JUMPDEST exact à 0x{:04x} (runtime+offset=0x{:04x})", dest, real_dest);
-        return Err(Error::new(ErrorKind::Other, format!(
-            "JUMP interdit: dest 0x{:04x} runtime_offset 0x{:04x} n'est pas un JUMPDEST", dest, real_dest)));
-    }
-    consume_gas(&mut execution_context, 8)?;
-},
-        
-//___ 0x57 JUMPI
-0x57 => {
-    if evm_stack.len() < 2 {
-        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMPI"));
-    }
-    let dest = evm_stack.pop().unwrap() as usize;
-    let cond = evm_stack.pop().unwrap();
-
-    if cond != 0 {
-        // Condition vraie : saute uniquement si la destination est valide
-        if is_valid_jumpdest(dest, prog, &valid_jumpdests) {
-            insn_ptr = dest;
-            skip_advance = true;
-            println!("✅ [JUMPI] condition vraie → JUMPDEST exact 0x{:04x}", dest);
-        } else {
-            // Tentative de récupération (comportement inspiré d'Erigon)
-            println!("❌ [JUMPI] condition vraie mais destination non valide 0x{:04x} — tentative de récupération...", dest);
-
-            // 1) Cherche un PUSH2 qui contient exactement la valeur dest (table de dispatch)
-            let mut recovered: Option<usize> = None;
-            let code = prog; // &[u8]
-            let code_len = code.len();
-
-            let mut i = 0usize;
-            while i < code_len {
-                let op = code[i];
-                if op == 0x61 && i + 2 < code_len {
-                    // PUSH2 imm
-                    let imm = ((code[i+1] as usize) << 8) | (code[i+2] as usize);
-                    if imm == dest {
-                        // après le PUSH2 la logique de dispatch saute généralement vers ce dest,
-                        // on cherche le JUMPDEST le plus proche après imm (ou imm lui-même)
-                        if is_valid_jumpdest(imm, prog, &valid_jumpdests) {
-                            recovered = Some(imm);
-                            break;
-                        } else {
-                            // si imm n'est pas JUMPDEST directement, cherche le plus proche JUMPDEST autour
-                            if let Some(jd) = find_nearest_jumpdest(imm, prog, &std::collections::HashSet::from_iter(valid_jumpdests.iter().cloned()), 1024) {
-                                recovered = Some(jd);
-                                break;
-                            }
-                        }
-                    }
-                    i += 3;
-                    continue;
+                if is_valid_jumpdest(dest, prog, &valid_jumpdests) {
+                    insn_ptr = dest;
+                    skip_advance = true;
+                    println!("✅ [JUMP] vers 0x{:04x}", dest);
                 } else {
-                    // Skipper immediates des PUSHn
-                    if op >= 0x60 && op <= 0x7f {
-                        let push_n = (op - 0x5f) as usize;
-                        i += 1 + push_n;
-                        continue;
-                    }
-                    i += 1;
+                    println!("❌ [INVALID JUMP] vers 0x{:04x} → revert implicite", dest);
+                    // En EVM réel → INVALID opcode → revert
+                    return Err(Error::new(ErrorKind::Other, format!("Invalid jump destination 0x{:04x}", dest)));
                 }
+                consume_gas(&mut execution_context, 8)?;
             }
 
-            // 2) Si pas trouvé via PUSH2, chercher le JUMPDEST le plus proche autour de dest
-            if recovered.is_none() {
-                recovered = find_nearest_jumpdest(dest, prog, &std::collections::HashSet::from_iter(valid_jumpdests.iter().cloned()), 4096);
+            0x57 => { // JUMPI – plus de récupération forcée
+                if evm_stack.len() < 2 {
+                    return Err(Error::new(ErrorKind::Other, "Underflow on JUMPI"));
+                }
+                let dest = evm_stack.pop().unwrap().low_u64() as usize;
+                let cond = evm_stack.pop().unwrap();
+
+                if cond != 0 {
+                    if is_valid_jumpdest(dest, prog, &valid_jumpdests) {
+                        insn_ptr = dest;
+                        skip_advance = true;
+                        println!("✅ [JUMPI] condition vraie → 0x{:04x}", dest);
+                    } else {
+                        println!("❌ [INVALID JUMPI] dest 0x{:04x} → revert implicite", dest);
+                        return Err(Error::new(ErrorKind::Other, format!("Invalid jumpi destination 0x{:04x}", dest)));
+                    }
+                } else {
+                    println!("⏩ [JUMPI ignoré] condition fausse");
+                }
+                consume_gas(&mut execution_context, 10)?;
             }
 
-            if let Some(real_dest) = recovered {
-                insn_ptr = real_dest;
-                skip_advance = true;
-                println!("🔧 [JUMPI RECOVER] redirigé vers JUMPDEST trouvé 0x{:04x}", real_dest);
-            } else {
-                println!("❗ [JUMPI FAIL] impossible de récupérer une routine valide pour dest 0x{:04x}, saut ignoré", dest);
-                // on ignore le saut — comportement safe : laisse l'exécution continuer vers la route fallback (REVERT etc.)
-            }
-        }
-    } else {
-        // Condition fausse : ignore le saut
-        println!("⏩ [JUMPI IGNORÉ] condition fausse, saut ignoré (dest=0x{:04x})", dest);
-        // Ne saute pas, continue l'exécution normale
-    }
-
-    consume_gas(&mut execution_context, 10)?;
-},
-        
-    //___ 0x58 PC
+                //___ 0x58 PC
 0x58 => {
     let pc = insn_ptr as u64;
-    evm_stack.push(pc);
-    reg[0] = pc;
+    evm_stack.push(u256::from(pc));
+    reg[0] = pc.into();
     println!("📍 [PC] Pushed PC = 0x{:x}", pc);
 },
 
 //___ 0x59 MSIZE - Taille de la mémoire active
 0x59 => {
     let memory_size = global_mem.len() as u64;
-    evm_stack.push(memory_size);
-    reg[0] = memory_size;
+    evm_stack.push(u256::from(memory_size));
+    reg[0] = memory_size.into();
     println!("📏 [MSIZE] → {} bytes", memory_size);
 },
 
@@ -2461,7 +2077,7 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
 
     //___ 0x5c TLOAD
     0x5c => {
-        let t_offset = reg[_dst] as usize;
+        let t_offset = reg[_dst].low_u64() as usize;
         if t_offset < evm_stack.len() {
             reg[_dst] = evm_stack[t_offset];
         } else {
@@ -2485,8 +2101,8 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
 
     //___ 0x5e MCOPY
     0x5e => {
-        let dst_offset = reg[_dst] as usize;
-        let src_offset = reg[_src] as usize;
+        let dst_offset = reg[_dst].low_u64() as usize;
+        let src_offset = reg[_src].low_u64() as usize;
         let len = insn.imm as usize;
         // Patch permissif : si OOB, on tronque la copie à ce qui est possible
         let max_len = global_mem.len().saturating_sub(dst_offset).min(global_mem.len().saturating_sub(src_offset));
@@ -2496,39 +2112,38 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
             global_mem[dst_offset..dst_offset + safe_len].copy_from_slice(&data);
         }
         // Sinon, on ignore la copie (aucune erreur fatale)
-            consume_gas(&mut execution_context, 3 + 3 * ((len + 31) / 32) as u64)?;
+             consume_gas(&mut execution_context, (3 + 3 * ((len + 31) / 32) as u64).try_into().unwrap())?;
     },
 
     //___ 0x5f PUSH0 - CORRECTION DÉFINITIVE
 0x5f => {
-    evm_stack.push(0);
+    let depth = evm_stack.len();
+    if depth >= 1024 {
+        return Err(Error::new(ErrorKind::Other, "EVM STACK overflow on PUSH0"));
+    }
+    evm_stack.push(u256::zero());
     reg[0] = 0;
-    println!("📌 [PUSH0] Pushed 0 (EVM standard)");
+    consume_gas(&mut execution_context, opcode)?;
 },
 
     // ___ 0x60 → 0x7f : PUSH1 à PUSH32 (tous les PUSH valides EVM)
-    0x60..=0x7f => {
-        let push_size = (opcode - 0x60 + 1) as usize; // 1 à 32
-        let start = insn_ptr + 1;
-        let end = (start + push_size).min(prog.len()); // sécurité
-        
-        let mut value = 0u64;
-        
-        // Lecture big-endian correcte
-        for i in start..end {
-            value = (value << 8) | (prog[i] as u64);
-        }
-        
-        // ✅ SUPPRESSION COMPLÈTE : Plus aucune modification de valeur
-        // Toutes les valeurs du bytecode sont utilisées exactement comme écrites
-        evm_stack.push(value);
-        reg[0] = value;
-        
-        println!("📌 [PUSH{}] Pushed 0x{:016x} (size: {}) - EXACT BYTECODE", push_size, value, push_size);
-        
-        // Avance correct du PC : opcode + données
-        advance = 1 + push_size;
-    },
+0x60..=0x7f => { 
+    let depth = evm_stack.len();
+    if depth >= 1024 {
+        return Err(Error::new(ErrorKind::Other, "EVM STACK overflow on PUSH"));
+    }
+    let push_size = (opcode - 0x60 + 1) as usize;
+    let mut value = u256::zero();
+    let start = insn_ptr + 1;
+    let end = (start + push_size).min(prog.len());
+    for i in start..end {
+        value = (value << 8) | u256::from(prog[i]);
+    }
+    evm_stack.push(value);
+    reg[0] = value.low_u64().into();
+    advance = 1 + push_size;
+    consume_gas(&mut execution_context, opcode)?;
+},
     
                 // ___ 0x80..=0x8f : DUP1 à DUP16 - VERSION EVM-COMPLIANT
                                 0x80..=0x8f => {
@@ -2578,8 +2193,8 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     if evm_stack.len() < num_topics + 1 {
         return Err(Error::new(ErrorKind::Other, format!("EVM STACK underflow on LOG{}", num_topics)));
     }
-    let size = evm_stack.pop().unwrap() as usize;
-    let offset = evm_stack.pop().unwrap() as usize;
+    let size = evm_stack.pop().unwrap().low_u64() as usize;
+    let offset = evm_stack.pop().unwrap().low_u64() as usize;
     let mut topics = Vec::new();
     for _ in 0..num_topics {
         if let Some(topic) = evm_stack.pop() {
@@ -2597,7 +2212,7 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
         data,
     });
     let gas = 375 + 750 * num_topics as u64 + 8 * size as u64;
-    consume_gas(&mut execution_context, gas)?;
+    consume_gas(&mut execution_context, gas.try_into().unwrap())?;
 },
 
 //___ 0xf5 CREATE2
@@ -2606,8 +2221,8 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on CREATE2"));
     }
     let salt = evm_stack.pop().unwrap();
-    let size = evm_stack.pop().unwrap() as usize;
-    let offset = evm_stack.pop().unwrap() as usize;
+    let size = evm_stack.pop().unwrap().low_u64() as usize;
+    let offset = evm_stack.pop().unwrap().low_u64() as usize;
     let value = evm_stack.pop().unwrap();
     // Stub: retourne 0 (échec) ou une adresse factice
     evm_stack.push(0);
@@ -2619,10 +2234,10 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     if evm_stack.len() < 6 {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on STATICCALL"));
     }
-    let ret_size = evm_stack.pop().unwrap() as usize;
-    let ret_offset = evm_stack.pop().unwrap() as usize;
-    let args_size = evm_stack.pop().unwrap() as usize;
-    let args_offset = evm_stack.pop().unwrap() as usize;
+    let ret_size = evm_stack.pop().unwrap().low_u64() as usize;
+    let ret_offset = evm_stack.pop().unwrap().low_u64() as usize;
+    let args_size = evm_stack.pop().unwrap().low_u64() as usize;
+    let args_offset = evm_stack.pop().unwrap().low_u64() as usize;
     let address = evm_stack.pop().unwrap();
     let gas = evm_stack.pop().unwrap();
     // Stub: push success=1
@@ -2639,7 +2254,7 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     let data_len = reg[6];
     let proto = reg[7];
     let res = helpers.get(&0x450).map(|f| f(addr_ptr, port, data_ptr, data_len, proto)).unwrap_or(0);
-    evm_stack.push(res);
+    evm_stack.push(res.into());
     println!("🌐 [SLU-IP 450] TCP/UDP send → result={}", res);
 },
 
@@ -2649,8 +2264,8 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
         return Err(Error::new(ErrorKind::Other, "STACK underflow on RETURN"));
     }
 
-    let len = evm_stack.pop().unwrap() as usize;
-    let offset = evm_stack.pop().unwrap() as usize;
+    let len = evm_stack.pop().unwrap().low_u64() as usize;
+    let offset = evm_stack.pop().unwrap().low_u64() as usize;
 
     println!("📤 [RETURN] len={}, offset=0x{:x}", len, offset);
 
@@ -2705,176 +2320,104 @@ while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
     return Ok(JsonValue::Object(result));
 },
 
-//___ 0xfd REVERT - CORRECTION ORDRE FINAL DÉFINITIF
-0xfd => {
-    if evm_stack.len() < 2 {
-        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on REVERT"));
-    }
-    
-    // ✅ EVM SPEC EXACTE: pile = [offset, size] avec offset au TOP
-    let offset = evm_stack.pop().unwrap() as usize;  // PREMIER POP = offset (sommet)
-    let size = evm_stack.pop().unwrap() as usize;    // DEUXIÈME POP = size (dessous)
-    
-    println!("❌ [REVERT] offset=0x{:x}, size={}", offset, size);
-    
-    // ✅ LECTURE CORRECTE: 36 bytes depuis offset 0
-    let mut revert_data = vec![0u8; size];
-    if size > 0 && offset + size <= global_mem.len() {
-        revert_data.copy_from_slice(&global_mem[offset..offset + size]);
-    }
-    
-    // ✅ ANALYSE SPÉCIFIQUE: offset=0, size=36 = Message Panic formaté complet
-    let error_type = if offset == 0 && size == 36 {
-        // Le contrat a formaté un message Panic(0x41) en mémoire
-        if revert_data.len() >= 4 {
-            let selector = u32::from_be_bytes([revert_data[0], revert_data[1], revert_data[2], revert_data[3]]);
-            if selector == 0x4e487b71 && revert_data.len() >= 36 {
-                let panic_code = u32::from_be_bytes([revert_data[32], revert_data[33], revert_data[34], revert_data[35]]);
-                match panic_code {
-                    0x41 => "Panic: Memory allocation error (0x41)".to_string(),
-                    _ => format!("Panic: Code 0x{:02x}", panic_code),
+            0xfd => { // REVERT – plus de bypass, arrêt strict
+                if evm_stack.len() < 2 {
+                    return Err(Error::new(ErrorKind::Other, "Underflow on REVERT"));
                 }
-            } else {
-                format!("Custom error: 0x{:08x}", selector)
-            }
-        } else {
-            "Malformed error data".to_string()
-        }
-    } else if size == 0 {
-        "EmptyRevert".to_string()
-    } else if size >= 4 {
-        let selector = u32::from_be_bytes([
-            revert_data.get(0).copied().unwrap_or(0),
-            revert_data.get(1).copied().unwrap_or(0),
-            revert_data.get(2).copied().unwrap_or(0),
-            revert_data.get(3).copied().unwrap_or(0),
-        ]);
-        
-        match selector {
-            // Panic(uint256) - Erreurs de validation Solidity
-            0x4e487b71 => {
-                if size >= 36 {
-                    let panic_code = u32::from_be_bytes([
-                        revert_data.get(32).copied().unwrap_or(0),
-                        revert_data.get(33).copied().unwrap_or(0),
-                        revert_data.get(34).copied().unwrap_or(0),
-                        revert_data.get(35).copied().unwrap_or(0),
+
+                let offset = evm_stack.pop().unwrap().low_u64() as usize;
+                let size   = evm_stack.pop().unwrap().low_u64() as usize;
+
+                println!("❌ [REVERT] offset=0x{:x}, size={}", offset, size);
+
+                let mut revert_data = vec![0u8; size.min(1024)];
+                if offset + revert_data.len() <= global_mem.len() {
+                    revert_data.copy_from_slice(&global_mem[offset..offset + revert_data.len()]);
+                }
+
+                let error_msg = if offset == 0 && size >= 4 {
+                    let selector = u32::from_be_bytes([
+                        global_mem.get(offset).copied().unwrap_or(0),
+                        global_mem.get(offset+1).copied().unwrap_or(0),
+                        global_mem.get(offset+2).copied().unwrap_or(0),
+                        global_mem.get(offset+3).copied().unwrap_or(0),
                     ]);
-                    
-                    match panic_code {
-                        0x01 => "Panic: Assert failure".to_string(),
-                        0x11 => "Panic: Arithmetic overflow/underflow".to_string(),
-                        0x12 => "Panic: Division by zero".to_string(),
-                        0x22 => "Panic: Array bounds check".to_string(),
-                        0x32 => "Panic: Array access out of bounds".to_string(),
-                        0x41 => "Panic: Memory allocation error".to_string(),
-                        0x51 => "Panic: Invalid internal function".to_string(),
-                        _ => format!("Panic: Unknown code 0x{:02x}", panic_code),
-                    }
-                } else {
-                    "Panic: Malformed".to_string()
-                }
-            },
-            0x08c379a0 => {
-                if size >= 68 {
-                    let str_len = u32::from_be_bytes([
-                        revert_data.get(36).copied().unwrap_or(0),
-                        revert_data.get(37).copied().unwrap_or(0),
-                        revert_data.get(38).copied().unwrap_or(0),
-                        revert_data.get(39).copied().unwrap_or(0),
-                    ]) as usize;
-                    
-                    if 68 + str_len <= size {
-                        if let Ok(msg) = std::str::from_utf8(&revert_data[68..68 + str_len]) {
-                            format!("Error: {}", msg)
-                        } else {
-                            "Error: require() failed".to_string()
-                        }
+
+                    if selector == 0x4e487b71 && size >= 36 {
+                        let code = u32::from_be_bytes([
+                            global_mem.get(offset+4).copied().unwrap_or(0),
+                            global_mem.get(offset+5).copied().unwrap_or(0),
+                            global_mem.get(offset+6).copied().unwrap_or(0),
+                            global_mem.get(offset+7).copied().unwrap_or(0),
+                        ]);
+                        format!("Panic(0x{:02x})", code)
                     } else {
-                        "Error: require() failed".to_string()
+                        format!("Error(0x{:08x})", selector)
                     }
                 } else {
-                    "Error: require() failed".to_string()
-                }
-            },
-            _ => format!("Custom error: 0x{:08x}", selector),
+                    format!("Revert ({} bytes)", size)
+                };
+
+                println!("   → {}", error_msg);
+                println!("   → DATA: 0x{}", hex::encode(&revert_data));
+
+                let mut result = serde_json::Map::new();
+                result.insert("error".to_string(), JsonValue::String(error_msg));
+                result.insert("revert_data".to_string(), JsonValue::String(hex::encode(&revert_data)));
+
+                return Ok(JsonValue::Object(result));
+            }
+
+            // ────────────────────────────────────────────────
+            // Les autres opcodes restent tels quels (ou corrigés mineurs)
+            // ────────────────────────────────────────────────
+            // (je ne répète pas tous ici – garde tes implémentations ADD, MUL, etc.)
+            // Mais supprime les clamps arbitraires sur SHL/SHR/SAR si possible
+            // et passe progressivement à U256 pour la pile si tu le peux
+
+            _ => {
+                println!("🟢 [NOP] Opcode 0x{:02x} non géré à PC 0x{:04x}", opcode, insn_ptr);
+            }
         }
-    } else {
-        "Short revert".to_string()
-    };
-    
-    // ✅ CONTEXTE SPÉCIFIQUE
-    let context_info = if offset == 0 && size == 36 {
-        "\n🔧 [CONTEXTE] Message Panic(0x41) formaté lu depuis la mémoire à offset 0"
-    } else {
-        ""
-    };
-    
-    let final_storage = execution_context.world_state.storage
-        .get(&interpreter_args.contract_address)
-        .cloned()
-        .unwrap_or_default();
-    
-    let mut result = serde_json::Map::new();
-    result.insert("error".to_string(), serde_json::Value::String(error_type.clone()));
-    result.insert("revert_data".to_string(), serde_json::Value::String(hex::encode(&revert_data)));
-    result.insert("storage".to_string(), serde_json::Value::Object(decode_storage_map(&final_storage)));
-    
-    consume_gas(&mut execution_context, size as u64)?;
-    
-    println!("❌ [REVERT] {} → arrêt de l'exécution{}", error_type, context_info);
-    println!("❌ [REVERT DATA] 0x{}", hex::encode(&revert_data));
-    
-    return Ok(serde_json::Value::Object(result));
-},
 
-    //___ Tout le reste → crash clair
-    _ => {
-        println!("🟢 [NOP] Opcode inconnu 0x{:02x} ignoré à PC {}", opcode, insn_ptr);
+        if skip_advance {
+            skip_advance = false;
+            continue;
+        } else {
+            insn_ptr += advance;
+        }
+
+        advance = 1;
     }
-    } // ✅ AJOUT: Accolade fermante du match opcode
 
-    // Avancement du PC - LOGIQUE CORRIGÉE
-    if skip_advance {
-        skip_advance = false; // Reset pour la prochaine itération
-        continue;
-    } else {
-        insn_ptr += advance;
+    // Fin d'exécution (conforme)
+    if natural_exit_detected {
+        let final_storage = execution_context.world_state.storage
+            .get(&interpreter_args.contract_address)
+            .cloned()
+            .unwrap_or_default();
+
+        let mut result = serde_json::Map::new();
+        result.insert("return".to_string(), JsonValue::Number(exit_value.into()));
+        result.insert("storage".to_string(), JsonValue::Object(decode_storage_map(&final_storage)));
+        result.insert("exit_reason".to_string(), JsonValue::String("STOP".to_string()));
+
+        return Ok(JsonValue::Object(result));
     }
-    
-    advance = 1; // Reset pour la prochaine instruction
-} // ✅ AJOUT: Accolade fermante de la boucle while
 
-// ✅ GESTION DE FIN D'EXÉCUTION
-if natural_exit_detected {
+    // Fin bytecode sans RETURN/STOP explicite → succès vide (conforme EVM)
     let final_storage = execution_context.world_state.storage
         .get(&interpreter_args.contract_address)
         .cloned()
         .unwrap_or_default();
 
     let mut result = serde_json::Map::new();
-    result.insert("return".to_string(), JsonValue::Number(exit_value.into()));
+    result.insert("return".to_string(), JsonValue::Array(vec![]));
     result.insert("storage".to_string(), JsonValue::Object(decode_storage_map(&final_storage)));
-    result.insert("exit_reason".to_string(), JsonValue::String("STOP".to_string()));
+    result.insert("exit_reason".to_string(), JsonValue::String("END_OF_BYTECODE".to_string()));
 
-    println!("✅ [NATURAL EXIT] Exécution terminée proprement");
-    return Ok(JsonValue::Object(result));
+    Ok(JsonValue::Object(result))
 }
-
-// ✅ CAS PAR DÉFAUT: Fin de programme sans RETURN explicite
-let final_storage = execution_context.world_state.storage
-    .get(&interpreter_args.contract_address)
-    .cloned()
-    .unwrap_or_default();
-
-let mut result = serde_json::Map::new();
-result.insert("return".to_string(), JsonValue::Bool(true));
-result.insert("storage".to_string(), JsonValue::Object(decode_storage_map(&final_storage)));
-result.insert("exit_reason".to_string(), JsonValue::String("END_OF_PROGRAM".to_string()));
-
-println!("✅ [END OF PROGRAM] Exécution terminée (fin de bytecode)");
-Ok(JsonValue::Object(result))
-} // ✅ AJOUT: Accolade fermante de la fonction execute_program
 
 /// ✅ AJOUT: Helper pour noms des opcodes
 fn opcode_name(opcode: u8) -> &'static str {
@@ -2964,7 +2507,7 @@ fn opcode_name(opcode: u8) -> &'static str {
 }
 
 /// Calcule le slot EVM pour un mapping (ex: balanceOf, allowance, etc.)
-fn compute_mapping_slot(base_slot: u64, keys: &[serde_json::Value]) -> String {
+fn compute_mapping_slot(base_slot: u256, keys: &[serde_json::Value]) -> String {
     let mut buf = vec![];
     for key in keys {
         match key {
