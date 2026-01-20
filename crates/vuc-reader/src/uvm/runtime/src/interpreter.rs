@@ -760,7 +760,7 @@ pub fn execute_program(
     interpreter_args: &InterpreterArgs,
     initial_storage: Option<HashMap<String, HashMap<String, Vec<u8>>>>,
 ) -> Result<serde_json::Value, Error> {
-    const U32MAX: u256 = (u32::MAX as u64).into();
+    const U32MAX: u256 = (u32::MAX as u64);
     const SHIFT_MASK_64: u256 = 0x3f;
 
     helpers.insert(0x450, crate::helpers::slu_ip450_send);
@@ -1044,7 +1044,7 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
         let n = ethereum_types::U256::from(evm_stack.pop().unwrap());
         let res = if n.is_zero() { ethereum_types::U256::zero() } else { (a * b) % n };
         evm_stack.push(u256::from(res.low_u64()));
-        reg[0] = res.low_u64();
+        reg[0] = res.low_u64().into();
     },
 
 //___ 0x0a EXP - VERSION 100 % EVM COMPLIANT avec U256
@@ -1222,7 +1222,7 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
     let a = evm_stack.pop().unwrap();
     let res = if a == b { u256::one() } else { u256::zero() };
     evm_stack.push(res);
-    reg[0] = res.low_u64();
+    reg[0] = res.low_u64().into();
     consume_gas(&mut execution_context, opcode)?;
 },
 
@@ -1254,7 +1254,7 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
     let a = evm_stack.pop().unwrap();
     let res = a | b;
     evm_stack.push(res);
-    reg[0] = res.low_u64();
+    reg[0] = res.low_u64().into();
     consume_gas(&mut execution_context, opcode)?;
 },
         
@@ -1267,7 +1267,7 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
     let a = evm_stack.pop().unwrap();
     let res = a ^ b;
     evm_stack.push(res);
-    reg[0] = res.low_u64();
+    reg[0] = res.low_u64().into();
     consume_gas(&mut execution_context, opcode)?;
 },
         
@@ -1277,7 +1277,7 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
     let a = evm_stack.pop().unwrap();
     let res = !a;
     evm_stack.push(res);
-    reg[0] = res.low_u64();
+    reg[0] = res.low_u64().into();
     consume_gas(&mut execution_context, opcode)?;
 },
         
@@ -1288,10 +1288,10 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
     }
 
     let byte_index = evm_stack.pop().unwrap();  // index (U256)
-    let word        = evm_stack.pop().unwrap(); // mot 256 bits (U256)
+    let word   = evm_stack.pop().unwrap(); // mot 256 bits (U256)
 
     // EVM spec: BYTE prend l'index modulo 256, mais seulement les 5 bits bas comptent (0..31)
-    // On masque à 0xff (les 8 bits bas) comme Geth/Erigon
+    // On masque à 0xff (les 8 bits bas)
     let i = byte_index.low_u64() as usize & 0xff;
 
     // Résultat : le i-ème byte (de gauche à droite, big-endian) ou 0 si i ≥ 32
@@ -1305,7 +1305,7 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
     };
 
     evm_stack.push(result);
-    reg[0] = result.low_u64();  // compatibilité avec tes registres u64
+    reg[0] = result.low_u64().into();  // compatibilité avec tes registres u64
 
     consume_gas(&mut execution_context, opcode)?;
     println!(
@@ -1324,7 +1324,7 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
     let shift_masked = shift.low_u64() & 0xff; // EVM masque 255
     let res = value << shift_masked;
     evm_stack.push(res);
-    reg[0] = res.low_u64();
+    reg[0] = res.low_u64().into();
     consume_gas(&mut execution_context, opcode)?;
 },
 
@@ -1338,7 +1338,7 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
     let shift_masked = shift.low_u64() & 0xff;
     let res = value >> shift_masked;
     evm_stack.push(res);
-    reg[0] = res.low_u64();
+    reg[0] = res.low_u64().into();
     consume_gas(&mut execution_context, opcode)?;
 },
         
@@ -1457,7 +1457,7 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
         reg[0] = result.into();
         
         let gas = 30 + 6 * ((len + 31) / 32) as u64;
-        consume_gas(&mut execution_context, gas).try_into().unwrap()?;
+        consume_gas(&mut execution_context, gas.try_into().unwrap()).try_into().unwrap()?;
         
         println!("🔒 [KECCAK256] → 0x{:x} (len={})", result, len);
     },
@@ -2088,7 +2088,7 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
 
     //___ 0x5d TSTORE
     0x5d => {
-        let t_offset = reg[_dst] as usize;
+        let t_offset = reg[_dst].low_u64() as usize;
         if t_offset < evm_stack.len() {
             evm_stack[t_offset] = reg[_src];
         } else if t_offset == evm_stack.len() {
