@@ -1208,7 +1208,7 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
     let res = if a_signed > b_signed { u256::one() } else { u256::zero() };
 
     evm_stack.push(res);
-    reg[0] = res.low_u64();
+    reg[0] = res.low_u64().into();
     consume_gas(&mut execution_context, opcode)?;
     println!("🔍 [SGT] {} >s {} → {}", a, b, res);
 },
@@ -1792,7 +1792,7 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
     };
     
     evm_stack.push(u256::from(block_hash));
-    reg[0] = block_hash;
+    reg[0] = block_hash.into();
     println!("🔷 [BLOCKHASH] block={} → 0x{:x}", block_number, block_hash);
 },
 
@@ -1819,7 +1819,7 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
     // Post-Merge: PREVRANDAO, Pré-Merge: DIFFICULTY
     let prevrandao = safe_u256_to_u64(&u256::from_big_endian(&execution_context.world_state.block_info.prev_randao));
     evm_stack.push(u256::from(prevrandao));
-    reg[0] = prevrandao.knto();
+    reg[0] = prevrandao.into();
     println!("🎲 [PREVRANDAO] → 0x{:x}", prevrandao);
 },
 
@@ -1899,8 +1899,8 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
     consume_gas(&mut execution_context, opcode)?;
 },
 
-//___ 0x52 MSTORE - CORRECTION COMPLÈTE AVEC SÉCURITÉ RENFORCÉE
-0x52 => {
+            //___ 0x52 MSTORE 
+    0x52 => {
     if evm_stack.len() < 2 {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on MSTORE"));
     }
@@ -1929,13 +1929,13 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
 
     consume_gas(&mut execution_context, 3)?;
 },
-
+            
 //___ 0x53 MSTORE8 - Stockage d'un byte en mémoire
 0x53 => {
     if evm_stack.len() < 2 {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on MSTORE8"));
     }
-    let value = evm_stack.pop().unwrap();
+    let value = evm_stack.pop().unwrap().low_u64();
     let offset = evm_stack.pop().unwrap().low_u64() as usize;
     
     // Stocke seulement le byte le moins significatif
@@ -1984,7 +1984,7 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
     evm_stack.push(u256::from(loaded_u64));
     reg[0] = loaded_u64.into();
     if _dst < reg.len() {
-        reg[_dst] = loaded_u64;
+        reg[_dst] = loaded_u64.into();
     }
 
     // debug minimal
