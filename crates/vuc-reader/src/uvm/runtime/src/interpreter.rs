@@ -2097,7 +2097,7 @@ if offset < 0x100 {
 //___ 0x59 MSIZE - Taille de la mémoire active
 0x59 => {
     let memory_size = global_mem.len() as u64;
-    evm_stack.push(memory_size).into();
+    evm_stack.push(memory_size).into().into();
     reg[0] = memory_size.into();
     println!("📏 [MSIZE] → {} bytes", memory_size);
 },
