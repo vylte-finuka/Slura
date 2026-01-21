@@ -13,6 +13,7 @@
 
 extern crate byteorder;
 extern crate combine;
+use primitive_types::U256;
 extern crate log;
 #[cfg(feature = "std")]
 extern crate time;
@@ -655,18 +656,18 @@ pub fn execute_ubf_program_secure(
         sender_address: "*sender*#default#address#".to_string(),
         args: vec![],
         state_data: vec![0; 1024],
-        gas_limit: 1000000,
-        gas_price: 1,
-        value: 0,
-        call_depth: 0,
-        block_number: 1,
-        timestamp: 0,
+        gas_limit: U256::from(1000000),
+        gas_price: U256::from(1),
+        value: U256::from(0),
+        call_depth: U256::from(0),
+        block_number: U256::from(1),
+        timestamp: U256::from(0),
         caller: "*default*#caller#address#".to_string(),
         origin: "*default*#origin#address#".to_string(),
         beneficiary: "*default*#beneficiary#address#".to_string(),
         function_offset: None,
-        base_fee: Some(0), // Option<u64>
-        blob_base_fee: Some(0), // Option<u64>
+        base_fee: Some(U256::from(0u64)), // Option<u64>
+        blob_base_fee: Some(U256::from(0u64)), // Option<U256>
         blob_hash: Some([0u8; 32]), // Option<[u8; 32]>
     };
 

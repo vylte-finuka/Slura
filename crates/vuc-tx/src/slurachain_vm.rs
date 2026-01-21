@@ -219,7 +219,8 @@ pub fn new(thread_pool_size: usize, batch_size: usize, vm: Arc<Mutex<SlurachainV
         &contract_address,
         &function_name,
         args,
-        Some(sender.as_str())
+        Some(sender.as_str()),
+        None // Ajoute le paramètre calldata (None si pas de données)
     ).await;
 
     self.record_transaction_access_pattern(&tx).await;
@@ -728,7 +729,8 @@ impl SlurachainVm {
                         Some(&sender),
                         None, // stack_usage: Option<&uvm_runtime::stack::StackUsage>
                         None, // return_type: Option<&str>
-                        None  // initial_storage: Option<HashMap<String, HashMap<String, Vec<u8>>>>
+                        None, // initial_storage: Option<HashMap<String, HashMap<String, Vec<u8>>>>
+                        None  // calldata: Option<&[u8]>
                     )
                     .await;
                 results.push(result);
@@ -882,11 +884,23 @@ impl SlurachainVm {
         function_name: &str,
         args: Vec<NerenaValue>,
         sender_vyid: Option<&str>,
+        calldata: Option<&[u8]>, // <-- AJOUT
     ) -> Result<NerenaValue, String> {
         let sender = sender_vyid.unwrap_or("*system*#default#").to_string();
-        let batch = vec![(module_path.to_string(), function_name.to_string(), args, sender)];
-        let results = self.execute_parallel_transactions(batch).await;
-        results.into_iter().next().unwrap_or(Err("Aucun résultat".to_string()))
+        // Appel direct à execute_program avec le buffer calldata
+        let result = self
+            .execute_program(
+                module_path,
+                function_name,
+                args,
+                Some(&sender),
+                None,
+                None,
+                None,
+                calldata, // <-- Passe le buffer ici
+            )
+            .await;
+        result
     }
 
                 /// ✅ NOUVEAU: Construction du storage dynamique depuis l'état du contrat
@@ -1481,9 +1495,10 @@ pub async fn execute_program(
         stack_usage: Option<&uvm_runtime::stack::StackUsage>,
         return_type: Option<&str>,
         initial_storage: Option<HashMap<String, HashMap<String, Vec<u8>>>>,
+        calldata: Option<&[u8]>,
     ) -> Result<serde_json::Value, String> {
         let mem = [0u8; 4096];
-        let mbuff = &[];
+        let mut mbuff: Vec<u8> = Vec::new();
         let exports: HashMap<u32, usize> = HashMap::new();
     let vyid = Self::extract_address(module_path);
     let sender = sender_vyid.unwrap_or("*system*#default#");
@@ -1585,12 +1600,12 @@ let result = {
         Some(&real_bytecode),
         stack_usage,
         &mem,
-        mbuff,
+        &mbuff, // ← Passe le vrai calldata ici !
         &mut self.uvm_helpers,
         &self.allowed_memory,
         return_type,
         &exports,
-        &interpreter_args, // <-- Correction ici
+        &interpreter_args,
         Some(converted_storage),
     )
     .map_err(|e| e.to_string())
@@ -1653,12 +1668,12 @@ return result;
         Some(&real_bytecode),
         stack_usage,
         &mem,
-        mbuff,
+        &mbuff, // ← Passe le vrai calldata ici !
         &mut self.uvm_helpers,
         &self.allowed_memory,
         return_type,
         &exports,
-        &interpreter_args, // <-- Correction ici
+        &interpreter_args,
         Some(converted_storage),
     );
         exec_future.map_err(|e| e.to_string())
@@ -1789,18 +1804,18 @@ async fn prepare_generic_execution_args(
             sender_address: sender.to_string(),
             args,
             state_data: calldata,
-            gas_limit: function_meta.gas_limit,
-            gas_price: self.gas_price,
-            value: 0,
-            call_depth: 0,
-            block_number,
-            timestamp: current_time,
+            gas_limit: function_meta.gas_limit.into(),
+            gas_price: self.gas_price.into(),
+            value: 0u64.into(),
+            call_depth: 0u64.into(),
+            block_number: block_number.into(),
+            timestamp: current_time.into(),
             caller: sender.to_string(),
             origin: sender.to_string(),
             beneficiary: sender.to_string(),
             function_offset: Some(resolved_offset),
-            base_fee: Some(0),
-            blob_base_fee: Some(0),
+            base_fee: Some(0u64.into()),
+            blob_base_fee: Some(0u64.into()),
             blob_hash: Some([0u8; 32]),
         })
     }

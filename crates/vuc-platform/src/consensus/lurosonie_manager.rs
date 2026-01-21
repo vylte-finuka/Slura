@@ -330,7 +330,7 @@ impl LurosonieManager {
                 // Try to get balance from VEZ contract
                 let mut vm_write = self.vm.write().await;
                 match vm_write.execute_module(vezcur_addr, "balanceOf",
-                    vec![serde_json::Value::String(address.clone())], Some("system")).await {
+                    vec![serde_json::Value::String(address.clone())], Some("system"), None).await {
                     Ok(result) => {
                         if let Some(solde) = result.as_u64() {
                             total_supply = total_supply.saturating_add(solde);
@@ -692,7 +692,7 @@ impl LurosonieManager {
                     .unwrap_or_else(|_| "*frame000*".to_string());
                 
                 match vm.execute_module(&vezcur_address, "solde_of",
-                    vec![serde_json::Value::String(account.clone())], Some(&account)).await {
+                    vec![serde_json::Value::String(account.clone())], Some(&account), None).await {
                     Ok(result) => {
                         if let Some(solde) = result.as_u64() {
                             solde
@@ -936,7 +936,7 @@ impl LurosonieManager {
             let module_path = format!("{}::vezcur", module_address);
 
             match vm.execute_module(&module_path, "solde_of",
-                vec![serde_json::Value::String(delegator.to_string())], Some(&delegator)).await {
+                vec![serde_json::Value::String(delegator.to_string())], Some(&delegator), None).await {
                 Ok(result) => result.as_u64().unwrap_or(0),
                 Err(_) => 0,
             }
@@ -1262,7 +1262,7 @@ impl LurosonieManager {
                                 serde_json::Value::Number(serde_json::Number::from(value)),
                             ]
                         });
-                        match vm.execute_module(contract_addr.unwrap(), function, args, Some(&tx.from_op)).await {
+                        match vm.execute_module(contract_addr.unwrap(), function, args, Some(&tx.from_op), None).await {
                             Ok(result) => {
                                 println!("✅ VM {} ok pour tx {}", function, tx.hash);
                                 Ok(serde_json::json!({
