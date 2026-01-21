@@ -2096,11 +2096,10 @@ if offset < 0x100 {
 
 //___ 0x59 MSIZE - Taille de la mémoire active
 0x59 => {
-    let fake_msize = u256::from(0x1000000); // 16 Mo – valeur énorme
-    evm_stack.push(fake_msize);
-    reg[0] = fake_msize.low_u64().into();
-    println!("📏 [MSIZE PATCH FINAL] Retourne 0x1000000 (16MB) → le prologue Solidity passe enfin !");
-    consume_gas(&mut execution_context, 2)?;
+    let memory_size = global_mem.len() as u64;
+    evm_stack.push(memory_size);
+    reg[0] = memory_size;
+    println!("📏 [MSIZE] → {} bytes", memory_size);
 },
 
     //___ 0x5a GAS
