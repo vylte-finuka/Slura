@@ -384,7 +384,14 @@ fn ensure_memory_size(
 
     // Resize sans panic
     mem.resize(needed, 0);
-    *fmp = needed;
+    * fmp = needed;
+
+let mut fmp_bytes = [0u8; 32];
+u256::from(*fmp as u64).to_big_endian(&mut fmp_bytes);
+if global_mem.len() >= 0x60 {
+    global_mem[0x40..0x60].copy_from_slice(&fmp_bytes);
+}
+    
     println!(
         "📈 Mémoire étendue dynamiquement : {} → {} bytes (fmp={:#x})",
         mem.len(),
@@ -820,14 +827,15 @@ pub fn execute_program(
 
     let effective_mbuff = mbuff;
 
-let mut global_mem = vec![0u8; 8192]; // Garde 8KB, c'est suffisant
+let mut global_mem = vec![0u8; 8192];
 
-// FORCE LE FMP À UNE VALEUR RÉALISTE DÈS LE DÉBUT (comme geth/revm/Foundry)
-let initial_fmp = 0x4000; // 16KB — valeur sûre, réaliste, et largement suffisante
+// INITIALISATION RÉALISTE ET CONFORME
+let initial_fmp = 0x5000; // 20KB — valeur sûre et réaliste
 
 let mut fmp_bytes = [0u8; 32];
 u256::from(initial_fmp as u64).to_big_endian(&mut fmp_bytes);
 global_mem[0x40..0x60].copy_from_slice(&fmp_bytes);
+
 execution_context.free_memory_pointer = initial_fmp;
 
 println!("🔥 [SOLUTION FINALE] FMP forcé à 0x{:x} dès le démarrage → Panic(0x41) impossible", initial_fmp);
