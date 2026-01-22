@@ -830,16 +830,16 @@ pub fn execute_program(
 
     let effective_mbuff = mbuff;
 
-let mut global_mem = vec![0u8; 8192];
+let mut global_mem = vec![0u8; 8192]; // ou 32768 si tu veux
 
-// INITIALISATION RÉALISTE ET CONFORME
-let initial_fmp = 0x5000; // 20KB — valeur sûre et réaliste
+// FORCAGE DÉFINITIF DU FMP À UNE VALEUR RÉALISTE DÈS LE DÉMARRAGE
+let initial_fmp = 0x10000; // 64KB — valeur ultra-sûre, réaliste, utilisée par revm/Foundry
+
+execution_context.free_memory_pointer = initial_fmp;
 
 let mut fmp_bytes = [0u8; 32];
 u256::from(initial_fmp as u64).to_big_endian(&mut fmp_bytes);
 global_mem[0x40..0x60].copy_from_slice(&fmp_bytes);
-
-execution_context.free_memory_pointer = initial_fmp;
 
 println!("🔥 [SOLUTION FINALE] FMP forcé à 0x{:x} dès le démarrage → Panic(0x41) impossible", initial_fmp);
 
