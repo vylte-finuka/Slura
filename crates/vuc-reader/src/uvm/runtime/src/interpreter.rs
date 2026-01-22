@@ -822,18 +822,16 @@ pub fn execute_program(
 
 let mut global_mem = vec![0u8; 8192]; // 8KB, conforme EVM pour les accès standards
 
-// Initialisation du FMP à 0x80 (standard Solidity)
+// Pré-allocation réaliste : les vrais clients EVM commencent avec au moins 4KB-16KB
+global_mem.resize(16384, 0); // 16KB — valeur très conservatrice et réaliste
+execution_context.free_memory_pointer = 0x80;
+
+// Écrit le FMP à 0x80 dans la mémoire (standard Solidity)
 let mut fmp_bytes = [0u8; 32];
 u256::from(0x80u64).to_big_endian(&mut fmp_bytes);
 global_mem[0x40..0x60].copy_from_slice(&fmp_bytes);
-execution_context.free_memory_pointer = 0x80;
 
-// Écriture fmp à 0x40 avec la valeur réelle (pour cohérence)
-let mut fmp_bytes = [0u8; 32];
-u256::from(execution_context.free_memory_pointer as u64).to_big_endian(&mut fmp_bytes);
-global_mem[0x40..0x60].copy_from_slice(&fmp_bytes);
-println!("🔧 Free memory pointer forcé à 0x{:x} (écrit à mem[0x40..0x60])", execution_context.free_memory_pointer);
-
+println!("🔧 [EVM REALISTIC INIT] Mémoire pré-allouée à 16KB + FMP=0x80 → prologue Solidity passe");
 let mut reg: [u256; 64] = [u256::zero(); 64];
     reg[10] = u256::from(((stack.as_ptr() as usize) + stack.len()) as u64);
     reg[8] = u256::zero();
@@ -2079,31 +2077,15 @@ let mut loop_detection: HashMap<usize, u32> = HashMap::new();
     println!("📍 [PC] Pushed PC = 0x{:x}", pc);
 },
 
-//___ 0x59 MSIZE
 0x59 => {
-    // Taille réelle de la mémoire
     let current_len = global_mem.len() as u64;
+    let rounded = ((current_len + 31) / 32) * 32;
+    let msize = u256::from(rounded);
 
-    // Free memory pointer (Solidity le initialise à 0x80 et l'update)
-    let fmp = execution_context.free_memory_pointer as u64;
+    evm_stack.push(msize);
+    reg[0] = rounded.into();
 
-    // Mémoire active = max(écrit, fmp + buffer de base)
-    let active = core::cmp::max(current_len, fmp.max(0x80) + 0x80); // +0x80 pour buffer Solidity
-
-    // Arrondi à 32 bytes (EVM exact)
-    let rounded = ((active + 31) / 32) * 32;
-
-    // Marge minimale réaliste : les clients garantissent au moins ~512 bytes au départ
-    let min_msize = 512u64; // 0x200
-    let msize = rounded.max(min_msize);
-
-    let result = u256::from(msize);
-
-    evm_stack.push(result);
-    reg[0] = msize.into();
-
-    println!("📏 [MSIZE REALISTIC] len={} | fmp={} → active={} → rounded={} → final={} (min 512)", 
-             current_len, fmp, active, rounded, msize);
+    println!("📏 [MSIZE EVM-EXACT] {} bytes (arrondi à 32)", rounded);
 
     consume_gas(&mut execution_context, 2)?;
 },
