@@ -820,8 +820,8 @@ pub fn execute_program(
 
     let effective_mbuff = mbuff;
 
-let mut global_mem = vec![0u8; 8192]; // 8KB, conforme EVM pour les accès standards
-
+let mut global_mem = vec![0u8; 32768]; // 32KB pré-alloués — conforme et réaliste
+    
 // Pré-allocation réaliste : les vrais clients EVM commencent avec au moins 4KB-16KB
 global_mem.resize(16384, 0); // 16KB — valeur très conservatrice et réaliste
 execution_context.free_memory_pointer = 0x80;
