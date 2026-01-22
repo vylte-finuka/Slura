@@ -37,6 +37,7 @@ pub struct ParallelTransaction {
     pub read_set: Arc<RwLock<HashMap<String, u64>>>, // slot -> version lue
     pub write_set: Arc<RwLock<HashMap<String, Vec<u8>>>>, // slot -> nouvelle valeur
     pub dependencies: Arc<RwLock<HashSet<u64>>>, // TX IDs dont on dépend
+    pub calldata: Option<Vec<u8>>, // <-- NOUVEAU: Données d'appel brut
 }
 
 impl Clone for ParallelTransaction {
@@ -51,6 +52,7 @@ impl Clone for ParallelTransaction {
             read_set: Arc::clone(&self.read_set),
             write_set: Arc::clone(&self.write_set),
             dependencies: Arc::clone(&self.dependencies),
+            calldata: self.calldata.clone(),
         }
     }
 }
@@ -689,15 +691,15 @@ impl SlurachainVm {
     }
 
     /// ✅ NOUVEAU: Exécution parallèle de batch
-    pub async fn execute_parallel_transactions(
+       pub async fn execute_parallel_transactions(
         &mut self,
-        transactions: Vec<(String, String, Vec<NerenaValue>, String)>,
+        transactions: Vec<(String, String, Vec<NerenaValue>, String, Option<Vec<u8>>)>, // Ajoute Option<Vec<u8>>
     ) -> Vec<Result<NerenaValue, String>> {
         if let Some(engine) = &self.parallel_engine {
             let parallel_txs: Vec<_> = transactions
                 .into_iter()
                 .enumerate()
-                .map(|(i, (module_path, function_name, args, sender))| {
+                .map(|(i, (module_path, function_name, args, sender, calldata))| {
                     ParallelTransaction {
                         id: i as u64,
                         contract_address: Self::extract_address(&module_path).to_string(),
@@ -708,29 +710,25 @@ impl SlurachainVm {
                         read_set: Arc::new(RwLock::new(HashMap::new())),
                         write_set: Arc::new(RwLock::new(HashMap::new())),
                         dependencies: Arc::new(RwLock::new(HashSet::new())),
+                        calldata, // <-- Passe le calldata ici
                     }
                 })
                 .collect();
-
-            println!(
-                "⚡ Exécution de {} transactions en parallèle optimiste (SANS récursion)",
-                parallel_txs.len()
-            );
             engine.execute_parallel_batch(parallel_txs).await
         } else {
-            // Fallback séquentiel SANS récursion
+            // Fallback séquentiel
             let mut results = Vec::new();
-            for (module_path, function_name, args, sender) in transactions {
+            for (module_path, function_name, args, sender, calldata) in transactions {
                 let result = self
                     .execute_program(
-                        &module_path, 
-                        &function_name, 
-                        args, 
+                        &module_path,
+                        &function_name,
+                        args,
                         Some(&sender),
-                        None, // stack_usage: Option<&uvm_runtime::stack::StackUsage>
-                        None, // return_type: Option<&str>
-                        None, // initial_storage: Option<HashMap<String, HashMap<String, Vec<u8>>>>
-                        None  // calldata: Option<&[u8]>
+                        None,
+                        None,
+                        None,
+                        calldata.as_deref(), // <-- Passe le calldata ici
                     )
                     .await;
                 results.push(result);
@@ -884,23 +882,19 @@ impl SlurachainVm {
         function_name: &str,
         args: Vec<NerenaValue>,
         sender_vyid: Option<&str>,
-        calldata: Option<&[u8]>, // <-- AJOUT
+        calldata: Option<&[u8]>,
     ) -> Result<NerenaValue, String> {
         let sender = sender_vyid.unwrap_or("*system*#default#").to_string();
-        // Appel direct à execute_program avec le buffer calldata
-        let result = self
-            .execute_program(
-                module_path,
-                function_name,
-                args,
-                Some(&sender),
-                None,
-                None,
-                None,
-                calldata, // <-- Passe le buffer ici
-            )
-            .await;
-        result
+        let calldata_vec = calldata.map(|c| c.to_vec());
+        let batch = vec![(
+            module_path.to_string(),
+            function_name.to_string(),
+            args,
+            sender,
+            calldata_vec, // <-- Ajoute ici
+        )];
+        let results = self.execute_parallel_transactions(batch).await;
+        results.into_iter().next().unwrap_or(Err("Aucun résultat".to_string()))
     }
 
                 /// ✅ NOUVEAU: Construction du storage dynamique depuis l'état du contrat
@@ -1583,6 +1577,7 @@ pub async fn execute_program(
 let converted_storage = self.build_dynamic_storage_from_contract_state(vyid)?
     .unwrap_or_else(|| HashMap::new());
 
+// ...existing code...
 let interpreter_args = self.prepare_generic_execution_args(
     vyid,
     function_name,
@@ -1600,7 +1595,7 @@ let result = {
         Some(&real_bytecode),
         stack_usage,
         &mem,
-        &mbuff, // ← Passe le vrai calldata ici !
+        &interpreter_args.state_data, // <-- CORRECTION : passe le vrai calldata ici !
         &mut self.uvm_helpers,
         &self.allowed_memory,
         return_type,
@@ -1665,17 +1660,17 @@ return result;
     let result = {
         let _guard = self.global_execution_lock.lock();
         let exec_future =     uvm_runtime::interpreter::execute_program(
-        Some(&real_bytecode),
-        stack_usage,
-        &mem,
-        &mbuff, // ← Passe le vrai calldata ici !
-        &mut self.uvm_helpers,
-        &self.allowed_memory,
-        return_type,
-        &exports,
-        &interpreter_args,
-        Some(converted_storage),
-    );
+            Some(&real_bytecode),
+            stack_usage,
+            &mem,
+            &interpreter_args.state_data, // <-- CORRECTION : passe le vrai calldata ici !
+            &mut self.uvm_helpers,
+            &self.allowed_memory,
+            return_type,
+            &exports,
+            &interpreter_args,
+            Some(converted_storage),
+        );
         exec_future.map_err(|e| e.to_string())
     };
     
