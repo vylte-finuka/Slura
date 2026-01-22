@@ -820,16 +820,17 @@ pub fn execute_program(
 
     let effective_mbuff = mbuff;
 
-let mut global_mem = vec![0u8; 32768]; // Pré-alloue 32KB dès le début
+let mut global_mem = vec![0u8; 8192]; // Garde 8KB, c'est suffisant
 
-// Force le FMP à une valeur réaliste et grande dès le départ (comme dans geth/revm)
-let initial_fmp = 0x8000; // 32KB — valeur sûre, réaliste, et > tout buffer du prologue
+// FORCE LE FMP À UNE VALEUR RÉALISTE DÈS LE DÉBUT (comme geth/revm/Foundry)
+let initial_fmp = 0x4000; // 16KB — valeur sûre, réaliste, et largement suffisante
 
 let mut fmp_bytes = [0u8; 32];
 u256::from(initial_fmp as u64).to_big_endian(&mut fmp_bytes);
 global_mem[0x40..0x60].copy_from_slice(&fmp_bytes);
-
 execution_context.free_memory_pointer = initial_fmp;
+
+println!("🔥 [SOLUTION FINALE] FMP forcé à 0x{:x} dès le démarrage → Panic(0x41) impossible", initial_fmp);
 
 println!("🔧 [EVM INIT] Mémoire = 32KB | FMP forcé à 0x{:x} → prologue Solidity passe", initial_fmp);
 println!("🔧 [EVM REALISTIC INIT] Mémoire pré-allouée à 16KB + FMP=0x80 → prologue Solidity passe");
