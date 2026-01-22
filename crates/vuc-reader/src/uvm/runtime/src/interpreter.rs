@@ -830,21 +830,19 @@ pub fn execute_program(
 
     let effective_mbuff = mbuff;
 
-let mut global_mem = vec![0u8; 8192]; // ou 32768 si tu veux plus de marge
+let mut global_mem = vec![0u8; 32768]; // plus de marge, au cas où
 
-// SOLUTION DÉFINITIVE : FMP initial grand dès le début
-let initial_fmp = 0x10000; // 64KB — valeur utilisée par revm, Foundry, geth en simulation
+let initial_fmp = 0x10000; // 64KB — valeur sûre et réaliste
 
 execution_context.free_memory_pointer = initial_fmp;
 
 let mut fmp_bytes = [0u8; 32];
 u256::from(initial_fmp as u64).to_big_endian(&mut fmp_bytes);
-if global_mem.len() >= 0x60 {
-    global_mem[0x40..0x60].copy_from_slice(&fmp_bytes);
-}
+global_mem.resize(0x60.max(global_mem.len()), 0); // au cas où
+global_mem[0x40..0x60].copy_from_slice(&fmp_bytes);
 
-println!("🎉 [SUCCÈS IMMINENT] FMP initial = 0x{:x} écrit en mem[0x40] dès le démarrage", initial_fmp);
-
+println!("🎉🎉🎉 [VICTOIRE] FMP initial forcé à 0x10000 et écrit en mem[0x40]");
+    
 let mut reg: [u256; 64] = [u256::zero(); 64];
     reg[10] = u256::from(((stack.as_ptr() as usize) + stack.len()) as u64);
     reg[8] = u256::zero();
