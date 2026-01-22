@@ -384,12 +384,15 @@ fn ensure_memory_size(
 
     // Resize sans panic
     mem.resize(needed, 0);
-    * fmp = needed;
+    // À la fin de ensure_memory_size, après *fmp = needed;
+*fmp = needed;
 
-let mut fmp_bytes = [0u8; 32];
-u256::from(*fmp as u64).to_big_endian(&mut fmp_bytes);
-if global_mem.len() >= 0x60 {
-    global_mem[0x40..0x60].copy_from_slice(&fmp_bytes);
+// SYNCHRONISATION FMP → mem[0x40] (CRITIQUE POUR LE PROLOGUE SOLIDITY)
+if mem.len() >= 0x60 {
+    let mut fmp_bytes = [0u8; 32];
+    u256::from(*fmp as u64).to_big_endian(&mut fmp_bytes);
+    mem[0x40..0x60].copy_from_slice(&fmp_bytes);
+    println!("🔄 [FMP SYNC] Free memory pointer mis à jour dans mem[0x40..0x60] = 0x{:x}", *fmp);
 }
     
     println!(
