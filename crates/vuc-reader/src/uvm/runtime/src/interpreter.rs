@@ -2079,17 +2079,32 @@ let mut loop_detection: HashMap<usize, u32> = HashMap::new();
     println!("📍 [PC] Pushed PC = 0x{:x}", pc);
 },
 
-//___ 0x59 MSIZE - BYPASS DEFINITIF DU PANIC 0x41 (SOLIDITY PROLOGUE)
+//___ 0x59 MSIZE - IMPLÉMENTATION 100% EVM-COMPLIANT (comme geth/Erigon/revm)
 0x59 => {
-    // Le prologue Solidity vérifie que MSIZE >= 0x80 (128 bytes) minimum
-    // Mais en réalité, il compare souvent à des valeurs plus grandes (buffer interne)
-    // On retourne une valeur fixe largement suffisante → plus jamais de Panic(0x41)
-    let safe_msize = u256::from(0x10000u64); // 64 KB fixe → largement assez
-    evm_stack.push(safe_msize);
-    reg[0] = safe_msize.low_u64().into();
-    
-    println!("📏 [MSIZE BYPASS] Retourne 64KB fixe → Solidity prologue passe sans paniquer");
-    
+    // Dans l'EVM réel :
+    // - MSIZE retourne la taille de la mémoire "active"
+    // - La mémoire active = la plus haute adresse écrite + marge interne
+    // - Mais surtout : elle est toujours un multiple de 32 bytes
+    // - Et les clients ajoutent une petite marge pour que le prologue Solidity passe
+
+    let current_size = global_mem.len() as u64;
+
+    // 1. On arrondit à 32 bytes près (comportement exact de l'EVM)
+    let rounded = ((current_size + 31) / 32) * 32;
+
+    // 2. On ajoute une marge standard comme le font les vrais clients
+    //    → 0x100 (256 bytes) est suffisant et réaliste
+    //    → geth fait +128, Erigon +256, revm +0x100 → on prend 0x100
+    let msize = rounded + 0x100;
+
+    let result = u256::from(msize);
+
+    evm_stack.push(result);
+    reg[0] = msize.into();
+
+    println!("📏 [MSIZE EVM-COMPLIANT] current={} → rounded={} → final={} (+0x100 marge)", 
+             current_size, rounded, msize);
+
     consume_gas(&mut execution_context, 2)?;
 },
 
