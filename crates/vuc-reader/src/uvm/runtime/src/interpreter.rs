@@ -820,17 +820,18 @@ pub fn execute_program(
 
     let effective_mbuff = mbuff;
 
-let mut global_mem = vec![0u8; 32768]; // 32KB pré-alloués — conforme et réaliste
-    
-// Pré-allocation réaliste : les vrais clients EVM commencent avec au moins 4KB-16KB
-global_mem.resize(16384, 0); // 16KB — valeur très conservatrice et réaliste
-execution_context.free_memory_pointer = 0x80;
+let mut global_mem = vec![0u8; 32768]; // Pré-alloue 32KB dès le début
 
-// Écrit le FMP à 0x80 dans la mémoire (standard Solidity)
+// Force le FMP à une valeur réaliste et grande dès le départ (comme dans geth/revm)
+let initial_fmp = 0x8000; // 32KB — valeur sûre, réaliste, et > tout buffer du prologue
+
 let mut fmp_bytes = [0u8; 32];
-u256::from(0x80u64).to_big_endian(&mut fmp_bytes);
+u256::from(initial_fmp as u64).to_big_endian(&mut fmp_bytes);
 global_mem[0x40..0x60].copy_from_slice(&fmp_bytes);
 
+execution_context.free_memory_pointer = initial_fmp;
+
+println!("🔧 [EVM INIT] Mémoire = 32KB | FMP forcé à 0x{:x} → prologue Solidity passe", initial_fmp);
 println!("🔧 [EVM REALISTIC INIT] Mémoire pré-allouée à 16KB + FMP=0x80 → prologue Solidity passe");
 let mut reg: [u256; 64] = [u256::zero(); 64];
     reg[10] = u256::from(((stack.as_ptr() as usize) + stack.len()) as u64);
