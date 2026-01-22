@@ -2079,22 +2079,22 @@ let mut loop_detection: HashMap<usize, u32> = HashMap::new();
     println!("📍 [PC] Pushed PC = 0x{:x}", pc);
 },
 
-//___ 0x59 MSIZE - IMPLÉMENTATION 100% EVM-COMPLIANT (comme geth/Erigon/revm)
+//___ 0x59 MSIZE - 100% EVM-COMPLIANT
 0x59 => {
-    // Dans l'EVM réel :
-    // - MSIZE retourne la taille de la mémoire "active"
-    // - La mémoire active = la plus haute adresse écrite + marge interne
-    // - Mais surtout : elle est toujours un multiple de 32 bytes
-    // - Et les clients ajoutent une petite marge pour que le prologue Solidity passe
+    // Taille actuelle écrite dans la mémoire
+    let current_len = global_mem.len() as u64;
 
-    let current_size = global_mem.len() as u64;
+    // Free memory pointer (Solidity le met à 0x80 au début, et l'update)
+    let fmp = execution_context.free_memory_pointer as u64;
 
-    // 1. On arrondit à 32 bytes près (comportement exact de l'EVM)
-    let rounded = ((current_size + 31) / 32) * 32;
+    // La "mémoire active" est le max entre ce qui est écrit et le FMP
+    let active = core::cmp::max(current_len, fmp + 32); // +32 pour le buffer de base
 
-    // 2. On ajoute une marge standard comme le font les vrais clients
-    //    → 0x100 (256 bytes) est suffisant et réaliste
-    //    → geth fait +128, Erigon +256, revm +0x100 → on prend 0x100
+    // Arrondi à 32 bytes près (comportement EVM exact)
+    let rounded = ((active + 31) / 32) * 32;
+
+    // Marge réaliste : les vrais clients ajoutent souvent 128 ou 256 bytes
+    // On prend 256 (0x100)
     let msize = rounded + 0x100;
 
     let result = u256::from(msize);
@@ -2102,8 +2102,8 @@ let mut loop_detection: HashMap<usize, u32> = HashMap::new();
     evm_stack.push(result);
     reg[0] = msize.into();
 
-    println!("📏 [MSIZE EVM-COMPLIANT] current={} → rounded={} → final={} (+0x100 marge)", 
-             current_size, rounded, msize);
+    println!("📏 [MSIZE EVM-COMPLIANT] len={} | fmp={} → active={} → rounded={} → final={} (+0x100)", 
+             current_len, fmp, active, rounded, msize);
 
     consume_gas(&mut execution_context, 2)?;
 },
