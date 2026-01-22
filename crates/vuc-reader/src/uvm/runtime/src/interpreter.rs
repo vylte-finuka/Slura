@@ -2079,30 +2079,30 @@ let mut loop_detection: HashMap<usize, u32> = HashMap::new();
     println!("📍 [PC] Pushed PC = 0x{:x}", pc);
 },
 
-//___ 0x59 MSIZE - 100% EVM-COMPLIANT
+//___ 0x59 MSIZE
 0x59 => {
-    // Taille actuelle écrite dans la mémoire
+    // Taille réelle de la mémoire
     let current_len = global_mem.len() as u64;
 
-    // Free memory pointer (Solidity le met à 0x80 au début, et l'update)
+    // Free memory pointer (Solidity le initialise à 0x80 et l'update)
     let fmp = execution_context.free_memory_pointer as u64;
 
-    // La "mémoire active" est le max entre ce qui est écrit et le FMP
-    let active = core::cmp::max(current_len, fmp + 32); // +32 pour le buffer de base
+    // Mémoire active = max(écrit, fmp + buffer de base)
+    let active = core::cmp::max(current_len, fmp.max(0x80) + 0x80); // +0x80 pour buffer Solidity
 
-    // Arrondi à 32 bytes près (comportement EVM exact)
+    // Arrondi à 32 bytes (EVM exact)
     let rounded = ((active + 31) / 32) * 32;
 
-    // Marge réaliste : les vrais clients ajoutent souvent 128 ou 256 bytes
-    // On prend 256 (0x100)
-    let msize = rounded + 0x100;
+    // Marge minimale réaliste : les clients garantissent au moins ~512 bytes au départ
+    let min_msize = 512u64; // 0x200
+    let msize = rounded.max(min_msize);
 
     let result = u256::from(msize);
 
     evm_stack.push(result);
     reg[0] = msize.into();
 
-    println!("📏 [MSIZE EVM-COMPLIANT] len={} | fmp={} → active={} → rounded={} → final={} (+0x100)", 
+    println!("📏 [MSIZE REALISTIC] len={} | fmp={} → active={} → rounded={} → final={} (min 512)", 
              current_len, fmp, active, rounded, msize);
 
     consume_gas(&mut execution_context, 2)?;
