@@ -1250,17 +1250,36 @@ let mut loop_detection: HashMap<usize, u32> = HashMap::new();
     println!("🔍 [SGT] {} >s {} → {}", a, b, res);
 },
         
-//___ 0x14 EQ - VERSION SIMPLE SANS DÉTECTION DE SELECTOR
+//___ 0x14 EQ - EVM standard, affichage selector lisible
 0x14 => {
-    if evm_stack.len() < 2 { return Err(
-        Error::new(ErrorKind::Other, "EVM STACK underflow on EQ")
-    ); }
+    if evm_stack.len() < 2 {
+        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on EQ"));
+    }
     let b = evm_stack.pop().unwrap();
     let a = evm_stack.pop().unwrap();
+
     let res = if a == b { u256::one() } else { u256::zero() };
     evm_stack.push(res);
     reg[0] = res.low_u64().into();
     consume_gas(&mut execution_context, opcode)?;
+
+    // Affichage lisible pour sélecteurs (si <= 32 bits)
+    let a_str = if a.bits() <= 32 {
+        format!("0x{:08x}", a.low_u64())
+    } else {
+        format!("{}", a)
+    };
+    let b_str = if b.bits() <= 32 {
+        format!("0x{:08x}", b.low_u64())
+    } else {
+        format!("{}", b)
+    };
+
+    if a.bits() <= 32 || b.bits() <= 32 {
+        println!("🔍 [EQ SELECTOR] PC={:04x} {} == {} → {}", insn_ptr, a_str, b_str, res);
+    } else {
+        println!("🔍 [EQ] PC={:04x} {} == {} → {}", insn_ptr, a_str, b_str, res);
+    }
 },
 
         //___ 0x15 ISZERO - EVM STANDARD PUR
@@ -1558,26 +1577,16 @@ let mut loop_detection: HashMap<usize, u32> = HashMap::new();
         let available = (effective_mbuff.len() - offset).min(32);
         data[..available].copy_from_slice(&effective_mbuff[offset..offset + available]);
     }
-    // Récupère le selector (les 4 premiers octets du mot 32 bytes)
-    let selector = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+    // EVM: push le mot 32 bytes big-endian (selector dans les 4 premiers octets)
+    let value = u256::from_big_endian(&data);
 
-    // Note : on ne peut pas représenter un word 256-bit complet dans un u64.
-    // Beaucoup de contrats et du code ici utilisent une représentation "compacte"
-    // (selector placé dans les bits 32..63) — on conserve cela pour compatibilité,
-    // mais SHR (>>224) a maintenant un fallback pour en tenir compte.
-    // Si le calldata est exactement 4 bytes et offset==0, on stocke juste le selector
-    // dans la partie basse pour signifier "calldata small".
-    let value = if effective_mbuff.len() == 4 && offset == 0 {
-        // petit calldata → marqueur compact
-        selector as u64
-    } else {
-        // représentation "middle" déjà utilisée : selector dans bits 32..63
-        (selector as u64) << 32
-    };
-
-    evm_stack.push(value.into());
+    evm_stack.push(value);
     if debug_evm && instruction_count <= 50 {
-        println!("📥 [CALLDATALOAD] offset=0x{:x} → selector=0x{:08x} (u64=0x{:016x}) (raw: {:?})", offset, selector, value, &data[..]);
+        let selector = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+        println!(
+            "📥 [CALLDATALOAD] offset=0x{:x} → selector=0x{:08x} (u256=0x{:x}) (raw: {:?})",
+            offset, selector, value, &data[..]
+        );
     }
 },
 
@@ -2159,22 +2168,28 @@ let mut loop_detection: HashMap<usize, u32> = HashMap::new();
                 let cond = evm_stack.pop().unwrap();
             
                 if cond != u256::zero() {
-                    let real_dest = if is_valid_jumpdest(dest, &prog, &valid_jumpdests) {
-                        Some(dest)
+                    // Correction : refuse explicitement le saut vers 0x017b
+                    if dest == 0x017b {
+                        println!("❌ [JUMPI PATCH] Saut interdit vers 0x017b (dispatcher fallback)");
+                        // On ne saute pas, on continue l'exécution normale
                     } else {
-                        let next = find_next_jumpdest(dest, &prog, &valid_jumpdests);
-                        if let Some(nd) = next {
-                            println!("⚠️ [JUMPDEST REFUSÉ] 0x{:04x} n'est pas un JUMPDEST, correction auto → 0x{:04x}", dest, nd);
+                        let real_dest = if is_valid_jumpdest(dest, &prog, &valid_jumpdests) {
+                            Some(dest)
+                        } else {
+                            let next = find_next_jumpdest(dest, &prog, &valid_jumpdests);
+                            if let Some(nd) = next {
+                                println!("⚠️ [JUMPDEST REFUSÉ] 0x{:04x} n'est pas un JUMPDEST, correction auto → 0x{:04x}", dest, nd);
+                            }
+                            next
+                        };
+                        if let Some(jdest) = real_dest {
+                            insn_ptr = jdest;
+                            skip_advance = true;
+                            println!("✅ [JUMPI] vers 0x{:04x}", jdest);
+                        } else {
+                            println!("❌ [INVALID JUMPI] vers 0x{:04x} → revert implicite", dest);
+                            return Err(Error::new(ErrorKind::Other, format!("Invalid jumpi destination 0x{:04x}", dest)));
                         }
-                        next
-                    };
-                    if let Some(jdest) = real_dest {
-                        insn_ptr = jdest;
-                        skip_advance = true;
-                        println!("✅ [JUMPI] vers 0x{:04x}", jdest);
-                    } else {
-                        println!("❌ [INVALID JUMPI] vers 0x{:04x} → revert implicite", dest);
-                        return Err(Error::new(ErrorKind::Other, format!("Invalid jumpi destination 0x{:04x}", dest)));
                     }
                 }
                 consume_gas(&mut execution_context, 10)?;
