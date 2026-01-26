@@ -43,17 +43,32 @@ contract ProofOfReserve {
 
 // ============================= Main Contract ===================================   
 contract VEZproxy is Initializable, ERC20Upgradeable, OwnableUpgradeable, UUPSUpgradeable {
+    
+    // ────────────────────────────────────────────────────────────────────────────────
+    //  HARDCODED OWNER POUR TESTS / DEBUG (remplace msg.sender)
+    // ────────────────────────────────────────────────────────────────────────────────
+    address private constant owner_self = 0x53ae54b11251d5003e9aa51422405bc35a2ef32d;
+
     EACAggregatorProxy public priceFeed;
     string public currency = "EUR";
 
     //@custom:oz-upgrades-unsafe-allow constructor
     constructor() {
+        // Optionnel : on peut déjà set owner ici si on veut forcer avant initialize
+        // mais on le fait dans initialize pour rester compatible proxy
     }
 
     function initialize() initializer public {
         __ERC20_init("Vyft Enhancing ZER", "VEZ");
-        __Ownable_init(msg.sender);
+        
+        // HARDCODE : on force l'owner à cette adresse fixe
+        // au lieu de __Ownable_init(msg.sender)
+        __Ownable_init(owner_self);
+        
         __UUPSUpgradeable_init();
+
+        // Pour debug : émettre un event pour confirmer que l'owner est bien setté
+        emit OwnershipTransferred(address(0), owner_self);
     }
 
     // ============================ External Mint Function ==============================
@@ -132,7 +147,6 @@ contract VEZproxy is Initializable, ERC20Upgradeable, OwnableUpgradeable, UUPSUp
     }
 
     // ============================ ERC20 Standard Functions ==============================
-    // On garde les fonctions publiques classiques, mais on n'override plus inutilement
 
     function transfer(address to, uint256 amount) 
         public 
