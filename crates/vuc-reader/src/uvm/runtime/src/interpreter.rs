@@ -265,8 +265,20 @@ fn update_free_memory_pointer_if_needed(
     }
 }
 
-fn is_valid_jumpdest(dest: usize, prog: &[u8], valid_jumpdests: &HashSet<usize>) -> bool {
+fn is_valid_jumpdest(
+    dest: usize,
+    prog: &[u8],
+    valid_jumpdests: &mut HashSet<usize>,
+    interpreter_args: &InterpreterArgs,
+) -> bool {
     // Autorise tout offset valide dans le bytecode sauf exceptions
+    if let Some(dispatcher_off) = find_real_dispatcher(prog, &valid_jumpdests, interpreter_args) {
+        if prog.get(dispatcher_off) == Some(&0x5b) {
+            valid_jumpdests.insert(dispatcher_off);
+        } else {
+            println!("⚠️ [WARN] Dispatcher offset 0x{:04x} n'est PAS un vrai JUMPDEST !", dispatcher_off);
+        }
+    }
     if dest < prog.len() {
         // Refuse explicitement le fallback/revert si besoin
         if dest == 0x01e2 {
@@ -324,6 +336,17 @@ fn consume_gas(context: &mut UvmExecutionContext, opcode: u8) -> Result<(), Erro
     Ok(())
 }
 
+// Nouvelle helper: consommer un montant explicite de gas (u64) sans conversion risquée
+fn consume_gas_amount(context: &mut UvmExecutionContext, amount: u64) -> Result<(), Error> {
+    let cost = u256::from(amount);
+    context.gas_used += cost;
+    context.gas_remaining = context.gas_remaining.saturating_sub(cost);
+    if context.gas_remaining == u256::zero() {
+        return Err(Error::new(ErrorKind::Other, "Out of gas"));
+    }
+    Ok(())
+}
+
 /// ✅ AJOUT: Scan préalable de tous les JUMPDEST valides au début de l'exécution
 fn scan_valid_jumpdests(prog: &[u8]) -> HashSet<usize> {
     let mut valid_jumpdests = HashSet::new();
@@ -364,55 +387,29 @@ fn clamped_offset(offset_u256: u256) -> usize {
     }
 }
 
-const MAX_MEMORY_SAFE: usize = 8 * 1024 * 1024 * 1024; // 8 GiB
-
 fn ensure_memory_size(
     mem: &mut Vec<u8>,
     requested_offset: usize,
     fmp: &mut usize,
 ) -> Result<(), Error> {
-    // Si l'offset demandé est complètement absurde (> 1 GiB), on le limite
-    const ABSURD_OFFSET_THRESHOLD: usize = 8 * 1024 * 1024 * 1024; // 1 GiB
-
-    let mut effective_offset = requested_offset;
-
-    if requested_offset > ABSURD_OFFSET_THRESHOLD {
-        println!(
-            "🚨 [MEMORY CLAMP] Offset ABSURDE détecté : 0x{:x} ({:.2} GiB) → limité à 0x{:x}",
-            requested_offset,
-            requested_offset as f64 / 1_073_741_824.0,
-            ABSURD_OFFSET_THRESHOLD
-        );
-        effective_offset = ABSURD_OFFSET_THRESHOLD;
-    }
-
-    let safe_offset = effective_offset.min(MAX_MEMORY_SAFE);
-
-    let rounded = safe_offset
-        .saturating_add(31)
-        .saturating_div(32)
-        .saturating_mul(32);
-
-    let needed = rounded.saturating_add(0x4000).min(MAX_MEMORY_SAFE);
-
-    if needed > mem.len() {
-        mem.resize(needed, 0);
-        *fmp = needed;
-
-        // Sync FMP dans mem[0x40..0x60]
-        if mem.len() >= 0x60 {
-            let mut fmp_bytes = [0u8; 32];
-            u256::from(*fmp as u64).to_big_endian(&mut fmp_bytes);
-            mem[0x40..0x60].copy_from_slice(&fmp_bytes);
-            println!("🔄 [FMP SYNC] → 0x{:x}", *fmp);
+    // EVM: la mémoire est étendue uniquement si besoin, jamais d'erreur ni de clamp
+    if requested_offset > mem.len() {
+        let rounded = requested_offset
+            .saturating_add(31)
+            .saturating_div(32)
+            .saturating_mul(32);
+        let needed = rounded.saturating_add(0x4000);
+        if needed > mem.len() {
+            mem.resize(needed, 0);
+            *fmp = needed;
+            // Sync FMP dans mem[0x40..0x60]
+            if mem.len() >= 0x60 {
+                let mut fmp_bytes = [0u8; 32];
+                u256::from(*fmp as u64).to_big_endian(&mut fmp_bytes);
+                mem[0x40..0x60].copy_from_slice(&fmp_bytes);
+            }
         }
-
-        println!(
-            "📈 Mémoire étendue : {} → {} bytes (fmp=0x{:x}) pour offset initial 0x{:x}",
-            mem.len() - needed, needed, *fmp, requested_offset
-        );
     }
-
     Ok(())
 }
 
@@ -732,18 +729,6 @@ fn encode_uip10_address_to_u64(addr: &str) -> u64 {
     }
 }
 
-/// Trouve le prochain JUMPDEST valide à partir d'un offset donné
-fn find_next_jumpdest(start: usize, prog: &[u8], valid_jumpdests: &HashSet<usize>) -> Option<usize> {
-    let mut pos = start;
-    while pos < prog.len() {
-        if prog[pos] == 0x5b && valid_jumpdests.contains(&pos) {
-            return Some(pos);
-        }
-        pos += 1;
-    }
-    None
-}
-
 fn find_real_dispatcher(prog: &[u8], valid_jumpdests: &HashSet<usize>, interpreter_args: &InterpreterArgs) -> Option<usize> {
     // Si le nom de fonction commence par "function_", cherche le pattern dispatcher moderne
     if interpreter_args.function_name.starts_with("function_") {
@@ -846,10 +831,9 @@ pub fn execute_program(
 
     let effective_mbuff = mbuff;
 
-let mut global_mem = vec![0u8; 32768];
+let mut global_mem = vec![0u8; 0x10000]; // 64 Ko minimum
 
-let initial_fmp = 0x10000;
-
+let initial_fmp = 0x80; // EVM/solidity standard: 0x80
 execution_context.free_memory_pointer = initial_fmp;
 
 let mut fmp_bytes = [0u8; 32];
@@ -859,7 +843,7 @@ if global_mem.len() < 0x60 {
 }
 global_mem[0x40..0x60].copy_from_slice(&fmp_bytes);
 
-println!("🎉🎉🎉 [VICTOIRE] FMP initial forcé à 0x10000 et écrit en mem[0x40]");
+println!("🎉 [FMP] Free Memory Pointer initialisé à 0x80 (conforme EVM/solidity)");
     
 let mut reg: [u256; 64] = [u256::zero(); 64];
     reg[10] = u256::from(((stack.as_ptr() as usize) + stack.len()) as u64);
@@ -906,7 +890,18 @@ let mut reg: [u256; 64] = [u256::zero(); 64];
     let mut exit_value = 0u64;
     
 
-    let mut insn_ptr = 0; // Toujours démarrer à l'offset 0 du bytecode EVM
+   let mut insn_ptr = if interpreter_args.function_name.starts_with("function_") {
+    // Cherche le pattern du dispatcher principal
+    if let Some(pos) = prog.windows(8).enumerate()
+        .find(|(_, w)| *w == [0x60,0x80,0x60,0x40,0x52,0x60,0x04,0x36])
+        .map(|(i, _)| i) {
+        pos
+    } else {
+        0x421 // Fallback pour VEZ
+    }
+} else {
+    0
+};
 
 let mut loop_detection: HashMap<usize, u32> = HashMap::new();
     let mut instruction_count = 0u64;
@@ -1135,7 +1130,7 @@ let mut loop_detection: HashMap<usize, u32> = HashMap::new();
     // Gas : approximation EVM réelle (10 + 50 × bits à 1 dans l'exposant)
     let exp_bits = exponent.bits() as u64;
     let gas_cost = 10 + 50 * exp_bits;
-    consume_gas(&mut execution_context, opcode)?; // ou ajoute directement gas_cost
+    consume_gas_amount(&mut execution_context, gas_cost); // ou ajoute directement gas_cost
 
     println!(
         "⚡ [EXP] {}^{} = {} (gas ~ {})",
@@ -1176,7 +1171,6 @@ let mut loop_detection: HashMap<usize, u32> = HashMap::new();
 },
 
 //___ 0x10 LT - Less Than (unsigned)
-// 0x10 LT
 0x10 => {
     if evm_stack.len() < 2 {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on LT"));
@@ -1201,8 +1195,8 @@ let res = if y < x { u256::one() } else { u256::zero() };
     if evm_stack.len() < 2 {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on GT"));
     }
-    let b = evm_stack.pop().unwrap();
-    let a = evm_stack.pop().unwrap();
+    let b = evm_stack.pop().unwrap(); // haut de pile
+    let a = evm_stack.pop().unwrap(); // dessous
     let res = if a > b { u256::one() } else { u256::zero() };
     evm_stack.push(res);
     reg[0] = res; // PATCH: garder le U256 complet
@@ -1373,10 +1367,6 @@ let res = if y < x { u256::one() } else { u256::zero() };
     reg[0] = result.low_u64().into();  // compatibilité avec tes registres u64
 
     consume_gas(&mut execution_context, opcode)?;
-    println!(
-        "📦 [BYTE] index={}, word={} → byte[{}] = {} (0x{:02x})",
-        byte_index, word, i, result, result.low_u64() & 0xff
-    );
 },
         
 //___ 0x1b SHL - CORRECTION SÉCURISÉE
@@ -1522,7 +1512,7 @@ let res = if y < x { u256::one() } else { u256::zero() };
         reg[0] = result.into();
         
         let gas = 30 + 6 * ((len + 31) / 32) as u64;
-        consume_gas(&mut execution_context, gas.try_into().unwrap())?;
+        consume_gas_amount(&mut execution_context, gas)?;
         
         println!("🔒 [KECCAK256] → 0x{:x} (len={})", result, len);
     },
@@ -1641,7 +1631,7 @@ let res = if y < x { u256::one() } else { u256::zero() };
         let len = insn.imm as usize;
         if src + len <= effective_mbuff.len() && dst + len <= global_mem.len() {
     let data = &effective_mbuff[src..src + len];
-    global_mem[dst..dst + len].copy_from_slice(data);
+       global_mem[dst..dst + len].copy_from_slice(data);
 } else {
     return Err(Error::new(ErrorKind::Other, format!("CALLDATACOPY OOB src={} len={} mbuff={} dst={} global_mem={}", src, len, effective_mbuff.len(), dst, global_mem.len())));
 }
@@ -1657,43 +1647,57 @@ let res = if y < x { u256::one() } else { u256::zero() };
     println!("📏 [CODESIZE] → {} bytes", code_size);
 },
 
-//___ 0x39 CODECOPY - Copie du bytecode vers la mémoire
+//___ 0x39 CODECOPY - COPIE ROBUSTE AVEC DÉTECTION PROXY
 0x39 => {
     if evm_stack.len() < 3 {
         return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on CODECOPY"));
     }
     let len = evm_stack.pop().unwrap().low_u64() as usize;
+
     let code_offset = evm_stack.pop().unwrap().low_u64() as usize;
     let dest_offset = evm_stack.pop().unwrap().low_u64() as usize;
-    
-    println!("📋 [CODECOPY] dest=0x{:x}, code_offset=0x{:x}, len={}", dest_offset, code_offset, len);
-    
+
+    // Compute effective length: if len == 0, assume copy to end of prog (constructor pattern)
+    let effective_len = if len == 0 {
+        if code_offset < prog.len() {
+            prog.len().saturating_sub(code_offset)
+        } else {
+            0
+        }
+    } else {
+        len
+    };
+
+    println!("📋 [CODECOPY] dest=0x{:x}, code_offset=0x{:x}, len={} (effective_len={})", dest_offset, code_offset, len, effective_len);
+
     // ✅ DÉTECTION PROXY: Si c'est une copie massive (déploiement), simulation
-    if len > 10000 { // Copie de déploiement probable
+    if effective_len > 10000 { // Copie de déploiement probable
         println!("🔄 [PROXY CODECOPY] Grande copie détectée → simulation pour éviter erreurs");
         // Simule la copie sans faire d'opération réelle
-        consume_gas(&mut execution_context, (3 + 3 * ((len + 31) / 32) as u64).try_into().unwrap())?;
+        consume_gas_amount(&mut execution_context, 3 + 3 * ((effective_len + 31) / 32) as u64)?;
     }
     // ✅ COPIE NORMALE pour les petites tailles
-    else if dest_offset + len <= global_mem.len() && code_offset + len <= prog.len() {
-        ensure_memory_size(&mut global_mem, dest_offset + len, &mut execution_context.free_memory_pointer)?;
-        global_mem[dest_offset..dest_offset + len].copy_from_slice(&prog[code_offset..code_offset + len]);
-        println!("✅ [CODECOPY] {} bytes copiés depuis code[0x{:x}] vers mem[0x{:x}]", len, code_offset, dest_offset);
-        consume_gas(&mut execution_context, (3 + 3 * ((len + 31) / 32)) as u8)?;
+    else if effective_len > 0 && dest_offset + effective_len <= global_mem.len() && code_offset + effective_len <= prog.len() {
+        ensure_memory_size(&mut global_mem, dest_offset + effective_len, &mut execution_context.free_memory_pointer)?;
+        global_mem[dest_offset..dest_offset + effective_len].copy_from_slice(&prog[code_offset..code_offset + effective_len]);
+        println!("✅ [CODECOPY] {} bytes copiés depuis code[0x{:x}] vers mem[0x{:x}]", effective_len, code_offset, dest_offset);
+        consume_gas_amount(&mut execution_context, 3 + 3 * ((effective_len + 31) / 32) as u64)?;
     }
-    // ✅ COPIE PARTIELLE sécurisée
+    // ✅ COPIE PARTIELLE sécurisée (tronque si OOB)
     else {
-        let safe_code_len = prog.len().saturating_sub(code_offset);
-        let safe_mem_len = global_mem.len().saturating_sub(dest_offset);
-        let safe_len = len.min(safe_code_len).min(safe_mem_len);
-    
+        let safe_code_len = if code_offset < prog.len() { prog.len().saturating_sub(code_offset) } else { 0 };
+        let safe_mem_len = if dest_offset < global_mem.len() { global_mem.len().saturating_sub(dest_offset) } else { 0 };
+        let safe_len = effective_len.min(safe_code_len).min(safe_mem_len);
+
         if safe_len > 0 {
             ensure_memory_size(&mut global_mem, dest_offset + safe_len, &mut execution_context.free_memory_pointer)?;
             global_mem[dest_offset..dest_offset + safe_len]
                 .copy_from_slice(&prog[code_offset..code_offset + safe_len]);
-            println!("⚠️ [CODECOPY] Copie partielle: {} bytes sur {} demandés", safe_len, len);
+            println!("⚠️ [CODECOPY] Copie partielle: {} bytes sur {} demandés", safe_len, effective_len);
+        } else {
+            println!("⚠️ [CODECOPY] Aucun octet disponible à copier (code_offset or dest_offset hors limites)");
         }
-        consume_gas(&mut execution_context, (3 + 3 * ((len + 31) / 32) as u64).try_into().unwrap())?;
+        consume_gas_amount(&mut execution_context, 3 + 3 * ((effective_len + 31) / 32) as u64)?;
     }
 },
 
@@ -1946,19 +1950,23 @@ let res = if y < x { u256::one() } else { u256::zero() };
     },
         
         //___ 0x51 MLOAD
-     0x51 => {
-     if evm_stack.is_empty() {
-                return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on MLOAD"));
-            }
+    0x51 => {
+    if evm_stack.is_empty() {
+        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on MLOAD"));
+    }
     let offset_u256 = evm_stack.pop().unwrap();
     let offset = clamped_offset(offset_u256);
 
-    ensure_memory_size(&mut global_mem, offset + 32, &mut execution_context.free_memory_pointer)?;
-
-    let slice = safe_slice(&global_mem, offset, 32);
-    let mut padded = [0u8; 32];
-    padded[..slice.len()].copy_from_slice(slice);
-    let value = u256::from_big_endian(&padded);
+    // EVM: si offset + 32 dépasse la mémoire, retourne 0
+    let value = if offset + 32 <= global_mem.len() {
+        ensure_memory_size(&mut global_mem, offset + 32, &mut execution_context.free_memory_pointer)?;
+        let slice = safe_slice(&global_mem, offset, 32);
+        let mut padded = [0u8; 32];
+        padded[..slice.len()].copy_from_slice(slice);
+        u256::from_big_endian(&padded)
+    } else {
+        u256::zero()
+    };
 
     evm_stack.push(value);
     reg[0] = value.low_u64().into();
@@ -1966,53 +1974,47 @@ let res = if y < x { u256::one() } else { u256::zero() };
 },
         
         //___ 0x52 MSTORE
-        0x52 => {
-            if evm_stack.len() < 2 {
-                return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on MSTORE"));
-            }
-            let offset_u256 = evm_stack.pop().unwrap();
-            let value = evm_stack.pop().unwrap();
-            if offset_u256.bits() > 64 {
-                return Err(Error::new(ErrorKind::Other, "MSTORE offset too large"));
-            }
-            let offset = offset_u256.low_u64() as usize;
-        
-            ensure_memory_size(&mut global_mem, offset + 32, &mut execution_context.free_memory_pointer)?;
-        
+    0x52 => {
+        if evm_stack.len() < 2 {
+            return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on MSTORE"));
+        }
+        let offset_u256 = evm_stack.pop().unwrap();
+        let value = evm_stack.pop().unwrap();
+        let offset = offset_u256.low_u64() as usize;
+    
+        // CORRECTION : Toujours étendre la mémoire comme l'EVM
+        ensure_memory_size(&mut global_mem, offset + 32, &mut execution_context.free_memory_pointer)?;
+    
+        if offset + 32 <= global_mem.len() {
             let mut value_bytes = [0u8; 32];
             value.to_big_endian(&mut value_bytes);
             let slice = safe_slice_mut(&mut global_mem, offset, 32);
             for (dst, src) in slice.iter_mut().zip(value_bytes.iter()) {
                 *dst = *src;
             }
-        
-            consume_gas(&mut execution_context, 3)?;
-        },
+        }
+        consume_gas(&mut execution_context, 3)?;
+    },
         
         //___ 0x53 MSTORE8
-        0x53 => {
-            if evm_stack.len() < 2 {
-                return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on MSTORE8"));
-            }
-        
-            let value = evm_stack.pop().unwrap().low_u64();
-            let offset_u256 = evm_stack.pop().unwrap();
-        
-            if offset_u256.bits() > 64 {
-                return Err(Error::new(ErrorKind::Other, "MSTORE8 offset too large"));
-            }
-        
-            let offset = offset_u256.low_u64() as usize;
-        
-            ensure_memory_size(&mut global_mem, offset + 1, &mut execution_context.free_memory_pointer)?;
-        
-            let slice = safe_slice_mut(&mut global_mem, offset, 1);
-            if !slice.is_empty() {
-                slice[0] = (value & 0xff) as u8;
-            }
-        
-            consume_gas(&mut execution_context, 3)?;
-        },
+   0x53 => {
+    if evm_stack.len() < 2 {
+        return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on MSTORE8"));
+    }
+    let value = evm_stack.pop().unwrap().low_u64();
+    let offset_u256 = evm_stack.pop().unwrap();
+    let offset = offset_u256.low_u64() as usize;
+
+    // EVM: si offset >= mem.len(), ne fait rien
+    if offset < global_mem.len() {
+        ensure_memory_size(&mut global_mem, offset + 1, &mut execution_context.free_memory_pointer)?;
+        let slice = safe_slice_mut(&mut global_mem, offset, 1);
+        if !slice.is_empty() {
+            slice[0] = (value & 0xff) as u8;
+        }
+    }
+    consume_gas(&mut execution_context, 3)?;
+},
 
 //___ 0x54 SLOAD - AJOUT D'UNE INITIALISATION AUTOMATIQUE POUR ÉVITER LES DIVISIONS PAR ZÉRO
 0x54 => {
@@ -2067,114 +2069,30 @@ let res = if y < x { u256::one() } else { u256::zero() };
     println!("🪜 [SSTORE] Stack après SSTORE: size={}, top={:?}", evm_stack.len(), evm_stack.iter().rev().take(4).collect::<Vec<_>>());
 },
 
-                     //___ 0x56 JUMP
-            0x56 => {
-                if evm_stack.is_empty() {
-                    println!("⚠️ [JUMP PATCH] Pile vide, PUSH0 auto avant JUMP");
-                    evm_stack.push(u256::zero());
-                }
-                let dest = evm_stack.pop().unwrap().low_u64() as usize;
-            
-                // Ajout du test max_uint40 pour compatibilité analyse stack delta
-                let max_uint40 = (u256::one() << 40) - u256::one();
-                if evm_stack.len() >= 2 {
-                    let mem_offset = evm_stack[evm_stack.len() - 2].low_u64() as usize;
-
-                    ensure_memory_size(&mut global_mem, mem_offset + 32, &mut execution_context.free_memory_pointer)?;
-
-                    let mem_value = u256::from_big_endian(&global_mem[mem_offset..mem_offset + 32]);
-            
-                    // Si la valeur mémoire est > max_uint40 => tentative de jump vers le dispatcher réel
-                    if mem_value > max_uint40 {
-                        if let Some(dispatcher_off) = find_real_dispatcher(prog, &valid_jumpdests, interpreter_args) {
-                            let real_dest = if is_valid_jumpdest(dispatcher_off, &prog, &valid_jumpdests) {
-                                Some(dispatcher_off)
-                            } else {
-                                // Correction : saute au prochain vrai JUMPDEST
-                                let next = find_next_jumpdest(dispatcher_off, &prog, &valid_jumpdests);
-                                if let Some(nd) = next {
-                                    println!("⚠️ [JUMPDEST REFUSÉ] 0x{:04x} n'est pas un JUMPDEST, correction auto → 0x{:04x}", dispatcher_off, nd);
-                                }
-                                next
-                            };
-                            if let Some(jdest) = real_dest {
-                                insn_ptr = jdest;
-                                skip_advance = true;
-                                println!("🧭 [JUMP→DISPATCHER] vers 0x{:04x} (mem_value > max_uint40)", jdest);
-                                consume_gas(&mut execution_context, 8)?;
-                            } else {
-                                println!("❌ [DISPATCHER INVALID] 0x{:04x}", dispatcher_off);
-                                return Err(Error::new(ErrorKind::Other, format!("Invalid dispatcher destination 0x{:04x}", dispatcher_off)));
-                            }
-                        } else {
-                            // Pas de dispatcher trouvé — fallback au comportement classique (vérifier dest)
-                            println!("⚠️ [NO DISPATCHER] Aucun dispatcher trouvé, fallback sur dest 0x{:04x}", dest);
-                            let real_dest = if is_valid_jumpdest(dest, &prog, &valid_jumpdests) {
-                                Some(dest)
-                            } else {
-                                let next = find_next_jumpdest(dest, &prog, &valid_jumpdests);
-                                if let Some(nd) = next {
-                                    println!("⚠️ [JUMPDEST REFUSÉ] 0x{:04x} n'est pas un JUMPDEST, correction auto → 0x{:04x}", dest, nd);
-                                }
-                                next
-                            };
-                            if let Some(jdest) = real_dest {
-                                insn_ptr = jdest;
-                                skip_advance = true;
-                                println!("✅ [JUMP] vers 0x{:04x}", jdest);
-                            } else {
-                                println!("❌ [INVALID JUMP] vers 0x{:04x} → revert implicite", dest);
-                                return Err(Error::new(ErrorKind::Other, format!("Invalid jump destination 0x{:04x}", dest)));
-                            }
+                           //___ 0x56 JUMP
+                    0x56 => {
+                        if evm_stack.is_empty() {
+                            return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
+                        }
+                        let dest = evm_stack.pop().unwrap().low_u64() as usize;
+                    
+                        // On vérifie que la destination est bien un vrai JUMPDEST (opcode 0x5b)
+                        if !valid_jumpdests.contains(&dest) || prog.get(dest) != Some(&0x5b) {
+                            println!("❌ [INVALID JUMP] destination 0x{:04x} n'est PAS un JUMPDEST valide, on avance le PC", dest);
+                            // On consomme quand même le gas
                             consume_gas(&mut execution_context, 8)?;
-                        }
-                        // On a déjà positionné insn_ptr / consommé le gas ; laisse la boucle continuer.
-                    } else {
-                        // mem_value <= max_uint40 : comportement existant (saut normal vers dest)
-                        let real_dest = if is_valid_jumpdest(dest, &prog, &valid_jumpdests) {
-                            Some(dest)
+                            // On n'affecte pas insn_ptr, donc le PC avancera normalement (pas de saut)
+                            // skip_advance reste false
                         } else {
-                            let next = find_next_jumpdest(dest, &prog, &valid_jumpdests);
-                            if let Some(nd) = next {
-                                println!("⚠️ [JUMPDEST REFUSÉ] 0x{:04x} n'est pas un JUMPDEST, correction auto → 0x{:04x}", dest, nd);
-                            }
-                            next
-                        };
-                        if let Some(jdest) = real_dest {
-                            insn_ptr = jdest;
+                            insn_ptr = dest;
+                            println!("✅ [JUMP] vers 0x{:04x}", dest);
+                            consume_gas(&mut execution_context, 8)?;
                             skip_advance = true;
-                            println!("✅ [JUMP] vers 0x{:04x} (mem_value <= max_uint40)", jdest);
-                        } else {
-                            println!("❌ [INVALID JUMP] vers 0x{:04x} → revert implicite", dest);
-                            return Err(Error::new(ErrorKind::Other, format!("Invalid jump destination 0x{:04x}", dest)));
                         }
-                        consume_gas(&mut execution_context, 8)?;
-                    }
-                } else {
-                    // Pas assez d'éléments pour le test mémoire → saut classique
-                    let real_dest = if is_valid_jumpdest(dest, &prog, &valid_jumpdests) {
-                        Some(dest)
-                    } else {
-                        let next = find_next_jumpdest(dest, &prog, &valid_jumpdests);
-                        if let Some(nd) = next {
-                            println!("⚠️ [JUMPDEST REFUSÉ] 0x{:04x} n'est pas un JUMPDEST, correction auto → 0x{:04x}", dest, nd);
-                        }
-                        next
-                    };
-                    if let Some(jdest) = real_dest {
-                        insn_ptr = jdest;
-                        skip_advance = true;
-                        println!("✅ [JUMP] vers 0x{:04x}", jdest);
-                    } else {
-                        println!("❌ [INVALID JUMP] vers 0x{:04x} → revert implicite", dest);
-                        return Err(Error::new(ErrorKind::Other, format!("Invalid jump destination 0x{:04x}", dest)));
-                    }
-                    consume_gas(&mut execution_context, 8)?;
-                }
-            },
+                    },
 
             //___ 0x57 JUMPI
-  0x57 => { // JUMPI
+  0x57 => {
     if evm_stack.len() < 2 {
         return Err(Error::new(
             ErrorKind::Other,
@@ -2182,9 +2100,9 @@ let res = if y < x { u256::one() } else { u256::zero() };
         ));
     }
 
-    // Ordre pile EVM : haut = condition, dessous = destination
+    // Ordre pile EVM : haut = destination, dessous = condition
+    let dest_u256 = evm_stack.pop().unwrap();
     let condition = evm_stack.pop().unwrap();
-    let dest_u256 = evm_stack.pop().unwrap();  // ← CRITIQUE : TOUJOURS pop la dest
 
     let dest = dest_u256.low_u64() as usize;
 
@@ -2284,7 +2202,7 @@ let res = if y < x { u256::one() } else { u256::zero() };
             global_mem[dst_offset..dst_offset + safe_len].copy_from_slice(&data);
         }
         // Sinon, on ignore la copie (aucune erreur fatale)
-             consume_gas(&mut execution_context, (3 + 3 * ((len + 31) / 32) as u64).try_into().unwrap())?;
+             consume_gas_amount(&mut execution_context, 3 + 3 * ((len + 31) / 32) as u64)?;
     },
 
     //___ 0x5f PUSH0 - CORRECTION DÉFINITIVE
@@ -2374,7 +2292,7 @@ let res = if y < x { u256::one() } else { u256::zero() };
         data,
     });
     let gas = 375 + 750 * num_topics as u64 + 8 * size as u64;
-    consume_gas(&mut execution_context, gas.try_into().unwrap())?;
+    consume_gas_amount(&mut execution_context, gas.try_into().unwrap())?;
 },
 
 //___ 0xf5 CREATE2
@@ -2387,7 +2305,7 @@ let res = if y < x { u256::one() } else { u256::zero() };
     let offset = evm_stack.pop().unwrap().low_u64() as usize;
     let value = evm_stack.pop().unwrap();
     evm_stack.push(u256::zero());
-    consume_gas(&mut execution_context, 32000u64.try_into().unwrap())?;
+    consume_gas_amount(&mut execution_context, 32000u64)?;
 },
 
 //___ 0xfa STATICCALL
@@ -2406,9 +2324,9 @@ let res = if y < x { u256::one() } else { u256::zero() };
     consume_gas(&mut execution_context, 100)?;
 },
 
-//___ 0xf1 FFI_CALL - ENVOI TCP/UDP VIA SLU-IP
-0xf1 => {
-    // FFI_CALL: args sur la pile ou registres
+//___ 0xf6 FFI_CALL_SLUIP450 - ENVOI TCP/UDP VIA SLU-IP
+0xf6 => {
+    // FFI_CALL_SLUIP450: args sur la pile ou registres
     let addr_ptr = reg[3];
     let port = reg[4];
     let data_ptr = reg[5];
@@ -2427,24 +2345,25 @@ let res = if y < x { u256::one() } else { u256::zero() };
     println!("🌐 [SLU-IP 450] TCP/UDP send → result={}", res);
 },
 
-//___ 0xf3 RETURN - DÉTECTION INTELLIGENTE DES VALEURS DE FONCTION
 0xf3 => {
     if evm_stack.len() < 2 {
         return Err(Error::new(ErrorKind::Other, "STACK underflow on RETURN"));
     }
 
+    // NOTE: EVM stack order for RETURN: top = length, next = offset
     let len = evm_stack.pop().unwrap().low_u64() as usize;
     let offset = evm_stack.pop().unwrap().low_u64() as usize;
 
-    println!("📤 [RETURN] len={}, offset=0x{:x}", len, offset);
+    // Affiche clairement offset puis len pour éviter confusion humaine (la pile fournit len en haut)
+    println!("📤 [RETURN] offset=0x{:x}, len={}", offset, len);
 
     // ✅ DÉTECTE RETOUR DE FONCTION (32 bytes depuis mémoire)
-if len == 32 && offset < global_mem.len() {
-    ensure_memory_size(&mut global_mem, offset + 32, &mut execution_context.free_memory_pointer)?;
-    let mut return_bytes = [0u8; 32];
-    if offset + 32 <= global_mem.len() {
-        return_bytes.copy_from_slice(&global_mem[offset..offset + 32]);
-    }
+    if len == 32 && offset < global_mem.len() {
+        ensure_memory_size(&mut global_mem, offset + 32, &mut execution_context.free_memory_pointer)?;
+        let mut return_bytes = [0u8; 32];
+        if offset + 32 <= global_mem.len() {
+            return_bytes.copy_from_slice(&global_mem[offset..offset + 32]);
+        }
         
         let return_value = u256::from_big_endian(&return_bytes);
         let return_u64 = return_value.low_u64();
@@ -2469,11 +2388,11 @@ if len == 32 && offset < global_mem.len() {
     }
 
     // ✅ CAS GÉNÉRAL (déploiement, etc.)
-let mut ret_data = vec![0u8; len];
-if len > 0 && offset + len <= global_mem.len() {
-    ensure_memory_size(&mut global_mem, offset + len, &mut execution_context.free_memory_pointer)?;
-    ret_data.copy_from_slice(&global_mem[offset..offset + len]);
-}
+    let mut ret_data = vec![0u8; len];
+    if len > 0 && offset + len <= global_mem.len() {
+        ensure_memory_size(&mut global_mem, offset + len, &mut execution_context.free_memory_pointer)?;
+        ret_data.copy_from_slice(&global_mem[offset..offset + len]);
+    }
 
     let formatted_result = decode_return_data_generic(&ret_data, len);
     
@@ -2516,20 +2435,21 @@ if len > 0 && offset + len <= global_mem.len() {
                     revert_data.copy_from_slice(src_slice);
                 }
 
-                let error_msg = if offset == 0 && size >= 4 {
+                let error_msg = if offset == 0 && size >= 36 {
                     let selector = u32::from_be_bytes([
                         global_mem.get(offset).copied().unwrap_or(0),
                         global_mem.get(offset+1).copied().unwrap_or(0),
                         global_mem.get(offset+2).copied().unwrap_or(0),
                         global_mem.get(offset+3).copied().unwrap_or(0),
                     ]);
-
-                    if selector == 0x4e487b71 && size >= 36 {
+                
+                    if selector == 0x4e487b71 {
+                        // Le code de panic est à offset+0x20 (32)
                         let code = u32::from_be_bytes([
-                            global_mem.get(offset+4).copied().unwrap_or(0),
-                            global_mem.get(offset+5).copied().unwrap_or(0),
-                            global_mem.get(offset+6).copied().unwrap_or(0),
-                            global_mem.get(offset+7).copied().unwrap_or(0),
+                            global_mem.get(offset+32).copied().unwrap_or(0),
+                            global_mem.get(offset+33).copied().unwrap_or(0),
+                            global_mem.get(offset+34).copied().unwrap_or(0),
+                            global_mem.get(offset+35).copied().unwrap_or(0),
                         ]);
                         format!("Panic(0x{:02x})", code)
                     } else {
@@ -2677,7 +2597,7 @@ fn opcode_name(opcode: u8) -> &'static str {
         0x80..=0x8f => "DUP",
         0x90..=0x9f => "SWAP",
         0xa0..=0xa4 => "LOG",
-        0xf1 => "FFI_CALL",
+        0xf6 => "FFI_CALL_SLUIP450",
         0xf2 => "METADATA_ACCESS",
         0xf3 => "RETURN",
         0xfd => "REVERT",
