@@ -2087,7 +2087,6 @@ let res = if y < x { u256::one() } else { u256::zero() };
                             insn_ptr = dest;
                             println!("✅ [JUMP] vers 0x{:04x}", dest);
                             consume_gas(&mut execution_context, 8)?;
-                            skip_advance = true;
                         }
                     },
 
