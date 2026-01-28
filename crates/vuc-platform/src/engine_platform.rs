@@ -1,3 +1,4 @@
+use primitive_types::U256;
 use tokio::sync::{Mutex, mpsc, broadcast}; // Ajoute broadcast
 use rand::Rng;
 
@@ -269,6 +270,65 @@ impl EnginePlatform {
                         Err("Storage manager non disponible".to_string())
                     }
                 }
+
+/// Extrait le runtime bytecode du bytecode de déploiement (comme eth_getCode / Erigon).
+/// Retourne le runtime pur (60806040...) ou une erreur claire.
+pub fn extract_runtime_from_creation_bytecode(full: &[u8]) -> Result<Vec<u8>, String> {
+    if full.is_empty() {
+        return Ok(vec![]);
+    }
+
+    // Déjà runtime pur ?
+    if full.len() >= 4 && full[0..4] == [0x60, 0x80, 0x60, 0x40] {
+        return Ok(full.to_vec());
+    }
+
+    let mut runtime_start = None;
+    let mut i = full.len().saturating_sub(1);
+
+    while i >= 3 {
+        if full[i] == 0xf3 {  // RETURN
+            if i >= 2 && (0x60..=0x7f).contains(&full[i - 2]) {
+                let mut pos = i + 1;
+
+                // Gestion du pattern courant : FE juste avant le runtime
+                if pos < full.len() && full[pos] == 0xfe {
+                    pos += 1;
+                    println!("→ FE détecté → décalage automatique à offset {}", pos);
+                }
+
+                if pos + 4 <= full.len() && full[pos..pos + 4] == [0x60, 0x80, 0x60, 0x40] {
+                    runtime_start = Some(pos);
+                    println!("→ Runtime trouvé à offset {} (début 60806040)", pos);
+                    break; // On prend le premier qui matche (le plus tardif car on part de la fin)
+                }
+            }
+        }
+        i = i.saturating_sub(1);
+    }
+
+    let start = runtime_start.ok_or_else(|| {
+        "Aucun RETURN valide suivi de 60806040 (même après décalage FE)".to_string()
+    })?;
+
+    let mut runtime = full[start..].to_vec();
+
+    // Coupe les metadata CBOR (dernier marqueur)
+    let cbor_marker = b"a2646970667358221220";
+    if let Some(cbor_pos) = runtime.windows(cbor_marker.len()).rposition(|w| w == cbor_marker) {
+        runtime.truncate(cbor_pos);
+        println!("→ Metadata CBOR supprimée (len runtime final: {})", runtime.len());
+    }
+
+    if runtime.len() < 4 || runtime[0..4] != [0x60, 0x80, 0x60, 0x40] {
+        return Err(format!(
+            "Validation finale échouée - offset={}, len={}, début: {:02x?}",
+            start, runtime.len(), &runtime[0..4.min(runtime.len())]
+        ));
+    }
+
+    Ok(runtime)
+}
         
         /// ✅ NOUVEAU: Rechargement complet au démarrage
         pub async fn load_all_persisted_state(&self) -> Result<u32, String> {
@@ -517,111 +577,6 @@ impl EnginePlatform {
                     println!("🔍 [PARSE RESULT] Final args: {:?}", args);
                     Some(args)
                 }
-
-    /// ✅ AJOUT: Méthode manquante deploy_contract
-    pub async fn deploy_contract(&self, deployment_request: serde_json::Value) -> Result<serde_json::Value, String> {
-        println!("🚀 Deploying contract with request: {:?}", deployment_request);
-        
-        // Extraction des paramètres de déploiement
-        let bytecode = deployment_request.get("bytecode")
-            .and_then(|b| b.as_str())
-            .unwrap_or("")
-            .to_string();
-            
-        let constructor_args = deployment_request.get("constructorArgs")
-            .and_then(|a| a.as_array())
-            .cloned()
-            .unwrap_or_default();
-            
-        let value = deployment_request.get("value")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-
-        // Génération d'une adresse de contrat
-        use sha3::{Digest, Sha3_256};
-        let mut hasher = Sha3_256::new();
-        hasher.update(&bytecode);
-        hasher.update(&chrono::Utc::now().timestamp().to_string());
-        let hex_addr = format!("{:x}", hasher.finalize());
-        let contract_address = format!("0x{}", &hex_addr[..40]).to_lowercase();
-        let decoded_bytecode = if bytecode.starts_with("0x") {
-            hex::decode(&bytecode[2..]).unwrap_or_default()
-        } else {
-            hex::decode(&bytecode).unwrap_or_default()
-        };
-        let account_state = vuc_tx::slurachain_vm::AccountState {
-            address: contract_address.clone(),
-            balance: value as u128,
-            contract_state: decoded_bytecode.clone(), // <-- stocke le vrai bytecode
-            resources: std::collections::BTreeMap::new(),
-            state_version: 1,
-            last_block_number: 0,
-            nonce: 0,
-            code_hash: format!("contract_{}", chrono::Utc::now().timestamp()),
-            storage_root: format!("storage_{}", contract_address),
-            is_contract: true,
-            gas_used: 0,
-        };
-
-        // Déploiement via la VM
-        {
-            let mut vm = self.vm.write().await;
-            if let Ok(decoded_bytecode) = hex::decode(&bytecode[2..]) {
-                let account_state = vuc_tx::slurachain_vm::AccountState {
-                    address: contract_address.clone(),
-                    balance: value as u128,
-                    contract_state: decoded_bytecode,
-                    resources: std::collections::BTreeMap::new(),
-                    state_version: 1,
-                    last_block_number: 0,
-                    nonce: 0,
-                    code_hash: format!("contract_{}", chrono::Utc::now().timestamp()),
-                    storage_root: format!("storage_{}", contract_address),
-                    is_contract: true,
-                    gas_used: 0,
-                };
-
-                vm.state.accounts.write().await.insert(contract_address.clone(), account_state);
-
-               // ✅ AJOUT : Exécution du constructeur ou initialize (si présent)
-        // 1. Détection automatique de la fonction d'init
-        let module = vm.modules.get(&contract_address);
-        let init_fn = if let Some(m) = module {
-            if m.functions.contains_key("initialize") {
-                Some("initialize")
-            } else if m.functions.contains_key("constructor") {
-                Some("constructor")
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        if let Some(init_fn_name) = init_fn {
-            println!("🚀 Exécution de {} pour initialiser le storage du contrat {}", init_fn_name, contract_address);
-            let _ = vm.execute_module(&contract_address, init_fn_name, vec![], Some(&self.validator_address), None);
-        } else {
-            println!("ℹ️ Aucun initialize/constructor détecté pour {}", contract_address);
-        }
-    }
-        }
-
-        // Génération d'un hash de transaction
-        let mut hasher = Sha3_256::new();
-        hasher.update(&contract_address);
-        hasher.update(&chrono::Utc::now().timestamp().to_string());
-        let tx_hash = format!("0x{:x}", hasher.finalize());
-        let tx_hash_padded = pad_hash_64(&tx_hash);
-
-        Ok(serde_json::json!({
-            "status": "success",
-            "contractAddress": contract_address,
-            "transactionHash": tx_hash,
-            "gasUsed": "0x5208",
-            "blockNumber": "0x1"
-        }))
-    }
 
     /// ✅ AJOUT: Méthode manquante get_gas_price
         pub async fn get_gas_price(&self) -> u64 {
@@ -1457,10 +1412,18 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
                         let mut vm = self.vm.write().await;
                         
                         // 1. Crée et insère le compte dans l'état VM
+                        let creation_bytecode = if bytecode_hex.starts_with("0x") {
+                            hex::decode(&bytecode_hex[2..]).unwrap_or_default()
+                        } else {
+                            hex::decode(bytecode_hex).unwrap_or_default()
+                        };
+                        let runtime_bytecode = Self::extract_runtime_from_creation_bytecode(&creation_bytecode)
+                            .map_err(|e| format!("Échec extraction runtime: {}", e))?;
+                        println!("Runtime extrait : 0x{} ({} octets)", hex::encode(&runtime_bytecode[..std::cmp::min(32, runtime_bytecode.len())]), runtime_bytecode.len());
                         let contract_account = vuc_tx::slurachain_vm::AccountState {
                             address: contract_address.clone(),
                             balance: value as u128,
-                            contract_state: bytecode.clone(),
+                            contract_state: runtime_bytecode,
                             resources: {
                                 let mut resources = std::collections::BTreeMap::new();
                                 resources.insert("deployed_by".to_string(), serde_json::Value::String(from_addr.clone()));
@@ -3437,10 +3400,11 @@ async fn main() {
                     let block_number = lurosonie_manager_clone.get_block_height().await;
                     if block_number == 1 {
                         println!("🪙 Block #1 produit — déploiement du contrat VEZ (direct, sans proxy)...");
+        
                         // 1) Déploiement direct du contrat VEZ à l'adresse cible
                         let vez_target_addr = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_string();
                         let vez_bytecode_hex = include_str!("../../../vez_bytecode.hex").trim();
-    
+        
                         let deploy_vez_tx = serde_json::json!({
                             "from": validator_address_generated,
                             "data": format!("0x{}", vez_bytecode_hex),
@@ -3450,39 +3414,14 @@ async fn main() {
                         });
                         let vez_tx_hash = value.send_transaction(deploy_vez_tx).await.unwrap();
                         println!("✅ Contrat VEZ déployé à l'adresse cible: {} (tx: {})", vez_target_addr, vez_tx_hash);
-    
-                        // 2) initialize(address) → selector moderne OpenZeppelin v4.9+ / v5
+        
+                        // 2) mint(address, uint256) → 888_000_000 VEZ (18 décimals)
                         let admin_address = validator_address_generated.to_lowercase();
                         let owner_address = "0x53ae54b11251d5003e9aa51422405bc35a2ef32d";
                         let owner_no_0x = owner_address.trim_start_matches("0x");
+        
     
-                        // initialize(address) → 0x8129fc1c + owner address (padded 32 bytes)
-                        let init_selector = "8129fc1c";
-                        let init_calldata = format!(
-                            "{}{:0>64}",
-                            init_selector,
-                            owner_no_0x
-                        );
-                        let init_tx = serde_json::json!({
-                            "to": vez_target_addr,
-                            "from": admin_address,
-                            "gas": "0x4c4b40",
-                            "value": "0x0",
-                            "data": format!("0x{}", init_calldata)
-                        });
-                        let init_hash = value.send_transaction(init_tx).await.unwrap();
-                        println!("🚀 VEZ initialisé avec owner {} → Tx: {}", owner_address, init_hash);
-    
-                        // 3) mint(address, uint256) → 888_000_000 VEZ (18 décimals)
-                        let mint_selector = "40c10f19";
-                        let mint_amount_hex = "0c1584eee63d880000"; // 888000000000000000000000000
-                        let mint_calldata = format!(
-                            "{selector}{address:0>64}{amount:0>64}",
-                            selector = mint_selector,
-                            address = owner_no_0x,
-                            amount = mint_amount_hex
-                        );
-                        assert_eq!(mint_calldata.len(), 136, "Calldata mint doit faire 68 bytes (136 hex)");
+                        let mint_calldata = "40c10f1900000000000000000000000053ae54b11251d5003e9aa51422405bc35a2ef32d0000000000000000000000000000000000000000x40c10f1900000000000000000000000053ae54b11251d5003e9aa51422405bc35a2ef32d000000000000000000000000000000000000000002de89507556d84678000000002de89507556d84678000000";
                         let mint_tx = serde_json::json!({
                             "to": vez_target_addr,
                             "from": admin_address,
@@ -3493,7 +3432,7 @@ async fn main() {
                         let mint_hash = value.send_transaction(mint_tx).await.unwrap();
                         println!("🪙 888 000 000.000000000000000000 VEZ mintés avec succès !");
                         println!("   Tx mint: {}", mint_hash);
-    
+        
                         break;
                     }
                 }

@@ -3,13 +3,11 @@
 
 pragma solidity ^0.8.26;
 
-import "@openzeppelin/contracts-upgradeable/token/ERC20/ERC20Upgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
 import "./EACAggregatorProxy.sol";
 
-// ========================= Externals Functions ==================================
+// ========================= ProofOfReserve (inchangé) =========================
 contract ProofOfReserve {
     address public owner;
     uint256 public totalValue;
@@ -41,47 +39,20 @@ contract ProofOfReserve {
     }
 }
 
-// ============================= Main Contract ===================================   
-contract VEZproxy is Initializable, ERC20Upgradeable, OwnableUpgradeable, UUPSUpgradeable {
-    
-    // ────────────────────────────────────────────────────────────────────────────────
-    //  HARDCODED OWNER POUR TESTS / DEBUG (remplace msg.sender)
-    // ────────────────────────────────────────────────────────────────────────────────
-    address private constant owner_self = 0x53ae54b11251d5003e9aa51422405bc35a2ef32d;
+// ============================== Contrat principal VEZ ==============================
+contract VEZ is ERC20, Ownable {
+  
+    string private constant TOKEN_NAME     = "Vyft Enhancing ZER";
+    string private constant TOKEN_SYMBOL   = "VEZ";
+    uint8  private constant TOKEN_DECIMALS = 18;
+
+    // Adresse owner initiale hardcodée
+    address private constant INITIAL_OWNER = 0x53Ae54b11251D5003e9aA51422405bC35A2eF32D;
 
     EACAggregatorProxy public priceFeed;
     string public currency = "EUR";
 
-    //@custom:oz-upgrades-unsafe-allow constructor
-    constructor() {
-        // Optionnel : on peut déjà set owner ici si on veut forcer avant initialize
-        // mais on le fait dans initialize pour rester compatible proxy
-    }
-
-    function initialize() initializer public {
-        __ERC20_init("Vyft Enhancing ZER", "VEZ");
-        
-        // HARDCODE : on force l'owner à cette adresse fixe
-        // au lieu de __Ownable_init(msg.sender)
-        __Ownable_init(owner_self);
-        
-        __UUPSUpgradeable_init();
-
-        // Pour debug : émettre un event pour confirmer que l'owner est bien setté
-        emit OwnershipTransferred(address(0), owner_self);
-    }
-
-    // ============================ External Mint Function ==============================
-    function mintToLuzia(address recipient, uint256 amount) external onlyOwner {
-        _mint(recipient, amount);
-    }
-
-    function mint(address to, uint256 amount) external onlyOwner {
-        _mint(to, amount);
-    }
-
-    // ============================ Blacklist Logic ==============================
-
+    // Blacklist
     address public blacklister;
     mapping(address => bool) private _blacklisted;
 
@@ -89,11 +60,49 @@ contract VEZproxy is Initializable, ERC20Upgradeable, OwnableUpgradeable, UUPSUp
     event UnBlacklisted(address indexed account);
     event BlacklisterChanged(address indexed newBlacklister);
 
+    // Pause
+    bool private _paused;
+
+    event Paused(address account);
+    event Unpaused(address account);
+
     modifier onlyBlacklister() {
         require(msg.sender == blacklister, "Caller is not the blacklister");
         _;
     }
 
+    modifier whenNotPaused() {
+        require(!_paused, "Pausable: paused");
+        _;
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    //  Constructor
+    // ──────────────────────────────────────────────────────────────
+    constructor(address _initialBlacklister, address _priceFeed) 
+        ERC20(TOKEN_NAME, TOKEN_SYMBOL) 
+        Ownable(INITIAL_OWNER) 
+    {
+        blacklister = _initialBlacklister;
+        priceFeed = EACAggregatorProxy(_priceFeed);
+        emit BlacklisterChanged(_initialBlacklister);
+    }
+
+    function name() public view virtual override returns (string memory) {
+        return TOKEN_NAME;
+    }
+
+    function symbol() public view virtual override returns (string memory) {
+        return TOKEN_SYMBOL;
+    }
+
+    function decimals() public view virtual override returns (uint8) {
+        return TOKEN_DECIMALS;
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    //  Blacklist functions
+    // ──────────────────────────────────────────────────────────────
     function isBlacklisted(address account) external view returns (bool) {
         return _blacklisted[account];
     }
@@ -115,39 +124,39 @@ contract VEZproxy is Initializable, ERC20Upgradeable, OwnableUpgradeable, UUPSUp
         emit BlacklisterChanged(newBlacklister);
     }
 
-    // ============================ Pausable Logic ==============================
-
-    bool private _paused;
-
-    event Paused(address account);
-    event Unpaused(address account);
-
-    modifier whenNotPaused() {
-        require(!_paused, "Pausable: paused");
-        _;
-    }
-
-    modifier whenPaused() {
-        require(_paused, "Pausable: not paused");
-        _;
-    }
-
+    // ──────────────────────────────────────────────────────────────
+    //  Pause functions
+    // ──────────────────────────────────────────────────────────────
     function paused() public view virtual returns (bool) {
         return _paused;
     }
 
-    function _pause() internal virtual whenNotPaused onlyOwner {
+    function pause() external onlyOwner {
+        require(!_paused, "Already paused");
         _paused = true;
-        emit Paused(_msgSender());
+        emit Paused(msg.sender);
     }
 
-    function _unpause() internal virtual whenPaused onlyOwner {
+    function unpause() external onlyOwner {
+        require(_paused, "Not paused");
         _paused = false;
-        emit Unpaused(_msgSender());
+        emit Unpaused(msg.sender);
     }
 
-    // ============================ ERC20 Standard Functions ==============================
+    // ──────────────────────────────────────────────────────────────
+    //  Mint (owner only)
+    // ──────────────────────────────────────────────────────────────
+    function mint(address to, uint256 amount) external onlyOwner {
+        _mint(to, amount);
+    }
 
+    function mintToLuzia(address recipient, uint256 amount) external onlyOwner {
+        _mint(recipient, amount);
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    //  Transfer avec checks blacklist + pause
+    // ──────────────────────────────────────────────────────────────
     function transfer(address to, uint256 amount) 
         public 
         virtual 
@@ -170,15 +179,5 @@ contract VEZproxy is Initializable, ERC20Upgradeable, OwnableUpgradeable, UUPSUp
         require(!_blacklisted[from], "From is blacklisted");
         require(!_blacklisted[to], "Recipient is blacklisted");
         return super.transferFrom(from, to, amount);
-    }
-
-    // ============================ Upgrade Control ==============================
-
-    function _authorizeUpgrade(address newImplementation) 
-        internal 
-        override 
-        onlyOwner 
-    {
-        // optionnel : vous pouvez ajouter une vérification supplémentaire ici si besoin
     }
 }
