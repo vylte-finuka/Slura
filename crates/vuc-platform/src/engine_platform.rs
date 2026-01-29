@@ -262,7 +262,7 @@ pub fn extract_runtime_from_creation_bytecode(full: &[u8]) -> Result<Vec<u8>, St
     }
 
     // Déjà runtime pur ?
-    if full.len() >= 4 && full[0..4] == [0x60, 0x80, 0x60, 0x40] {
+    if full.len() >= 7 && full[0..7] == [0x60, 0x80, 0x60, 0x40, 0x52, 0x34, 0x80 ] {
         return Ok(full.to_vec());
     }
 
