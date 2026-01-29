@@ -133,23 +133,6 @@ impl EnginePlatform {
         format!("0x{}", cleaned.to_lowercase())
     }
 
-        fn extract_sender_from_raw(raw_bytes: &[u8]) -> Option<String> {
-            use ethers::prelude::*;
-            use ethers::utils::rlp::Rlp;
-        
-            // Décoder le RLP des bytes bruts
-            let rlp = Rlp::new(raw_bytes);
-        
-            // Décoder la transaction signée (legacy/EIP-155)
-            let (tx_req, _signature) = TransactionRequest::decode_signed_rlp(&rlp).ok()?;
-        
-            // Récupérer l'adresse from (via recovery)
-            let from = tx_req.from?;
-        
-            // Retourne l'adresse hex sur 40 caractères, format 0x[0-9a-f]{40}
-            Some(format!("0x{}", hex::encode(from.as_bytes())))
-        }
-
     pub async fn build_account(&self) -> Result<(String, String), anyhow::Error> {
         let mut vm = self.vm.write().await;
         vuc_platform::operator::crypto_perf::generate_and_create_account(&mut vm, "acc").await
