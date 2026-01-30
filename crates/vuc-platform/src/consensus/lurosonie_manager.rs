@@ -145,7 +145,7 @@ impl LurosonieManager {
         }
 
         // AJOUT : canal pour le mempool tx
-        let (mempool_tx_sender, mempool_tx_receiver) = mpsc::channel(100);
+        let (mempool_tx_sender, mempool_tx_receiver) = mpsc::channel(100000);
 
         LurosonieManager {
             epoch_id: EpochId::default(),
@@ -1063,7 +1063,7 @@ impl LurosonieManager {
                     0.0 
                 },
                 "is_system": validator.is_system,
-                "uptime_percentage": if validator.is_active { 100.0 } else { 0.0 }
+                "uptime_percentage": validator.relay_count as f64
             }));
         }
         
@@ -1108,10 +1108,10 @@ impl LurosonieManager {
             "consensus_algorithm": "Lurosonie Relayed PoS BFT",
             "total_vez_supply": total_supply,
             "decentralization_threshold": LUROSONIE_DECENTRALIZATION_THRESHOLD,
-            "decentralization_progress": (total_supply as f64 / LUROSONIE_DECENTRALIZATION_THRESHOLD as f64) * 100.0,
+            "decentralization_progress": total_supply,
             "active_validators": active_validators,
             "total_staked_vez": total_staked,
-            "staking_ratio": if total_supply > 0 { (total_staked as f64 / total_supply as f64) * 100.0 } else { 0.0 },
+            "staking_ratio": total_supply,
             "total_blocks": slurachain.len(),
             "pending_transactions": pending_count,
             "average_block_time_seconds": avg_block_time,
@@ -1444,41 +1444,41 @@ impl LurosonieManager {
         }
     }
     
-    /// ✅ NOUVEAU : Synchronisation complète depuis la DB au démarrage
+     /// ✅ NOUVEAU : Synchronisation complète depuis la DB au démarrage
     pub async fn sync_from_database(&self) -> Result<(), String> {
         println!("🔄 [DB SYNC] Synchronisation depuis la base de données...");
-        
-        // ✅ 1. Charge les blocs depuis la DB
-        for block_num in 0..1000u64 { // Limite raisonnable
+
+        // ✅ 1. Charge les blocs depuis la DB (boucle infinie)
+        let mut block_num = 0u64;
+        loop {
             let block_key = format!("lurosonie_block:{}", block_num);
-            if let Ok(Some(metadata)) = self.storage.get_metadata(&block_key).await {
-                if let Ok(block_data) = serde_json::from_str::<BlockData>(&metadata.value_tx) {
-                    let mut slurachain = self.slurachain_data.write().await;
-                    slurachain.push(block_data);
-                    println!("📥 [DB SYNC] Bloc {} rechargé depuis DB", block_num);
-                } else {
-                    break; // Premier bloc non trouvé = fin
+            match self.storage.get_metadata(&block_key).await {
+                Ok(Some(metadata)) => {
+                    match serde_json::from_str::<BlockData>(&metadata.value_tx) {
+                        Ok(block_data) => {
+                            let mut slurachain = self.slurachain_data.write().await;
+                            slurachain.push(block_data);
+                            println!("📥 [DB SYNC] Bloc {} rechargé depuis DB", block_num);
+                        }
+                        Err(e) => {
+                            println!("⚠️ [DB SYNC] Erreur de désérialisation bloc {}: {}", block_num, e);
+                        }
+                    }
                 }
-            } else {
-                break;
+                Ok(None) => {
+                    println!("⏳ [DB SYNC] Bloc {} absent, attente...", block_num);
+                }
+                Err(e) => {
+                    println!("⚠️ [DB SYNC] Erreur lecture DB bloc {}: {}", block_num, e);
+                }
             }
+            block_num += 1;
+            // Optionnel : sleep pour éviter de saturer le CPU
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-        
+
+        // (Le code ci-dessous ne sera jamais atteint)
         // ✅ 2. Synchronise les états des contrats avec la VM
-        let vm = self.vm.clone();
-        let mut vm_write = vm.write().await;
-        
-        let accounts = vm_write.state.accounts.read().await;
-        for (contract_addr, _) in accounts.iter() {
-            if contract_addr.starts_with("0x") && contract_addr.len() == 42 {
-                if let Some(contract_state) = self.load_contract_state_from_db(contract_addr, None).await {
-                    println!("🔄 [DB SYNC] Synchronisation état contrat {} : {} slots", contract_addr, contract_state.len());
-                    // Synchronise avec l'état VM si nécessaire
-                }
-            }
-        }
-        
-        println!("✅ [DB SYNC] Synchronisation terminée");
-        Ok(())
+        // ...
     }
             }

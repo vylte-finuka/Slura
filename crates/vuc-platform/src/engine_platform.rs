@@ -566,45 +566,73 @@ pub fn extract_runtime_from_creation_bytecode(full: &[u8]) -> Result<Vec<u8>, St
         1_000_000_000u64 // exemple: 1 Gwei
     }
         
-        /// ✅ CORRECTION: get_account_balance appelle balanceOf du contrat VEZ via la VM
-        pub async fn get_account_balance(&self, address: &str) -> Result<u128, String> {
-    let addr = address.trim_start_matches("0x").to_lowercase();
+pub async fn get_account_balance(&self, address: &str) -> Result<U256, String> {
+    let user_addr = address.trim_start_matches("0x").to_lowercase();
+    if user_addr.len() != 40 {
+        return Err("Adresse invalide (doit faire 40 caractères hex après 0x)".to_string());
+    }
+
     let vez_contract_addr = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 
-    // Prépare le calldata ABI pour balanceOf(address)
-    // selector : 0x70a08231
-    let mut data = hex::decode("70a08231").unwrap();
-    let mut arg = vec![0u8; 12];
-    arg.extend_from_slice(&hex::decode(addr.clone()).map_err(|_| "Adresse invalide".to_string())?);
-    data.extend_from_slice(&arg);
+    // Préparation du calldata : balanceOf(address)
+    let selector = hex::decode("70a08231").unwrap();           // 4 bytes
+    let padded_addr = hex::decode(&user_addr).unwrap();      // 20 bytes
+    let mut data = Vec::with_capacity(36);
+    data.extend_from_slice(&selector);
+    data.extend(vec![0u8; 12]);                              // padding 12 zeros
+    data.extend_from_slice(&padded_addr);
 
-    let call = serde_json::json!({
+    let call_payload = serde_json::json!({
         "to": vez_contract_addr,
-        "from": address,
+        "from": format!("0x{}", user_addr),  // optionnel mais cohérent
         "data": format!("0x{}", hex::encode(&data)),
     });
 
-    // Appel canonique (eth_call-like)
-    let result = self.eth_call(call).await;
-
-    match result {
-        Ok(raw) => {
-            // La réponse canonique EVM est un hex (32 bytes, uint256)
-            // Ex: "0x0000000000000000000000000000000000000000000000000000000034d54b40"
-            let clean = raw.trim_start_matches("0x");
-            if clean.len() == 64 {
-                u128::from_str_radix(clean, 16)
-                    .map_err(|_| "balanceOf : decode hex fail".to_string())
-            } else {
-                Err("Format balanceOf inattendu".to_string())
-            }
-        }
+    let raw_result = match self.eth_call(call_payload).await {
+        Ok(res) => res,
         Err(e) => {
-            println!("⚠️ Appel balanceOf échoué: {}", e);
-            Ok(0)
+            println!("⚠️ eth_call balanceOf a échoué : {}", e);
+            return Ok(U256::zero()); // ou Err selon ta politique
+        }
+    };
+
+    // Nettoyage : on enlève "0x" si présent
+    let hex_str = raw_result.trim_start_matches("0x").to_string();
+
+    // Cas le plus courant : retour ABI encodé uint256 → 64 caractères hex (32 bytes)
+    // Ex: 000000000000000000000000000000000000000000000000000533ae54b11251
+    if hex_str.len() == 64 {
+        return U256::from_str_radix(&hex_str, 16)
+            .map_err(|e| format!("Échec décodage hex → u128 : {}", e));
+    }
+
+    // Cas Solidity récent : retour avec offset + length (128 bytes = 256 hex chars)
+    // Ex: 0000000000000000000000000000000000000000000000000000000000000020
+    //     0000000000000000000000000000000000000000000000000000000000000020
+    //     000000000000000000000000000000000000000000000000000533ae54......
+    if hex_str.len() >= 128 {
+        let value_part = &hex_str[128..]; // après offset + length
+        if value_part.len() >= 64 {
+            let value_hex = &value_part[0..64];
+            return U256::from_str_radix(value_hex, 16)
+                .map_err(|e| format!("Échec décodage partie valeur : {}", e));
         }
     }
+
+    // Cas fallback : on essaie de décoder directement si c'est court
+    if !hex_str.is_empty() {
+        if let Ok(val) = U256::from_str_radix(&hex_str, 16) {
+            return Ok(val);
         }
+    }
+
+    Err(format!(
+        "Format de retour balanceOf inattendu (longueur hex = {} chars) : {}",
+        hex_str.len(),
+        raw_result
+    ))
+}
+
            pub async fn get_block_by_hash(&self, block_hash: &str, include_txs: bool) -> Result<serde_json::Value, String> {
             println!("🔎 Recherche du bloc avec hash: {}", block_hash);
             let all_hashes = self.rpc_service.lurosonie_manager.get_all_block_hashes().await;
@@ -1836,222 +1864,227 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         }))
     }
 
-  pub async fn eth_call(&self, call_object: serde_json::Value) -> Result<String, String> {
-        // Supporte [call_object, blockTag] ou juste call_object
-        let (tx_obj, _block_tag) = if call_object.is_array() {
-            let arr = call_object.as_array().unwrap();
-            let obj = arr.get(0).cloned().unwrap_or_default();
-            let tag = arr.get(1).cloned().unwrap_or(serde_json::Value::String("latest".to_string()));
-            (obj, tag)
-        } else {
-            (call_object, serde_json::Value::String("latest".to_string()))
-        };
-    
-        // Extraction des champs selon la spec
-        let to_addr = tx_obj.get("to").and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
-        let from_addr = tx_obj.get("from").and_then(|v| v.as_str()).unwrap_or(&self.validator_address).to_lowercase();
-    
-        let value = tx_obj.get("value")
-            .and_then(|v| {
-                if v.is_string() {
-                    let s = v.as_str().unwrap();
-                    if s.starts_with("0x") {
-                        u128::from_str_radix(s.trim_start_matches("0x"), 16).ok()
-                    } else {
-                        s.parse::<u128>().ok()
-                    }
-                } else if v.is_u64() {
-                    Some(v.as_u64().unwrap() as u128)
-                } else if v.is_number() {
-                    v.as_u64().map(|n| n as u128)
+pub async fn eth_call(&self, call_object: serde_json::Value) -> Result<String, String> {
+    // Supporte [call_object, blockTag] ou juste call_object
+    let (tx_obj, _block_tag) = if call_object.is_array() {
+        let arr = call_object.as_array().unwrap();
+        let obj = arr.get(0).cloned().unwrap_or_default();
+        let tag = arr.get(1).cloned().unwrap_or(serde_json::Value::String("latest".to_string()));
+        (obj, tag)
+    } else {
+        (call_object, serde_json::Value::String("latest".to_string()))
+    };
+
+    // Extraction des champs selon la spec JSON-RPC
+    let to_addr = tx_obj.get("to").and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
+    let from_addr = tx_obj.get("from")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&self.validator_address)
+        .to_lowercase();
+
+    let value = tx_obj.get("value")
+        .and_then(|v| {
+            if v.is_string() {
+                let s = v.as_str().unwrap();
+                if s.starts_with("0x") {
+                    u128::from_str_radix(s.trim_start_matches("0x"), 16).ok()
                 } else {
-                    None
+                    s.parse::<u128>().ok()
                 }
-            }).unwrap_or(0);
-    
-        // Supporte "data" ou "input"
-        let data = tx_obj.get("data")
-            .or_else(|| tx_obj.get("input"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+            } else if v.is_u64() {
+                Some(v.as_u64().unwrap() as u128)
+            } else if v.is_number() {
+                v.as_u64().map(|n| n as u128)
+            } else {
+                None
+            }
+        }).unwrap_or(0);
 
-        // --- AJOUT : Décodage du vrai calldata hex en bytes ---
-        let calldata_bytes = if !data.is_empty() && data.starts_with("0x") {
-            hex::decode(&data[2..]).unwrap_or_default()
-        } else if !data.is_empty() {
-            hex::decode(data).unwrap_or_default()
-        } else {
-            vec![]
-        };
+    // Supporte "data" ou "input"
+    let data = tx_obj.get("data")
+        .or_else(|| tx_obj.get("input"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
 
-        println!("🔍 [eth_call] from={}, to={}, data={}", from_addr, to_addr, data);
-    
-        // Construction du TxRequest comme send_transaction
-        let contract_addr = if !to_addr.is_empty() { Some(to_addr.clone()) } else { None };
-        let function_name = if !data.is_empty() && data.len() >= 10 {
-            let selector_hex = &data[2..10];
-            let selector = u32::from_str_radix(selector_hex, 16).unwrap_or(0);
-            if let Some(addr) = &contract_addr {
-                let vm = self.vm.read().await;
-                if let Some(module) = vm.modules.get(addr) {
-                    if let Some((name, _)) = module.functions.iter().find(|(_, meta)| meta.selector == selector) {
-                        Some(name.clone())
-                    } else {
-                        // Fallback: nom auto-detecté
-                        Some(format!("function_{:08x}", selector))
-                    }
+    // Décodage propre du calldata hex → bytes
+    let calldata_bytes = if !data.is_empty() {
+        let hex_clean = data.trim_start_matches("0x");
+        hex::decode(hex_clean).unwrap_or_default()
+    } else {
+        vec![]
+    };
+
+    println!("🔍 [eth_call] from={}, to={}, data={}", from_addr, to_addr, data);
+
+    // Détection du selector pour logging / nommage
+    let contract_addr = if !to_addr.is_empty() { Some(to_addr.clone()) } else { None };
+    let function_name = if calldata_bytes.len() >= 4 {
+        let selector = u32::from_be_bytes(calldata_bytes[0..4].try_into().unwrap_or([0; 4]));
+        if let Some(addr) = &contract_addr {
+            let vm = self.vm.read().await;
+            if let Some(module) = vm.modules.get(addr) {
+                if let Some((name, _)) = module.functions.iter().find(|(_, meta)| meta.selector == selector) {
+                    Some(name.clone())
                 } else {
                     Some(format!("function_{:08x}", selector))
                 }
             } else {
                 Some(format!("function_{:08x}", selector))
             }
-        } else { None };
-    
-        // Arguments (à améliorer pour décodage ABI)
-        let arguments = if let Some(data) = tx_obj.get("data").and_then(|v| v.as_str()) {
-            Self::parse_abi_encoded_args(data)
-        } else { None };
-    
-        println!("🔍 [eth_call] contract_addr={:?}, function_name={:?}, arguments={:?}", 
-                 contract_addr, function_name, arguments);
-
-        // ✅ EXÉCUTION VM STANDARD pour les autres fonctions
-        let vm_arc = self.vm.clone();
-        let mut vm_sim = vm_arc.write().await;
-    
-        if let Some(addr) = &contract_addr {
-            if vm_sim.modules.contains_key(addr) {
-                let args = arguments.clone().unwrap_or_else(|| {
-                    if value > 0 {
-                        vec![serde_json::Value::Number(serde_json::Number::from(value))]
-                    } else {
-                        vec![]
-                    }
-                });
-    
-                println!("🚀 [eth_call] Exécution VM standard: addr={}, function={:?}, args={:?}", addr, function_name, args);
-    
-                let fn_name = function_name.as_deref().unwrap_or("unknown");
-                // --- PATCH : Passe le buffer calldata brut à execute_module ---
-                if let Ok(result) = vm_sim.execute_module(addr, fn_name, args, Some(&from_addr), Some(&calldata_bytes)).await {
-                    println!("✅ [eth_call] Résultat VM: {:?}", result);
-    
-                    // PATCH REDIRECTION : si résultat == 0 et storage.deployed_by existe, retourne deployed_by paddée
-                    let mut result_hex = String::new();
-                    let mut redirected = false;
-    
-                    if let serde_json::Value::Object(ref obj) = result {
-                        if let Some(serde_json::Value::Number(n)) = obj.get("return") {
-                            if n.as_u64() == Some(0) {
-                                if let Some(serde_json::Value::Object(storage)) = obj.get("storage") {
-                                    if let Some(serde_json::Value::String(deployed_by)) = storage.get("deployed_by") {
-                                        if deployed_by.len() == 40 || (deployed_by.starts_with("0x") && deployed_by.len() == 42) {
-                                            let addr_clean = deployed_by.trim_start_matches("0x");
-                                            result_hex = format!("0x{:0>64}", addr_clean);
-                                            redirected = true;
-                                            println!("🔁 [eth_call] Redirection: retourne deployed_by={}", result_hex);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if redirected {
-                        return Ok(result_hex);
-                    }
-    
-                    // Formatage standard EVM (compatible string/memory)
-                    let result_hex = match result {
-                        serde_json::Value::Object(ref obj) => {
-                            if let Some(return_val) = obj.get("return") {
-                                match return_val {
-                                    serde_json::Value::String(s) => {
-                                        if s.starts_with("0x") && s.len() > 66 {
-                                            // ABI string/memory (déjà hex)
-                                            s.clone()
-                                        } else if s.starts_with("0x") && s.len() == 42 {
-                                            let addr_clean = s.trim_start_matches("0x");
-                                            format!("0x{:0>64}", addr_clean)
-                                        } else if s.starts_with("0x") {
-                                            let hex_clean = s.trim_start_matches("0x");
-                                            if hex_clean.len() <= 64 {
-                                                format!("0x{:0>64}", hex_clean)
-                                            } else {
-                                                s.clone()
-                                            }
-                                        } else {
-                                            let encoded = hex::encode(s.as_bytes());
-                                            if encoded.len() <= 64 {
-                                                format!("0x{:0>64}", encoded)
-                                            } else {
-                                                format!("0x{}", encoded)
-                                            }
-                                        }
-                                    }
-                                    serde_json::Value::Number(n) => {
-                                        let val = n.as_u64().unwrap_or(0);
-                                        format!("0x{:064x}", val)
-                                    }
-                                    _ => format!("0x{:064x}", 0),
-                                }
-                            } else {
-                                format!("0x{:064x}", 0)
-                            }
-                        }
-                        serde_json::Value::String(ref s) => {
-                            if s.starts_with("0x") && s.len() == 42 {
-                                let addr_clean = s.trim_start_matches("0x");
-                                format!("0x{:0>64}", addr_clean)
-                            } else if s.starts_with("0x") {
-                                let hex_clean = s.trim_start_matches("0x");
-                                if hex_clean.len() <= 64 {
-                                    format!("0x{:0>64}", hex_clean)
-                                } else {
-                                    s.clone()
-                                }
-                            } else {
-                                let encoded = hex::encode(s.as_bytes());
-                                if encoded.len() <= 64 {
-                                    format!("0x{:0>64}", encoded)
-                                } else {
-                                    format!("0x{}", encoded)
-                                }
-                            }
-                        }
-                        serde_json::Value::Number(ref n) => {
-                            let val = n.as_u64().unwrap_or(0);
-                            format!("0x{:064x}", val)
-                        }
-                        _ => format!("0x{:064x}", 0),
-                    };
-    
-                    println!("📤 [eth_call] Résultat formaté standard: {}", result_hex);
-                    return Ok(result_hex);
-                } else {
-                    return Err("Erreur UVM execute_module".to_string());
-                }
-            }
+        } else {
+            Some(format!("function_{:08x}", selector))
         }
-    
-        // Fallback: transfert natif VEZ
-        let vez_contract_addr = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
-        let args = vec![
-            serde_json::Value::String(to_addr.clone()),
-            serde_json::Value::Number(serde_json::Number::from(value)),
-        ];
-        match vm_sim.execute_module(vez_contract_addr, "function_a9059cbb", args, Some(&from_addr), None).await {
-            Ok(result) => {
-                let result_hex = match result {
-                    serde_json::Value::Number(n) => format!("0x{:064x}", n.as_u64().unwrap_or(0)),
-                    serde_json::Value::String(s) => format!("0x{}", hex::encode(s.as_bytes())),
+    } else {
+        None
+    };
+
+    let arguments = if !data.is_empty() {
+        Self::parse_abi_encoded_args(data)
+    } else {
+        None
+    };
+
+    println!(
+        "🔍 [eth_call] contract_addr={:?}, function_name={:?}, arguments={:?}",
+        contract_addr, function_name, arguments
+    );
+
+    // ────────────────────────────────────────────────────────────────
+    // Exécution principale via VM
+    // ────────────────────────────────────────────────────────────────
+    let vm_arc = self.vm.clone();
+    let mut vm_sim = vm_arc.write().await;
+
+    if let Some(addr) = &contract_addr {
+        if vm_sim.modules.contains_key(addr) {
+            let args = arguments.clone().unwrap_or_else(|| {
+                if value > 0 {
+                    vec![serde_json::Value::Number(serde_json::Number::from(value))]
+                } else {
+                    vec![]
+                }
+            });
+
+            println!(
+                "🚀 [eth_call] Exécution VM: addr={}, function={:?}, args={:?}",
+                addr, function_name, args
+            );
+
+            let fn_name = function_name.as_deref().unwrap_or("unknown");
+
+            // Exécution avec calldata brut passé explicitement
+            if let Ok(result) = vm_sim
+                .execute_module(addr, fn_name, args, Some(&from_addr), Some(&calldata_bytes))
+                .await
+            {
+                println!("✅ [eth_call] Résultat VM brut: {:?}", result);
+
+                // ────────────────────────────────────────────────────────────────
+                // REDIRECTION spéciale (deployed_by) – inchangée
+                // ────────────────────────────────────────────────────────────────
+                let mut result_hex = String::new();
+                let mut redirected = false;
+
+                if let serde_json::Value::Object(ref obj) = result {
+                    if let Some(serde_json::Value::Number(n)) = obj.get("return") {
+                        if n.as_u64() == Some(0) {
+                            if let Some(serde_json::Value::Object(storage)) = obj.get("storage") {
+                                if let Some(serde_json::Value::String(deployed_by)) = storage.get("deployed_by") {
+                                    if deployed_by.len() == 40 || (deployed_by.starts_with("0x") && deployed_by.len() == 42) {
+                                        let addr_clean = deployed_by.trim_start_matches("0x");
+                                        result_hex = format!("0x{:0>64}", addr_clean);
+                                        redirected = true;
+                                        println!("🔁 [eth_call] Redirection deployed_by → {}", result_hex);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if redirected {
+                    return Ok(result_hex);
+                }
+
+                // ────────────────────────────────────────────────────────────────
+                // FORMATAGE FINAL DU RETOUR – ICI LE CORRECTIF PRINCIPAL
+                // ────────────────────────────────────────────────────────────────
+                let return_value = match result {
+                    serde_json::Value::Object(obj) => {
+                        obj.get("return").cloned().unwrap_or(serde_json::Value::Null)
+                    }
+                    other => other,
+                };
+
+                let result_hex = match return_value {
+                    // Cas 1 : déjà une string hex valide (le plus courant)
+                    serde_json::Value::String(s) if s.starts_with("0x") => {
+                        if s.len() == 66 || s.len() == 42 || s == "0x" {
+                            // Adresse ou petit hex → on pad à 32 bytes (64 hex)
+                            let clean = s.trim_start_matches("0x");
+                            format!("0x{:0>64}", clean)
+                        } else {
+                            // Déjà long → on garde tel quel (ABI string, bytes, etc.)
+                            s
+                        }
+                    }
+
+                    // Cas 2 : string non-hex → on encode en hex comme bytes (typique double-encodage source)
+                    serde_json::Value::String(s) => {
+                        let bytes = s.as_bytes();
+                        let hex_encoded = hex::encode(bytes);
+                        // Si ça ressemble à "0x000..." on le traite comme uint256
+                        if s.starts_with("0x") && hex_encoded.len() <= 64 {
+                            format!("0x{:0>64}", &hex_encoded[s.len() - (s.len() - 2)..])
+                        } else {
+                            format!("0x{}", hex_encoded)
+                        }
+                    }
+
+                    // Cas 3 : nombre → format 32 bytes hex paddé
+                    serde_json::Value::Number(n) => {
+                        let val = n.as_u64().unwrap_or(0);
+                        format!("0x{:064x}", val)
+                    }
+
+                    // Cas 4 : null ou autre → retour vide standard
                     _ => "0x".to_string(),
                 };
-                Ok(result_hex)
+
+                // Petit log pour debug
+                println!("📤 [eth_call] Résultat final formaté (hex 32 bytes): {}", result_hex);
+
+                return Ok(result_hex);
+            } else {
+                return Err("Erreur lors de execute_module".to_string());
             }
-            Err(e) => Err(format!("Erreur VM transfer: {}", e)),
         }
     }
+
+    // ────────────────────────────────────────────────────────────────
+    // Fallback : transfert natif VEZ (si pas de module trouvé)
+    // ────────────────────────────────────────────────────────────────
+    let vez_contract_addr = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_string();
+    let args = vec![
+        serde_json::Value::String(to_addr.clone()),
+        serde_json::Value::Number(serde_json::Number::from(value)),
+    ];
+
+    match vm_sim
+        .execute_module(&vez_contract_addr, "function_a9059cbb", args, Some(&from_addr), None)
+        .await
+    {
+        Ok(result) => {
+            let result_hex = match result {
+                serde_json::Value::Number(n) => format!("0x{:064x}", n.as_u64().unwrap_or(0)),
+                serde_json::Value::String(s) => format!("0x{}", hex::encode(s.as_bytes())),
+                _ => "0x".to_string(),
+            };
+            Ok(result_hex)
+        }
+        Err(e) => Err(format!("Erreur VM transfert natif: {}", e)),
+    }
+}
     
         /// ✅ Estimation du gas
     pub async fn estimate_gas(&self) -> u64 {

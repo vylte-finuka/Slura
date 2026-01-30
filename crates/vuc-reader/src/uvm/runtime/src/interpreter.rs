@@ -882,11 +882,6 @@ pub fn execute_program(
         call_stack: vec![],
     };
 
-    execution_context.bootstrap_essential_storage(
-        &interpreter_args.contract_address,
-        &interpreter_args.sender_address,
-    );
-
     set_balance(
         &mut execution_context.world_state,
         &interpreter_args.sender_address,
@@ -964,6 +959,8 @@ pub fn execute_program(
         valid_jumpdests.insert(dispatcher_off);
     }
 
+    let mut last_eq_result = u256::zero();
+
     let mut evm_stack: Vec<u256> = Vec::with_capacity(1024);
 
     let mut natural_exit_detected = false;
@@ -1039,9 +1036,7 @@ pub fn execute_program(
 
         //___ Pectra/Charène opcodes ___
         match opcode {
-            // ────────────────────────────────────────────────
-            //  Opérations conservées mais corrigées pour conformité
-            // ────────────────────────────────────────────────
+
             0x00 => {
                 /* STOP */
                 natural_exit_detected = true;
@@ -1394,6 +1389,7 @@ pub fn execute_program(
                 let res = if a == b { u256::one() } else { u256::zero() };
                 evm_stack.push(res);
                 reg[0] = res.low_u64().into();
+                last_eq_result = res; // <-- AJOUT
                 consume_gas(&mut execution_context, opcode)?;
 
                 // Affichage lisible pour sélecteurs (si <= 32 bits)
@@ -1856,7 +1852,10 @@ pub fn execute_program(
                     // Copie de déploiement probable
                     println!("🔄 [PROXY CODECOPY] Grande copie détectée → simulation pour éviter erreurs");
                     // Simule la copie sans faire d'opération réelle
-                   consume_gas(&mut execution_context, (3 + 3 * ((len + 31) / 32) as u64).try_into().unwrap())?;
+                    consume_gas(
+                        &mut execution_context,
+                        (3 + 3 * ((len + 31) / 32) as u64).try_into().unwrap(),
+                    )?;
                 }
                 // ✅ COPIE NORMALE pour les petites tailles
                 else if dest_offset + len <= global_mem.len() && code_offset + len <= prog.len() {
@@ -1866,7 +1865,10 @@ pub fn execute_program(
                         "✅ [CODECOPY] {} bytes copiés depuis code[0x{:x}] vers mem[0x{:x}]",
                         len, code_offset, dest_offset
                     );
-                     consume_gas(&mut execution_context, (3 + 3 * ((len + 31) / 32) as u64).try_into().unwrap())?;
+                    consume_gas(
+                        &mut execution_context,
+                        (3 + 3 * ((len + 31) / 32) as u64).try_into().unwrap(),
+                    )?;
                 }
                 // ✅ COPIE PARTIELLE sécurisée
                 else {
@@ -1882,7 +1884,10 @@ pub fn execute_program(
                             safe_len, len
                         );
                     }
-                     consume_gas(&mut execution_context, (3 + 3 * ((len + 31) / 32) as u64).try_into().unwrap())?;
+                    consume_gas(
+                        &mut execution_context,
+                        (3 + 3 * ((len + 31) / 32) as u64).try_into().unwrap(),
+                    )?;
                 }
             }
 
@@ -2380,26 +2385,22 @@ pub fn execute_program(
                         ),
                     ));
                 }
-
-                // Ordre pile EVM : haut = destination, dessous = condition
+            
                 let dest_u256 = evm_stack.pop().unwrap();
                 let condition = evm_stack.pop().unwrap();
-
                 let dest = dest_u256.low_u64() as usize;
-
+            
                 println!(
-                    "🔀 [JUMPI @ {:04x}] cond={} → dest=0x{:04x}  (stack size après pops = {})",
+                    "🔀 [JUMPI @ {:04x}] cond={} → dest=0x{:04x}  (stack size après pops = {}) | last_eq_result={}",
                     insn_ptr,
                     condition,
                     dest,
-                    evm_stack.len()
+                    evm_stack.len(),
+                    last_eq_result
                 );
-
-                if condition.is_zero() {
-                    println!("   ↪ condition FAUSSE → pas de saut, destination consommée");
-                    // On continue normalement, sans changer PC
-                } else {
-                    // Saut conditionnel : vérification stricte JUMPDEST
+            
+                // Seul cas où on saute : condition vraie ET dernier EQ == 1
+                if !condition.is_zero() && last_eq_result == u256::one() {
                     if !valid_jumpdests.contains(&dest) {
                         println!(
                             "❌ [INVALID JUMPI] destination 0x{:04x} n'est PAS un JUMPDEST valide",
@@ -2410,12 +2411,14 @@ pub fn execute_program(
                             format!("Invalid jump destination 0x{:04x}", dest),
                         ));
                     }
-
                     println!("   → saut CONDITIONNEL pris vers 0x{:04x}", dest);
                     insn_ptr = dest;
                     skip_advance = true;
+                } else {
+                    println!("   ↪ condition FAUSSE ou dernier EQ != 1 → pas de saut");
+                    // On continue normalement
                 }
-
+            
                 consume_gas(&mut execution_context, 10)?;
             }
 
@@ -2526,14 +2529,17 @@ pub fn execute_program(
                     return Err(Error::new(ErrorKind::Other, "EVM STACK overflow on PUSH"));
                 }
                 let push_size = (opcode - 0x60 + 1) as usize;
-                let mut value = u256::zero();
                 let start = insn_ptr + 1;
                 let end = (start + push_size).min(prog.len());
-                for i in start..end {
-                    value = (value << 8) | u256::from(prog[i]);
+                let mut value_bytes = [0u8; 32];
+                // Correction : copie en big-endian (à droite dans le tableau)
+                let copy_len = end - start;
+                if copy_len > 0 && copy_len <= 32 {
+                    value_bytes[32 - copy_len..32].copy_from_slice(&prog[start..end]);
                 }
+                let value = u256::from_big_endian(&value_bytes);
                 evm_stack.push(value);
-                reg[0] = value; // PATCH: garder le U256 complet
+                reg[0] = value;
                 advance = 1 + push_size;
                 consume_gas(&mut execution_context, opcode)?;
             }
@@ -2687,107 +2693,115 @@ pub fn execute_program(
                 println!("🌐 [SLU-IP 450] TCP/UDP send → result={}", res);
             }
 
-            0xf3 => {
-                if evm_stack.len() < 2 {
-                    return Err(Error::new(ErrorKind::Other, "STACK underflow on RETURN"));
-                }
+        0xf3 => {
+    if evm_stack.len() < 2 {
+        return Err(Error::new(ErrorKind::Other, "STACK underflow on RETURN"));
+    }
 
-                // Stack order: top = length, next = offset (conforme EVM)
-                let len = evm_stack.pop().unwrap().low_u64() as usize;
-                let offset = evm_stack.pop().unwrap().low_u64() as usize;
+    let len = evm_stack.pop().unwrap().low_u64() as usize;
+    let offset = evm_stack.pop().unwrap().low_u64() as usize;
 
-                println!("📤 [RETURN] offset=0x{:x}, len={}", offset, len);
+    println!("📤 [RETURN] offset=0x{:x}, len={}", offset, len);
 
-                // Sécurité mémoire
-                if len > 0 && offset + len > global_mem.len() {
-                    ensure_memory_size(
-                        &mut global_mem,
-                        offset + len,
-                        &mut execution_context.free_memory_pointer,
-                    )?;
-                }
+    if len > 0 && offset + len > global_mem.len() {
+        ensure_memory_size(&mut global_mem, offset + len, &mut execution_context.free_memory_pointer)?;
+    }
 
-                // ───────────────────────────────────────────────────────────────
-                // STRATEGIE GENERIQUE : on essaie toujours de parser intelligemment
-                // ───────────────────────────────────────────────────────────────
+    let mut result = serde_json::Map::new();
 
-                let mut result = serde_json::Map::new();
+    let return_data: Vec<u8> = if len == 0 {
+        Vec::new()
+    } else {
+        let copy_len = len.min(global_mem.len().saturating_sub(offset));
+        global_mem[offset..offset + copy_len].to_vec()
+    };
 
-                // 1. Cas classique simple : retour d'un uint256 / uint8 / bool / address (32 bytes ou moins)
-                if len >= 32 && offset + 32 <= global_mem.len() {
-                    let mut data_32 = [0u8; 32];
-                    data_32.copy_from_slice(&global_mem[offset..offset + 32]);
+    let decoded = if return_data.is_empty() {
+        JsonValue::Null
 
-                    let value = u256::from_big_endian(&data_32);
+    // ── PRIORITÉ : cas très fréquent → uint256 ABI (offset + length + valeur 32 bytes)
+    //    len=128, offset=0 → les 32 derniers bytes = la valeur
+    } else if len == 128 && return_data.len() >= 32 {
+        // On prend les 32 DERNIERS bytes (la vraie valeur uint256)
+        let start = return_data.len() - 32;
+        let mut data_32 = [0u8; 32];
+        data_32.copy_from_slice(&return_data[start..]);
 
-                    // Heuristique : si petite valeur (< 256) → probablement uint8 (decimals)
-                    let as_u64 = value.low_u64();
-                    if as_u64 < 256 {
-                        println!("→ Probable uint8 détecté: {}", as_u64);
-                        result.insert("return".to_string(), JsonValue::Number(as_u64.into()));
-                    } else {
-                        // Sinon, on garde en hex pour les gros nombres / address
-                        let hex_str = format!("0x{}", hex::encode(&data_32));
-                        result.insert("return".to_string(), JsonValue::String(hex_str));
-                    }
-                }
-                // 2. Cas string dynamique (name, symbol, etc.) : offset + length + data
-                else if len >= 64 && offset + 64 <= global_mem.len() {
-                    // Lire offset des données (premiers 32 bytes)
-                    let mut offset_bytes = [0u8; 32];
-                    offset_bytes.copy_from_slice(&global_mem[offset..offset + 32]);
-                    let data_offset = u256::from_big_endian(&offset_bytes).low_u64() as usize;
+        let value = u256::from_big_endian(&data_32);
 
-                    // Lire longueur (32 bytes suivants)
-                    let mut len_bytes = [0u8; 32];
-                    len_bytes.copy_from_slice(&global_mem[offset + 32..offset + 64]);
-                    let str_len = u256::from_big_endian(&len_bytes).low_u64() as usize;
+        println!("→ uint256 ABI détecté (len=128) : 0x{:064x}", value);
+        JsonValue::String(format!("0x{:064x}", value))
 
-                    if data_offset + str_len <= global_mem.len() {
-                        let str_data = &global_mem[data_offset..data_offset + str_len];
-                        if let Ok(s) = String::from_utf8(str_data.to_vec()) {
-                            println!("→ String détectée: {:?}", s);
-                            result.insert("return".to_string(), JsonValue::String(s));
-                        } else {
-                            // Pas UTF-8 valide → hex
-                            result.insert(
-                                "return".to_string(),
-                                JsonValue::String(format!("0x{}", hex::encode(str_data))),
-                            );
-                        }
-                    }
-                }
-                // 3. Cas fallback générique (tout le reste)
-                else {
-                    let mut ret_data = vec![0u8; len.min(1024)]; // limite pour éviter des copies énormes
-                    if len > 0 {
-                        let copy_len = ret_data.len().min(global_mem.len() - offset);
-                        ret_data[..copy_len]
-                            .copy_from_slice(&global_mem[offset..offset + copy_len]);
-                    }
+    // ── Cas double-encodage string "0x000..." (comme avant)
+    } else if return_data.len() >= 66 && return_data.starts_with(&[0x30, 0x78]) && return_data.len() % 2 == 0 {
+        let hex_content = &return_data[2..];
+        let hex_str = hex::encode(hex_content);
+        let padded_hex = format!("{:0>64}", hex_str);
 
-                    // Décode basique
-                    let hex_ret = format!("0x{}", hex::encode(&ret_data));
-                    println!("→ Retour générique (hex): {}", hex_ret);
-                    result.insert("return".to_string(), JsonValue::String(hex_ret));
-                }
-
-                // Ajout storage final (comme avant)
-                let final_storage = execution_context
-                    .world_state
-                    .storage
-                    .get(&interpreter_args.contract_address)
-                    .cloned()
-                    .unwrap_or_default();
-
-                result.insert(
-                    "storage".to_string(),
-                    JsonValue::Object(decode_storage_map(&final_storage)),
-                );
-
-                println!("✅ [RETURN] Résultat final: {:?}", result.get("return"));
-                return Ok(JsonValue::Object(result));
+        match u256::from_str_radix(&padded_hex, 16) {
+            Ok(val) => {
+                println!("→ DOUBLE-ENCODAGE STRING → uint256 nettoyé : 0x{:064x}", val);
+                JsonValue::String(format!("0x{:064x}", val))
             }
+            Err(_) => JsonValue::String(format!("0x{}", hex::encode(&return_data))),
+        }
+
+    // ── Cas string dynamique classique (name/symbol)
+    } else if return_data.len() >= 64 {
+        let offset_bytes = &return_data[0..32];
+        let len_bytes = &return_data[32..64];
+
+        let data_offset = u256::from_big_endian(offset_bytes).low_u64() as usize;
+        let str_len = u256::from_big_endian(len_bytes).low_u64() as usize;
+
+        if data_offset + str_len <= global_mem.len() {
+            let str_data = &global_mem[data_offset..data_offset + str_len];
+            if let Ok(s) = String::from_utf8(str_data.to_vec()) {
+                println!("→ String dynamique : {:?}", s);
+                JsonValue::String(s)
+            } else {
+                JsonValue::String(format!("0x{}", hex::encode(str_data)))
+            }
+        } else {
+            JsonValue::String(format!("0x{}", hex::encode(&return_data)))
+        }
+
+    // ── Cas simple 32 bytes ou moins
+    } else if return_data.len() >= 32 {
+        let mut data_32 = [0u8; 32];
+        let copy_len = 32.min(return_data.len());
+        data_32[32 - copy_len..].copy_from_slice(&return_data[..copy_len]);
+
+        let value = u256::from_big_endian(&data_32);
+        let hex_str = format!("0x{:064x}", value);
+        println!("→ uint256 simple : {}", hex_str);
+        JsonValue::String(hex_str)
+
+    // ── Fallback
+    } else {
+        let hex_ret = format!("0x{}", hex::encode(&return_data));
+        println!("→ Retour générique : {}", hex_ret);
+        JsonValue::String(hex_ret)
+    };
+
+    result.insert("return".to_string(), decoded);
+
+    // Storage final (inchangé)
+    let final_storage = execution_context
+        .world_state
+        .storage
+        .get(&interpreter_args.contract_address)
+        .cloned()
+        .unwrap_or_default();
+
+    result.insert(
+        "storage".to_string(),
+        JsonValue::Object(decode_storage_map(&final_storage)),
+    );
+
+    println!("✅ [RETURN] Résultat final: {:?}", result.get("return"));
+    return Ok(JsonValue::Object(result));
+}
 
             //___ 0xfd REVERT - EXTRAIT LES DONNÉES DE REVERT ET LES FORMATE
             0xfd => {
@@ -3079,38 +3093,5 @@ fn safe_slice(mem: &[u8], offset: usize, len: usize) -> &[u8] {
         &mem[offset..]
     } else {
         &[]
-    }
-}
-
-impl UvmExecutionContext {
-    /// ✅ NOUVEAU: Pré-initialise uniquement les slots critiques nécessaires au démarrage
-    pub fn bootstrap_essential_storage(&mut self, contract_address: &str, sender_address: &str) {
-        let contract_storage = self
-            .world_state
-            .storage
-            .entry(contract_address.to_string())
-            .or_insert_with(HashMap::new);
-
-        // ✅ SEUL le slot 0x65 (owner) est pré-initialisé pour permettre au bytecode de fonctionner
-        let owner_slot = "0000000000000000000000000000000000000000000000000000000000000065";
-        if !contract_storage.contains_key(owner_slot) {
-            let sender_clean = if sender_address.starts_with("0x") {
-                &sender_address[2..]
-            } else {
-                sender_address
-            };
-
-            if let Ok(addr_bytes) = hex::decode(sender_clean) {
-                if addr_bytes.len() == 20 {
-                    let mut owner_bytes = vec![0u8; 32];
-                    owner_bytes[12..32].copy_from_slice(&addr_bytes);
-                    contract_storage.insert(owner_slot.to_string(), owner_bytes);
-                    println!(
-                        "🔑 [BOOTSTRAP] Owner slot 0x65 initialisé = {}",
-                        sender_address
-                    );
-                }
-            }
-        }
     }
 }
