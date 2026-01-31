@@ -2714,7 +2714,7 @@ pub fn execute_program(
             }
 
             //___ 0xf3 RETURN
-                        let value = u256::from_big_endian(&data_32);
+                let value = u256::from_big_endian(&data_32);
         let hex_str = format!("0x{:064x}", value);
         println!("→ uint256 simple : {}", hex_str);
         JsonValue::String(hex_str)
@@ -3222,4 +3222,4 @@ fn safe_slice(mem: &[u8], offset: usize, len: usize) -> &[u8] {
     } else {
         &[]
     }
-}
+                    }
