@@ -2714,73 +2714,36 @@ pub fn execute_program(
             }
 
             //___ 0xf3 RETURN
-        0xf3 => {
-                let (offset, len) = if evm_stack.len() >= 2 {
-                    let l = evm_stack.pop().unwrap();
-                    let o = evm_stack.pop().unwrap();
-                    (
-                        o.low_u64() as usize,
-                        l.low_u64() as usize,
-                    )
-                } else {
-                    println!("⚠️ [RETURN] underflow → return(0,0)");
-                    (0, 0)
-                };
+                        let value = u256::from_big_endian(&data_32);
+        let hex_str = format!("0x{:064x}", value);
+        println!("→ uint256 simple : {}", hex_str);
+        JsonValue::String(hex_str)
 
-                let end = offset.saturating_add(len);
-                if end > global_mem.len() {
-                    ensure_memory_size(&mut global_mem, end, &mut execution_context.free_memory_pointer)?;
-                }
+    // ── Fallback
+    } else {
+        let hex_ret = format!("0x{}", hex::encode(&return_data));
+        println!("→ Retour générique : {}", hex_ret);
+        JsonValue::String(hex_ret)
+    };
 
-                let copy_len = len.min(global_mem.len().saturating_sub(offset));
-                execution_context.return_data = if copy_len > 0 {
-                    global_mem[offset..offset + copy_len].to_vec()
-                } else {
-                    vec![]
-                };
+    result.insert("return".to_string(), decoded);
 
-                println!(
-                    "↪ [RETURN] offset=0x{:04x} len={} copied={} call_stack_len={}",
-                    offset, len, copy_len, execution_context.call_stack.len()
-                );
+    // Storage final (inchangé)
+    let final_storage = execution_context
+        .world_state
+        .storage
+        .get(&interpreter_args.contract_address)
+        .cloned()
+        .unwrap_or_default();
 
-                if !execution_context.call_stack.is_empty() {
-                    // Retour depuis un sous-contrat / helper interne
-                    let frame = execution_context.call_stack.pop().expect("call_stack non vide mais pop échoue");
+    result.insert(
+        "storage".to_string(),
+        JsonValue::Object(decode_storage_map(&final_storage)),
+    );
 
-                    let next_pc = frame.return_pc.unwrap_or(insn_ptr.wrapping_add(1));
-                    println!(
-                        "  ↩ Retour depuis call_stack depth {} → restauration PC = 0x{:04x}",
-                        execution_context.call_stack.len() + 1, next_pc
-                    );
-
-                    insn_ptr = next_pc;
-                    skip_advance = true;
-
-                    evm_stack.push(u256::one());  // succès pour le caller
-
-                    // On CONTINUE l'exécution (pas de return Ok ici !)
-                } else {
-                    // Vraie fin de transaction
-                    println!("  🏁 Top-level RETURN ({} bytes) → fin", execution_context.return_data.len());
-
-                    let mut result = serde_json::json!({
-                        "exit_reason": "RETURN",
-                        "return": decode_return_data_generic(&execution_context.return_data, execution_context.return_data.len()),
-                        "gas_used": execution_context.gas_used.low_u64(),
-                    });
-
-                    let contract_storage = execution_context.world_state
-                        .storage
-                        .get(&interpreter_args.contract_address)
-                        .cloned()
-                        .unwrap_or_default();
-
-                    result["storage"] = JsonValue::Object(decode_storage_map(&contract_storage));
-
-                    return Ok(result);
-                }
-            }
+    println!("✅ [RETURN] Résultat final: {:?}", result.get("return"));
+    return Ok(JsonValue::Object(result));
+}
 
             //___ 0xf4 DELEGATECALL
         0xf4 => {
