@@ -2714,36 +2714,107 @@ pub fn execute_program(
             }
 
             //___ 0xf3 RETURN
-                let value = u256::from_big_endian(&data_32);
-        let hex_str = format!("0x{:064x}", value);
-        println!("→ uint256 simple : {}", hex_str);
-        JsonValue::String(hex_str)
+                  0xf3 => {
+                if evm_stack.len() < 2 {
+                    return Err(Error::new(ErrorKind::Other, "STACK underflow on RETURN"));
+                }
 
-    // ── Fallback
-    } else {
-        let hex_ret = format!("0x{}", hex::encode(&return_data));
-        println!("→ Retour générique : {}", hex_ret);
-        JsonValue::String(hex_ret)
-    };
+                // Stack order: top = length, next = offset (conforme EVM)
+                let len = evm_stack.pop().unwrap().low_u64() as usize;
+                let offset = evm_stack.pop().unwrap().low_u64() as usize;
 
-    result.insert("return".to_string(), decoded);
+                println!("📤 [RETURN] offset=0x{:x}, len={}", offset, len);
 
-    // Storage final (inchangé)
-    let final_storage = execution_context
-        .world_state
-        .storage
-        .get(&interpreter_args.contract_address)
-        .cloned()
-        .unwrap_or_default();
+                // Sécurité mémoire
+                if len > 0 && offset + len > global_mem.len() {
+                    ensure_memory_size(
+                        &mut global_mem,
+                        offset + len,
+                        &mut execution_context.free_memory_pointer,
+                    )?;
+                }
 
-    result.insert(
-        "storage".to_string(),
-        JsonValue::Object(decode_storage_map(&final_storage)),
-    );
+                // ───────────────────────────────────────────────────────────────
+                // STRATEGIE GENERIQUE : on essaie toujours de parser intelligemment
+                // ───────────────────────────────────────────────────────────────
 
-    println!("✅ [RETURN] Résultat final: {:?}", result.get("return"));
-    return Ok(JsonValue::Object(result));
-}
+                let mut result = serde_json::Map::new();
+
+                // 1. Cas classique simple : retour d'un uint256 / uint8 / bool / address (32 bytes ou moins)
+                if len >= 32 && offset + 32 <= global_mem.len() {
+                    let mut data_32 = [0u8; 32];
+                    data_32.copy_from_slice(&global_mem[offset..offset + 32]);
+
+                    let value = u256::from_big_endian(&data_32);
+
+                    // Heuristique : si petite valeur (< 256) → probablement uint8 (decimals)
+                    let as_u64 = value.low_u64();
+                    if as_u64 < 256 {
+                        println!("→ Probable uint8 détecté: {}", as_u64);
+                        result.insert("return".to_string(), JsonValue::Number(as_u64.into()));
+                    } else {
+                        // Sinon, on garde en hex pour les gros nombres / address
+                        let hex_str = format!("0x{}", hex::encode(&data_32));
+                        result.insert("return".to_string(), JsonValue::String(hex_str));
+                    }
+                }
+                // 2. Cas string dynamique (name, symbol, etc.) : offset + length + data
+                else if len >= 64 && offset + 64 <= global_mem.len() {
+                    // Lire offset des données (premiers 32 bytes)
+                    let mut offset_bytes = [0u8; 32];
+                    offset_bytes.copy_from_slice(&global_mem[offset..offset + 32]);
+                    let data_offset = u256::from_big_endian(&offset_bytes).low_u64() as usize;
+
+                    // Lire longueur (32 bytes suivants)
+                    let mut len_bytes = [0u8; 32];
+                    len_bytes.copy_from_slice(&global_mem[offset + 32..offset + 64]);
+                    let str_len = u256::from_big_endian(&len_bytes).low_u64() as usize;
+
+                    if data_offset + str_len <= global_mem.len() {
+                        let str_data = &global_mem[data_offset..data_offset + str_len];
+                        if let Ok(s) = String::from_utf8(str_data.to_vec()) {
+                            println!("→ String détectée: {:?}", s);
+                            result.insert("return".to_string(), JsonValue::String(s));
+                        } else {
+                            // Pas UTF-8 valide → hex
+                            result.insert(
+                                "return".to_string(),
+                                JsonValue::String(format!("0x{}", hex::encode(str_data))),
+                            );
+                        }
+                    }
+                }
+                // 3. Cas fallback générique (tout le reste)
+                else {
+                    let mut ret_data = vec![0u8; len.min(1024)]; // limite pour éviter des copies énormes
+                    if len > 0 {
+                        let copy_len = ret_data.len().min(global_mem.len() - offset);
+                        ret_data[..copy_len]
+                            .copy_from_slice(&global_mem[offset..offset + copy_len]);
+                    }
+
+                    // Décode basique
+                    let hex_ret = format!("0x{}", hex::encode(&ret_data));
+                    println!("→ Retour générique (hex): {}", hex_ret);
+                    result.insert("return".to_string(), JsonValue::String(hex_ret));
+                }
+
+                // Ajout storage final (comme avant)
+                let final_storage = execution_context
+                    .world_state
+                    .storage
+                    .get(&interpreter_args.contract_address)
+                    .cloned()
+                    .unwrap_or_default();
+
+                result.insert(
+                    "storage".to_string(),
+                    JsonValue::Object(decode_storage_map(&final_storage)),
+                );
+
+                println!("✅ [RETURN] Résultat final: {:?}", result.get("return"));
+                return Ok(JsonValue::Object(result));
+            }
 
             //___ 0xf4 DELEGATECALL
         0xf4 => {
