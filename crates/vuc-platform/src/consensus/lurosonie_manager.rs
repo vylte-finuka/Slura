@@ -412,13 +412,13 @@ impl LurosonieManager {
         let mut contract_states: HashMap<String, Vec<u8>> = HashMap::new();
         let mut execution_results = HashMap::new();
         let mut processed_hashes = Vec::new();
-
+    
         for tx in &transactions {
             match self.execute_transaction_in_block(tx).await {
                 Ok(result) => {
                     execution_results.insert(tx.hash.clone(), result.clone());
                     processed_hashes.push(tx.hash.clone());
-
+    
                     // ✅ NOUVEAU : Extraction du storage modifié depuis le résultat
                     if let Some(storage_obj) = result.get("storage") {
                         if let Some(storage_map) = storage_obj.as_object() {
@@ -435,7 +435,7 @@ impl LurosonieManager {
                             }
                         }
                     }
-
+    
                     // ✅ SAUVEGARDE TRANSACTION EN BASE
                     let metadata = SlurachainMetadata {
                         from_op: tx.from_op.clone(),
@@ -452,11 +452,13 @@ impl LurosonieManager {
                     }
                 }
                 Err(e) => {
-                    error!("❌ Échec exécution tx {} (restera dans le mempool): {}", tx.hash, e);
+                    error!("❌ Échec exécution tx {} (retirée du mempool): {}", tx.hash, e);
                     execution_results.insert(tx.hash.clone(), serde_json::json!({
                         "status": "failed",
                         "error": e
                     }));
+                    // Correction : retirer du mempool même en cas d'échec
+                    processed_hashes.push(tx.hash.clone());
                 }
             }
         }
@@ -493,7 +495,7 @@ impl LurosonieManager {
                  if is_system_block { "système" } else { "validateur" },
                  producer, 
                  if relay_power == u64::MAX { "∞".to_string() } else { relay_power.to_string() });
-
+    
         // ✅ CORRECTION: Utilisation de block_number dans le calcul du state root
         // 1. Récupère l'état courant des comptes
         let accounts = {
@@ -501,7 +503,7 @@ impl LurosonieManager {
             let accounts = vm.state.accounts.read();
             let x = accounts.await.clone(); x
         };
-
+    
         // 2. Calcule le Patricia Trie root pour l'état au bloc donné
         let hashed_state: reth_trie::HashedPostState = build_state_trie(&accounts);
         let mut trie_accounts: Vec<(B256, reth_trie::TrieAccount)> = hashed_state.accounts
@@ -1476,9 +1478,5 @@ impl LurosonieManager {
             // Optionnel : sleep pour éviter de saturer le CPU
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-
-        // (Le code ci-dessous ne sera jamais atteint)
-        // ✅ 2. Synchronise les états des contrats avec la VM
-        // ...
     }
             }
