@@ -217,7 +217,7 @@ impl Default for UvmWorldState {
                 blob_hash: [0u8; 32],
                 prev_randao: [0u8; 32],
             },
-            chain_id: u256::from(45056u64),
+            chain_id: u256::from(get_chain_id()),
         }
     }
 }
@@ -337,6 +337,17 @@ fn consume_gas_amount(context: &mut UvmExecutionContext, amount: u64) -> Result<
     let cost = u256::from(amount);
     context.gas_used += cost;
     Ok(())
+}
+
+fn get_chain_id() -> u64 {
+    match std::env::var("SLURACHAIN_NETWORK")
+        .unwrap_or("devnet".to_string())
+        .as_str()
+    {
+        "mainnet" => 45056,
+        "testnet" => 45057,
+        "devnet" | _ => 45058,
+    }
 }
 
 /// ✅ AJOUT: Scan préalable de tous les JUMPDEST valides au début de l'exécution
@@ -2620,25 +2631,31 @@ pub fn execute_program(
             }
 
             //___ 0xf1 CALL
-         0xf1 => {
+            0xf1 => {
                 if evm_stack.len() < 7 {
                     return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on CALL"));
                 }
 
-                let out_size   = evm_stack.pop().unwrap().low_u64() as usize;
+                let out_size = evm_stack.pop().unwrap().low_u64() as usize;
                 let out_offset = evm_stack.pop().unwrap().low_u64() as usize;
-                let in_size    = evm_stack.pop().unwrap().low_u64() as usize;
-                let in_offset  = evm_stack.pop().unwrap().low_u64() as usize;
-                let value      = evm_stack.pop().unwrap();
-                let to         = evm_stack.pop().unwrap();
-                let gas        = evm_stack.pop().unwrap();
+                let in_size = evm_stack.pop().unwrap().low_u64() as usize;
+                let in_offset = evm_stack.pop().unwrap().low_u64() as usize;
+                let value = evm_stack.pop().unwrap();
+                let to = evm_stack.pop().unwrap();
+                let gas = evm_stack.pop().unwrap();
 
                 let to_addr = format!("0x{:040x}", to);
 
                 println!(
                     "📞 [CALL] depth={} to={} value={} in=0x{:x}:{} out=0x{:x}:{} gas={}",
                     execution_context.call_stack.len() + 1,
-                    to_addr, value, in_offset, in_size, out_offset, out_size, gas
+                    to_addr,
+                    value,
+                    in_offset,
+                    in_size,
+                    out_offset,
+                    out_size,
+                    gas
                 );
 
                 // ─── SAUVEGARDE DU POINT DE RETOUR ──────────────────────────────
@@ -2647,8 +2664,8 @@ pub fn execute_program(
                     contract: to_addr.clone(),
                     value,
                     gas_limit: gas,
-                    input_data: vec![], // rempli plus bas si besoin
-                    return_pc: Some(insn_ptr + 1),   // ← CRITIQUE : +1
+                    input_data: vec![],            // rempli plus bas si besoin
+                    return_pc: Some(insn_ptr + 1), // ← CRITIQUE : +1
                 });
 
                 // Préparation calldata
@@ -2676,7 +2693,12 @@ pub fn execute_program(
                     )?;
                 }
 
-                let code = execution_context.world_state.code.get(&to_addr).cloned().unwrap_or_default();
+                let code = execution_context
+                    .world_state
+                    .code
+                    .get(&to_addr)
+                    .cloned()
+                    .unwrap_or_default();
 
                 let call_result = execute_program(
                     Some(&code),
@@ -2693,20 +2715,22 @@ pub fn execute_program(
 
                 match call_result {
                     Ok(val) => {
-                        let return_bytes = val.get("return")
+                        let return_bytes = val
+                            .get("return")
                             .and_then(|v| v.as_str())
                             .and_then(|s| s.strip_prefix("0x"))
                             .map_or(vec![], |h| hex::decode(h).unwrap_or_default());
 
                         let copy_len = out_size.min(return_bytes.len());
                         if out_offset + copy_len <= global_mem.len() {
-                            global_mem[out_offset..out_offset + copy_len].copy_from_slice(&return_bytes[..copy_len]);
+                            global_mem[out_offset..out_offset + copy_len]
+                                .copy_from_slice(&return_bytes[..copy_len]);
                         }
 
-                        evm_stack.push(u256::one());  // succès
+                        evm_stack.push(u256::one()); // succès
                     }
                     Err(_) => {
-                        evm_stack.push(u256::zero());  // échec
+                        evm_stack.push(u256::zero()); // échec
                     }
                 }
 
@@ -2714,9 +2738,15 @@ pub fn execute_program(
             }
 
             //___ 0xf3 RETURN
-                  0xf3 => {
+            0xf3 => {
                 if evm_stack.len() < 2 {
                     return Err(Error::new(ErrorKind::Other, "STACK underflow on RETURN"));
+                }
+
+                if insn_ptr + 1 < prog.len() && prog[insn_ptr + 1] == 0x5b {
+                    println!("➡️ [RETURN] JUMPDEST détecté après RETURN, on continue !");
+                    insn_ptr += 1;
+                    continue;
                 }
 
                 // Stack order: top = length, next = offset (conforme EVM)
@@ -2786,8 +2816,8 @@ pub fn execute_program(
                 }
                 // 3. Cas fallback générique (tout le reste)
                 else {
-                    let mut ret_data = vec![0u8; len.min(1024)]; // limite pour éviter des copies énormes
-                    if len > 0 {
+                    let mut ret_data = vec![0u8; len.min(1024)];
+                    if len > 0 && offset < global_mem.len() {
                         let copy_len = ret_data.len().min(global_mem.len() - offset);
                         ret_data[..copy_len]
                             .copy_from_slice(&global_mem[offset..offset + copy_len]);
@@ -2817,24 +2847,32 @@ pub fn execute_program(
             }
 
             //___ 0xf4 DELEGATECALL
-        0xf4 => {
+            0xf4 => {
                 if evm_stack.len() < 6 {
-                    return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on DELEGATECALL"));
+                    return Err(Error::new(
+                        ErrorKind::Other,
+                        "EVM STACK underflow on DELEGATECALL",
+                    ));
                 }
 
-                let out_size   = evm_stack.pop().unwrap().low_u64() as usize;
+                let out_size = evm_stack.pop().unwrap().low_u64() as usize;
                 let out_offset = evm_stack.pop().unwrap().low_u64() as usize;
-                let in_size    = evm_stack.pop().unwrap().low_u64() as usize;
-                let in_offset  = evm_stack.pop().unwrap().low_u64() as usize;
-                let to         = evm_stack.pop().unwrap();
-                let gas        = evm_stack.pop().unwrap();
+                let in_size = evm_stack.pop().unwrap().low_u64() as usize;
+                let in_offset = evm_stack.pop().unwrap().low_u64() as usize;
+                let to = evm_stack.pop().unwrap();
+                let gas = evm_stack.pop().unwrap();
 
                 let to_addr = format!("0x{:040x}", to);
 
                 println!(
                     "🤝 [DELEGATECALL] depth={} to={} in=0x{:x}:{} out=0x{:x}:{} gas={}",
                     execution_context.call_stack.len() + 1,
-                    to_addr, in_offset, in_size, out_offset, out_size, gas
+                    to_addr,
+                    in_offset,
+                    in_size,
+                    out_offset,
+                    out_size,
+                    gas
                 );
 
                 // ─── SAUVEGARDE DU POINT DE RETOUR ──────────────────────────────
@@ -2859,7 +2897,12 @@ pub fn execute_program(
                 call_args.state_data = calldata.clone();
                 call_args.call_depth = interpreter_args.call_depth + u256::from(1);
 
-                let code = execution_context.world_state.code.get(&to_addr).cloned().unwrap_or_default();
+                let code = execution_context
+                    .world_state
+                    .code
+                    .get(&to_addr)
+                    .cloned()
+                    .unwrap_or_default();
 
                 let call_result = execute_program(
                     Some(&code),
@@ -2876,14 +2919,16 @@ pub fn execute_program(
 
                 match call_result {
                     Ok(val) => {
-                        let return_bytes = val.get("return")
+                        let return_bytes = val
+                            .get("return")
                             .and_then(|v| v.as_str())
                             .and_then(|s| s.strip_prefix("0x"))
                             .map_or(vec![], |h| hex::decode(h).unwrap_or_default());
 
                         let copy_len = out_size.min(return_bytes.len());
                         if out_offset + copy_len <= global_mem.len() {
-                            global_mem[out_offset..out_offset + copy_len].copy_from_slice(&return_bytes[..copy_len]);
+                            global_mem[out_offset..out_offset + copy_len]
+                                .copy_from_slice(&return_bytes[..copy_len]);
                         }
 
                         evm_stack.push(u256::one());
@@ -3022,25 +3067,33 @@ pub fn execute_program(
                 }
             }
 
-                  //___ 0xfa STATICCALL
-         0xfa => {
+            //___ 0xfa STATICCALL
+            0xfa => {
                 if evm_stack.len() < 6 {
-                    return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on STATICCALL"));
+                    return Err(Error::new(
+                        ErrorKind::Other,
+                        "EVM STACK underflow on STATICCALL",
+                    ));
                 }
 
-                let out_size   = evm_stack.pop().unwrap().low_u64() as usize;
+                let out_size = evm_stack.pop().unwrap().low_u64() as usize;
                 let out_offset = evm_stack.pop().unwrap().low_u64() as usize;
-                let in_size    = evm_stack.pop().unwrap().low_u64() as usize;
-                let in_offset  = evm_stack.pop().unwrap().low_u64() as usize;
-                let to         = evm_stack.pop().unwrap();
-                let gas        = evm_stack.pop().unwrap();
+                let in_size = evm_stack.pop().unwrap().low_u64() as usize;
+                let in_offset = evm_stack.pop().unwrap().low_u64() as usize;
+                let to = evm_stack.pop().unwrap();
+                let gas = evm_stack.pop().unwrap();
 
                 let to_addr = format!("0x{:040x}", to);
 
                 println!(
                     "🔒 [STATICCALL] depth={} to={} in=0x{:x}:{} out=0x{:x}:{} gas={}",
                     execution_context.call_stack.len() + 1,
-                    to_addr, in_offset, in_size, out_offset, out_size, gas
+                    to_addr,
+                    in_offset,
+                    in_size,
+                    out_offset,
+                    out_size,
+                    gas
                 );
 
                 // ─── SAUVEGARDE DU POINT DE RETOUR ──────────────────────────────
@@ -3068,7 +3121,12 @@ pub fn execute_program(
                 call_args.state_data = calldata.clone();
                 call_args.call_depth = interpreter_args.call_depth + u256::from(1);
 
-                let code = execution_context.world_state.code.get(&to_addr).cloned().unwrap_or_default();
+                let code = execution_context
+                    .world_state
+                    .code
+                    .get(&to_addr)
+                    .cloned()
+                    .unwrap_or_default();
 
                 let call_result = execute_program(
                     Some(&code),
@@ -3085,14 +3143,16 @@ pub fn execute_program(
 
                 match call_result {
                     Ok(val) => {
-                        let return_bytes = val.get("return")
+                        let return_bytes = val
+                            .get("return")
                             .and_then(|v| v.as_str())
                             .and_then(|s| s.strip_prefix("0x"))
                             .map_or(vec![], |h| hex::decode(h).unwrap_or_default());
 
                         let copy_len = out_size.min(return_bytes.len());
                         if out_offset + copy_len <= global_mem.len() {
-                            global_mem[out_offset..out_offset + copy_len].copy_from_slice(&return_bytes[..copy_len]);
+                            global_mem[out_offset..out_offset + copy_len]
+                                .copy_from_slice(&return_bytes[..copy_len]);
                         }
 
                         evm_stack.push(u256::one());
@@ -3293,4 +3353,4 @@ fn safe_slice(mem: &[u8], offset: usize, len: usize) -> &[u8] {
     } else {
         &[]
     }
-                    }
+}
