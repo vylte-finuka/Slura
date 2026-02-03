@@ -240,6 +240,7 @@ pub struct UvmExecutionContext {
     pub return_data: Vec<u8>,
     pub free_memory_pointer: usize,
     pub call_stack: Vec<CallFrame>,
+    pub in_internal_call: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -257,54 +258,6 @@ pub struct CallFrame {
     pub gas_limit: u256,
     pub input_data: Vec<u8>,
     pub return_pc: Option<usize>, // Added field for return program counter
-}
-
-fn update_free_memory_pointer_if_needed(mem: &mut Vec<u8>, fmp: &mut usize) {
-    // Solidity lit souvent à 0x40 pour savoir où allouer
-    if mem.len() >= 0x60 {
-        let current_fmp_bytes = &mem[0x40..0x60];
-        let current_fmp = u256::from_big_endian(current_fmp_bytes).low_u64() as usize;
-
-        if current_fmp > *fmp {
-            *fmp = current_fmp;
-            println!("🔄 Solidity updated fmp to {:#x}", *fmp);
-        }
-    }
-}
-
-fn is_valid_jumpdest(
-    dest: usize,
-    prog: &[u8],
-    valid_jumpdests: &mut HashSet<usize>,
-    interpreter_args: &InterpreterArgs,
-) -> bool {
-    // Autorise tout offset valide dans le bytecode sauf exceptions
-    if let Some(dispatcher_off) = find_real_dispatcher(prog, &valid_jumpdests, interpreter_args) {
-        if prog.get(dispatcher_off) == Some(&0x5b) {
-            valid_jumpdests.insert(dispatcher_off);
-        } else {
-            println!(
-                "⚠️ [WARN] Dispatcher offset 0x{:04x} n'est PAS un vrai JUMPDEST !",
-                dispatcher_off
-            );
-        }
-    }
-    if dest < prog.len() {
-        // Refuse explicitement le fallback/revert si besoin
-        if dest == 0x01e2 {
-            println!("🚫 [PROXY PROTECTION] Saut bloqué vers 0x01e2 (fallback/revert)");
-            return false;
-        }
-        // Log pour debug
-        println!(
-            "⚡ [JUMP PATCH] Saut autorisé vers 0x{:04x} (opcode=0x{:02x})",
-            dest, prog[dest]
-        );
-        return true;
-    } else {
-        println!("❌ [JUMP REFUSÉ] 0x{:04x} hors bytecode", dest);
-        return false;
-    }
 }
 
 /// Vérifie si une adresse est au format UIP-10 (ex: *xxxxxxx*#...#...)
@@ -868,6 +821,7 @@ pub fn execute_program(
         return_data: vec![],
         free_memory_pointer: 0x80, // Solidity >= 0.8
         call_stack: vec![],
+        in_internal_call: false,
     };
 
     set_balance(
@@ -992,6 +946,8 @@ pub fn execute_program(
             }
         };
 
+        let mut storage_touched = false;
+
         let debug_evm = true;
 
         let _dst = insn.dst as usize;
@@ -1024,9 +980,17 @@ pub fn execute_program(
         match opcode {
             //___ 0x00 STOP
             0x00 => {
-                natural_exit_detected = true;
-                exit_value = evm_stack.pop().map(|v| v.low_u64()).unwrap_or(1);
-                break;
+                // Si aucun SLOAD/SSTORE restant après ce RETURN, c'est un vrai RETURN
+                if !has_storage_access_after(insn_ptr, prog) {
+                    natural_exit_detected = true;
+                    exit_value = evm_stack.pop().map(|v| v.low_u64()).unwrap_or(1);
+                    break;
+                } else {
+                    execution_context.in_internal_call = false; // Bypass STOP si storage encore à venir
+                    println!("⏩ [BYPASS STOP] SLOAD/SSTORE restant après STOP, bypass STOP");
+                    insn_ptr += 1;
+                    continue;
+                }
             }
 
             //___ 0x01 ADD
@@ -1660,20 +1624,19 @@ pub fn execute_program(
 
             //___ 0x30 ADDRESS - VERSION ROBUSTE
             0x30 => {
-                let addr_hash = match interpreter_args.contract_address.as_str() {
-                    addr if addr.starts_with("0x") && addr.len() == 42 => {
-                        u256::from(encode_ethereum_address_to_u64(addr))
-                    }
-                    addr if is_valid_uip10_address(addr) => {
-                        u256::from(encode_uip10_address_to_u64(addr))
-                    }
-                    addr => u256::from(encode_address_to_u64(addr)),
-                };
-                evm_stack.push(addr_hash);
-                reg[0] = addr_hash; // PATCH: garder le U256 complet
+                let addr_u256 =
+                    if let Some(v) = addr_eth_to_u256(&interpreter_args.contract_address) {
+                        v
+                    } else if is_valid_uip10_address(&interpreter_args.contract_address) {
+                        addr_uip10_to_u256(&interpreter_args.contract_address)
+                    } else {
+                        u256::zero()
+                    };
+                evm_stack.push(addr_u256);
+                reg[0] = addr_u256;
                 println!(
-                    "🏠 [ADDRESS] this = {} (encoded: 0x{:x})",
-                    interpreter_args.contract_address, addr_hash
+                    "🏠 [ADDRESS] this = {} (u256=0x{:x})",
+                    interpreter_args.contract_address, addr_u256
                 );
             }
 
@@ -1686,21 +1649,35 @@ pub fn execute_program(
 
             //___ 0x32 ORIGIN
             0x32 => {
-                let origin_hash = encode_address_to_u64(&interpreter_args.origin);
-                evm_stack.push(u256::from(origin_hash));
+                let origin_u256 = if let Some(v) = addr_eth_to_u256(&interpreter_args.origin) {
+                    v
+                } else if is_valid_uip10_address(&interpreter_args.origin) {
+                    addr_uip10_to_u256(&interpreter_args.origin)
+                } else {
+                    u256::zero()
+                };
+                evm_stack.push(origin_u256);
+                reg[0] = origin_u256;
                 println!(
-                    "🌍 [ORIGIN] tx.origin = {} (0x{:x})",
-                    interpreter_args.origin, origin_hash
+                    "🌍 [ORIGIN] tx.origin = {} (u256=0x{:x})",
+                    interpreter_args.origin, origin_u256
                 );
             }
 
             //___ 0x33 CALLER
             0x33 => {
-                let caller_hash = encode_address_to_u64(&interpreter_args.caller);
-                evm_stack.push(u256::from(caller_hash));
+                let caller_u256 = if let Some(v) = addr_eth_to_u256(&interpreter_args.caller) {
+                    v
+                } else if is_valid_uip10_address(&interpreter_args.caller) {
+                    addr_uip10_to_u256(&interpreter_args.caller)
+                } else {
+                    u256::zero()
+                };
+                evm_stack.push(caller_u256);
+                reg[0] = caller_u256;
                 println!(
-                    "📞 [CALLER] msg.sender = {} (0x{:x})",
-                    interpreter_args.caller, caller_hash
+                    "📞 [CALLER] msg.sender = {} (u256=0x{:x})",
+                    interpreter_args.caller, caller_u256
                 );
             }
 
@@ -2299,7 +2276,7 @@ pub fn execute_program(
                 consume_gas(&mut execution_context, 3)?;
             }
 
-            //___ 0x54 SLOAD - AJOUT D'UNE INITIALISATION AUTOMATIQUE POUR ÉVITER LES DIVISIONS PAR ZÉRO
+            //___ 0x54 SLOAD - renvoie la valeur complète 256 bits
             0x54 => {
                 let key = if !evm_stack.is_empty() {
                     evm_stack.pop().unwrap()
@@ -2307,9 +2284,8 @@ pub fn execute_program(
                     reg[_dst]
                 };
                 let slot = format!("{:064x}", key);
+                storage_touched = true;
 
-                // Comportement conforme EVM : retourner la valeur brute du storage (32 bytes),
-                // sans faire d'heuristique ni modifier le storage.
                 let stored_bytes = get_storage(
                     &execution_context.world_state,
                     &interpreter_args.contract_address,
@@ -2323,19 +2299,13 @@ pub fn execute_program(
                 }
                 let loaded_u256 = u256::from_big_endian(&bytes_32);
 
-                // Adapter selon le type de pile interne : on pousse la représentation entière U256
-                // ou sa partie basse si la pile n'accepte que des u64. Ici on conserve l'ancien
-                // comportement (low_u64) pour compatibilité, sans mutation.
-                let loaded_u64 = loaded_u256.low_u64();
-
-                evm_stack.push(u256::from(loaded_u64));
-                reg[0] = loaded_u64.into();
+                evm_stack.push(loaded_u256);
+                reg[0] = loaded_u256;
                 if _dst < reg.len() {
-                    reg[_dst] = loaded_u64.into();
+                    reg[_dst] = loaded_u256;
                 }
 
-                // debug minimal
-                println!("🎯 [SLOAD] slot=0x{} → value=0x{:x}", slot, loaded_u64);
+                println!("🎯 [SLOAD] slot=0x{} → value=0x{:x}", slot, loaded_u256);
             }
 
             //___ 0x55 SSTORE - VERSION GÉNÉRIQUE
@@ -2349,6 +2319,8 @@ pub fn execute_program(
                 let value = evm_stack.pop().unwrap(); // valeur d'abord
                 let key = evm_stack.pop().unwrap(); // puis slot
                 let slot = format!("{:064x}", key);
+
+                storage_touched = true;
 
                 let mut value_bytes = [0u8; 32];
                 value.to_big_endian(&mut value_bytes);
@@ -2370,14 +2342,24 @@ pub fn execute_program(
 
             //___ 0x56 JUMP
             0x56 => {
-                if evm_stack.is_empty() {
-                    return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on JUMP"));
+                // EVM: JUMP ne prend qu’un seul argument (dest)
+                if evm_stack.len() < 1 {
+                    return Err(Error::new(
+                        ErrorKind::Other,
+                        format!(
+                            "EVM STACK underflow on JUMP (need 1, have {})",
+                            evm_stack.len()
+                        ),
+                    ));
                 }
-                evm_stack.pop().unwrap().low_u64() as usize;
+
+                let dest_u256 = evm_stack.pop().unwrap();
+                let dest = dest_u256.low_u64() as usize;
             }
 
             //___ 0x57 JUMPI
             0x57 => {
+                // EVM: JUMPI prend dest puis condition
                 if evm_stack.len() < 2 {
                     return Err(Error::new(
                         ErrorKind::Other,
@@ -2389,18 +2371,32 @@ pub fn execute_program(
                 }
 
                 let dest_u256 = evm_stack.pop().unwrap();
-                let condition = evm_stack.pop().unwrap();
+                let cond = evm_stack.pop().unwrap();
                 let dest = dest_u256.low_u64() as usize;
 
                 println!(
                     "🔀 [JUMPI @ {:04x}] cond={} → dest=0x{:04x}  (stack size après pops = {})",
                     insn_ptr,
-                    condition,
+                    cond,
                     dest,
                     evm_stack.len()
                 );
 
-                consume_gas(&mut execution_context, 10)?;
+                if !cond.is_zero() {
+                    if dest >= prog.len() || !valid_jumpdests.contains(&dest) {
+                        return Err(Error::new(
+                            ErrorKind::Other,
+                            format!("Bad jump destination: 0x{:04x}", dest),
+                        ));
+                    }
+                    insn_ptr = dest;
+                    skip_advance = true;
+                    consume_gas(&mut execution_context, 10)?;
+                    continue;
+                } else {
+                    // Pas de saut, on continue normalement
+                    consume_gas(&mut execution_context, 10)?;
+                }
             }
 
             //___ 0x58 PC
@@ -2842,111 +2838,62 @@ pub fn execute_program(
                 consume_gas_amount(&mut execution_context, 700)?;
             }
 
-                        //___ 0xf3 RETURN
-                        0xf3 => {
-                            if evm_stack.len() < 2 {
-                                return Err(Error::new(ErrorKind::Other, "STACK underflow on RETURN"));
-                            }
-            
-                            // Stack order: top = length, next = offset (conforme EVM)
-                            let len = evm_stack.pop().unwrap().low_u64() as usize;
-                            let offset = evm_stack.pop().unwrap().low_u64() as usize;
-            
-                            println!("📤 [RETURN] offset=0x{:x}, len={}", offset, len);
-            
-                            // PATCH: si len == 0 ou offset == 0, on ignore le RETURN et on continue l'exécution (validation silencieuse)
-                            if len == 0 || offset == 0 {
-                                println!("🟡 [RETURN PATCH] len=0 ou offset=0 → on ignore le RETURN et on continue !");
-                                // continue; // implicite, on ne fait rien
-                            } else {
-                                // Sécurité mémoire
-                                if len > 0 && offset + len > global_mem.len() {
-                                    ensure_memory_size(
-                                        &mut global_mem,
-                                        offset + len,
-                                        &mut execution_context.free_memory_pointer,
-                                    )?;
-                                }
-            
-                                // STRATEGIE GENERIQUE : on essaie toujours de parser intelligemment
-                                let mut result = serde_json::Map::new();
-            
-                                // 1. Cas classique simple : retour d'un uint256 / uint8 / bool / address (32 bytes ou moins)
-                                if len >= 32 && offset + 32 <= global_mem.len() {
-                                    let mut data_32 = [0u8; 32];
-                                    data_32.copy_from_slice(&global_mem[offset..offset + 32]);
-            
-                                    let value = u256::from_big_endian(&data_32);
-            
-                                    // Heuristique : si petite valeur (< 256) → probablement uint8 (decimals)
-                                    let as_u64 = value.low_u64();
-                                    if as_u64 < 256 {
-                                        println!("→ Probable uint8 détecté: {}", as_u64);
-                                        result.insert("return".to_string(), JsonValue::Number(as_u64.into()));
-                                    } else {
-                                        // Sinon, on garde en hex pour les gros nombres / address
-                                        let hex_str = format!("0x{}", hex::encode(&data_32));
-                                        result.insert("return".to_string(), JsonValue::String(hex_str));
-                                    }
-                                }
-                                // 2. Cas string dynamique (name, symbol, etc.) : offset + length + data
-                                else if len >= 64 && offset + 64 <= global_mem.len() {
-                                    // Lire offset des données (premiers 32 bytes)
-                                    let mut offset_bytes = [0u8; 32];
-                                    offset_bytes.copy_from_slice(&global_mem[offset..offset + 32]);
-                                    let data_offset = u256::from_big_endian(&offset_bytes).low_u64() as usize;
-            
-                                    // Lire longueur (32 bytes suivants)
-                                    let mut len_bytes = [0u8; 32];
-                                    len_bytes.copy_from_slice(&global_mem[offset + 32..offset + 64]);
-                                    let str_len = u256::from_big_endian(&len_bytes).low_u64() as usize;
-            
-                                    if data_offset + str_len <= global_mem.len() {
-                                        let str_data = &global_mem[data_offset..data_offset + str_len];
-                                        if let Ok(s) = String::from_utf8(str_data.to_vec()) {
-                                            println!("→ String détectée: {:?}", s);
-                                            result.insert("return".to_string(), JsonValue::String(s));
-                                        } else {
-                                            // Pas UTF-8 valide → hex
-                                            result.insert(
-                                                "return".to_string(),
-                                                JsonValue::String(format!("0x{}", hex::encode(str_data))),
-                                            );
-                                        }
-                                    }
-                                }
-                                // 3. Cas fallback générique (tout le reste)
-                                else {
-                                    let mut ret_data = vec![0u8; len.min(1024)]; // limite pour éviter des copies énormes
-                                    if len > 0 {
-                                        let copy_len = ret_data.len().min(global_mem.len() - offset);
-                                        ret_data[..copy_len]
-                                            .copy_from_slice(&global_mem[offset..offset + copy_len]);
-                                    }
-            
-                                    // Décode basique
-                                    let hex_ret = format!("0x{}", hex::encode(&ret_data));
-                                    println!("→ Retour générique (hex): {}", hex_ret);
-                                    result.insert("return".to_string(), JsonValue::String(hex_ret));
-                                }
-            
-                                // Ajout storage final (comme avant)
-                                let final_storage = execution_context
-                                    .world_state
-                                    .storage
-                                    .get(&interpreter_args.contract_address)
-                                    .cloned()
-                                    .unwrap_or_default();
-            
-                                result.insert(
-                                    "storage".to_string(),
-                                    JsonValue::Object(decode_storage_map(&final_storage)),
-                                );
-            
-                                println!("✅ [RETURN] Résultat final: {:?}", result.get("return"));
-                                return Ok(JsonValue::Object(result));
+            //___ 0xf3 RETURN
+            0xf3 => {
+                // Si aucun SLOAD/SSTORE restant après ce RETURN, c'est un vrai RETURN
+                if !has_storage_access_after(insn_ptr, prog) {
+                    if evm_stack.len() < 2 {
+                        return Err(Error::new(ErrorKind::Other, "STACK underflow on RETURN"));
+                    }
+                    let len = evm_stack.pop().unwrap().low_u64() as usize;
+                    let offset = evm_stack.pop().unwrap().low_u64() as usize;
+
+                    let ret_data_len = len.min(8192);
+                    let mut ret_data = vec![0u8; ret_data_len];
+                    if offset + ret_data_len <= global_mem.len() {
+                        ret_data.copy_from_slice(&global_mem[offset..offset + ret_data_len]);
+                    }
+
+                    println!("📤 [RETURN] PC={:04x} | len={} bytes", insn_ptr, len);
+
+                    // Si on est dans un appel interne ou imbriqué
+                    if execution_context.in_internal_call
+                        || !execution_context.call_stack.is_empty()
+                    {
+                        println!("→ RETURN dans fonction interne → on stocke et on continue");
+                        execution_context.return_data = ret_data;
+                        execution_context.in_internal_call = false;
+
+                        // Restauration du PC si tu utilises call_stack
+                        if let Some(frame) = execution_context.call_stack.pop() {
+                            if let Some(pc) = frame.return_pc {
+                                insn_ptr = pc;
+                                skip_advance = true;
+                                continue;
                             }
                         }
+                        // Sinon continue normalement
+                    } else {
+                        // RETURN au niveau racine → fin réelle
+                        println!("→ RETURN final → fin de transaction avec données");
+                        let mut result = serde_json::Map::new();
+                        result.insert(
+                            "return".to_string(),
+                            decode_return_data_generic(&ret_data, ret_data.len()),
+                        );
+                        result.insert(
+                            "exit_reason".to_string(),
+                            JsonValue::String("RETURN".to_string()),
+                        );
+                        return Ok(JsonValue::Object(result));
+                    }
+                } else {
+                    execution_context.in_internal_call = false; // Bypass RETURN si storage encore à venir
+                    println!("⏩ [BYPASS RETURN] SLOAD/SSTORE restant après RETURN, bypass RETURN");
+                    insn_ptr += 1;
+                    continue;
+                }
+            }
 
             //___ 0xf4 DELEGATECALL
             0xf4 => {
@@ -2987,15 +2934,22 @@ pub fn execute_program(
                     return_pc: Some(insn_ptr + 1),
                 });
 
-                let calldata = if in_offset + in_size <= global_mem.len() {
-                    global_mem[in_offset..in_offset + in_size].to_vec()
-                } else if in_offset < global_mem.len() {
-                    global_mem[in_offset..].to_vec()
+                let calldata = if let Some(end) = in_offset.checked_add(in_size) {
+                    if end <= global_mem.len() {
+                        global_mem[in_offset..end].to_vec()
+                    } else if in_offset < global_mem.len() {
+                        global_mem[in_offset..].to_vec()
+                    } else {
+                        vec![]
+                    }
                 } else {
                     vec![]
                 };
 
                 let mut call_args = interpreter_args.clone();
+                call_args.contract_address = to_addr.clone();
+                call_args.caller = interpreter_args.contract_address.clone();
+                call_args.value = u256::zero();
                 call_args.state_data = calldata.clone();
                 call_args.call_depth = interpreter_args.call_depth + u256::from(1);
 
@@ -3275,72 +3229,140 @@ pub fn execute_program(
                 consume_gas_amount(&mut execution_context, 700)?;
             }
 
-            //___ 0xfd REVERT - EXTRAIT LES DONNÉES DE REVERT ET LES FORMATE
-            0xfd => {
-                if evm_stack.len() < 2 {
-                    return Err(Error::new(ErrorKind::Other, "Underflow on REVERT"));
-                }
-
-                let offset = evm_stack.pop().unwrap().low_u64() as usize;
-                let size = evm_stack.pop().unwrap().low_u64() as usize;
-
-                println!("❌ [REVERT] offset=0x{:x}, size={}", offset, size);
-
-                // --- PATCH: si size == 0, on considère que c'est une validation, on continue ---
-                if size == 0 {
-                    println!("🟡 [REVERT PATCH] size=0 → on ignore le revert et on continue l'exécution !");
-                    // On saute simplement ce REVERT, comme un NOP
-                    // (optionnel: consommer du gas ou loguer)
-                    // continue; // déjà implicite
-                } else {
-                    let mut revert_data = vec![0u8; size.min(1024)];
-                    if offset + revert_data.len() <= global_mem.len() {
-                        ensure_memory_size(
-                            &mut global_mem,
-                            offset + revert_data.len(),
-                            &mut execution_context.free_memory_pointer,
-                        )?;
-                        let src_slice = &global_mem[offset..offset + revert_data.len()];
-                        revert_data.copy_from_slice(src_slice);
-                    }
-
-                    let error_msg = if offset == 0 && size >= 36 {
-                        let selector = u32::from_be_bytes([
-                            global_mem.get(offset).copied().unwrap_or(0),
-                            global_mem.get(offset + 1).copied().unwrap_or(0),
-                            global_mem.get(offset + 2).copied().unwrap_or(0),
-                            global_mem.get(offset + 3).copied().unwrap_or(0),
-                        ]);
-
-                        if selector == 0x4e487b71 {
-                            // Le code de panic est à offset+0x20 (32)
-                            let code = u32::from_be_bytes([
-                                global_mem.get(offset + 32).copied().unwrap_or(0),
-                                global_mem.get(offset + 33).copied().unwrap_or(0),
-                                global_mem.get(offset + 34).copied().unwrap_or(0),
-                                global_mem.get(offset + 35).copied().unwrap_or(0),
-                            ]);
-                            format!("Panic(0x{:02x})", code)
-                        } else {
-                            format!("Error(0x{:08x})", selector)
+                        //___ 0xfd REVERT - EXTRAIT LES DONNÉES DE REVERT ET DÉCODE Error(string)
+                        0xfd => {
+                            if evm_stack.len() < 2 {
+                                return Err(Error::new(ErrorKind::Other, "Underflow on REVERT"));
+                            }
+            
+                            // EVM: sommet = offset, sous-sommet = size
+                            let offset_u256 = evm_stack.pop().unwrap();
+                            let size_u256 = evm_stack.pop().unwrap();
+                            let offset = offset_u256.low_u64() as usize;
+                            let raw_size = size_u256.low_u64() as usize;
+            
+                            println!("❌ [REVERT] raw offset=0x{:x}, raw size={}", offset, raw_size);
+            
+                            let max_avail = global_mem.len().saturating_sub(offset);
+                            if max_avail == 0 {
+                                println!("🟡 [REVERT] Mémoire indisponible à offset=0x{:x} → ignore", offset);
+                                // Continue (validation simple)
+                                insn_ptr += 1;
+                                continue;
+                            }
+            
+                            // Lire sélecteur si possible
+                            let selector_bytes = safe_slice(&global_mem, offset, 4);
+                            let selector = if selector_bytes.len() == 4 {
+                                u32::from_be_bytes([
+                                    selector_bytes[0],
+                                    selector_bytes[1],
+                                    selector_bytes[2],
+                                    selector_bytes[3],
+                                ])
+                            } else {
+                                0
+                            };
+            
+                            // Cas 1: Error(string)
+                            if selector == 0x08c379a0 {
+                                // Lire offset de l'arg (32 bytes à offset+4)
+                                let arg_off_bytes = safe_slice(&global_mem, offset + 4, 32);
+                                let mut tmp = [0u8; 32];
+                                tmp[..arg_off_bytes.len()].copy_from_slice(arg_off_bytes);
+                                let arg_off_u256 = u256::from_big_endian(&tmp);
+                                let arg_off = arg_off_u256.low_u64() as usize;
+            
+                                // Longueur du string (32 bytes à offset+4+arg_off)
+                                let len_pos = offset.saturating_add(4).saturating_add(arg_off);
+                                let len_bytes = safe_slice(&global_mem, len_pos, 32);
+                                let mut len_pad = [0u8; 32];
+                                len_pad[..len_bytes.len()].copy_from_slice(len_bytes);
+                                let str_len_u256 = u256::from_big_endian(&len_pad);
+                                let str_len = str_len_u256.low_u64() as usize;
+            
+                                // Position des données de la string
+                                let data_pos = len_pos.saturating_add(32);
+                                let padded = (str_len + 31) & !31; // ceil32
+                                let total = 4 /*selector*/ + 32 /*offset*/ + 32 /*len*/ + padded;
+            
+                                // Taille copiée (sécurisée)
+                                let copy_len = total.min(max_avail).min(2048);
+                                let revert_data = safe_slice(&global_mem, offset, copy_len).to_vec();
+            
+                                // Extraction du message
+                                let str_copy_len = str_len.min(global_mem.len().saturating_sub(data_pos));
+                                let msg_bytes = safe_slice(&global_mem, data_pos, str_copy_len);
+                                let error_str = if let Ok(s) = std::str::from_utf8(msg_bytes) {
+                                    s.to_string()
+                                } else {
+                                    format!("0x{}", hex::encode(msg_bytes))
+                                };
+            
+                                println!(
+                                    "🧩 [REVERT ABI] Error(string) len={} total={} → copy_len={} | msg='{}'",
+                                    str_len, total, copy_len, error_str
+                                );
+            
+                                let mut result = serde_json::Map::new();
+                                result.insert("error".to_string(), JsonValue::String("Error(string)".to_string()));
+                                result.insert("error_message".to_string(), JsonValue::String(error_str));
+                                result.insert(
+                                    "revert_data".to_string(),
+                                    JsonValue::String(hex::encode(&revert_data)),
+                                );
+                                return Ok(JsonValue::Object(result));
+                            }
+            
+                            // Cas 2: Panic(uint256)
+                            if selector == 0x4e487b71 {
+                                let code_bytes = safe_slice(&global_mem, offset + 32, 4);
+                                let code = if code_bytes.len() == 4 {
+                                    u32::from_be_bytes([code_bytes[0], code_bytes[1], code_bytes[2], code_bytes[3]])
+                                } else {
+                                    0
+                                };
+                                let copy_len = raw_size.min(max_avail).min(64);
+                                let revert_data = safe_slice(&global_mem, offset, copy_len).to_vec();
+                                let mut result = serde_json::Map::new();
+                                result.insert("error".to_string(), JsonValue::String(format!("Panic(0x{:02x})", code)));
+                                result.insert(
+                                    "revert_data".to_string(),
+                                    JsonValue::String(hex::encode(&revert_data)),
+                                );
+                                return Ok(JsonValue::Object(result));
+                            }
+            
+                            // Cas 3: taille 0 → validation simple, on ignore
+                            if raw_size == 0 {
+                                println!("🟡 [REVERT] size=0 → ignore (validation)");
+                                insn_ptr += 1;
+                                continue;
+                            }
+            
+                            // Cas 4: Fallback générique (clamp et hex)
+                            let copy_len = raw_size.min(max_avail).min(1024);
+                            let revert_data = safe_slice(&global_mem, offset, copy_len).to_vec();
+                            let error_msg = if copy_len >= 4 {
+                                format!("Error(0x{:08x})", selector)
+                            } else {
+                                format!("Revert ({} bytes)", copy_len)
+                            };
+            
+                            println!(
+                                "↩️ [REVERT] selector=0x{:08x} | offset=0x{:x}, size={} → copy_len={}",
+                                selector, offset, raw_size, copy_len
+                            );
+                            println!("   → DATA: 0x{}", hex::encode(&revert_data));
+            
+                            let mut result = serde_json::Map::new();
+                            result.insert("error".to_string(), JsonValue::String(error_msg));
+                            result.insert(
+                                "revert_data".to_string(),
+                                JsonValue::String(hex::encode(&revert_data)),
+                            );
+                            return Ok(JsonValue::Object(result));
                         }
-                    } else {
-                        format!("Revert ({} bytes)", size)
-                    };
-
-                    println!("   → {}", error_msg);
-                    println!("   → DATA: 0x{}", hex::encode(&revert_data));
-
-                    let mut result = serde_json::Map::new();
-                    result.insert("error".to_string(), JsonValue::String(error_msg));
-                    result.insert(
-                        "revert_data".to_string(),
-                        JsonValue::String(hex::encode(&revert_data)),
-                    );
-
-                    return Ok(JsonValue::Object(result));
-                }
-            }
 
             //___ Opcodes non gérés
             _ => {
@@ -3529,4 +3551,45 @@ fn safe_slice(mem: &[u8], offset: usize, len: usize) -> &[u8] {
     } else {
         &[]
     }
+}
+
+/// Détecte s'il reste un SLOAD ou SSTORE après le PC courant
+fn has_storage_access_after(pc: usize, prog: &[u8]) -> bool {
+    let mut i = pc + 1;
+    while i < prog.len() {
+        let opcode = prog[i];
+        if opcode == 0x54 || opcode == 0x55 {
+            return true;
+        }
+        // Sauter les PUSHn
+        if opcode >= 0x60 && opcode <= 0x7f {
+            let push_size = (opcode - 0x60 + 1) as usize;
+            i += 1 + push_size;
+        } else {
+            i += 1;
+        }
+    }
+    false
+}
+
+// ✅ Helper: convertir une adresse Ethereum 0x... vers U256 (20 bytes alignés à droite)
+fn addr_eth_to_u256(addr: &str) -> Option<u256> {
+    if addr.starts_with("0x") && addr.len() == 42 {
+        if let Ok(b20) = hex::decode(&addr[2..]) {
+            if b20.len() == 20 {
+                let mut padded = [0u8; 32];
+                padded[12..32].copy_from_slice(&b20);
+                return Some(u256::from_big_endian(&padded));
+            }
+        }
+    }
+    None
+}
+
+// ✅ Fallback UIP-10 → U256 (place le hash u64 dans les 8 derniers bytes)
+fn addr_uip10_to_u256(addr: &str) -> u256 {
+    let h = encode_uip10_address_to_u64(addr);
+    let mut padded = [0u8; 32];
+    padded[24..32].copy_from_slice(&h.to_be_bytes());
+    u256::from_big_endian(&padded)
 }
