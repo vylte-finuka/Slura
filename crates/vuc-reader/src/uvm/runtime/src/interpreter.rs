@@ -2361,7 +2361,6 @@ pub fn execute_program(
                     skip_advance = true;
                     consume_gas(&mut execution_context, 10)?;
                     continue;
-                }
             }
 
             //___ 0x57 JUMPI
