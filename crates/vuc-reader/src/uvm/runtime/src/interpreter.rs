@@ -734,25 +734,18 @@ fn encode_uip10_address_to_u64(addr: &str) -> u64 {
 
 fn find_real_dispatcher(
     prog: &[u8],
-    valid_jumpdests: &HashSet<usize>,
+    _valid_jumpdests: &HashSet<usize>,
     interpreter_args: &InterpreterArgs,
 ) -> Option<usize> {
-    // Si le nom de fonction commence par "function_", cherche le pattern dispatcher moderne
+    // Exécution EVM naturelle: ne force aucun fallback spécifique
     if interpreter_args.function_name.starts_with("function_") {
-        // Cherche le pattern PUSH1 0x80, PUSH1 0x40, MSTORE, PUSH1 0x04, CALLDATASIZE
-        if let Some(pos) = prog
-            .windows(8)
+        prog.windows(8)
             .enumerate()
             .skip(100)
             .find(|(_, w)| *w == [0x60, 0x80, 0x60, 0x40, 0x52, 0x60, 0x04, 0x36])
             .map(|(i, _)| i)
-        {
-            Some(pos)
-        } else {
-            Some(0x421) // Fallback spécifique pour le contrat VEZ
-        }
     } else {
-        Some(0)
+        None
     }
 }
 
@@ -790,7 +783,50 @@ pub fn execute_program(
     const U32MAX: u256 = u256([u32::MAX as u64, 0, 0, 0]);
     const SHIFT_MASK_64: u256 = u256([0x3f, 0, 0, 0]);
 
-    helpers.insert(0x450, crate::helpers::slu_ip450_send);
+    // InstructionResult codes (repr(u8))
+    const IR_STOP: u64 = 1;
+    const IR_RETURN: u64 = 2;
+    const IR_SELFDESTRUCT: u64 = 3;
+    const IR_REVERT: u64 = 0x10;
+
+    // --- erreurs/halts courants (repr(u8) d'après l'énum) ---
+    const IR_OUT_OF_GAS: u64 = 0x20;
+    const IR_OPCODE_NOT_FOUND: u64 = 0x26;
+    const IR_INVALID_JUMP: u64 = 0x2a;
+    const IR_STACK_UNDERFLOW: u64 = 0x2c;
+    const IR_STACK_OVERFLOW: u64 = 0x2d;
+    const IR_OUT_OF_OFFSET: u64 = 0x2e;
+    const IR_FATAL_EXTERNAL_ERROR: u64 = 0x36;
+
+    #[inline]
+    fn halt_json(
+        execution_context: &UvmExecutionContext,
+        interpreter_args: &InterpreterArgs,
+        code: u64,
+        reason: &str,
+    ) -> serde_json::Value {
+        let final_storage = execution_context
+            .world_state
+            .storage
+            .get(&interpreter_args.contract_address)
+            .cloned()
+            .unwrap_or_default();
+
+        let mut obj = serde_json::Map::new();
+        obj.insert(
+            "error".to_string(),
+            serde_json::Value::String(reason.to_string()),
+        );
+        obj.insert(
+            "instruction_result".to_string(),
+            serde_json::Value::Number(code.into()),
+        );
+        obj.insert(
+            "storage".to_string(),
+            serde_json::Value::Object(decode_storage_map(&final_storage)),
+        );
+        serde_json::Value::Object(obj)
+    }
 
     let prog = match prog_ {
         Some(prog) => prog,
@@ -920,7 +956,13 @@ pub fn execute_program(
         *pc_count += 1;
         if *pc_count > MAX_SAME_PC {
             println!("🔴 [BOUCLE INFINIE] PC=0x{:04x} → arrêt forcé", insn_ptr);
-            break;
+            // Traite comme OutOfGas
+            return Ok(halt_json(
+                &execution_context,
+                interpreter_args,
+                IR_OUT_OF_GAS,
+                "Infinite loop guard: OutOfGas",
+            ));
         }
 
         if evm_stack.len() > 1024 {
@@ -928,7 +970,23 @@ pub fn execute_program(
                 "🔴 [STACK OVERFLOW] {} éléments → arrêt forcé",
                 evm_stack.len()
             );
-            break;
+            return Ok(halt_json(
+                &execution_context,
+                interpreter_args,
+                IR_STACK_OVERFLOW,
+                "Stack overflow",
+            ));
+        }
+
+        // Surconsommation de gas → OutOfGas
+        if execution_context.gas_used > interpreter_args.gas_limit {
+            println!("⛽ [GAS] Limite dépassée → OutOfGas");
+            return Ok(halt_json(
+                &execution_context,
+                interpreter_args,
+                IR_OUT_OF_GAS,
+                "Gas limit exceeded",
+            ));
         }
 
         let opcode = prog[insn_ptr];
@@ -980,17 +1038,9 @@ pub fn execute_program(
         match opcode {
             //___ 0x00 STOP
             0x00 => {
-                // Si aucun SLOAD/SSTORE restant après ce RETURN, c'est un vrai RETURN
-                if !has_storage_access_after(insn_ptr, prog) {
-                    natural_exit_detected = true;
-                    exit_value = evm_stack.pop().map(|v| v.low_u64()).unwrap_or(1);
-                    break;
-                } else {
-                    execution_context.in_internal_call = false; // Bypass STOP si storage encore à venir
-                    println!("⏩ [BYPASS STOP] SLOAD/SSTORE restant après STOP, bypass STOP");
-                    insn_ptr += 1;
-                    continue;
-                }
+                // Règle demandée: si len == 0 → PC + 1 (ici STOP n'a pas de len, on avance juste)
+                println!("⏹️ [STOP] pc+1 (pas de halt)");
+                // Ne rien renvoyer, on laisse l'incrément de PC se faire en bas de boucle
             }
 
             //___ 0x01 ADD
@@ -1236,24 +1286,19 @@ pub fn execute_program(
                 println!("🔧 [SIGNEXTEND] b={}, x=0x{:x} → 0x{:x}", b, x, res);
             }
 
-            //___ 0x10 LT - Less Than (unsigned)
+            //___ 0x10 LT - Less Than (unsigned, conforme EVM)
             0x10 => {
                 if evm_stack.len() < 2 {
                     return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on LT"));
                 }
-
-                let y = evm_stack.pop().unwrap(); // haut de pile = y
-                let x = evm_stack.pop().unwrap(); // dessous     = x
-                let res = if y < x { u256::one() } else { u256::zero() };
-
+                // EVM: pop a puis b, push 1 si a < b
+                let a = evm_stack.pop().unwrap(); // haut de pile
+                let b = evm_stack.pop().unwrap(); // dessous
+                let res = if a < b { u256::one() } else { u256::zero() };
                 evm_stack.push(res);
-
-                println!(
-                    "🔍 [LT – conforme EVM] y={} < x={}  → {}   (y < x ? 1:0)",
-                    y, x, res
-                );
-
-                consume_gas(&mut execution_context, 3)?;
+                reg[0] = res;
+                println!("🔍 [LT] a={} < b={} → {}", a, b, res);
+                consume_gas(&mut execution_context, opcode)?;
             }
 
             //___ 0x11 GT - Greater Than (unsigned)
@@ -1556,51 +1601,28 @@ pub fn execute_program(
                 reg[0] = (clz as u64).into();
             }
 
-            //___ 0x20 KECCAK256 - CORRECTION COMPLÈTE POUR EVM
+            //___ 0x20 KECCAK256 – sans limite 1MB, hash sur la fenêtre demandée
             0x20 => {
                 use tiny_keccak::{Hasher, Keccak};
-
                 if evm_stack.len() < 2 {
                     return Err(Error::new(
                         ErrorKind::Other,
                         "EVM STACK underflow on KECCAK256",
                     ));
                 }
-
-                // ✅ CORRECTION: Utilise la pile EVM au lieu des registres
                 let len = evm_stack.pop().unwrap().low_u64() as usize;
                 let offset = evm_stack.pop().unwrap().low_u64() as usize;
 
                 println!("🔒 [KECCAK256] offset=0x{:x}, len={}", offset, len);
 
-                // ✅ SÉCURITÉ: Validation des paramètres
-                if len > 1024 * 1024 {
-                    // Limite 1MB pour éviter les abus
-                    println!("⚠️ [KECCAK256] Taille excessive {} → utilisé 32", len);
-                    let safe_len = 32;
-                    let data = vec![0u8; safe_len];
-                    let mut hasher = Keccak::v256();
-                    let mut hash = [0u8; 32];
-                    hasher.update(&data);
-                    hasher.finalize(&mut hash);
-                    let result = safe_u256_to_u64(&u256::from_big_endian(&hash));
-                    evm_stack.push(result.into());
-                    reg[0] = result.into();
-                    consume_gas(&mut execution_context, 30 + 6)?;
-                    continue;
-                }
-
-                // ✅ DONNÉES: Priorité calldata puis global_mem
+                // Données: priorité calldata puis global_mem, zero-pad hors mémoire
                 let data = if let Some(end) = offset.checked_add(len) {
                     if end <= effective_mbuff.len() {
                         &effective_mbuff[offset..end]
-                    } else if offset < effective_mbuff.len() {
-                        &effective_mbuff[offset..]
                     } else if end <= global_mem.len() {
                         &global_mem[offset..end]
-                    } else if offset < global_mem.len() {
-                        &global_mem[offset..]
                     } else {
+                        // hors mémoire: pad avec zéros
                         &[0u8; 32][..len.min(32)]
                     }
                 } else {
@@ -1612,13 +1634,12 @@ pub fn execute_program(
                 hasher.update(data);
                 hasher.finalize(&mut hash);
 
-                let result = safe_u256_to_u64(&u256::from_big_endian(&hash));
-                evm_stack.push(result.into());
-                reg[0] = result.into();
+                let result = u256::from_big_endian(&hash);
+                evm_stack.push(result);
+                reg[0] = result;
 
                 let gas = 30 + 6 * ((len + 31) / 32) as u64;
                 consume_gas_amount(&mut execution_context, gas)?;
-
                 println!("🔒 [KECCAK256] → 0x{:x} (len={})", result, len);
             }
 
@@ -1709,18 +1730,6 @@ pub fn execute_program(
                     data[..available].copy_from_slice(&effective_mbuff[offset..offset + available]);
                 }
 
-                // PATCH CRITIQUE : si offset <= 4 (typique selector), on masque pour ne garder que les 4 bytes
-                if offset <= 4 {
-                    // On force les bytes 4..31 à zéro → selector pur sur 32 bits
-                    for i in 4..32 {
-                        data[i] = 0;
-                    }
-                    println!(
-                        "🛡️ [CALLDATALOAD PATCH] Selector forcé pur (offset={})",
-                        offset
-                    );
-                }
-
                 let value = u256::from_big_endian(&data);
                 evm_stack.push(value);
 
@@ -1733,33 +1742,12 @@ pub fn execute_program(
                 }
             }
 
-            // 0x36 CALLDATASIZE - Protection anti-saut prématuré vers 0x01e2
+            // 0x36 CALLDATASIZE - valeur réelle, sans protection/clamp
             0x36 => {
                 let real_size = effective_mbuff.len() as u64;
-
-                // Valeur minimale acceptable pour passer le test "calldatasize < 4"
-                let safe_min_size = 4u64;
-
-                // Si la vraie taille est < 4 OU si on est dans un contexte qui nécessite un calldata normal
-                let reported_size = if real_size == 0 || real_size < safe_min_size {
-                    // Cas : calldata vide ou trop petit → on force une taille minimale pour éviter le revert immédiat
-                    println!(
-            "⚠️ [CALLDATASIZE PROTECTION] Taille réelle = {} → forcée à {} pour éviter saut vers 0x01e2",
-            real_size, safe_min_size
-        );
-                    safe_min_size
-                } else {
-                    // Taille normale → on garde la vraie valeur
-                    real_size
-                };
-
-                evm_stack.push(reported_size.into());
-                reg[0] = u256::from(reported_size);
-
-                println!(
-                    "📏 [CALLDATASIZE] → {} bytes (real={}, reported={})",
-                    reported_size, real_size, reported_size
-                );
+                evm_stack.push(real_size.into());
+                reg[0] = real_size.into();
+                println!("📏 [CALLDATASIZE] → {} bytes", real_size);
             }
 
             //___ 0x37 CALLDATACOPY
@@ -1767,7 +1755,7 @@ pub fn execute_program(
                 let dst = reg[_dst].low_u64() as usize; // treat as offset into global_mem
                 let src = reg[_src].low_u64() as usize; // treat as offset into mbuff
                 let len = insn.imm as usize;
-                // Correction EVM : si len == 0, ne rien faire (aucune erreur)
+                // Correction EVM  : si len == 0, ne rien faire (aucune erreur)
                 if len == 0 {
                     // Rien à copier, pas d'erreur même si src/dst hors borne
                 } else if src + len <= effective_mbuff.len() && dst + len <= global_mem.len() {
@@ -1913,7 +1901,6 @@ pub fn execute_program(
                     addr_str, dest_offset, code_offset, size
                 );
 
-                // Récupère le code du contrat externe
                 let ext_code = execution_context
                     .world_state
                     .code
@@ -1921,21 +1908,21 @@ pub fn execute_program(
                     .cloned()
                     .unwrap_or_default();
 
-                // Copie sécurisée
-                if dest_offset + size <= global_mem.len() {
-                    ensure_memory_size(
-                        &mut global_mem,
-                        dest_offset + size,
-                        &mut execution_context.free_memory_pointer,
-                    )?;
-                    let copy_len = size.min(ext_code.len().saturating_sub(code_offset));
-                    if copy_len > 0 && code_offset < ext_code.len() {
-                        global_mem[dest_offset..dest_offset + copy_len]
-                            .copy_from_slice(&ext_code[code_offset..code_offset + copy_len]);
-                    }
-                    // Remplit le reste avec des zéros
-                    if copy_len < size {
-                        global_mem[dest_offset + copy_len..dest_offset + size].fill(0);
+                if let Some(end) = dest_offset.checked_add(size) {
+                    if end <= global_mem.len() {
+                        ensure_memory_size(
+                            &mut global_mem,
+                            end,
+                            &mut execution_context.free_memory_pointer,
+                        )?;
+                        let copy_len = size.min(ext_code.len().saturating_sub(code_offset));
+                        if copy_len > 0 && code_offset < ext_code.len() {
+                            global_mem[dest_offset..dest_offset + copy_len]
+                                .copy_from_slice(&ext_code[code_offset..code_offset + copy_len]);
+                        }
+                        if copy_len < size {
+                            global_mem[dest_offset + copy_len..dest_offset + size].fill(0);
+                        }
                     }
                 }
 
@@ -1972,28 +1959,30 @@ pub fn execute_program(
                 );
 
                 if size == 0 {
-                    // Rien à copier, pas d'erreur même si data_offset OOB
+                    // Rien à copier
                 } else {
-                    // EVM: si out of bounds, on copie ce qu'on peut et on complète par des zéros
-                    ensure_memory_size(
-                        &mut global_mem,
-                        dest_offset + size,
-                        &mut execution_context.free_memory_pointer,
-                    )?;
-                    let ret_len = execution_context.return_data.len();
-                    let copy_len = if data_offset < ret_len {
-                        (ret_len - data_offset).min(size)
+                    if let Some(end) = dest_offset.checked_add(size) {
+                        ensure_memory_size(
+                            &mut global_mem,
+                            end,
+                            &mut execution_context.free_memory_pointer,
+                        )?;
+                        let ret_len = execution_context.return_data.len();
+                        let copy_len = if data_offset < ret_len {
+                            (ret_len - data_offset).min(size)
+                        } else {
+                            0
+                        };
+                        if copy_len > 0 {
+                            global_mem[dest_offset..dest_offset + copy_len].copy_from_slice(
+                                &execution_context.return_data[data_offset..data_offset + copy_len],
+                            );
+                        }
+                        if copy_len < size {
+                            global_mem[dest_offset + copy_len..dest_offset + size].fill(0);
+                        }
                     } else {
-                        0
-                    };
-                    if copy_len > 0 {
-                        global_mem[dest_offset..dest_offset + copy_len].copy_from_slice(
-                            &execution_context.return_data[data_offset..data_offset + copy_len],
-                        );
-                    }
-                    // Remplit le reste avec des zéros
-                    if copy_len < size {
-                        global_mem[dest_offset + copy_len..dest_offset + size].fill(0);
+                        println!("⚠️ [RETURNDATACOPY] dest_offset + size overflow, copie ignorée");
                     }
                 }
 
@@ -2173,13 +2162,12 @@ pub fn execute_program(
                 println!("💰 [BLOBBASEFEE] → {} wei", blob_base_fee);
             }
 
-            // ___ 0x50 POP
+            // ___ 0x50 POP (strict)
             0x50 => {
                 if evm_stack.is_empty() {
-                    // EVM compliant : on pousse un zéro si la pile est vide, pour supporter les POP finaux "gratuits"
-                    evm_stack.push(u256::zero());
+                    return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on POP"));
                 }
-                let _popped = evm_stack.pop().unwrap();
+                let _ = evm_stack.pop().unwrap();
                 println!("🗑️ [POP] Element retiré de la pile");
             }
 
@@ -2223,11 +2211,12 @@ pub fn execute_program(
                 }
                 let offset_u256 = evm_stack.pop().unwrap();
                 let value = evm_stack.pop().unwrap();
-                let offset = offset_u256.low_u64() as usize;
+                // PATCH: clamp offset from U256
+                let offset = clamped_offset(offset_u256);
 
                 println!("📤 [MSTORE] offset=0x{:x} ← value=0x{:x}", offset, value);
 
-                // CORRECTION : Toujours étendre la mémoire comme l'EVM, mais refuse tout overflow
+                // Safe checked_add for end = offset + 32
                 if let Some(end) = offset.checked_add(32) {
                     ensure_memory_size(
                         &mut global_mem,
@@ -2243,8 +2232,7 @@ pub fn execute_program(
                         }
                     }
                 } else {
-                    // Offset trop grand, on ignore silencieusement (comportement EVM)
-                    println!("⚠️ [MSTORE] Offset trop grand (overflow), écriture ignorée");
+                    println!("⚠️ [MSTORE] offset + 32 overflow, écriture ignorée");
                 }
                 consume_gas(&mut execution_context, 3)?;
             }
@@ -2259,19 +2247,24 @@ pub fn execute_program(
                 }
                 let value = evm_stack.pop().unwrap().low_u64();
                 let offset_u256 = evm_stack.pop().unwrap();
-                let offset = offset_u256.low_u64() as usize;
+                // PATCH: clamp offset
+                let offset = clamped_offset(offset_u256);
 
                 // EVM: si offset >= mem.len(), ne fait rien
-                if offset < global_mem.len() {
-                    ensure_memory_size(
-                        &mut global_mem,
-                        offset + 1,
-                        &mut execution_context.free_memory_pointer,
-                    )?;
-                    let slice = safe_slice_mut(&mut global_mem, offset, 1);
-                    if !slice.is_empty() {
-                        slice[0] = (value & 0xff) as u8;
+                if let Some(end) = offset.checked_add(1) {
+                    if offset < global_mem.len() {
+                        ensure_memory_size(
+                            &mut global_mem,
+                            end,
+                            &mut execution_context.free_memory_pointer,
+                        )?;
+                        let slice = safe_slice_mut(&mut global_mem, offset, 1);
+                        if !slice.is_empty() {
+                            slice[0] = (value & 0xff) as u8;
+                        }
                     }
+                } else {
+                    println!("⚠️ [MSTORE8] offset + 1 overflow, écriture ignorée");
                 }
                 consume_gas(&mut execution_context, 3)?;
             }
@@ -2340,33 +2333,28 @@ pub fn execute_program(
                 );
             }
 
-            //___ 0x56 JUMP
+            //___ 0x56 JUMP (strict)
             0x56 => {
-                // EVM: JUMP ne prend qu’un seul argument (dest)
-                if evm_stack.len() < 1 {
-                    return Err(Error::new(
-                        ErrorKind::Other,
-                        format!(
-                            "EVM STACK underflow on JUMP (need 1, have {})",
-                            evm_stack.len()
-                        ),
+                if evm_stack.is_empty() {
+                    return Ok(halt_json(
+                        &execution_context,
+                        interpreter_args,
+                        IR_STACK_UNDERFLOW,
+                        "EVM STACK underflow on JUMP",
                     ));
                 }
-
-                let dest_u256 = evm_stack.pop().unwrap();
-                let dest = dest_u256.low_u64() as usize;
+                let dest = evm_stack.pop().unwrap().low_u64() as usize;
             }
 
             //___ 0x57 JUMPI
             0x57 => {
-                // EVM: JUMPI prend dest puis condition
+                // EVM: JUMPI prend dest puis condition (saut si cond != 0)
                 if evm_stack.len() < 2 {
-                    return Err(Error::new(
-                        ErrorKind::Other,
-                        format!(
-                            "EVM STACK underflow on JUMPI (need 2, have {})",
-                            evm_stack.len()
-                        ),
+                    return Ok(halt_json(
+                        &execution_context,
+                        interpreter_args,
+                        IR_STACK_UNDERFLOW,
+                        "EVM STACK underflow on JUMPI",
                     ));
                 }
 
@@ -2384,9 +2372,11 @@ pub fn execute_program(
 
                 if !cond.is_zero() {
                     if dest >= prog.len() || !valid_jumpdests.contains(&dest) {
-                        return Err(Error::new(
-                            ErrorKind::Other,
-                            format!("Bad jump destination: 0x{:04x}", dest),
+                        return Ok(halt_json(
+                            &execution_context,
+                            interpreter_args,
+                            IR_INVALID_JUMP,
+                            &format!("Bad jump destination: 0x{:04x}", dest),
                         ));
                     }
                     insn_ptr = dest;
@@ -2466,7 +2456,6 @@ pub fn execute_program(
                 let dst_offset = reg[_dst].low_u64() as usize;
                 let src_offset = reg[_src].low_u64() as usize;
                 let len = insn.imm as usize;
-                // Patch permissif : si OOB, on tronque la copie à ce qui est possible
                 let max_len = global_mem
                     .len()
                     .saturating_sub(dst_offset)
@@ -2476,15 +2465,16 @@ pub fn execute_program(
                     && src_offset + safe_len <= global_mem.len()
                     && dst_offset + safe_len <= global_mem.len()
                 {
-                    ensure_memory_size(
-                        &mut global_mem,
-                        dst_offset + safe_len,
-                        &mut execution_context.free_memory_pointer,
-                    )?;
-                    let data: Vec<u8> = global_mem[src_offset..src_offset + safe_len].to_vec();
-                    global_mem[dst_offset..dst_offset + safe_len].copy_from_slice(&data);
+                    if let Some(end) = dst_offset.checked_add(safe_len) {
+                        ensure_memory_size(
+                            &mut global_mem,
+                            end,
+                            &mut execution_context.free_memory_pointer,
+                        )?;
+                        let data: Vec<u8> = global_mem[src_offset..src_offset + safe_len].to_vec();
+                        global_mem[dst_offset..dst_offset + safe_len].copy_from_slice(&data);
+                    }
                 }
-                // Sinon, on ignore la copie (aucune erreur fatale)
                 consume_gas_amount(&mut execution_context, 3 + 3 * ((len + 31) / 32) as u64)?;
             }
 
@@ -2670,7 +2660,7 @@ pub fn execute_program(
                 if value > u256::zero() {
                     transfer_value(
                         &mut execution_context.world_state,
-                        &interpreter_args.contract_address,
+                        &interpreter_args.caller,
                         &to_addr,
                         value,
                     )?;
@@ -2838,60 +2828,136 @@ pub fn execute_program(
                 consume_gas_amount(&mut execution_context, 700)?;
             }
 
-            //___ 0xf3 RETURN
+            //___ 0xf3 RETURN (EVM: pop offset puis size)
             0xf3 => {
-                // Si aucun SLOAD/SSTORE restant après ce RETURN, c'est un vrai RETURN
-                if !has_storage_access_after(insn_ptr, prog) {
-                    if evm_stack.len() < 2 {
-                        return Err(Error::new(ErrorKind::Other, "STACK underflow on RETURN"));
-                    }
-                    let len = evm_stack.pop().unwrap().low_u64() as usize;
-                    let offset = evm_stack.pop().unwrap().low_u64() as usize;
+                if evm_stack.len() < 2 {
+                    return Err(Error::new(ErrorKind::Other, "STACK underflow on RETURN"));
+                }
 
-                    let ret_data_len = len.min(8192);
-                    let mut ret_data = vec![0u8; ret_data_len];
-                    if offset + ret_data_len <= global_mem.len() {
-                        ret_data.copy_from_slice(&global_mem[offset..offset + ret_data_len]);
-                    }
+                // EVM: offset d'abord, puis size
+                let offset_u256 = evm_stack.pop().unwrap();
+                let len_u256 = evm_stack.pop().unwrap();
+                let len = len_u256.low_u64() as usize;
+                let offset = clamped_offset(offset_u256);
 
-                    println!("📤 [RETURN] PC={:04x} | len={} bytes", insn_ptr, len);
+                println!("📤 [RETURN] len={}, offset=0x{:x}", len, offset);
 
-                    // Si on est dans un appel interne ou imbriqué
-                    if execution_context.in_internal_call
-                        || !execution_context.call_stack.is_empty()
-                    {
-                        println!("→ RETURN dans fonction interne → on stocke et on continue");
-                        execution_context.return_data = ret_data;
-                        execution_context.in_internal_call = false;
-
-                        // Restauration du PC si tu utilises call_stack
-                        if let Some(frame) = execution_context.call_stack.pop() {
-                            if let Some(pc) = frame.return_pc {
-                                insn_ptr = pc;
-                                skip_advance = true;
-                                continue;
+                // Règle demandée: si len == 0 → PC + 1 (ne pas halter)
+                if len == 0 {
+                    println!("📤 [RETURN] len=0 → pc+1 (pas de halt)");
+                    // Optionnel: vider la return_data comme en EVM
+                    execution_context.return_data.clear();
+                    // Laisser l'incrément normal du PC (advance=1) se faire en bas de boucle
+                } else if len == 32 {
+                    if let Some(end) = offset.checked_add(32) {
+                        ensure_memory_size(
+                            &mut global_mem,
+                            end,
+                            &mut execution_context.free_memory_pointer,
+                        )?;
+                        let mut return_bytes = [0u8; 32];
+                        if end <= global_mem.len() {
+                            return_bytes.copy_from_slice(&global_mem[offset..end]);
+                        } else {
+                            let avail = global_mem.len().saturating_sub(offset);
+                            if avail > 0 {
+                                return_bytes[..avail]
+                                    .copy_from_slice(&global_mem[offset..offset + avail]);
                             }
                         }
-                        // Sinon continue normalement
-                    } else {
-                        // RETURN au niveau racine → fin réelle
-                        println!("→ RETURN final → fin de transaction avec données");
+
+                        let return_value = u256::from_big_endian(&return_bytes);
+                        let return_u64 = return_value.low_u64();
+                        let function_result = match return_u64 {
+                            value if value > 0 && value < 1_000_000 => {
+                                JsonValue::Number(value.into())
+                            }
+                            _ => JsonValue::String(format!("0x{}", hex::encode(&return_bytes))),
+                        };
+
+                        let final_storage = execution_context
+                            .world_state
+                            .storage
+                            .get(&interpreter_args.contract_address)
+                            .cloned()
+                            .unwrap_or_default();
+
                         let mut result = serde_json::Map::new();
+                        result.insert("return".to_string(), function_result);
                         result.insert(
-                            "return".to_string(),
-                            decode_return_data_generic(&ret_data, ret_data.len()),
+                            "storage".to_string(),
+                            JsonValue::Object(decode_storage_map(&final_storage)),
                         );
                         result.insert(
-                            "exit_reason".to_string(),
-                            JsonValue::String("RETURN".to_string()),
+                            "instruction_result".to_string(),
+                            JsonValue::Number(IR_RETURN.into()),
+                        );
+
+                        println!(
+                            "✅ [FUNCTION RETURN] Valeur détectée: {:?}",
+                            result.get("return")
+                        );
+                        return Ok(JsonValue::Object(result));
+                    } else {
+                        println!("⚠️ [RETURN] offset + 32 overflow, retour vide");
+                        let mut result = serde_json::Map::new();
+                        result.insert("return".to_string(), JsonValue::Array(vec![]));
+                        result.insert(
+                            "instruction_result".to_string(),
+                            JsonValue::Number(IR_RETURN.into()),
                         );
                         return Ok(JsonValue::Object(result));
                     }
                 } else {
-                    execution_context.in_internal_call = false; // Bypass RETURN si storage encore à venir
-                    println!("⏩ [BYPASS RETURN] SLOAD/SSTORE restant après RETURN, bypass RETURN");
-                    insn_ptr += 1;
-                    continue;
+                    // Cas général
+                    let mut ret_data = vec![0u8; len];
+                    if len > 0 {
+                        if let Some(end) = offset.checked_add(len) {
+                            ensure_memory_size(
+                                &mut global_mem,
+                                end,
+                                &mut execution_context.free_memory_pointer,
+                            )?;
+                            if end <= global_mem.len() {
+                                ret_data.copy_from_slice(&global_mem[offset..end]);
+                            } else {
+                                let avail = global_mem.len().saturating_sub(offset);
+                                if avail > 0 {
+                                    ret_data[..avail]
+                                        .copy_from_slice(&global_mem[offset..offset + avail]);
+                                }
+                                if avail < len {
+                                    ret_data[avail..].fill(0);
+                                }
+                            }
+                        } else {
+                            println!("⚠️ [RETURN] offset + len overflow, données ignorées");
+                            ret_data.clear();
+                        }
+                    }
+
+                    let formatted_result = decode_return_data_generic(&ret_data, ret_data.len());
+
+                    let final_storage = execution_context
+                        .world_state
+                        .storage
+                        .get(&interpreter_args.contract_address)
+                        .cloned()
+                        .unwrap_or_default();
+
+                    let mut result = serde_json::Map::new();
+                    result.insert("return".to_string(), formatted_result);
+                    result.insert(
+                        "storage".to_string(),
+                        JsonValue::Object(decode_storage_map(&final_storage)),
+                    );
+                    result.insert(
+                        "instruction_result".to_string(),
+                        JsonValue::Number(IR_RETURN.into()),
+                    );
+
+                    println!("✅ [RETURN] Données: {:?}", result.get("return"));
+                    return Ok(JsonValue::Object(result));
                 }
             }
 
@@ -3105,24 +3171,108 @@ pub fn execute_program(
                 println!("🌐 [SLU-IP 450] TCP/UDP send → result={}", res);
             }
 
-            //___ 0xfe ASSERT
-            0xfe => {
-                // Si le sommet de la pile est zéro, alors assertion échouée
-                if evm_stack.is_empty() {
-                    return Err(Error::new(ErrorKind::Other, "ASSERT: pile vide"));
+            //___ 0xfa STATICCALL
+            0xfa => {
+                if evm_stack.len() < 6 {
+                    return Err(Error::new(
+                        ErrorKind::Other,
+                        "EVM STACK underflow on STATICCALL",
+                    ));
                 }
-                let cond = evm_stack.pop().unwrap();
-                if cond.is_zero() {
-                    println!("❌ [ASSERT] Assertion échouée (opcode 0xfe)");
-                    let mut result = serde_json::Map::new();
-                    result.insert(
-                        "error".to_string(),
-                        JsonValue::String("ASSERT failed (opcode 0xfe)".to_string()),
-                    );
-                    return Ok(JsonValue::Object(result));
+
+                let out_size = evm_stack.pop().unwrap().low_u64() as usize;
+                let out_offset = evm_stack.pop().unwrap().low_u64() as usize;
+                let in_size = evm_stack.pop().unwrap().low_u64() as usize;
+                let in_offset = evm_stack.pop().unwrap().low_u64() as usize;
+                let to = evm_stack.pop().unwrap();
+                let gas = evm_stack.pop().unwrap();
+
+                let to_addr = format!("0x{:040x}", to);
+
+                println!(
+                    "🔒 [STATICCALL] depth={} to={} in=0x{:x}:{} out=0x{:x}:{} gas={}",
+                    execution_context.call_stack.len() + 1,
+                    to_addr,
+                    in_offset,
+                    in_size,
+                    out_offset,
+                    out_size,
+                    gas
+                );
+
+                // ─── SAUVEGARDE DU POINT DE RETOUR ──────────────────────────────
+                execution_context.call_stack.push(CallFrame {
+                    caller: interpreter_args.contract_address.clone(),
+                    contract: to_addr.clone(),
+                    value: u256::zero(),
+                    gas_limit: gas,
+                    input_data: vec![],
+                    return_pc: Some(insn_ptr + 1),
+                });
+
+                let calldata = if let Some(end) = in_offset.checked_add(in_size) {
+                    if end <= global_mem.len() {
+                        global_mem[in_offset..end].to_vec()
+                    } else if in_offset < global_mem.len() {
+                        global_mem[in_offset..].to_vec()
+                    } else {
+                        vec![]
+                    }
                 } else {
-                    println!("✅ [ASSERT] Assertion réussie (opcode 0xfe)");
+                    vec![]
+                };
+
+                let mut call_args = interpreter_args.clone();
+                call_args.contract_address = to_addr.clone();
+                call_args.caller = interpreter_args.contract_address.clone();
+                call_args.value = u256::zero();
+                call_args.state_data = calldata.clone();
+                call_args.call_depth = interpreter_args.call_depth + u256::from(1);
+
+                let code = execution_context
+                    .world_state
+                    .code
+                    .get(&to_addr)
+                    .cloned()
+                    .unwrap_or_default();
+
+                let call_result = execute_program(
+                    Some(&code),
+                    None,
+                    &global_mem,
+                    &calldata,
+                    helpers,
+                    allowed_memory,
+                    None,
+                    &HashMap::new(),
+                    &call_args,
+                    Some(execution_context.world_state.storage.clone()),
+                );
+
+                match call_result {
+                    Ok(val) => {
+                        let return_bytes = val
+                            .get("return")
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| s.strip_prefix("0x"))
+                            .map_or(vec![], |h| hex::decode(h).unwrap_or_default());
+
+                        let copy_len = out_size.min(return_bytes.len());
+                        if let Some(end) = out_offset.checked_add(copy_len) {
+                            if end <= global_mem.len() {
+                                global_mem[out_offset..end]
+                                    .copy_from_slice(&return_bytes[..copy_len]);
+                            }
+                        }
+
+                        evm_stack.push(u256::one());
+                    }
+                    Err(_) => {
+                        evm_stack.push(u256::zero());
+                    }
                 }
+
+                consume_gas_amount(&mut execution_context, 700)?;
             }
 
             //___ 0xfa STATICCALL
@@ -3229,140 +3379,152 @@ pub fn execute_program(
                 consume_gas_amount(&mut execution_context, 700)?;
             }
 
-                        //___ 0xfd REVERT - EXTRAIT LES DONNÉES DE REVERT ET DÉCODE Error(string)
-                        0xfd => {
-                            if evm_stack.len() < 2 {
-                                return Err(Error::new(ErrorKind::Other, "Underflow on REVERT"));
-                            }
-            
-                            // EVM: sommet = offset, sous-sommet = size
-                            let offset_u256 = evm_stack.pop().unwrap();
-                            let size_u256 = evm_stack.pop().unwrap();
-                            let offset = offset_u256.low_u64() as usize;
-                            let raw_size = size_u256.low_u64() as usize;
-            
-                            println!("❌ [REVERT] raw offset=0x{:x}, raw size={}", offset, raw_size);
-            
-                            let max_avail = global_mem.len().saturating_sub(offset);
-                            if max_avail == 0 {
-                                println!("🟡 [REVERT] Mémoire indisponible à offset=0x{:x} → ignore", offset);
-                                // Continue (validation simple)
-                                insn_ptr += 1;
-                                continue;
-                            }
-            
-                            // Lire sélecteur si possible
-                            let selector_bytes = safe_slice(&global_mem, offset, 4);
-                            let selector = if selector_bytes.len() == 4 {
-                                u32::from_be_bytes([
-                                    selector_bytes[0],
-                                    selector_bytes[1],
-                                    selector_bytes[2],
-                                    selector_bytes[3],
-                                ])
-                            } else {
-                                0
-                            };
-            
-                            // Cas 1: Error(string)
-                            if selector == 0x08c379a0 {
-                                // Lire offset de l'arg (32 bytes à offset+4)
-                                let arg_off_bytes = safe_slice(&global_mem, offset + 4, 32);
-                                let mut tmp = [0u8; 32];
-                                tmp[..arg_off_bytes.len()].copy_from_slice(arg_off_bytes);
-                                let arg_off_u256 = u256::from_big_endian(&tmp);
-                                let arg_off = arg_off_u256.low_u64() as usize;
-            
-                                // Longueur du string (32 bytes à offset+4+arg_off)
-                                let len_pos = offset.saturating_add(4).saturating_add(arg_off);
-                                let len_bytes = safe_slice(&global_mem, len_pos, 32);
-                                let mut len_pad = [0u8; 32];
-                                len_pad[..len_bytes.len()].copy_from_slice(len_bytes);
-                                let str_len_u256 = u256::from_big_endian(&len_pad);
-                                let str_len = str_len_u256.low_u64() as usize;
-            
-                                // Position des données de la string
-                                let data_pos = len_pos.saturating_add(32);
-                                let padded = (str_len + 31) & !31; // ceil32
-                                let total = 4 /*selector*/ + 32 /*offset*/ + 32 /*len*/ + padded;
-            
-                                // Taille copiée (sécurisée)
-                                let copy_len = total.min(max_avail).min(2048);
-                                let revert_data = safe_slice(&global_mem, offset, copy_len).to_vec();
-            
-                                // Extraction du message
-                                let str_copy_len = str_len.min(global_mem.len().saturating_sub(data_pos));
-                                let msg_bytes = safe_slice(&global_mem, data_pos, str_copy_len);
-                                let error_str = if let Ok(s) = std::str::from_utf8(msg_bytes) {
-                                    s.to_string()
-                                } else {
-                                    format!("0x{}", hex::encode(msg_bytes))
-                                };
-            
-                                println!(
-                                    "🧩 [REVERT ABI] Error(string) len={} total={} → copy_len={} | msg='{}'",
-                                    str_len, total, copy_len, error_str
-                                );
-            
-                                let mut result = serde_json::Map::new();
-                                result.insert("error".to_string(), JsonValue::String("Error(string)".to_string()));
-                                result.insert("error_message".to_string(), JsonValue::String(error_str));
-                                result.insert(
-                                    "revert_data".to_string(),
-                                    JsonValue::String(hex::encode(&revert_data)),
-                                );
-                                return Ok(JsonValue::Object(result));
-                            }
-            
-                            // Cas 2: Panic(uint256)
-                            if selector == 0x4e487b71 {
-                                let code_bytes = safe_slice(&global_mem, offset + 32, 4);
-                                let code = if code_bytes.len() == 4 {
-                                    u32::from_be_bytes([code_bytes[0], code_bytes[1], code_bytes[2], code_bytes[3]])
-                                } else {
-                                    0
-                                };
-                                let copy_len = raw_size.min(max_avail).min(64);
-                                let revert_data = safe_slice(&global_mem, offset, copy_len).to_vec();
-                                let mut result = serde_json::Map::new();
-                                result.insert("error".to_string(), JsonValue::String(format!("Panic(0x{:02x})", code)));
-                                result.insert(
-                                    "revert_data".to_string(),
-                                    JsonValue::String(hex::encode(&revert_data)),
-                                );
-                                return Ok(JsonValue::Object(result));
-                            }
-            
-                            // Cas 3: taille 0 → validation simple, on ignore
-                            if raw_size == 0 {
-                                println!("🟡 [REVERT] size=0 → ignore (validation)");
-                                insn_ptr += 1;
-                                continue;
-                            }
-            
-                            // Cas 4: Fallback générique (clamp et hex)
-                            let copy_len = raw_size.min(max_avail).min(1024);
-                            let revert_data = safe_slice(&global_mem, offset, copy_len).to_vec();
-                            let error_msg = if copy_len >= 4 {
-                                format!("Error(0x{:08x})", selector)
-                            } else {
-                                format!("Revert ({} bytes)", copy_len)
-                            };
-            
-                            println!(
-                                "↩️ [REVERT] selector=0x{:08x} | offset=0x{:x}, size={} → copy_len={}",
-                                selector, offset, raw_size, copy_len
-                            );
-                            println!("   → DATA: 0x{}", hex::encode(&revert_data));
-            
-                            let mut result = serde_json::Map::new();
-                            result.insert("error".to_string(), JsonValue::String(error_msg));
-                            result.insert(
-                                "revert_data".to_string(),
-                                JsonValue::String(hex::encode(&revert_data)),
-                            );
-                            return Ok(JsonValue::Object(result));
+            //___ 0xfd REVERT
+            //___ 0xfd REVERT
+            0xfd => {
+                if evm_stack.len() < 2 {
+                    return Err(Error::new(
+                        ErrorKind::Other,
+                        "EVM STACK underflow on REVERT",
+                    ));
+                }
+                // EVM: offset d'abord, puis size (même ordre que RETURN)
+                let offset_u256 = evm_stack.pop().unwrap();
+                let len_u256 = evm_stack.pop().unwrap();
+
+                let requested_len_u64 = len_u256.low_u64();
+                let requested_len = requested_len_u64 as usize;
+                let offset = clamped_offset(offset_u256);
+
+                // Borne prudente pour éviter OOM (ajuster si besoin)
+                const MAX_REVERT_DATA: usize = 256 * 1024; // 256 KiB max de copie
+
+                // Taille réellement copiable depuis la mémoire disponible
+                let avail = if offset < global_mem.len() {
+                    global_mem.len() - offset
+                } else {
+                    0
+                };
+                let copy_len = requested_len.min(avail).min(MAX_REVERT_DATA);
+
+                println!(
+                    "↩️ [REVERT] requested_len={}, clamped_copy_len={}, offset=0x{:x}",
+                    requested_len, copy_len, offset
+                );
+
+                // Copie safe (sans zero-pad massif ni overflow)
+                let mut revert_data = Vec::with_capacity(copy_len);
+                if copy_len > 0 {
+                    if let Some(end) = offset.checked_add(copy_len) {
+                        if end <= global_mem.len() {
+                            revert_data.extend_from_slice(&global_mem[offset..end]);
                         }
+                    }
+                }
+
+                // Expose aussi via return_data pour RETURNDATASIZE/RETURNDATACOPY éventuels
+                execution_context.return_data = revert_data.clone();
+
+                let final_storage = execution_context
+                    .world_state
+                    .storage
+                    .get(&interpreter_args.contract_address)
+                    .cloned()
+                    .unwrap_or_default();
+
+                let mut result = serde_json::Map::new();
+                result.insert(
+                    "error".to_string(),
+                    JsonValue::String("REVERT executed".to_string()),
+                );
+                result.insert(
+                    "instruction_result".to_string(),
+                    JsonValue::Number(IR_REVERT.into()),
+                );
+                // Optionnel: retourner les données de revert (bornées) pour debug
+                result.insert(
+                    "revert_data".to_string(),
+                    JsonValue::String(format!("0x{}", hex::encode(&revert_data))),
+                );
+                result.insert(
+                    "storage".to_string(),
+                    JsonValue::Object(decode_storage_map(&final_storage)),
+                );
+                return Ok(JsonValue::Object(result));
+            }
+
+            //___ 0xfe ASSERT
+            0xfe => {
+                // Si le sommet de la pile est zéro, alors assertion échouée
+                if evm_stack.is_empty() {
+                    return Err(Error::new(ErrorKind::Other, "ASSERT: pile vide"));
+                }
+                let cond = evm_stack.pop().unwrap();
+                if cond.is_zero() {
+                    println!("❌ [ASSERT] Assertion échouée (opcode 0xfe)");
+                    let mut result = serde_json::Map::new();
+                    result.insert(
+                        "error".to_string(),
+                        JsonValue::String("ASSERT failed (opcode 0xfe)".to_string()),
+                    );
+                    return Ok(JsonValue::Object(result));
+                } else {
+                    println!("✅ [ASSERT] Assertion réussie (opcode 0xfe)");
+                }
+            }
+
+            //___ 0xff SELFDESTRUCT
+            0xff => {
+                if evm_stack.is_empty() {
+                    return Ok(halt_json(
+                        &execution_context,
+                        interpreter_args,
+                        IR_STACK_UNDERFLOW,
+                        "EVM STACK underflow on SELFDESTRUCT",
+                    ));
+                }
+                // bénéficiaire
+                let beneficiary_u256 = evm_stack.pop().unwrap();
+                let beneficiary = format!("0x{:040x}", beneficiary_u256);
+
+                // transfert du solde du contrat au bénéficiaire
+                let contract_addr = &interpreter_args.contract_address;
+                let bal = get_balance(&execution_context.world_state, contract_addr);
+                if bal > u256::zero() {
+                    let mut ws = execution_context.world_state.clone();
+                    set_balance(&mut ws, contract_addr, u256::zero());
+                    let dest_bal = get_balance(&ws, &beneficiary);
+                    set_balance(&mut ws, &beneficiary, dest_bal + bal);
+                }
+
+                // code “effacé” (ici: vide)
+                execution_context
+                    .world_state
+                    .code
+                    .insert(contract_addr.clone(), vec![]);
+
+                // retour immédiat
+                let final_storage = execution_context
+                    .world_state
+                    .storage
+                    .get(contract_addr)
+                    .cloned()
+                    .unwrap_or_default();
+                let mut result = serde_json::Map::new();
+                result.insert(
+                    "selfdestruct_beneficiary".to_string(),
+                    JsonValue::String(beneficiary),
+                );
+                result.insert(
+                    "instruction_result".to_string(),
+                    JsonValue::Number(IR_SELFDESTRUCT.into()),
+                );
+                result.insert(
+                    "storage".to_string(),
+                    JsonValue::Object(decode_storage_map(&final_storage)),
+                );
+                return Ok(JsonValue::Object(result));
+            }
 
             //___ Opcodes non gérés
             _ => {
@@ -3370,6 +3532,31 @@ pub fn execute_program(
                     "🟢 [NOP] Opcode 0x{:02x} non géré à PC 0x{:04x}",
                     opcode, insn_ptr
                 );
+                // Traite comme “opcode not found” (halt)
+                let mut obj = serde_json::Map::new();
+                obj.insert(
+                    "error".to_string(),
+                    JsonValue::String(format!(
+                        "Opcode not found 0x{:02x} at PC 0x{:04x}",
+                        opcode, insn_ptr
+                    )),
+                );
+                obj.insert(
+                    "instruction_result".to_string(),
+                    JsonValue::Number(IR_OPCODE_NOT_FOUND.into()),
+                );
+                // inclure storage pour cohérence
+                let final_storage = execution_context
+                    .world_state
+                    .storage
+                    .get(&interpreter_args.contract_address)
+                    .cloned()
+                    .unwrap_or_default();
+                obj.insert(
+                    "storage".to_string(),
+                    JsonValue::Object(decode_storage_map(&final_storage)),
+                );
+                return Ok(JsonValue::Object(obj));
             }
         }
 
@@ -3401,6 +3588,11 @@ pub fn execute_program(
             "exit_reason".to_string(),
             JsonValue::String("STOP".to_string()),
         );
+        // InstructionResult: Stop
+        result.insert(
+            "instruction_result".to_string(),
+            JsonValue::Number(IR_STOP.into()),
+        );
 
         return Ok(JsonValue::Object(result));
     }
@@ -3422,6 +3614,11 @@ pub fn execute_program(
     result.insert(
         "exit_reason".to_string(),
         JsonValue::String("END_OF_BYTECODE".to_string()),
+    );
+    // Traiter fin de bytecode comme Stop (succès)
+    result.insert(
+        "instruction_result".to_string(),
+        JsonValue::Number(IR_STOP.into()),
     );
 
     Ok(JsonValue::Object(result))
