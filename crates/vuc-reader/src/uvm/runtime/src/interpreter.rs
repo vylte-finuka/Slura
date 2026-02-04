@@ -2343,7 +2343,7 @@ pub fn execute_program(
                         "EVM STACK underflow on JUMP",
                     ));
       }
-        let dest = evm_stack.pop().unwrap() as usize;
+        let dest = evm_stack.pop().unwrap();
         insn_ptr = dest;
         continue;
     },
