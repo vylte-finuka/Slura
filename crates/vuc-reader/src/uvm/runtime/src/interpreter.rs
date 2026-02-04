@@ -2333,9 +2333,10 @@ pub fn execute_program(
                 );
             }
 
-            //___ 0x56 JUMP (strict)
+            //___ 0x56 JUMP
             0x56 => {
-                if evm_stack.is_empty() {
+                // EVM: JUMP prend dest puis condition (saut si cond != 0)
+                if evm_stack.len() < 2 {
                     return Ok(halt_json(
                         &execution_context,
                         interpreter_args,
@@ -2343,7 +2344,24 @@ pub fn execute_program(
                         "EVM STACK underflow on JUMP",
                     ));
                 }
-                let dest = evm_stack.pop().unwrap().low_u64() as usize;
+
+                let dest_u256 = evm_stack.pop().unwrap();
+                let cond = evm_stack.pop().unwrap();
+                let dest = dest_u256.low_u64() as usize;
+
+                println!(
+                    "🔀 [JUMP @ {:04x}] cond={} → dest=0x{:04x}  (stack size après pops = {})",
+                    insn_ptr,
+                    cond,
+                    dest,
+                    evm_stack.len()
+                );
+
+                    insn_ptr = dest;
+                    skip_advance = true;
+                    consume_gas(&mut execution_context, 10)?;
+                    continue;
+                }
             }
 
             //___ 0x57 JUMPI
