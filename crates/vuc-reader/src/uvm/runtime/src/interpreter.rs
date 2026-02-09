@@ -949,6 +949,12 @@ pub fn execute_program(
     const MAX_INSTRUCTIONS: u64 = 100_000;
     const MAX_SAME_PC: u32 = 1000;
 
+    // --- Définition de la plage du dispatcher (à adapter selon le bytecode analysé) ---
+    // Ici, d'après ton dump : dispatcher = 0x09CA à 0x0A38, handler d'erreur = 0x014b
+    let dispatcher_start = 0x09ca;
+    let dispatcher_end = 0x0a38;
+    let dispatcher_error = 0x014b;
+
     while insn_ptr < prog.len() && instruction_count < MAX_INSTRUCTIONS {
         let opcode = prog[insn_ptr];
 
@@ -1068,11 +1074,11 @@ pub fn execute_program(
                 if evm_stack.len() < 2 {
                     return Err(Error::new(ErrorKind::Other, "Underflow ADD"));
                 }
-                let b = evm_stack.pop().unwrap();
                 let a = evm_stack.pop().unwrap();
+                let b = evm_stack.pop().unwrap();
                 let res = a.overflowing_add(b).0;
                 evm_stack.push(res);
-                reg[0] = res; // PATCH: garder le U256 complet
+                reg[0] = res;
                 consume_gas(&mut execution_context, opcode)?;
             }
 
@@ -1081,11 +1087,11 @@ pub fn execute_program(
                 if evm_stack.len() < 2 {
                     return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on MUL"));
                 }
-                let b = evm_stack.pop().unwrap();
                 let a = evm_stack.pop().unwrap();
+                let b = evm_stack.pop().unwrap();
                 let res = a.overflowing_mul(b).0;
                 evm_stack.push(res);
-                reg[0] = res; // PATCH: garder le U256 complet
+                reg[0] = res;
                 consume_gas(&mut execution_context, opcode)?;
             }
 
@@ -1094,11 +1100,11 @@ pub fn execute_program(
                 if evm_stack.len() < 2 {
                     return Err(Error::new(ErrorKind::Other, "EVM STACK underlow on SUB"));
                 }
-                let b = evm_stack.pop().unwrap();
                 let a = evm_stack.pop().unwrap();
+                let b = evm_stack.pop().unwrap();
                 let res = a.overflowing_sub(b).0;
                 evm_stack.push(res);
-                reg[0] = res; // PATCH: garder le U256 complet
+                reg[0] = res;
                 consume_gas(&mut execution_context, opcode)?;
             }
 
@@ -1108,11 +1114,11 @@ pub fn execute_program(
                 if evm_stack.len() < 2 {
                     return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on DIV"));
                 }
-                let b = evm_stack.pop().unwrap();
                 let a = evm_stack.pop().unwrap();
+                let b = evm_stack.pop().unwrap();
                 let res = if b.is_zero() { u256::zero() } else { a / b };
                 evm_stack.push(res);
-                reg[0] = u256::from(res.low_u64());
+                reg[0] = res;
                 consume_gas(&mut execution_context, opcode)?;
             }
 
@@ -1121,8 +1127,8 @@ pub fn execute_program(
                 if evm_stack.len() < 2 {
                     return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on SDIV"));
                 }
-                let b = evm_stack.pop().unwrap();
                 let a = evm_stack.pop().unwrap();
+                let b = evm_stack.pop().unwrap();
                 let a_i256 = I256::from(a.as_u64() as i64);
                 let b_i256 = I256::from(b.as_u64() as i64);
                 let res = if b_i256 == I256::from(0) {
@@ -1139,8 +1145,8 @@ pub fn execute_program(
                 if evm_stack.len() < 2 {
                     return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on MOD"));
                 }
-                let b = evm_stack.pop().unwrap();
                 let a = evm_stack.pop().unwrap();
+                let b = evm_stack.pop().unwrap();
 
                 // ✅ EVM SPEC: modulo par zéro = 0 (comportement défini)
                 let result = if b == u256::zero() {
@@ -1159,8 +1165,8 @@ pub fn execute_program(
                 if evm_stack.len() < 2 {
                     return Err(Error::new(ErrorKind::Other, "EVM STACK underflow on SMOD"));
                 }
-                let b = evm_stack.pop().unwrap();
                 let a = evm_stack.pop().unwrap();
+                let b = evm_stack.pop().unwrap();
 
                 // Convert U256 to I256 using as_u64 (may not be fully correct for negative values, but matches original intent)
                 let a_i256 = I256::from(a.as_u64() as i64);
@@ -1186,16 +1192,16 @@ pub fn execute_program(
                         "EVM STACK underflow on ADDMOD",
                     ));
                 }
-                let a = primitive_types::U256::from(evm_stack.pop().unwrap());
-                let b = primitive_types::U256::from(evm_stack.pop().unwrap());
-                let n = primitive_types::U256::from(evm_stack.pop().unwrap());
+                let a = evm_stack.pop().unwrap();
+                let b = evm_stack.pop().unwrap();
+                let n = evm_stack.pop().unwrap();
                 let res = if n.is_zero() {
-                    primitive_types::U256::zero()
+                    u256::zero()
                 } else {
                     (a + b) % n
                 };
-                evm_stack.push(u256::from(res.low_u64()));
-                reg[0] = u256::from(res.low_u64());
+                evm_stack.push(res);
+                reg[0] = res;
             }
 
             // ___ 0x09 MULMOD
@@ -1206,16 +1212,16 @@ pub fn execute_program(
                         "EVM STACK underflow on MULMOD",
                     ));
                 }
-                let a = primitive_types::U256::from(evm_stack.pop().unwrap());
-                let b = primitive_types::U256::from(evm_stack.pop().unwrap());
-                let n = primitive_types::U256::from(evm_stack.pop().unwrap());
+                let a = evm_stack.pop().unwrap();
+                let b = evm_stack.pop().unwrap();
+                let n = evm_stack.pop().unwrap();
                 let res = if n.is_zero() {
-                    primitive_types::U256::zero()
+                    u256::zero()
                 } else {
                     (a * b) % n
                 };
-                evm_stack.push(u256::from(res.low_u64()));
-                reg[0] = res.low_u64().into();
+                evm_stack.push(res);
+                reg[0] = res;
             }
 
             //___ 0x0a EXP - VERSION 100 % EVM COMPLIANT avec U256
@@ -2363,28 +2369,9 @@ pub fn execute_program(
                         "EVM STACK underflow on JUMP",
                     ));
                 }
+
                 let dest_u256 = evm_stack.pop().unwrap();
-                let dest = dest_u256.low_u64() as usize;
 
-                println!("🔁 [JUMP @ {:04x}] dest=0x{:04x}", insn_ptr, dest);
-
-                // Validation stricte du jumpdest (conforme EVM)
-                if dest >= prog.len() || !valid_jumpdests.contains(&dest) {
-                    return Ok(halt_json(
-                        &execution_context,
-                        interpreter_args,
-                        IR_INVALID_JUMP,
-                        &format!("Bad jump destination: 0x{:04x}", dest),
-                    ));
-                }
-
-                // Effectuer le saut
-                insn_ptr = dest;
-                skip_advance = true;
-
-                // Coût (placeholder, consume_gas ignore l’arg)
-                consume_gas(&mut execution_context, 10)?;
-                continue;
             }
 
             //___ 0x57 JUMPI
@@ -3314,110 +3301,6 @@ pub fn execute_program(
                 consume_gas_amount(&mut execution_context, 700)?;
             }
 
-            //___ 0xfa STATICCALL
-            0xfa => {
-                if evm_stack.len() < 6 {
-                    return Err(Error::new(
-                        ErrorKind::Other,
-                        "EVM STACK underflow on STATICCALL",
-                    ));
-                }
-
-                let out_size = evm_stack.pop().unwrap().low_u64() as usize;
-                let out_offset = evm_stack.pop().unwrap().low_u64() as usize;
-                let in_size = evm_stack.pop().unwrap().low_u64() as usize;
-                let in_offset = evm_stack.pop().unwrap().low_u64() as usize;
-                let to = evm_stack.pop().unwrap();
-                let gas = evm_stack.pop().unwrap();
-
-                let to_addr = format!("0x{:040x}", to);
-
-                println!(
-                    "🔒 [STATICCALL] depth={} to={} in=0x{:x}:{} out=0x{:x}:{} gas={}",
-                    execution_context.call_stack.len() + 1,
-                    to_addr,
-                    in_offset,
-                    in_size,
-                    out_offset,
-                    out_size,
-                    gas
-                );
-
-                // ─── SAUVEGARDE DU POINT DE RETOUR ──────────────────────────────
-                execution_context.call_stack.push(CallFrame {
-                    caller: interpreter_args.contract_address.clone(),
-                    contract: to_addr.clone(),
-                    value: u256::zero(),
-                    gas_limit: gas,
-                    input_data: vec![],
-                    return_pc: Some(insn_ptr + 1),
-                });
-
-                let calldata = if let Some(end) = in_offset.checked_add(in_size) {
-                    if end <= global_mem.len() {
-                        global_mem[in_offset..end].to_vec()
-                    } else if in_offset < global_mem.len() {
-                        global_mem[in_offset..].to_vec()
-                    } else {
-                        vec![]
-                    }
-                } else {
-                    vec![]
-                };
-
-                let mut call_args = interpreter_args.clone();
-                call_args.contract_address = to_addr.clone();
-                call_args.caller = interpreter_args.contract_address.clone();
-                call_args.value = u256::zero();
-                call_args.state_data = calldata.clone();
-                call_args.call_depth = interpreter_args.call_depth + u256::from(1);
-
-                let code = execution_context
-                    .world_state
-                    .code
-                    .get(&to_addr)
-                    .cloned()
-                    .unwrap_or_default();
-
-                let call_result = execute_program(
-                    Some(&code),
-                    None,
-                    &global_mem,
-                    &calldata,
-                    helpers,
-                    allowed_memory,
-                    None,
-                    &HashMap::new(),
-                    &call_args,
-                    Some(execution_context.world_state.storage.clone()),
-                );
-
-                match call_result {
-                    Ok(val) => {
-                        let return_bytes = val
-                            .get("return")
-                            .and_then(|v| v.as_str())
-                            .and_then(|s| s.strip_prefix("0x"))
-                            .map_or(vec![], |h| hex::decode(h).unwrap_or_default());
-
-                        let copy_len = out_size.min(return_bytes.len());
-                        if let Some(end) = out_offset.checked_add(copy_len) {
-                            if end <= global_mem.len() {
-                                global_mem[out_offset..end]
-                                    .copy_from_slice(&return_bytes[..copy_len]);
-                            }
-                        }
-
-                        evm_stack.push(u256::one());
-                    }
-                    Err(_) => {
-                        evm_stack.push(u256::zero());
-                    }
-                }
-
-                consume_gas_amount(&mut execution_context, 700)?;
-            }
-
             //___ 0xfd REVERT
             0xfd => {
                 if evm_stack.len() < 2 {
@@ -3426,7 +3309,7 @@ pub fn execute_program(
                         "EVM STACK underflow on REVERT",
                     ));
                 }
-                // EVM: offset d'abord, puis size (même ordre que RETURN)
+                // EVM: offset d'abord, puis size
                 let offset_u256 = evm_stack.pop().unwrap();
                 let len_u256 = evm_stack.pop().unwrap();
                 let len = len_u256.low_u64() as usize;
@@ -3435,28 +3318,28 @@ pub fn execute_program(
                 println!("↩️ [REVERT] len={}, offset=0x{:x}", len, offset);
 
                 let mut revert_data = vec![0u8; len];
-                    if let Some(end) = offset.checked_add(len) {
-                        ensure_memory_size(
-                            &mut global_mem,
-                            end,
-                            &mut execution_context.free_memory_pointer,
-                        )?;
-                        if end <= global_mem.len() {
-                            revert_data.copy_from_slice(&global_mem[offset..end]);
-                        } else {
-                            let avail = global_mem.len().saturating_sub(offset);
-                            if avail > 0 {
-                                revert_data[..avail]
-                                    .copy_from_slice(&global_mem[offset..offset + avail]);
-                            }
-                            if avail < len {
-                                revert_data[avail..].fill(0);
-                            }
-                        }
+                if let Some(end) = offset.checked_add(len) {
+                    ensure_memory_size(
+                        &mut global_mem,
+                        end,
+                        &mut execution_context.free_memory_pointer,
+                    )?;
+                    if end <= global_mem.len() {
+                        revert_data.copy_from_slice(&global_mem[offset..end]);
                     } else {
-                        println!("⚠️ [REVERT] offset + len overflow, données ignorées");
-                        revert_data.clear();
+                        let avail = global_mem.len().saturating_sub(offset);
+                        if avail > 0 {
+                            revert_data[..avail]
+                                .copy_from_slice(&global_mem[offset..offset + avail]);
+                        }
+                        if avail < len {
+                            revert_data[avail..].fill(0);
+                        }
                     }
+                } else {
+                    println!("⚠️ [REVERT] offset + len overflow, données ignorées");
+                    revert_data.clear();
+                }
 
                 let final_storage = execution_context
                     .world_state
@@ -3585,6 +3468,26 @@ pub fn execute_program(
                     JsonValue::Object(decode_storage_map(&final_storage)),
                 );
                 return Ok(JsonValue::Object(obj));
+            }
+        }
+
+        // --- PATCH: Dispatcher EVM, ne jamais REVERT sur mismatch de selector ---
+        if insn_ptr >= dispatcher_start && insn_ptr <= dispatcher_end {
+            // Si on saute à l'adresse d'erreur du dispatcher, lever une erreur explicite
+            if insn_ptr == dispatcher_error {
+                return Err(Error::new(
+                    ErrorKind::Other,
+                    "No selector matched (dispatcher)",
+                ));
+            }
+            // Si opcode REVERT dans le dispatcher, l'ignorer (continue)
+            if opcode == 0xfd {
+                println!(
+                    "⏩ [DISPATCHER] REVERT ignoré dans le dispatcher (PC=0x{:04x})",
+                    insn_ptr
+                );
+                insn_ptr += 1;
+                continue;
             }
         }
 

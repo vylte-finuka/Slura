@@ -313,82 +313,6 @@ pub fn extract_runtime_from_creation_bytecode(full: &[u8]) -> Result<Vec<u8>, St
     Ok(runtime)
 }
         
-        /// ✅ NOUVEAU: Rechargement complet au démarrage
-        pub async fn load_all_persisted_state(&self) -> Result<u32, String> {
-            if let Some(storage_manager) = &self.vm.read().await.storage_manager {
-                let mut loaded_count = 0u32;
-                
-                println!("🔄 Rechargement complet de l'état persisté...");
-                
-                // ✅ SCAN SYSTÉMATIQUE avec plusieurs préfixes
-                let prefixes = vec!["account:", "deployed_contract:", "module:", "receipt:"];
-                
-                for prefix in prefixes {
-                    // Scan approximatif (RocksDB n'a pas d'API de scan par préfixe simple)
-                    for i in 0..100000u32 {
-                        let test_keys = vec![
-                            format!("{}0x{:040x}", prefix, i),
-                            format!("{}{}", prefix, i),
-                            format!("{}user_{}", prefix, i),
-                            format!("{}*system*#{}", prefix, i),
-                        ];
-                        
-                        for key in test_keys {
-                            if let Ok(data) = storage_manager.read(&key) {
-                                match prefix {
-                                    "account:" => {
-                                        if let Ok(account_data) = serde_json::from_slice::<serde_json::Value>(&data) {
-                                            if let Some(addr) = account_data.get("address").and_then(|v| v.as_str()) {
-                                                if self.restore_account_from_data(addr, &account_data).await.unwrap_or(false) {
-                                                    loaded_count += 1;
-                                                    println!("✅ Compte rechargé: {}", addr);
-                                                }
-                                            }
-                                        }
-                                    },
-                                    "deployed_contract:" => {
-                                        if let Ok(contract_data) = serde_json::from_slice::<serde_json::Value>(&data) {
-                                            if let Some(addr) = contract_data.get("address").and_then(|v| v.as_str()) {
-                                                if self.restore_contract_from_data(addr, &contract_data).await.unwrap_or(false) {
-                                                    loaded_count += 1;
-                                                    println!("✅ Contrat rechargé: {}", addr);
-                                                }
-                                            }
-                                        }
-                                    },
-                                    "module:" => {
-                                        if let Ok(module_data) = serde_json::from_slice::<serde_json::Value>(&data) {
-                                            if let Some(addr) = module_data.get("address").and_then(|v| v.as_str()) {
-                                                if self.restore_module_from_data(addr, &module_data).await.unwrap_or(false) {
-                                                    loaded_count += 1;
-                                                    println!("✅ Module rechargé: {}", addr);
-                                                }
-                                            }
-                                        }
-                                    },
-                                    "receipt:" => {
-                                        if let Ok(receipt_data) = serde_json::from_slice::<serde_json::Value>(&data) {
-                                            if let Some(tx_hash) = receipt_data.get("transactionHash").and_then(|v| v.as_str()) {
-                                                let mut receipts = self.tx_receipts.write().await;
-                                                receipts.insert(tx_hash.to_string(), receipt_data);
-                                                loaded_count += 1;
-                                            }
-                                        }
-                                    },
-                                    _ => {}
-                                }
-                            }
-                        }
-                    }
-                }
-                
-                println!("📊 Rechargement terminé: {} éléments restaurés", loaded_count);
-                Ok(loaded_count)
-            } else {
-                Err("Storage manager non disponible".to_string())
-            }
-        }
-        
         /// ✅ NOUVEAU: Restauration d'un compte
         async fn restore_account_from_data(&self, address: &str, account_data: &serde_json::Value) -> Result<bool, String> {
             let mut vm = self.vm.write().await;
@@ -3342,11 +3266,6 @@ async fn main() {
         }
     }
 
-    // ✅ NOUVEAU: CHARGEMENT AU DÉMARRAGE
-    println!("🔄 Chargement de l'état persisté...");
-    let loaded_count = engine_platform.load_all_persisted_state().await.unwrap_or(0);
-    println!("📊 {} éléments rechargés depuis RocksDB", loaded_count);
-
     // ✅ NOUVEAU: SAUVEGARDE PÉRIODIQUE (toutes les 60 secondes)  
     let engine_clone_persist = Arc::clone(&engine_platform);
     let persistence_handle = tokio::spawn(async move {
@@ -3525,7 +3444,6 @@ async fn main() {
         
         println!("👥 Total accounts created: {}", user_accounts);
         println!("🏦 System accounts: {} (system + VEZ contract)", accounts.len() - user_accounts);
-        println!("💾 Persistance: {} éléments rechargés au démarrage", loaded_count);
     }
     
     println!("🛑 Press Ctrl+C to stop\n");
@@ -3644,7 +3562,6 @@ async fn main() {
     println!("   • {} comptes sauvegardés", final_accounts_count);
     println!("   • {} modules sauvegardés", final_modules_count);
     println!("   • {} receipts sauvegardés", final_receipts_count);
-    println!("   • Rechargé {} éléments au démarrage", loaded_count);
     
     println!("🛑 Slurachain Network stopped gracefully with full state persistence");
 }
