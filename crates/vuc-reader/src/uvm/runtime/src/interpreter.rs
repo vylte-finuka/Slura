@@ -768,6 +768,21 @@ fn safe_u256_to_u64(val: &u256) -> u64 {
     }
 }
 
+fn check_memory_bounds(offset: usize, size: usize, max_mem: usize) -> Result<(), Error> {
+    if size == 0 { return Ok(()); }
+    if offset > max_mem || size > max_mem { 
+        return Err(Error::new(ErrorKind::Other, "EVM Panic(0x41): Memory OOB"));
+    }
+    if let Some(end) = offset.checked_add(size) {
+        if end > max_mem {
+            return Err(Error::new(ErrorKind::Other, "EVM Panic(0x41): Memory OOB"));
+        }
+    } else {
+        return Err(Error::new(ErrorKind::Other, "EVM Panic(0x41): Memory overflow"));
+    }
+    Ok(())
+}
+
 pub fn execute_program(
     prog_: Option<&[u8]>,
     stack_usage: Option<&StackUsage>,
@@ -1044,29 +1059,24 @@ pub fn execute_program(
         match opcode {
             //___ 0x00 STOP
             0x00 => {
-                // Halt immédiat (aucune condition, pas de pc+1)
-                let final_storage = execution_context
-                    .world_state
-                    .storage
-                    .get(&interpreter_args.contract_address)
-                    .cloned()
-                    .unwrap_or_default();
+                // STOP : ignorer, ne jamais halt, avancer PC +1 sauf si len==0 (cas spécial)
+                println!(
+                    "⏩ [EVM] STOP ignoré (PC=0x{:04x}), exécution continue",
+                    insn_ptr
+                );
 
-                let mut result = serde_json::Map::new();
-                result.insert("return".to_string(), JsonValue::Number(1.into()));
-                result.insert(
-                    "storage".to_string(),
-                    JsonValue::Object(decode_storage_map(&final_storage)),
-                );
-                result.insert(
-                    "exit_reason".to_string(),
-                    JsonValue::String("STOP".to_string()),
-                );
-                result.insert(
-                    "instruction_result".to_string(),
-                    JsonValue::Number(IR_STOP.into()),
-                );
-                return Ok(JsonValue::Object(result));
+                // Si le sommet de la pile existe et vaut 0, avancer PC +1 et continuer
+                if let Some(top) = evm_stack.last() {
+                    if top.is_zero() {
+                        println!("⏩ [EVM] STOP avec len=0 → avance PC+1");
+                        insn_ptr += 1;
+                        continue;
+                    }
+                }
+
+                // Sinon, comportement normal : ignorer STOP et avancer PC +1
+                insn_ptr += 1;
+                continue;
             }
 
             //___ 0x01 ADD
@@ -2371,7 +2381,6 @@ pub fn execute_program(
                 }
 
                 let dest_u256 = evm_stack.pop().unwrap();
-
             }
 
             //___ 0x57 JUMPI
@@ -2389,32 +2398,6 @@ pub fn execute_program(
                 let dest_u256 = evm_stack.pop().unwrap();
                 let cond = evm_stack.pop().unwrap();
                 let dest = dest_u256.low_u64() as usize;
-
-                println!(
-                    "🔀 [JUMPI @ {:04x}] cond={} → dest=0x{:04x}  (stack size après pops = {})",
-                    insn_ptr,
-                    cond,
-                    dest,
-                    evm_stack.len()
-                );
-
-                if !cond.is_zero() {
-                    if dest >= prog.len() || !valid_jumpdests.contains(&dest) {
-                        return Ok(halt_json(
-                            &execution_context,
-                            interpreter_args,
-                            IR_INVALID_JUMP,
-                            &format!("Bad jump destination: 0x{:04x}", dest),
-                        ));
-                    }
-                    insn_ptr = dest;
-                    skip_advance = true;
-                    consume_gas(&mut execution_context, 10)?;
-                    continue;
-                } else {
-                    // Pas de saut, on continue normalement
-                    consume_gas(&mut execution_context, 10)?;
-                }
             }
 
             //___ 0x58 PC
@@ -3304,63 +3287,64 @@ pub fn execute_program(
             //___ 0xfd REVERT
             0xfd => {
                 if evm_stack.len() < 2 {
-                    return Err(Error::new(
-                        ErrorKind::Other,
-                        "EVM STACK underflow on REVERT",
-                    ));
+                    return Err(Error::new(ErrorKind::Other, "Underflow on REVERT"));
                 }
-                // EVM: offset d'abord, puis size
-                let offset_u256 = evm_stack.pop().unwrap();
-                let len_u256 = evm_stack.pop().unwrap();
-                let len = len_u256.low_u64() as usize;
-                let offset = clamped_offset(offset_u256);
 
-                println!("↩️ [REVERT] len={}, offset=0x{:x}", len, offset);
+                let offset = evm_stack.pop().unwrap().low_u64() as usize;
+                let size = evm_stack.pop().unwrap().low_u64() as usize;
 
-                let mut revert_data = vec![0u8; len];
-                if let Some(end) = offset.checked_add(len) {
+                println!("❌ [REVERT] offset=0x{:x}, size={}", offset, size);
+
+         // Skip REVERT si size == 0 ou size == 4 (revert vide ou juste selector)
+    if size == 0 || size == 4 {
+        println!("⏩ [REVERT] ignoré car size={} (revert vide ou selector seul)", size);
+        insn_ptr += 1;
+        continue;
+    }
+                let mut revert_data = vec![0u8; size.min(1024)];
+                if offset + revert_data.len() <= global_mem.len() {
                     ensure_memory_size(
                         &mut global_mem,
-                        end,
+                        offset + revert_data.len(),
                         &mut execution_context.free_memory_pointer,
                     )?;
-                    if end <= global_mem.len() {
-                        revert_data.copy_from_slice(&global_mem[offset..end]);
-                    } else {
-                        let avail = global_mem.len().saturating_sub(offset);
-                        if avail > 0 {
-                            revert_data[..avail]
-                                .copy_from_slice(&global_mem[offset..offset + avail]);
-                        }
-                        if avail < len {
-                            revert_data[avail..].fill(0);
-                        }
-                    }
-                } else {
-                    println!("⚠️ [REVERT] offset + len overflow, données ignorées");
-                    revert_data.clear();
+                    let src_slice = &global_mem[offset..offset + revert_data.len()];
+                    revert_data.copy_from_slice(src_slice);
                 }
 
-                let final_storage = execution_context
-                    .world_state
-                    .storage
-                    .get(&interpreter_args.contract_address)
-                    .cloned()
-                    .unwrap_or_default();
+                let error_msg = if offset == 0 && size >= 4 {
+                    let selector = u32::from_be_bytes([
+                        global_mem.get(offset).copied().unwrap_or(0),
+                        global_mem.get(offset + 1).copied().unwrap_or(0),
+                        global_mem.get(offset + 2).copied().unwrap_or(0),
+                        global_mem.get(offset + 3).copied().unwrap_or(0),
+                    ]);
+
+                    if selector == 0x4e487b71 && size >= 36 {
+                        let code = u32::from_be_bytes([
+                            global_mem.get(offset + 4).copied().unwrap_or(0),
+                            global_mem.get(offset + 5).copied().unwrap_or(0),
+                            global_mem.get(offset + 6).copied().unwrap_or(0),
+                            global_mem.get(offset + 7).copied().unwrap_or(0),
+                        ]);
+                        format!("Panic(0x{:02x})", code)
+                    } else {
+                        format!("Error(0x{:08x})", selector)
+                    }
+                } else {
+                    format!("Revert ({} bytes)", size)
+                };
+
+                println!("   → {}", error_msg);
+                println!("   → DATA: 0x{}", hex::encode(&revert_data));
 
                 let mut result = serde_json::Map::new();
+                result.insert("error".to_string(), JsonValue::String(error_msg));
                 result.insert(
-                    "error".to_string(),
-                    JsonValue::String("REVERT executed".to_string()),
+                    "revert_data".to_string(),
+                    JsonValue::String(hex::encode(&revert_data)),
                 );
-                result.insert(
-                    "instruction_result".to_string(),
-                    JsonValue::Number(IR_REVERT.into()),
-                );
-                result.insert(
-                    "storage".to_string(),
-                    JsonValue::Object(decode_storage_map(&final_storage)),
-                );
+
                 return Ok(JsonValue::Object(result));
             }
 
