@@ -322,6 +322,17 @@ fn scan_valid_jumpdests(prog: &[u8]) -> HashSet<usize> {
     valid_jumpdests
 }
 
+/// ✅ Helper: vérifie qu'une destination de saut est valide (dans le code, opcode JUMPDEST, et pré-scannée)
+fn is_valid_jumpdest(dest: usize, prog: &[u8], valid_jumpdests: &HashSet<usize>) -> bool {
+    if dest >= prog.len() {
+        return false;
+    }
+    if prog[dest] != 0x5b {
+        return false;
+    }
+    valid_jumpdests.contains(&dest)
+}
+
 fn clamped_offset(offset_u256: u256) -> usize {
     const MAX_SAFE: u64 = 1 << 30; // 1 GiB
     let raw = offset_u256.low_u64();
@@ -2390,19 +2401,29 @@ pub fn execute_program(
 
             //___ 0x57 JUMPI
             0x57 => {
-                // EVM: JUMPI prend dest puis condition (saut si cond != 0)
+                // JUMPI – plus de récupération forcée
                 if evm_stack.len() < 2 {
-                    return Ok(halt_json(
-                        &execution_context,
-                        interpreter_args,
-                        IR_STACK_UNDERFLOW,
-                        "EVM STACK underflow on JUMPI",
-                    ));
+                    return Err(Error::new(ErrorKind::Other, "Underflow on JUMPI"));
                 }
-
-                let dest_u256 = evm_stack.pop().unwrap();
+                let dest = evm_stack.pop().unwrap().low_u64() as usize;
                 let cond = evm_stack.pop().unwrap();
-                let dest = dest_u256.low_u64() as usize;
+
+                if cond != u256::zero() {
+                    if is_valid_jumpdest(dest, &prog, &valid_jumpdests) {
+                        insn_ptr = dest;
+                        skip_advance = true;
+                        println!("✅ [JUMPI] condition vraie → 0x{:04x}", dest);
+                    } else {
+                        println!("❌ [INVALID JUMPI] dest 0x{:04x} → revert implicite", dest);
+                        return Err(Error::new(
+                            ErrorKind::Other,
+                            format!("Invalid jumpi destination 0x{:04x}", dest),
+                        ));
+                    }
+                } else {
+                    println!("⏩ [JUMPI ignoré] condition fausse");
+                }
+                consume_gas(&mut execution_context, 10)?;
             }
 
             //___ 0x58 PC
@@ -2816,87 +2837,183 @@ pub fn execute_program(
                 consume_gas_amount(&mut execution_context, 700)?;
             }
 
-            //___ 0xf3 RETURN (EVM: pop offset puis size)
+            //___ 0xf3 RETURN (version générique & fiable – sans devinette sur la longueur)
             0xf3 => {
                 if evm_stack.len() < 2 {
                     return Err(Error::new(ErrorKind::Other, "STACK underflow on RETURN"));
                 }
 
-                let offset = evm_stack.pop().unwrap().low_u64() as usize;
-                let len = evm_stack.pop().unwrap().low_u64() as usize;
+                let size_u256 = evm_stack.pop().unwrap();
+                let offset_u256 = evm_stack.pop().unwrap();
 
-                println!("📤 [RETURN] len={}, offset=0x{:x}", len, offset);
+                let size = size_u256.low_u64() as usize;
+                let offset = clamped_offset(offset_u256);
 
-                // ✅ DÉTECTE RETOUR DE FONCTION (32 bytes depuis mémoire)
-                if len == 32 && offset < global_mem.len() {
+                println!("📤 [RETURN] len = {}, offset = 0x{:x}", size, offset);
+
+                // ─── CAS CLASSIQUES ERC20 / metadata ─────────────────────────────────────
+                if size >= 32 && offset <= global_mem.len().saturating_sub(32) {
                     ensure_memory_size(
                         &mut global_mem,
                         offset + 32,
                         &mut execution_context.free_memory_pointer,
                     )?;
-                    let mut return_bytes = [0u8; 32];
-                    if offset + 32 <= global_mem.len() {
-                        return_bytes.copy_from_slice(&global_mem[offset..offset + 32]);
+
+                    let mut data32 = [0u8; 32];
+                    let copy_len = size.min(32);
+                    data32[..copy_len].copy_from_slice(&global_mem[offset..offset + copy_len]);
+
+                    let value = u256::from_big_endian(&data32);
+
+                    // 1. Décimals : petit entier ≤ 255
+                    if size == 32 && value <= u256::from(255u64) {
+                        let mut result = serde_json::Map::new();
+                        result.insert(
+                            "return".to_string(),
+                            JsonValue::Number(value.low_u64().into()),
+                        );
+                        result.insert(
+                            "likely_type".to_string(),
+                            JsonValue::String("decimals (uint8)".to_string()),
+                        );
+
+                        let storage_map = decode_storage_map(
+                            execution_context
+                                .world_state
+                                .storage
+                                .get(&interpreter_args.contract_address)
+                                .unwrap_or(&HashMap::new()),
+                        );
+                        result.insert("storage".to_string(), JsonValue::Object(storage_map));
+
+                        println!(
+                            "🎯 [RETURN] Petits uint → probablement decimals = {}",
+                            value
+                        );
+                        return Ok(JsonValue::Object(result));
                     }
 
-                    let return_value = u256::from_big_endian(&return_bytes);
-                    let return_u64 = return_value.low_u64();
+                    // 2. String ABI-encodée (classique pour name / symbol / currency)
+                    if size >= 64 {
+                        let str_offset_bytes = &global_mem[offset..offset + 32];
+                        let str_offset = u256::from_big_endian(str_offset_bytes);
 
-                    // ✅ IDENTIFIE LES VALEURS TYPIQUES DE FONCTIONS ERC20
-                    let function_result = match return_u64 {
-                        value if value > 0 && value < 1_000_000 => JsonValue::Number(value.into()),
-                        _ => JsonValue::String(format!("0x{}", hex::encode(&return_bytes))),
-                    };
+                        if str_offset == u256::from(32u64) {
+                            // offset standard = 0x20
+                            let str_len_bytes = &global_mem[offset + 32..offset + 64];
+                            let str_len = u256::from_big_endian(str_len_bytes).low_u64() as usize;
 
-                    let final_storage = execution_context
+                            if str_len > 0 && offset + 64 + str_len <= global_mem.len() {
+                                let str_data = &global_mem[offset + 64..offset + 64 + str_len];
+
+                                if let Ok(s) = std::str::from_utf8(str_data) {
+                                    let cleaned = s.trim_end_matches('\0').to_string();
+
+                                    if !cleaned.is_empty() {
+                                        let mut result = serde_json::Map::new();
+                                        result.insert(
+                                            "return".to_string(),
+                                            JsonValue::String(cleaned.clone()),
+                                        );
+                                        result.insert(
+                                            "likely_type".to_string(),
+                                            JsonValue::String(
+                                                if cleaned.len() <= 6
+                                                    && cleaned.chars().all(|c| {
+                                                        c.is_ascii_alphanumeric() || c == '-'
+                                                    })
+                                                {
+                                                    "symbol or currency (short string)".to_string()
+                                                } else {
+                                                    "name or description (string)".to_string()
+                                                },
+                                            ),
+                                        );
+
+                                        let storage_map = decode_storage_map(
+                                            execution_context
+                                                .world_state
+                                                .storage
+                                                .get(&interpreter_args.contract_address)
+                                                .unwrap_or(&HashMap::new()),
+                                        );
+                                        result.insert(
+                                            "storage".to_string(),
+                                            JsonValue::Object(storage_map),
+                                        );
+
+                                        println!(
+                                            "🎯 [RETURN STRING] → \"{}\" ({} bytes nettoyés)",
+                                            cleaned,
+                                            cleaned.len()
+                                        );
+                                        return Ok(JsonValue::Object(result));
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // 3. Autres uint256 classiques (balanceOf, totalSupply, etc.)
+                    if size == 32 {
+                        let mut result = serde_json::Map::new();
+                        result.insert(
+                            "return".to_string(),
+                            JsonValue::String(format!("{}", value)),
+                        );
+                        result.insert(
+                            "likely_type".to_string(),
+                            JsonValue::String("uint256".to_string()),
+                        );
+
+                        let storage_map = decode_storage_map(
+                            execution_context
+                                .world_state
+                                .storage
+                                .get(&interpreter_args.contract_address)
+                                .unwrap_or(&HashMap::new()),
+                        );
+                        result.insert("storage".to_string(), JsonValue::Object(storage_map));
+
+                        println!("🎯 [RETURN] Gros uint256 → {}", value);
+                        return Ok(JsonValue::Object(result));
+                    }
+                }
+
+                // ─── FALLBACK GÉNÉRIQUE ──────────────────────────────────────────────────
+                let mut ret_data = vec![0u8; size.min(8192)]; // limite raisonnable
+                if size > 0 {
+                    let copy_len = ret_data.len();
+                    if let Some(end) = offset.checked_add(copy_len) {
+                        if end <= global_mem.len() {
+                            ensure_memory_size(
+                                &mut global_mem,
+                                end,
+                                &mut execution_context.free_memory_pointer,
+                            )?;
+                            let src = &global_mem[offset..end];
+                            ret_data[..copy_len].copy_from_slice(src);
+                        }
+                    } else {
+                        println!("⚠️ [RETURN fallback] offset + len overflow, copie ignorée");
+                    }
+                }
+
+                let formatted = decode_return_data_generic(&ret_data, size);
+
+                let mut result = serde_json::Map::new();
+                result.insert("return".to_string(), formatted.clone());
+
+                let storage_map = decode_storage_map(
+                    execution_context
                         .world_state
                         .storage
                         .get(&interpreter_args.contract_address)
-                        .cloned()
-                        .unwrap_or_default();
-
-                    let mut result = serde_json::Map::new();
-                    result.insert("return".to_string(), function_result);
-                    result.insert(
-                        "storage".to_string(),
-                        JsonValue::Object(decode_storage_map(&final_storage)),
-                    );
-
-                    println!(
-                        "✅ [FUNCTION RETURN] Valeur détectée: {:?}",
-                        result.get("return")
-                    );
-                    return Ok(JsonValue::Object(result));
-                }
-
-                // ✅ CAS GÉNÉRAL (déploiement, etc.)
-                let mut ret_data = vec![0u8; len];
-                if len > 0 && offset + len <= global_mem.len() {
-                    ensure_memory_size(
-                        &mut global_mem,
-                        offset + len,
-                        &mut execution_context.free_memory_pointer,
-                    )?;
-                    ret_data.copy_from_slice(&global_mem[offset..offset + len]);
-                }
-
-                let formatted_result = decode_return_data_generic(&ret_data, len);
-
-                let final_storage = execution_context
-                    .world_state
-                    .storage
-                    .get(&interpreter_args.contract_address)
-                    .cloned()
-                    .unwrap_or_default();
-
-                let mut result = serde_json::Map::new();
-                result.insert("return".to_string(), formatted_result);
-                result.insert(
-                    "storage".to_string(),
-                    JsonValue::Object(decode_storage_map(&final_storage)),
+                        .unwrap_or(&HashMap::new()),
                 );
+                result.insert("storage".to_string(), JsonValue::Object(storage_map));
 
-                println!("✅ [RETURN] Données: {:?}", result.get("return"));
+                println!("📤 [RETURN fallback] {} bytes → {:?}", size, formatted);
                 return Ok(JsonValue::Object(result));
             }
 
@@ -3227,15 +3344,6 @@ pub fn execute_program(
 
                 println!("❌ [REVERT] offset=0x{:x}, size={}", offset, size);
 
-                // Skip REVERT si size == 0 ou size == 4 (revert vide ou juste selector)
-                if size == 0 || size == 4 {
-                    println!(
-                        "⏩ [REVERT] ignoré car size={} (revert vide ou selector seul)",
-                        size
-                    );
-                    insn_ptr += 1;
-                    continue;
-                }
                 let mut revert_data = vec![0u8; size.min(1024)];
                 if offset + revert_data.len() <= global_mem.len() {
                     ensure_memory_size(
