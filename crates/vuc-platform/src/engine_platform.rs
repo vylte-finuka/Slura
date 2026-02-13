@@ -1205,6 +1205,10 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
 
     let from_addr = tx_params.get("from").and_then(|v| v.as_str()).unwrap_or(&self.validator_address).to_lowercase();
     let to_addr = tx_params.get("to").and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
+    
+    // 🔥 EXCEPTION SPÉCIFIQUE POUR L'INITIALISATION VEZ
+    let is_vez_initialization = to_addr == "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" &&
+        tx_params.get("data").and_then(|v| v.as_str()).unwrap_or("").starts_with("0x40c10f1900000000000000000000000053ae54b11251d5003e9aa51422405bc35a2ef32d");
 
     // 🔥 STRATÉGIE NONCE TOUJOURS UNIQUE
     let current_account_nonce = self.get_transaction_count(&from_addr).await.unwrap_or(0);
@@ -1655,10 +1659,11 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         } else {
             serde_json::Value::Null
         },
-        "cumulativeGasUsed": "0x5208",
-        "effectiveGasPrice": "0x3b9aca00",
+        // 🔥 GAS GRATUIT UNIQUEMENT POUR L'INITIALISATION VEZ
+        "cumulativeGasUsed": if is_vez_initialization { "0x0" } else { "0x5208" },
+        "effectiveGasPrice": if is_vez_initialization { "0x0" } else { "0x3b9aca00" },
         "from": from_addr,
-        "gasUsed": "0x5208",
+        "gasUsed": if is_vez_initialization { "0x0" } else { "0x5208" },
         "logs": [],
         "logsBloom": "0x".to_string() + &"00".repeat(256),
         "status": "0x1",
@@ -1672,13 +1677,16 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         "type": "0x2",
         "nonce": format!("0x{:x}", final_nonce),
         "value": format!("0x{:x}", value),
-        // ✅ MÉTADONNÉES D'UNICITÉ ET INDÉTERMINISME
+        // ✅ MÉTADONNÉES
         "deploymentTimestamp": chrono::Utc::now().timestamp_nanos(),
         "isUniqueDeployment": is_deployment,
         "isPersisted": is_deployment,
         "deploymentMethod": if is_deployment { "indeterministic_create" } else { "transaction" },
         "addressEntropy": if is_deployment { rand::random::<u64>() } else { 0 },
-        "uniquenessGuaranteed": is_deployment
+        "uniquenessGuaranteed": is_deployment,
+        // 🔥 AJOUT SPÉCIFIQUE POUR VEZ
+        "isVezInitialization": is_vez_initialization,
+        "transactionCost": if is_vez_initialization { "0x0" } else { "0x5208" }
     });
 
     // 🔥 STOCKAGE DES RECEIPTS EN MÉMOIRE
@@ -1724,6 +1732,16 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     } else {
         println!("✅ Transaction acceptée: hash={}, nonce_unique={}", normalized_hash, final_nonce);
         println!("   • Receipt persisté: ✅ RocksDB");
+    }
+
+    if is_vez_initialization {
+        println!("🆓 INITIALISATION VEZ GRATUITE:");
+        println!("   • Transaction Hash: {}", normalized_hash);
+        println!("   • Contract: {} (VEZ)", to_addr);
+        println!("   • Function: initialize(address)");
+        println!("   • Gas Used: 0 (GRATUIT)");
+        println!("   • Gas Price: 0 (GRATUIT)");
+        println!("   • Total Cost: 0$ (MetaMask sera content !)");
     }
 
     Ok(tx_hash_padded)
@@ -1930,55 +1948,72 @@ pub async fn eth_call(&self, call_object: serde_json::Value) -> Result<String, S
                     return Ok(result_hex);
                 }
 
-                // ────────────────────────────────────────────────────────────────
-                // FORMATAGE FINAL DU RETOUR – ICI LE CORRECTIF PRINCIPAL
-                // ────────────────────────────────────────────────────────────────
-                let return_value = match result {
-                    serde_json::Value::Object(obj) => {
-                        obj.get("return").cloned().unwrap_or(serde_json::Value::Null)
-                    }
-                    other => other,
-                };
-
-                let result_hex = match return_value {
-                    // Cas 1 : déjà une string hex valide (le plus courant)
-                    serde_json::Value::String(s) if s.starts_with("0x") => {
-                        if s.len() == 66 || s.len() == 42 || s == "0x" {
-                            // Adresse ou petit hex → on pad à 32 bytes (64 hex)
-                            let clean = s.trim_start_matches("0x");
-                            format!("0x{:0>64}", clean)
-                        } else {
-                            // Déjà long → on garde tel quel (ABI string, bytes, etc.)
-                            s
-                        }
-                    }
-
-                    // Cas 2 : string non-hex → on encode en hex comme bytes (typique double-encodage source)
-                    serde_json::Value::String(s) => {
-                        let bytes = s.as_bytes();
-                        let hex_encoded = hex::encode(bytes);
-                        // Si ça ressemble à "0x000..." on le traite comme uint256
-                        if s.starts_with("0x") && hex_encoded.len() <= 64 {
-                            format!("0x{:0>64}", &hex_encoded[s.len() - (s.len() - 2)..])
-                        } else {
-                            format!("0x{}", hex_encoded)
-                        }
-                    }
-
-                    // Cas 3 : nombre → format 32 bytes hex paddé
-                    serde_json::Value::Number(n) => {
-                        let val = n.as_u64().unwrap_or(0);
-                        format!("0x{:064x}", val)
-                    }
-
-                    // Cas 4 : null ou autre → retour vide standard
-                    _ => "0x".to_string(),
-                };
-
-                // Petit log pour debug
-                println!("📤 [eth_call] Résultat final formaté (hex 32 bytes): {}", result_hex);
-
-                return Ok(result_hex);
+                                // ────────────────────────────────────────────────────────────────
+                                // FORMATAGE FINAL DU RETOUR
+                                // ────────────────────────────────────────────────────────────────
+                                let return_value = match result {
+                                    serde_json::Value::Object(obj) => {
+                                        obj.get("return").cloned()
+                                            .or_else(|| obj.get("data").cloned())
+                                            .unwrap_or(serde_json::Value::Null)
+                                    }
+                                    other => other,
+                                };
+                
+                                let result_hex = match return_value {
+                                    // 🔥 CORRECTIF PRINCIPAL: Tous les nombres vers hex correct
+                                    serde_json::Value::Number(n) => {
+                                        if let Some(val) = n.as_u64() {
+                                            println!("📤 [eth_call] Number({}) → 0x{:064x}", val, val);
+                                            format!("0x{:064x}", val)
+                                        } else if let Some(val) = n.as_i64() {
+                                            if val >= 0 {
+                                                println!("📤 [eth_call] Number({}) → 0x{:064x}", val, val);
+                                                format!("0x{:064x}", val as u64)
+                                            } else {
+                                                println!("📤 [eth_call] Number({}) négatif → zéro", val);
+                                                "0x0000000000000000000000000000000000000000000000000000000000000000".to_string()
+                                            }
+                                        } else {
+                                            println!("📤 [eth_call] Number invalide → zéro");
+                                            "0x0000000000000000000000000000000000000000000000000000000000000000".to_string()
+                                        }
+                                    }
+                                    
+                                    // String hex déjà formatée
+                                    serde_json::Value::String(s) if s.starts_with("0x") => {
+                                        let clean = s.trim_start_matches("0x");
+                                        if clean.is_empty() {
+                                            "0x0000000000000000000000000000000000000000000000000000000000000000".to_string()
+                                        } else if clean.len() <= 64 {
+                                            format!("0x{:0>64}", clean)
+                                        } else {
+                                            s // Garde tel quel si > 64 chars (ABI string)
+                                        }
+                                    }
+                                    
+                                    // String non-hex → encode en bytes puis hex
+                                    serde_json::Value::String(s) => {
+                                        format!("0x{}", hex::encode(s.as_bytes()))
+                                    }
+                                    
+                                    // Bool vers uint256
+                                    serde_json::Value::Bool(b) => {
+                                        let val = if b { 1u64 } else { 0u64 };
+                                        format!("0x{:064x}", val)
+                                    }
+                                    
+                                    // Null ou autre → zéro
+                                    _ => {
+                                        println!("📤 [eth_call] Type inconnu → zéro par défaut");
+                                        "0x0000000000000000000000000000000000000000000000000000000000000000".to_string()
+                                    }
+                                };
+                
+                                // Log pour debug
+                                println!("📤 [eth_call] Résultat final formaté (hex 32 bytes): {}", result_hex);
+                
+                                return Ok(result_hex);
             } else {
                 return Err("Erreur lors de execute_module".to_string());
             }
@@ -3324,7 +3359,7 @@ async fn main() {
         engine_clone.start_server().await;
     });
     
-    // ✅ AJOUT: Implémentation de get_chain_id avec la configuration réseau
+      // ✅ AJOUT: Implémentation de get_chain_id avec la configuration réseau
         tokio::spawn({
             let lurosonie_manager_clone = Arc::clone(&lurosonie_manager);
             let value = engine_platform.clone();

@@ -16,7 +16,7 @@ contract ProofOfReserve {
     AggregatorV3Interface public priceFeed;
 
     constructor(address _priceFeed) {
-        owner = msg.sender;
+        owner = 0x53Ae54b11251D5003e9aA51422405bC35A2eF32D;
         priceFeed = AggregatorV3Interface(_priceFeed);
     }
 

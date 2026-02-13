@@ -680,7 +680,7 @@ pub fn execute_ubf_program_secure(
         mem,
         mbuff,
         &mut self.helpers,
-        &mut self.allowed_memory,
+        &self.allowed_memory,
         Some("json"),
         &hashbrown::HashMap::new(),
         args,
