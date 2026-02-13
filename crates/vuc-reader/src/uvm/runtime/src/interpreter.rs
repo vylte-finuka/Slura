@@ -348,18 +348,6 @@ fn ensure_contract_owner_initialized(
     contract_address: &str,
     caller: &str,
 ) {
-    // ✅ CORRECTION: Pour VEZ, force toujours l'appelant comme propriétaire
-    if contract_address.to_lowercase() == "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" {
-        let owner_slot = "9016d09d72d40fdae2fd8ceac6b6234c7706214fd39c1cd1e609a0528c199300"; // Slot canonique owner
-        let caller_u256 = encode_address_to_u256(caller);
-        let mut owner_bytes = vec![0u8; 32];
-        caller_u256.to_big_endian(&mut owner_bytes);
-        set_storage(world_state, contract_address, owner_slot, owner_bytes);
-        
-        println!("🔐 [VEZ OWNER] Forcé le propriétaire VEZ: {} → slot {}", caller, owner_slot);
-        return;
-    }
-
     // Check if contract already has an owner in storage
     let owner_slot = "0000000000000000000000000000000000000000000000000000000000000000";
     let current_owner = get_storage(world_state, contract_address, owner_slot);
@@ -636,7 +624,7 @@ fn check_mem(
     len: usize,
     access_type: &str,
     insn_ptr: usize,
-    calldata: &[u8], // ✅ CHANGEMENT : calldata au lieu de mbuff
+    mbuff: &[u8],
     mem: &[u8],
     stack: &[u8],
     allowed_memory: &HashSet<Range<u64>>,
@@ -653,8 +641,8 @@ fn check_mem(
     let addr_u64 = addr.low_u64();
     if let Some(addr_end) = addr_u64.checked_add(len as u64) {
         let offset = addr_u64 as usize;
-        // ✅ calldata dynamique first (offset semantics)
-        if offset + len <= calldata.len() {
+        // calldata first (offset semantics)
+        if offset + len <= mbuff.len() {
             return Ok(());
         }
         // mem (stack/memory) next
@@ -669,15 +657,15 @@ fn check_mem(
         if allowed_memory.iter().any(|range| range.contains(&addr_u64)) {
             return Ok(());
         }
-        // ✅ PATCH: autorise lecture limitée si calldata vide (EVM-style permissif pour reads courtes)
-        if calldata.len() == 0 && addr_u64 < 32 && addr_end <= 32 {
+        // PATCH: autorise lecture limitée si calldata vide (EVM-style permissif pour reads courtes)
+        if mbuff.len() == 0 && addr_u64 < 32 && addr_end <= 32 {
             return Ok(());
         }
     }
     Err(Error::new(ErrorKind::Other, format!(
-        "Error: out of bounds memory {} (insn #{:?}), addr {:#x}, size {:?}\ncalldata: {:#x}/{:#x}, mem: {:#x}/{:#x}, stack: {:#x}/{:#x}",
+        "Error: out of bounds memory {} (insn #{:?}), addr {:#x}, size {:?}\nmbuff: {:#x}/{:#x}, mem: {:#x}/{:#x}, stack: {:#x}/{:#x}",
         access_type, insn_ptr, addr, len,
-        calldata.as_ptr() as u64, calldata.len(), // ✅ calldata au lieu de mbuff
+        mbuff.as_ptr() as u64, mbuff.len(),
         mem.as_ptr() as u64, mem.len(),
         stack.as_ptr() as u64, stack.len()
     )))
@@ -936,12 +924,12 @@ pub fn execute_program(
     prog_: Option<&[u8]>,
     stack_usage: Option<&StackUsage>,
     mem: &[u8],
-    mbuff: &[u8], // ✅ Garde pour compatibilité mais ne l'utilise plus
+    mbuff: &[u8],
     helpers: &mut HashMap<u32, ebpf::Helper>,
     allowed_memory: &HashSet<Range<u64>>,
     ret_type: Option<&str>,
     exports: &HashMap<u32, usize>,
-    interpreter_args: &InterpreterArgs, // ✅ CLEF : Utilise interpreter_args.state_data
+    interpreter_args: &InterpreterArgs,
     initial_storage: Option<HashMap<String, HashMap<String, Vec<u8>>>>,
 ) -> Result<serde_json::Value, Error> {
     const U32MAX: u256 = u256([u32::MAX as u64, 0, 0, 0]);
@@ -1168,6 +1156,7 @@ pub fn execute_program(
 
     while bytecode_pc < prog.len() && instruction_count < MAX_INSTRUCTIONS {
         let opcode = prog[bytecode_pc];
+
         let mut advance = 1;
         let mut skip_advance = false;
 
@@ -1669,7 +1658,7 @@ pub fn execute_program(
                 consume_gas_amount(&mut execution_context, 2)?;
             }
 
-            //___ 0x35 CALLDATALOAD - ✅ CORRECTION : Utilise interpreter_args.state_data
+            //___ 0x35 CALLDATALOAD
             0x35 => {
                 if evm_stack.is_empty() {
                     return Ok(halt_json_ebpf("Stack underflow on CALLDATALOAD"));
@@ -1678,7 +1667,7 @@ pub fn execute_program(
                 let offset_usize = as_usize_or_fail(offset);
 
                 let mut data = [0u8; 32];
-                let calldata = &interpreter_args.state_data; // ✅ DYNAMIQUE depuis slurachain_vm
+                let calldata = &interpreter_args.state_data;
 
                 for i in 0..32 {
                     if offset_usize + i < calldata.len() {
@@ -1692,15 +1681,15 @@ pub fn execute_program(
                 consume_gas_amount(&mut execution_context, 3)?;
             }
 
-            //___ 0x36 CALLDATASIZE - ✅ CORRECTION : Utilise interpreter_args.state_data
+            //___ 0x36 CALLDATASIZE
             0x36 => {
-                let size = u256::from(interpreter_args.state_data.len()); // ✅ DYNAMIQUE
+                let size = u256::from(interpreter_args.state_data.len());
                 evm_stack.push(size);
                 println!("📏 [CALLDATASIZE] {}", size);
                 consume_gas_amount(&mut execution_context, 2)?;
             }
 
-            //___ 0x37 CALLDATACOPY - ✅ CORRECTION : Utilise interpreter_args.state_data
+            //___ 0x37 CALLDATACOPY
             0x37 => {
                 if evm_stack.len() < 3 {
                     return Ok(halt_json_ebpf("Stack underflow on CALLDATACOPY"));
@@ -1717,7 +1706,7 @@ pub fn execute_program(
                     return Ok(halt_json_ebpf("Memory resize failed on CALLDATACOPY"));
                 }
 
-                let calldata = &interpreter_args.state_data; // ✅ DYNAMIQUE
+                let calldata = &interpreter_args.state_data;
                 for i in 0..size_usize {
                     if dest_offset_usize + i < global_mem.len() {
                         if offset_usize + i < calldata.len() {
