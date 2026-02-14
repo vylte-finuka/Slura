@@ -1,4 +1,4 @@
-use primitive_types::U256;
+use ethers::types::U256;
 use tokio::sync::{Mutex, mpsc, broadcast}; // Ajoute broadcast
 use rand::Rng;
 
@@ -516,7 +516,7 @@ pub async fn get_account_balance(&self, address: &str) -> Result<U256, String> {
         Ok(res) => res,
         Err(e) => {
             println!("⚠️ eth_call balanceOf a échoué : {}", e);
-            return Ok(U256::zero()); // ou Err selon ta politique
+            return Ok(ethers::types::U256::zero()); // ou Err selon ta politique
         }
     };
 
@@ -3358,74 +3358,86 @@ async fn main() {
     let server_handle = tokio::spawn(async move {
         engine_clone.start_server().await;
     });
+        
+    // ✅ AJOUT: Implémentation de get_chain_id avec la configuration réseau
+            tokio::spawn({
+        let lurosonie_manager_clone = Arc::clone(&lurosonie_manager);
+        let value = engine_platform.clone();
+        let validator_address_generated = validator_address_generated.clone();
+        async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                let block_number = lurosonie_manager_clone.get_block_height().await;
+                if block_number == 1 {
+                    println!("🪙 Block #1 produit — déploiement du contrat VEZ...");
     
-      // ✅ AJOUT: Implémentation de get_chain_id avec la configuration réseau
-        tokio::spawn({
-    let lurosonie_manager_clone = Arc::clone(&lurosonie_manager);
-    let value = engine_platform.clone();
-    let validator_address_generated = validator_address_generated.clone();
-    async move {
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            let block_number = lurosonie_manager_clone.get_block_height().await;
-            if block_number == 1 {
-                println!("🪙 Block #1 produit — déploiement du contrat VEZ...");
-
-                // 1) Déploiement VEZ
-                let vez_target_addr = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_string();
-                let vez_bytecode_hex = include_str!("../../../vez_bytecode.hex").trim();
-
-                let deploy_vez_tx = serde_json::json!({
-                    "from": validator_address_generated,
-                    "data": format!("0x{}", vez_bytecode_hex),
-                    "value": "0x0",
-                    "create2": true,
-                    "target_address": vez_target_addr,
-                });
-                let vez_tx_hash = value.send_transaction(deploy_vez_tx).await.unwrap();
-                println!("✅ VEZ déployé à {} (tx: {})", vez_target_addr, vez_tx_hash);
-
-                // 2) Mint correct : 888_000_000 VEZ vers owner
-                let owner_address = "0x53ae54b11251d5003e9aa51422405bc35a2ef32d".to_string();
-                let amount = U256::from(888_000_000u64) * U256::from(10u64.pow(18));
-
-                // Construction calldata propre mint(address,uint256)
-                let mut mint_calldata = vec![0x40, 0xc1, 0x0f, 0x19]; // selector
-                let to_bytes = hex::decode(owner_address.trim_start_matches("0x")).unwrap();
-                let mut padded_to = vec![0u8; 32];
-                padded_to[12..].copy_from_slice(&to_bytes);
-                mint_calldata.extend_from_slice(&padded_to);
-
-                let mut amount_bytes = [0u8; 32];
-                amount.to_big_endian(&mut amount_bytes);
-                mint_calldata.extend_from_slice(&amount_bytes);
-
-                let mint_tx = serde_json::json!({
-                    "to": vez_target_addr,
-                    "from": validator_address_generated.to_lowercase(),
-                    "gas": "0x4c4b40",
-                    "value": "0x0",
-                    "data": format!("0x{}", hex::encode(&mint_calldata))
-                });
-
-                let mint_hash = value.send_transaction(mint_tx).await.unwrap();
-                println!("🪙 Minté 888M VEZ vers {} ! (tx: {})", owner_address, mint_hash);
-
-                break;
+                    // 1) Déploiement VEZ
+                    let vez_target_addr = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_string();
+                    let vez_bytecode_hex = include_str!("../../../vez_bytecode.hex").trim();
+    
+                    let deploy_vez_tx = serde_json::json!({
+                        "from": validator_address_generated,
+                        "data": format!("0x{}", vez_bytecode_hex),
+                        "value": "0x0",
+                        "create2": true,
+                        "target_address": vez_target_addr,
+                    });
+                    let vez_tx_hash = value.send_transaction(deploy_vez_tx).await.unwrap();
+                    println!("✅ VEZ déployé à {} (tx: {})", vez_target_addr, vez_tx_hash);
+    
+                    // 2) 🔥 CORRECTION CALLDATA mint(address,uint256)
+                    let owner_address = "0x53ae54b11251d5003e9aa51422405bc35a2ef32d".to_string();
+                    let amount: ethers::types::U256 = ethers::types::U256::from(888_000_000u64) * ethers::types::U256::from(10u64.pow(18));
+    
+                    // ✅ Construction calldata PROPRE selon ABI standard
+                    let mut mint_calldata = Vec::new();
+                    
+                    // 1️⃣ Selector: mint(address,uint256) = keccak256("mint(address,uint256)")[0:4]
+                    let mint_selector = [0x40, 0xc1, 0x0f, 0x19]; // mint(address,uint256)
+                    mint_calldata.extend_from_slice(&mint_selector);
+                    
+                    // 2️⃣ Premier paramètre: address (32 bytes paddés à gauche)
+                    let to_bytes = hex::decode(owner_address.trim_start_matches("0x")).unwrap();
+                    let mut padded_to = [0u8; 32];
+                    padded_to[12..].copy_from_slice(&to_bytes); // Les 20 derniers bytes
+                    mint_calldata.extend_from_slice(&padded_to);
+                    
+                    // 3️⃣ 🔥 CORRECTION: Deuxième paramètre uint256 (32 bytes big-endian)
+                    let mut amount_bytes = [0u8; 32];
+                    amount.to_big_endian(&mut amount_bytes); // ✅ CORRECTION ICI
+                    mint_calldata.extend_from_slice(&amount_bytes);
+    
+                    println!("🔍 [CALLDATA DEBUG] mint(address,uint256):");
+                    println!("   • Selector: {}", hex::encode(&mint_selector));
+                    println!("   • Address param: {}", hex::encode(&padded_to));
+                    println!("   • Amount param: {}", hex::encode(&amount_bytes));
+                    println!("   • Amount value: {} VEZ", amount / ethers::types::U256::from(10u64.pow(18)));
+                    println!("   • Total calldata length: {} bytes", mint_calldata.len());
+    
+                    let mint_tx = serde_json::json!({
+                        "to": vez_target_addr,
+                        "from": validator_address_generated.to_lowercase(),
+                        "gas": "0x4c4b40",
+                        "value": "0x0",
+                        "data": format!("0x{}", hex::encode(&mint_calldata))
+                    });
+    
+                    println!("🔥 [MINT TX DEBUG] Transaction complète:");
+                    println!("   • to: {}", vez_target_addr);
+                    println!("   • from: {}", validator_address_generated.to_lowercase());
+                    println!("   • data: 0x{}", hex::encode(&mint_calldata));
+                    println!("   • data length: {} characters hex", hex::encode(&mint_calldata).len());
+    
+                    let mint_hash = value.send_transaction(mint_tx).await.unwrap();
+                    println!("🪙 Minté 888M VEZ vers {} ! (tx: {})", owner_address, mint_hash);
+    
+                    break;
+                }
             }
         }
-    }
-});
-    
-    // ✅ Tasks de monitoring...
-    let cleanup_manager = lurosonie_manager.clone();
-    let cleanup_handle = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(60));
-        loop {
-            interval.tick().await;
-            cleanup_manager.cleanup_old_pending_transactions(3600).await;
-        }
     });
+    
+    // ...existing code...
 
     let metrics_manager = lurosonie_manager.clone();
     let metrics_handle = tokio::spawn(async move {
@@ -3540,11 +3552,6 @@ async fn main() {
         result = server_handle => {
             if let Err(e) = result {
                 eprintln!("❌ Erreur dans le serveur RPC: {}", e);
-            }
-        }
-        result = cleanup_handle => {
-            if let Err(e) = result {
-                eprintln!("❌ Erreur dans le nettoyage: {}", e);
             }
         }
         result = metrics_handle => {
