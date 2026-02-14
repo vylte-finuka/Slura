@@ -3437,8 +3437,6 @@ async fn main() {
         }
     });
     
-    // ...existing code...
-
     let metrics_manager = lurosonie_manager.clone();
     let metrics_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(30));
