@@ -3187,7 +3187,7 @@ async fn main() {
             Network::Devnet => "Développement - Réseau local",
         });
 
-    let (default_port, default_chain_id, consensus_mode) = match cluster {
+    let (default_port, default_chain_id, _consensus_mode) = match cluster {
         Network::Mainnet => (8080, 45056, "Lurosonie_bft"),
         Network::Testnet => (8081, 45057, "Lurosonie_bft"),
         Network::Devnet => (8082, 45058, "Lurosonie_bft"),
@@ -3384,52 +3384,6 @@ async fn main() {
                     });
                     let vez_tx_hash = value.send_transaction(deploy_vez_tx).await.unwrap();
                     println!("✅ VEZ déployé à {} (tx: {})", vez_target_addr, vez_tx_hash);
-    
-                    // 2) 🔥 CORRECTION CALLDATA mint(address,uint256)
-                    let owner_address = "0x53ae54b11251d5003e9aa51422405bc35a2ef32d".to_string();
-                    let amount: ethers::types::U256 = ethers::types::U256::from(888_000_000u64) * ethers::types::U256::from(10u64.pow(18));
-    
-                    // ✅ Construction calldata PROPRE selon ABI standard
-                    let mut mint_calldata = Vec::new();
-                    
-                    // 1️⃣ Selector: mint(address,uint256) = keccak256("mint(address,uint256)")[0:4]
-                    let mint_selector = [0x40, 0xc1, 0x0f, 0x19]; // mint(address,uint256)
-                    mint_calldata.extend_from_slice(&mint_selector);
-                    
-                    // 2️⃣ Premier paramètre: address (32 bytes paddés à gauche)
-                    let to_bytes = hex::decode(owner_address.trim_start_matches("0x")).unwrap();
-                    let mut padded_to = [0u8; 32];
-                    padded_to[12..].copy_from_slice(&to_bytes); // Les 20 derniers bytes
-                    mint_calldata.extend_from_slice(&padded_to);
-                    
-                    // 3️⃣ 🔥 CORRECTION: Deuxième paramètre uint256 (32 bytes big-endian)
-                    let mut amount_bytes = [0u8; 32];
-                    amount.to_big_endian(&mut amount_bytes); // ✅ CORRECTION ICI
-                    mint_calldata.extend_from_slice(&amount_bytes);
-    
-                    println!("🔍 [CALLDATA DEBUG] mint(address,uint256):");
-                    println!("   • Selector: {}", hex::encode(&mint_selector));
-                    println!("   • Address param: {}", hex::encode(&padded_to));
-                    println!("   • Amount param: {}", hex::encode(&amount_bytes));
-                    println!("   • Amount value: {} VEZ", amount / ethers::types::U256::from(10u64.pow(18)));
-                    println!("   • Total calldata length: {} bytes", mint_calldata.len());
-    
-                    let mint_tx = serde_json::json!({
-                        "to": vez_target_addr,
-                        "from": validator_address_generated.to_lowercase(),
-                        "gas": "0x4c4b40",
-                        "value": "0x0",
-                        "data": format!("0x{}", hex::encode(&mint_calldata))
-                    });
-    
-                    println!("🔥 [MINT TX DEBUG] Transaction complète:");
-                    println!("   • to: {}", vez_target_addr);
-                    println!("   • from: {}", validator_address_generated.to_lowercase());
-                    println!("   • data: 0x{}", hex::encode(&mint_calldata));
-                    println!("   • data length: {} characters hex", hex::encode(&mint_calldata).len());
-    
-                    let mint_hash = value.send_transaction(mint_tx).await.unwrap();
-                    println!("🪙 Minté 888M VEZ vers {} ! (tx: {})", owner_address, mint_hash);
     
                     break;
                 }
