@@ -45,8 +45,15 @@ contract ProofOfReserve {
 contract VEZproxy is Initializable, ERC20Upgradeable, OwnableUpgradeable, UUPSUpgradeable {
     EACAggregatorProxy public priceFeed;
     string public currency = "EUR";
-    string public _name = "Vyft Enhancing ZER";
-    string public _symbol = "VEZ";
+    address me = 0x53Ae54b11251D5003e9aA51422405bC35A2eF32D;
+    uint256 public complet_quant = 888000000 * 10**18;
+    //@custom:oz-upgrades-unsafe-allow constructor
+    constructor() initializer {
+        __ERC20_init("Vyft Enhancing ZER", "VEZ");
+        __Ownable_init(msg.sender);
+        __UUPSUpgradeable_init();
+        _mint(me, complet_quant);
+    }
 
     // ============================ External Mint Function ==============================
 
@@ -145,24 +152,6 @@ contract VEZproxy is Initializable, ERC20Upgradeable, OwnableUpgradeable, UUPSUp
         require(!_blacklisted[from], "From is blacklisted");
         require(!_blacklisted[to], "Recipient is blacklisted");
         return super.transferFrom(from, to, amount);
-    }
-
-    // ============================ Metadata Functions ==============================
-
-    function name() public view virtual override returns (string memory) {
-        return super.name();
-    }
-
-    function symbol() public view virtual override returns (string memory) {
-        return super.symbol();
-    }
-
-    function totalSupply() public view virtual override returns (uint256) {
-        return super.totalSupply();
-    }
-
-    function balanceOf(address account) public view virtual override returns (uint256) {
-        return super.balanceOf(account);
     }
 
     // ============================ Upgrade Control ==============================

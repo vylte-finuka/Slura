@@ -596,6 +596,49 @@ fn transfer_value(
 }
 
 fn get_storage(world_state: &UvmWorldState, contract: &str, slot: &str) -> Vec<u8> {
+    // Si le slot est déjà un hash (clé hexadécimale de 64 caractères), accès direct
+    if slot.len() == 64 && slot.chars().all(|c| c.is_ascii_hexdigit()) {
+        return world_state
+            .storage
+            .get(contract)
+            .and_then(|contract_storage| contract_storage.get(slot))
+            .cloned()
+            .unwrap_or_else(|| vec![0; 32]);
+    }
+
+    // DÉTECTION DYNAMIQUE : slot de mapping Solidity (keccak256(address . slot))
+    // Si le slot est de la forme "address|slot" (ex: "0xabc...|1"), on calcule le hash
+    if let Some((addr, mapping_slot)) = slot.split_once('|') {
+        // Décodage de l'adresse (20 bytes)
+        let mut padded = [0u8; 32];
+        if addr.starts_with("0x") && addr.len() == 42 {
+            if let Ok(addr_bytes) = hex::decode(&addr[2..]) {
+                padded[12..32].copy_from_slice(&addr_bytes);
+            }
+        }
+        // Décodage du slot (u256 big endian)
+        let slot_num = mapping_slot.parse::<u64>().unwrap_or(0);
+        let mut slot_bytes = [0u8; 32];
+        primitive_types::U256::from(slot_num).to_big_endian(&mut slot_bytes);
+
+        // Concatène address (32 bytes) + slot (32 bytes)
+        let mut buf = [0u8; 64];
+        buf[..32].copy_from_slice(&padded);
+        buf[32..].copy_from_slice(&slot_bytes);
+
+        // Hash keccak256
+        let hash = keccak_hash(&buf);
+        let key = hex::encode(hash);
+
+        return world_state
+            .storage
+            .get(contract)
+            .and_then(|contract_storage| contract_storage.get(&key))
+            .cloned()
+            .unwrap_or_else(|| vec![0; 32]);
+    }
+
+    // Fallback : slot direct (ex: totalSupply, owner, etc.)
     world_state
         .storage
         .get(contract)
@@ -1989,17 +2032,30 @@ pub fn execute_program(
                     return Ok(halt_json_ebpf("Stack underflow on SLOAD"));
                 }
                 let key = evm_stack.pop().unwrap();
+            
+                // --- Ajout dynamique pour mapping ---
+                // Si la clé est un hash plausible (ex: >= 2^160), on tente le hash direct
                 let key_hex = format!("{:064x}", key);
-                let value_bytes = get_storage(
+                let mut value_bytes = get_storage(
                     &execution_context.world_state,
                     &interpreter_args.contract_address,
                     &key_hex,
                 );
+            
+                // Si 0, on tente la logique mapping (keccak256(address ++ slot))
+                if value_bytes.iter().all(|&b| b == 0) {
+                    // Heuristique : si la clé est un hash, on ne fait rien
+                    // Sinon, on tente de reconstruire la clé mapping
+                    // (ex: pour balanceOf(addr), key = keccak256(addr ++ slot))
+                    // Ici, tu peux ajouter une logique pour détecter si key est une adresse ou slot
+                    // ou laisser l'utilisateur fournir la clé "address|slot" dans le storage initial
+                }
+            
                 let value = u256::from_big_endian(&value_bytes);
-
+            
                 evm_stack.push(value);
                 println!("🗄️ [SLOAD] storage[{}] = {}", key, value);
-                consume_gas_amount(&mut execution_context, 100)?; // Assume warm
+                consume_gas_amount(&mut execution_context, 100)?;
             }
 
             //___ 0x55 SSTORE
