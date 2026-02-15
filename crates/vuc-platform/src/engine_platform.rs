@@ -3359,37 +3359,55 @@ async fn main() {
         engine_clone.start_server().await;
     });
         
-    // ✅ AJOUT: Implémentation de get_chain_id avec la configuration réseau
-            tokio::spawn({
-        let lurosonie_manager_clone = Arc::clone(&lurosonie_manager);
-        let value = engine_platform.clone();
-        let validator_address_generated = validator_address_generated.clone();
-        async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                let block_number = lurosonie_manager_clone.get_block_height().await;
-                if block_number == 1 {
-                    println!("🪙 Block #1 produit — déploiement du contrat VEZ...");
+          // ✅ AJOUT: Implémentation de get_chain_id avec la configuration réseau
+        tokio::spawn({
+            let lurosonie_manager_clone = Arc::clone(&lurosonie_manager);
+            let value = engine_platform.clone();
+            let validator_address_generated = validator_address_generated.clone();
+            async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    let block_number = lurosonie_manager_clone.get_block_height().await;
+                    if block_number == 1 {
+                        println!("🪙 Block #1 produit — déploiement du contrat VEZ (direct, sans proxy)...");
+        
+                        // 1) Déploiement direct du contrat VEZ à l'adresse cible
+                        let vez_target_addr = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_string();
+                        let vez_bytecode_hex = include_str!("../../../vez_bytecode.hex").trim();
+        
+                        let deploy_vez_tx = serde_json::json!({
+                            "from": validator_address_generated,
+                            "data": format!("0x{}", vez_bytecode_hex),
+                            "value": "0x0",
+                            "create2": true,
+                            "target_address": vez_target_addr,
+                        });
+                        let vez_tx_hash = value.send_transaction(deploy_vez_tx).await.unwrap();
+                        println!("✅ Contrat VEZ déployé à l'adresse cible: {} (tx: {})", vez_target_addr, vez_tx_hash);
+        
+                        // 2) mint(address, uint256) → 888_000_000 VEZ (18 décimals)
+                        let admin_address = validator_address_generated.to_lowercase();
+                        let owner_address = "0x53ae54b11251d5003e9aa51422405bc35a2ef32d";
+                        let owner_no_0x = owner_address.trim_start_matches("0x");
+        
     
-                    // 1) Déploiement VEZ
-                    let vez_target_addr = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_string();
-                    let vez_bytecode_hex = include_str!("../../../vez_bytecode.hex").trim();
-    
-                    let deploy_vez_tx = serde_json::json!({
-                        "from": validator_address_generated,
-                        "data": format!("0x{}", vez_bytecode_hex),
-                        "value": "0x0",
-                        "create2": true,
-                        "target_address": vez_target_addr,
-                    });
-                    let vez_tx_hash = value.send_transaction(deploy_vez_tx).await.unwrap();
-                    println!("✅ VEZ déployé à {} (tx: {})", vez_target_addr, vez_tx_hash);
-    
-                    break;
+                        let mint_calldata = "40c10f1900000000000000000000000053ae54b11251d5003e9aa51422405bc35a2ef32d0000000000000000000000000000000000000000x40c10f1900000000000000000000000053ae54b11251d5003e9aa51422405bc35a2ef32d000000000000000000000000000000000000000002de89507556d84678000000002de89507556d84678000000";
+                        let mint_tx = serde_json::json!({
+                            "to": vez_target_addr,
+                            "from": admin_address,
+                            "gas": "0x4c4b40",
+                            "value": "0x0",
+                            "data": format!("0x{}", mint_calldata)
+                        });
+                        let mint_hash = value.send_transaction(mint_tx).await.unwrap();
+                        println!("🪙 888 000 000.000000000000000000 VEZ mintés avec succès !");
+                        println!("   Tx mint: {}", mint_hash);
+        
+                        break;
+                    }
                 }
             }
-        }
-    });
+        });
     
     let metrics_manager = lurosonie_manager.clone();
     let metrics_handle = tokio::spawn(async move {
