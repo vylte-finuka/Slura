@@ -445,7 +445,7 @@ impl LurosonieManager {
                         nonce_tx: tx.nonce_tx,
                         hash_tx: tx.hash.clone(),
                     };
-                    if let Err(e) = self.storage.store_metadata(&tx.hash, &metadata).await {
+                    if let Err(e) = self.storage.store_metadata(&tx.hash, &metadata) {
                         error!("❌ Erreur sauvegarde transaction {}: {}", tx.hash, e);
                     } else {
                         println!("💾 [DB] Transaction {} sauvegardée", tx.hash);
@@ -882,7 +882,7 @@ impl LurosonieManager {
             hash_tx: hash.clone(),
         };
         
-        if let Err(e) = self.storage.store_metadata(&block_key, &block_metadata).await {
+        if let Err(e) = self.storage.store_metadata(&block_key, &block_metadata) {
             error!("❌ Erreur sauvegarde bloc Lurosonie {}: {}", block_key, e);
         } else {
             println!("💾 [DB] Bloc Lurosonie {} sauvegardé", block_key);
@@ -901,7 +901,7 @@ impl LurosonieManager {
                 hash_tx: hash.clone(),
             };
             
-            if let Err(e) = self.storage.store_metadata(&storage_key, &state_metadata).await {
+            if let Err(e) = self.storage.store_metadata(&storage_key, &state_metadata) {
                 error!("❌ Erreur sauvegarde état contrat Lurosonie {}: {}", storage_key, e);
             } else {
                 println!("💾 [DB] État contrat {} sauvegardé pour bloc {}", 
@@ -1428,7 +1428,7 @@ impl LurosonieManager {
             let slot = format!("{:064x}", slot_id);
             let storage_key = format!("lurosonie_contract_state:{}:{}:{}", contract_address, slot, block_num);
             
-            if let Ok(Some(metadata)) = self.storage.get_metadata(&storage_key).await {
+            if let Ok(Some(metadata)) = self.storage.get_metadata(&storage_key) {
                 if let Ok(bytes) = hex::decode(&metadata.value_tx) {
                     if bytes != vec![0u8; 32] { // Ignore les slots vides
                         contract_state.insert(slot.clone(), bytes);
@@ -1454,7 +1454,7 @@ impl LurosonieManager {
         let mut block_num = 0u64;
         loop {
             let block_key = format!("lurosonie_block:{}", block_num);
-            match self.storage.get_metadata(&block_key).await {
+            match self.storage.get_metadata(&block_key) {
                 Ok(Some(metadata)) => {
                     match serde_json::from_str::<BlockData>(&metadata.value_tx) {
                         Ok(block_data) => {

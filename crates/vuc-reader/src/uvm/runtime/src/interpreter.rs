@@ -993,6 +993,12 @@ pub fn execute_program(
     const IR_OUT_OF_OFFSET: u64 = 0x2e;
     const IR_FATAL_EXTERNAL_ERROR: u64 = 0x36;
 
+        // 🔎 LOG de la formation du calldata (state_data)
+    println!(
+        "🟢 [DEBUG] Formation du calldata (state_data) : {}",
+        hex::encode(&interpreter_args.state_data)
+    );
+
     #[inline]
     fn halt_json(
         execution_context: &UvmExecutionContext,
@@ -2032,30 +2038,17 @@ pub fn execute_program(
                     return Ok(halt_json_ebpf("Stack underflow on SLOAD"));
                 }
                 let key = evm_stack.pop().unwrap();
-            
-                // --- Ajout dynamique pour mapping ---
-                // Si la clé est un hash plausible (ex: >= 2^160), on tente le hash direct
                 let key_hex = format!("{:064x}", key);
-                let mut value_bytes = get_storage(
+                let value_bytes = get_storage(
                     &execution_context.world_state,
                     &interpreter_args.contract_address,
                     &key_hex,
                 );
-            
-                // Si 0, on tente la logique mapping (keccak256(address ++ slot))
-                if value_bytes.iter().all(|&b| b == 0) {
-                    // Heuristique : si la clé est un hash, on ne fait rien
-                    // Sinon, on tente de reconstruire la clé mapping
-                    // (ex: pour balanceOf(addr), key = keccak256(addr ++ slot))
-                    // Ici, tu peux ajouter une logique pour détecter si key est une adresse ou slot
-                    // ou laisser l'utilisateur fournir la clé "address|slot" dans le storage initial
-                }
-            
                 let value = u256::from_big_endian(&value_bytes);
-            
+
                 evm_stack.push(value);
                 println!("🗄️ [SLOAD] storage[{}] = {}", key, value);
-                consume_gas_amount(&mut execution_context, 100)?;
+                consume_gas_amount(&mut execution_context, 100)?; // Assume warm
             }
 
             //___ 0x55 SSTORE

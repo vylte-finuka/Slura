@@ -1,10 +1,10 @@
+use anyhow::{Result, Context};
+use rocksdb::{DB, Options, IteratorMode, Direction};
 use serde::{Serialize, Deserialize};
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use rocksdb::{DB, Options};
 use std::path::Path;
+use std::sync::Arc;
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SlurachainMetadata {
     pub from_op: String,
     pub receiver_op: String,
@@ -14,16 +14,14 @@ pub struct SlurachainMetadata {
     pub hash_tx: String,
 }
 
-#[async_trait::async_trait]
-pub trait RocksDBManager: Send + Sync {
-    fn new() -> Self where Self: Sized;
+pub trait RocksDBManager: Send + Sync + 'static {
+    fn read(&self, key: &str) -> Result<Vec<u8>>;
+    fn write(&self, key: &str, value: &[u8]) -> Result<()>;
+    fn scan_prefix(&self, prefix: &str) -> Result<Vec<(String, Vec<u8>)>>;
 
-    async fn store_metadata(&self, key: &str, metadata: &SlurachainMetadata) -> Result<(), Box<dyn std::error::Error>>;
-    async fn get_metadata(&self, key: &str) -> Result<Option<SlurachainMetadata>, Box<dyn std::error::Error>>;
-
-    fn read(&self, key: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>>;
-    fn write(&self, key: &str, value: Vec<u8>) -> Result<(), Box<dyn std::error::Error>>;
-    fn store(&self, key: &str, value: Vec<u8>) -> Result<(), Box<dyn std::error::Error>>;
+    // Helpers spécifiques metadata (sérialisation JSON)
+    fn store_metadata(&self, key: &str, metadata: &SlurachainMetadata) -> Result<()>;
+    fn get_metadata(&self, key: &str) -> Result<Option<SlurachainMetadata>>;
 }
 
 #[derive(Clone)]
@@ -31,71 +29,80 @@ pub struct RocksDBManagerImpl {
     db: Arc<DB>,
 }
 
-#[async_trait::async_trait]
-impl RocksDBManager for RocksDBManagerImpl {
-    fn new() -> Self {
-        let path = "./vyft_rocksdb";
+impl RocksDBManagerImpl {
+    /// Ouvre ou crée une base RocksDB au chemin spécifié
+    pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
         let mut opts = Options::default();
         opts.create_if_missing(true);
-        let db = DB::open(&opts, Path::new(path)).expect("Erreur ouverture RocksDB");
-        RocksDBManagerImpl {
-            db: Arc::new(db),
-        }
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+
+        let db = DB::open(&opts, path.as_ref())
+            .with_context(|| format!("Échec ouverture RocksDB à {:?}", path.as_ref()))?;
+
+        Ok(Self { db: Arc::new(db) })
     }
 
-    async fn store_metadata(&self, key: &str, metadata: &SlurachainMetadata) -> Result<(), Box<dyn std::error::Error>> {
-        // Sérialise en JSON pour stockage dans RocksDB
-        let bytes = serde_json::to_vec(metadata)?;
-        self.db.put(key.as_bytes(), &bytes)?;
-        Ok(())
-    }
-
-    async fn get_metadata(&self, key: &str) -> Result<Option<SlurachainMetadata>, Box<dyn std::error::Error>> {
-        if let Some(bytes) = self.db.get(key.as_bytes())? {
-            let meta: SlurachainMetadata = serde_json::from_slice(&bytes)?;
-            Ok(Some(meta))
-        } else {
-            Ok(None)
-        }
-    }
-
-    fn read(&self, key: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        let val = self.db.get(key.as_bytes())?.ok_or("Clé non trouvée")?;
-        Ok(val)
-    }
-
-    fn write(&self, key: &str, value: Vec<u8>) -> Result<(), Box<dyn std::error::Error>> {
-        self.db.put(key.as_bytes(), &value)?;
-        Ok(())
-    }
-
-    fn store(&self, key: &str, value: Vec<u8>) -> Result<(), Box<dyn std::error::Error>> {
-        self.write(key, value)
+    /// Pour les tests ou cas où on veut une DB temporaire en mémoire
+    #[cfg(test)]
+    pub fn new_temp() -> Result<Self> {
+        let mut opts = Options::default();
+        opts.create_if_missing(true);
+        let db = DB::open(&opts, tempfile::tempdir()?.path())
+            .context("Échec ouverture RocksDB temporaire")?;
+        Ok(Self { db: Arc::new(db) })
     }
 }
 
-impl RocksDBManagerImpl {
-    pub async fn put_metadata(&self, key: &str, value: SlurachainMetadata) -> Result<(), String> {
-        let bytes = serde_json::to_vec(&value).map_err(|e| e.to_string())?;
-        self.db.put(key.as_bytes(), &bytes).map_err(|e| e.to_string())?;
-        Ok(())
+#[async_trait::async_trait]
+impl RocksDBManager for RocksDBManagerImpl {
+    fn read(&self, key: &str) -> Result<Vec<u8>> {
+        self.db
+            .get(key.as_bytes())
+            .context("Erreur lecture RocksDB")?
+            .ok_or_else(|| anyhow::anyhow!("Clé non trouvée: {}", key))
+            .map(|v| v.to_vec())
     }
 
-    pub fn read_sync(&self, key: &str) -> Result<Vec<u8>, String> {
-        self.db.get(key.as_bytes())
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "Clé non trouvée".to_string())
+    fn write(&self, key: &str, value: &[u8]) -> Result<()> {
+        self.db
+            .put(key.as_bytes(), value)
+            .context("Erreur écriture RocksDB")
     }
 
-    pub fn write_sync(&self, key: &str, value: Vec<u8>) -> Result<(), String> {
-        self.db.put(key.as_bytes(), &value).map_err(|e| e.to_string())
+    fn scan_prefix(&self, prefix: &str) -> Result<Vec<(String, Vec<u8>)>> {
+        let mut results = Vec::new();
+        let iter = self.db.iterator(IteratorMode::From(prefix.as_bytes(), Direction::Forward));
+
+        for item in iter {
+            let (k, v) = item.context("Erreur itération RocksDB")?;
+            let key_str = String::from_utf8(k.to_vec())
+                .context("Clé non-UTF8 dans scan")?;
+
+            if !key_str.starts_with(prefix) {
+                break;
+            }
+
+            results.push((key_str, v.to_vec()));
+        }
+
+        Ok(results)
     }
 
-    pub fn store_sync(&self, key: &str, value: Vec<u8>) -> Result<(), String> {
-        self.write_sync(key, value)
+    fn store_metadata(&self, key: &str, metadata: &SlurachainMetadata) -> Result<()> {
+        let bytes = serde_json::to_vec(metadata)
+            .context("Échec sérialisation JSON metadata")?;
+        self.write(key, &bytes)
     }
 
-    pub fn put(&self, key: &str, value: &[u8]) -> Result<(), String> {
-        self.db.put(key.as_bytes(), value).map_err(|e| e.to_string())
+    fn get_metadata(&self, key: &str) -> Result<Option<SlurachainMetadata>> {
+        match self.read(key) {
+            Ok(bytes) => {
+                let meta = serde_json::from_slice(&bytes)
+                    .context("Échec désérialisation metadata")?;
+                Ok(Some(meta))
+            }
+            Err(e) if e.to_string().contains("Clé non trouvée") => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 }

@@ -197,7 +197,7 @@ impl EnginePlatform {
                             
                             let account_key = format!("account:{}", address);
                             if let Ok(data_bytes) = serde_json::to_vec(&account_data) {
-                                if let Err(e) = storage_manager.write(&account_key, data_bytes) {
+                                if let Err(e) = storage_manager.write(&account_key, &data_bytes) {
                                     eprintln!("⚠️ Échec sauvegarde compte {}: {}", address, e);
                                 } else {
                                     println!("✅ Compte persisté: {}", address);
@@ -228,7 +228,7 @@ impl EnginePlatform {
                             
                             let module_key = format!("module:{}", addr);
                             if let Ok(data_bytes) = serde_json::to_vec(&module_data) {
-                                if let Err(e) = storage_manager.write(&module_key, data_bytes) {
+                                if let Err(e) = storage_manager.write(&module_key, &data_bytes) {
                                     eprintln!("⚠️ Échec sauvegarde module {}: {}", addr, e);
                                 } else {
                                     println!("✅ Module persisté: {}", addr);
@@ -240,7 +240,7 @@ impl EnginePlatform {
                         for (tx_hash, receipt) in receipts_data.iter() {
                             let receipt_key = format!("receipt:{}", tx_hash);
                             if let Ok(receipt_bytes) = serde_json::to_vec(receipt) {
-                                if let Err(e) = storage_manager.write(&receipt_key, receipt_bytes) {
+                                if let Err(e) = storage_manager.write(&receipt_key, &receipt_bytes) {
                                     eprintln!("⚠️ Échec sauvegarde receipt {}: {}", tx_hash, e);
                                 }
                             }
@@ -1605,7 +1605,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     if let Some(storage_manager) = &self.vm.read().await.storage_manager {
         let receipt_key = format!("receipt:{}", normalized_hash);
         if let Ok(receipt_bytes) = serde_json::to_vec(&receipt) {
-            if let Err(e) = storage_manager.write(&receipt_key, receipt_bytes) {
+            if let Err(e) = storage_manager.write(&receipt_key, &receipt_bytes) {
                 eprintln!("⚠️ Erreur persistance receipt {}: {}", normalized_hash, e);
             } else {
                 println!("💾 Receipt {} persisté dans RocksDB", normalized_hash);
@@ -1614,7 +1614,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
 
         let receipt_key_padded = format!("receipt:{}", tx_hash_padded);
         if let Ok(receipt_bytes) = serde_json::to_vec(&receipt) {
-            if let Err(e) = storage_manager.write(&receipt_key_padded, receipt_bytes) {
+            if let Err(e) = storage_manager.write(&receipt_key_padded, &receipt_bytes) {
                 eprintln!("⚠️ Erreur persistance receipt padded {}: {}", tx_hash_padded, e);
             } else {
                 println!("💾 Receipt {} (padded) persisté dans RocksDB", tx_hash_padded);
@@ -1763,6 +1763,12 @@ pub async fn eth_call(&self, call_object: serde_json::Value) -> Result<String, S
 
     println!("🔍 [eth_call] from={}, to={}, data={}", from_addr, to_addr, data);
 
+        // 🔎 LOG de la formation du calldata (eth_call)
+    println!(
+        "🟢 [DEBUG] Formation du calldata in engine_platform (eth_call) : {}",
+        hex::encode(&calldata_bytes)
+    );
+
     // Détection du selector pour logging / nommage
     let contract_addr = if !to_addr.is_empty() { Some(to_addr.clone()) } else { None };
     let function_name = if calldata_bytes.len() >= 4 {
@@ -1804,18 +1810,9 @@ pub async fn eth_call(&self, call_object: serde_json::Value) -> Result<String, S
 
     if let Some(addr) = &contract_addr {
         if vm_sim.modules.contains_key(addr) {
-            let args = arguments.clone().unwrap_or_else(|| {
-                if value > 0 {
-                    vec![serde_json::Value::Number(serde_json::Number::from(value))]
-                } else {
-                    vec![]
-                }
-            });
-
-            println!(
-                "🚀 [eth_call] Exécution VM: addr={}, function={:?}, args={:?}",
-                addr, function_name, args
-            );
+            // ⛔️ Correction : ne passe PAS les arguments décodés pour un appel EVM
+            // let args = arguments.clone().unwrap_or_else(|| ...);
+            let args = vec![]; // <-- toujours vide pour EVM pur
 
             let fn_name = function_name.as_deref().unwrap_or("unknown");
 
@@ -3086,11 +3083,11 @@ async fn main() {
         Network::Devnet => "devnet",
     };
 
-        println!("🌐 Réseau Slurachain sélectionné: {} ({})", cluster_str, match cluster {
-            Network::Mainnet => "Production - Réseau principal",
-            Network::Testnet => "Test - Réseau de test public (Charène)", 
-            Network::Devnet => "Développement - Réseau local",
-        });
+    println!("🌐 Réseau Slurachain sélectionné: {} ({})", cluster_str, match cluster {
+        Network::Mainnet => "Production - Réseau principal",
+        Network::Testnet => "Test - Réseau de test public (Charène)", 
+        Network::Devnet => "Développement - Réseau local",
+    });
 
     let (default_port, default_chain_id, _consensus_mode) = match cluster {
         Network::Mainnet => (8080, 45056, "Lurosonie_bft"),
@@ -3098,25 +3095,70 @@ async fn main() {
         Network::Devnet => (8082, 45058, "Lurosonie_bft"),
     };
 
-    // Initialisation du storage manager
-    let storage: Arc<RocksDBManagerImpl> = Arc::new(RocksDBManagerImpl::new());
-    println!("✅ RocksDB storage manager initialisé");
+    // ────────────────────────────────────────────────
+    // CONFIGURATION ROCKSDB - TRÈS TÔT AVANT TOUT LE RESTE
+    // ────────────────────────────────────────────────
+    use std::path::PathBuf;
 
-    // Initialisation de la VM avec cluster et storage manager
+    let db_path_env = std::env::var("ROCKSDB_PATH").ok();
+
+    let db_path = db_path_env.unwrap_or_else(|| {
+        let mut p = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        p.push("chain_data");
+        p.push("vyft_rocksdb");
+        p.to_string_lossy().into_owned()
+    });
+
+    println!("📂 Configuration RocksDB - chemin utilisé : {}", db_path);
+
+    // Création dossier parent si besoin
+    let db_dir = PathBuf::from(&db_path);
+    if let Some(parent) = db_dir.parent() {
+        if !parent.exists() {
+            std::fs::create_dir_all(parent)
+                .expect("Impossible de créer le dossier parent pour RocksDB");
+            println!("📁 Dossier parent créé : {}", parent.display());
+        }
+    }
+
+    // Ouverture de RocksDB
+    let rocksdb_manager = RocksDBManagerImpl::new(&db_path)
+        .expect("ÉCHEC CRITIQUE : Impossible d'ouvrir RocksDB (permissions / chemin ?)");
+
+    let storage: Arc<RocksDBManagerImpl> = Arc::new(rocksdb_manager);
+    println!("✅ RocksDB ouvert avec succès - persistance sur disque activée à : {}", db_path);
+
+    // ────────────────────────────────────────────────
+    // INITIALISATION VM + CONFIG STORAGE + ENGINE PARALLÈLE
+    // ────────────────────────────────────────────────
     let mut vm = SlurachainVm::new_with_cluster(cluster_str);
 
-    // 🔥 Activation du moteur parallèle (4 threads, batch de 32)
-    let cpu_count = num_cpus::get().max(4); // Utilise au moins 4 threads
+    // ATTACHE ROCKSDB À LA VM AVANT DE CRÉER L'ENGINE PARALLÈLE
+    vm.set_storage_manager(storage.clone());
+    println!("✅ Storage manager attaché à la VM de base (avant création engine parallèle)");
+
+    // Maintenant on active le moteur parallèle → il reçoit une VM déjà avec RocksDB
+    let cpu_count = num_cpus::get().max(4);
     println!("🖥️ Détection automatique : {} threads CPU pour le moteur parallèle", cpu_count);
     vm = vm.with_parallel_engine(cpu_count, 32);
 
-    let vm = Arc::new(TokioRwLock::new(vm));
+    // Wrap final dans Arc<RwLock>
+    let vm = Arc::new(tokio::sync::RwLock::new(vm));
+
+    // Vérification finale que RocksDB est bien présent
+    {
+        let vm_guard = vm.read().await;
+        if vm_guard.storage_manager.is_some() {
+            println!("✅ CONFIRMATION FINALE : RocksDB bien présent dans la VM finale");
+        } else {
+            panic!("❌ ERREUR : RocksDB NON présent dans la VM finale malgré set_storage_manager !");
+        }
+    }
+
     let mut validator_address_generated = String::new();
 
     {
         let mut vm_guard = vm.write().await;
-        vm_guard.set_storage_manager(storage.clone());
-        println!("✅ Storage manager attaché à la VM");
 
         // Création du compte système
         println!("🏛️ Creating system account...");
@@ -3138,7 +3180,7 @@ async fn main() {
             }
         };
 
-        // ✅ VÉRIFICATION QUE LE MODULE EST BIEN ENREGISTRÉ
+        // VÉRIFICATION MODULE VEZ
         if vm_guard.modules.contains_key("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee") {
             println!("✅ VEZ module correctly registered");
             println!("   • Functions available: {:?}", 
@@ -3147,7 +3189,7 @@ async fn main() {
             eprintln!("❌ VEZ module NOT registered - initialization will fail");
         }
         
-        // ✅ CRÉATION DES COMPTES INITIAUX avec VEZ
+        // CRÉATION COMPTES INITIAUX
         println!("👥 Creating initial accounts...");
         if let Err(e) = create_initial_accounts_with_vez(&mut vm_guard, &validator_address_generated).await {
             eprintln!("❌ Failed to create initial accounts: {}", e);
@@ -3437,7 +3479,7 @@ async fn main() {
         println!("💾 ✅ SAUVEGARDE FINALE RÉUSSIE");
     }
     
-    if let Err(e) = save_system_state(&vm, &storage, &validator_address).await {
+    if let Err(e) = save_system_state(&vm, storage, &validator_address).await {
         eprintln!("⚠️ Failed to save system state: {}", e);
     } else {
         println!("💾 System state saved successfully");
@@ -3472,7 +3514,6 @@ async fn main() {
     
     println!("🛑 Slurachain Network stopped gracefully with full state persistence");
 }
-
 
 // ✅ AJOUT: Implémentation get_chain_id avec configuration réseau
 impl EnginePlatform {
@@ -3531,7 +3572,7 @@ async fn create_initial_accounts_with_vez(vm: &mut SlurachainVm, validator_addre
 
 async fn save_system_state(
     vm: &Arc<TokioRwLock<SlurachainVm>>, 
-    storage: &Arc<RocksDBManagerImpl>,
+    storage: Arc<RocksDBManagerImpl>,
     validator_address: &str
 ) -> Result<(), String> {
     println!("💾 Saving system state...");
@@ -3547,7 +3588,7 @@ async fn save_system_state(
                 .map_err(|e| format!("Failed to serialize account {}: {}", address, e))?;
             
             let storage_key = format!("account:{}", address);
-            if let Err(e) = storage.store(&storage_key, account_data) {
+            if let Err(e) = storage.write(&storage_key, &account_data) {
                 eprintln!("⚠️ Failed to save account {}: {}", address, e);
             }
         }

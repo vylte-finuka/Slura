@@ -43,38 +43,69 @@ contract ProofOfReserve {
 
 // ============================= Main Contract ===================================   
 contract VEZproxy is Initializable, ERC20Upgradeable, OwnableUpgradeable, UUPSUpgradeable {
+
+    // ============================ Storage Variables ==============================
+    // TOUTES les variables personnalisées sont placées APRÈS les contrats hérités
+    // pour respecter le layout ERC7201 d'OpenZeppelin et éviter le décalage de slots
+
     EACAggregatorProxy public priceFeed;
-    string public currency = "EUR";
-    address me = 0x53Ae54b11251D5003e9aA51422405bC35A2eF32D;
-    uint256 public complet_quant = 888000000 * 10**18;
-    //@custom:oz-upgrades-unsafe-allow constructor
-    constructor() initializer {
-        __ERC20_init("Vyft Enhancing ZER", "VEZ");
-        __Ownable_init(msg.sender);
-        __UUPSUpgradeable_init();
-        _mint(me, complet_quant);
-    }
+    string public currency;
+    address public me;
+    uint256 public complet_quant;
 
-    // ============================ External Mint Function ==============================
-
-    function mint(address to, uint256 amount) external onlyOwner {
-        _mint(to, amount);
-    }
-
-    // ============================ Blacklist Logic ==============================
-
+    // Blacklist
     address public blacklister;
     mapping(address => bool) private _blacklisted;
 
+    // Pausable
+    bool private _paused;
+
+    // ============================ Events ==============================
     event Blacklisted(address indexed account);
     event UnBlacklisted(address indexed account);
     event BlacklisterChanged(address indexed newBlacklister);
 
+    event Paused(address account);
+    event Unpaused(address account);
+
+    // ============================ Modifiers ==============================
     modifier onlyBlacklister() {
         require(msg.sender == blacklister, "Caller is not the blacklister");
         _;
     }
 
+    modifier whenNotPaused() {
+        require(!_paused, "Pausable: paused");
+        _;
+    }
+
+    modifier whenPaused() {
+        require(_paused, "Pausable: not paused");
+        _;
+    }
+
+    // ============================ Constructor & Initialization ==============================
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() initializer {
+        __ERC20_init("Vyft Enhancing ZER", "VEZ");
+        __Ownable_init(msg.sender);
+        __UUPSUpgradeable_init();
+
+        // Initialisation des variables personnalisées
+        currency = "EUR";
+        me = 0x53Ae54b11251D5003e9aA51422405bC35A2eF32D;
+        complet_quant = 888_000_000 * 10**18;
+
+        // Mint initial du total supply au créateur (ou à 'me')
+        _mint(me, complet_quant);
+    }
+
+    // ============================ Mint Function ==============================
+    function mint(address to, uint256 amount) external onlyOwner {
+        _mint(to, amount);
+    }
+
+    // ============================ Blacklist Logic ==============================
     function isBlacklisted(address account) external view returns (bool) {
         return _blacklisted[account];
     }
@@ -97,22 +128,6 @@ contract VEZproxy is Initializable, ERC20Upgradeable, OwnableUpgradeable, UUPSUp
     }
 
     // ============================ Pausable Logic ==============================
-
-    bool private _paused;
-
-    event Paused(address account);
-    event Unpaused(address account);
-
-    modifier whenNotPaused() {
-        require(!_paused, "Pausable: paused");
-        _;
-    }
-
-    modifier whenPaused() {
-        require(_paused, "Pausable: not paused");
-        _;
-    }
-
     function paused() public view virtual returns (bool) {
         return _paused;
     }
@@ -127,9 +142,7 @@ contract VEZproxy is Initializable, ERC20Upgradeable, OwnableUpgradeable, UUPSUp
         emit Unpaused(_msgSender());
     }
 
-    // ============================ ERC20 Standard Functions ==============================
-    // On garde les fonctions publiques classiques, mais on n'override plus inutilement
-
+    // ============================ ERC20 Overrides ==============================
     function transfer(address to, uint256 amount) 
         public 
         virtual 
@@ -155,11 +168,11 @@ contract VEZproxy is Initializable, ERC20Upgradeable, OwnableUpgradeable, UUPSUp
     }
 
     // ============================ Upgrade Control ==============================
-
     function _authorizeUpgrade(address newImplementation) 
         internal 
         override 
         onlyOwner 
     {
+        // Vous pouvez ajouter des vérifications supplémentaires ici si besoin
     }
 }

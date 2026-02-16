@@ -240,7 +240,7 @@ impl OptimisticParallelEngine {
                 &function_name,
                 args,
                 Some(sender.as_str()),
-                None, // Ajoute le paramètre calldata (None si pas de données)
+                tx.calldata.as_deref(),
             )
             .await;
 
@@ -256,8 +256,11 @@ impl OptimisticParallelEngine {
     /// ✅ Phase de validation et commit optimiste
     async fn validate_and_commit_batch(&self) -> Vec<bool> {
         println!("🔍 Phase de validation optimiste...");
+        println!(
+            "   Nombre de tx actives : {}",
+            self.active_transactions.len()
+        );
 
-        // Tri par ordre de timestamp/priorité pour déterminisme
         let mut transaction_ids: Vec<_> = self
             .active_transactions
             .iter()
@@ -265,13 +268,24 @@ impl OptimisticParallelEngine {
             .collect();
         transaction_ids.sort();
 
+        println!("   Tx IDs à valider : {:?}", transaction_ids);
+
         let mut validation_results = Vec::new();
 
         for tx_id in transaction_ids {
+            println!("   → Validation TX {}", tx_id);
             if let Some(tx) = self.active_transactions.get(&tx_id) {
+                println!(
+                    "     read_set de TX {} : {:?}",
+                    tx_id,
+                    tx.read_set.read().await
+                );
+
                 let is_valid = self.validate_transaction_conflicts(&tx).await;
+                println!("     → is_valid = {}", is_valid);
 
                 if is_valid {
+                    println!("     → Commit en cours pour TX {}", tx_id);
                     self.commit_transaction_changes(&tx).await;
                     validation_results.push(true);
                     println!("✅ TX {} commitée avec succès", tx_id);
@@ -279,6 +293,8 @@ impl OptimisticParallelEngine {
                     validation_results.push(false);
                     println!("❌ TX {} en conflit, sera retryée", tx_id);
                 }
+            } else {
+                println!("⚠️ TX {} introuvable dans active_transactions !", tx_id);
             }
         }
 
@@ -287,14 +303,31 @@ impl OptimisticParallelEngine {
 
     /// ✅ Validation des conflits de concurrence
     async fn validate_transaction_conflicts(&self, tx: &ParallelTransaction) -> bool {
-        // Vérifie si les versions lues sont encore valides
         let read_set = tx.read_set.read().await;
+        println!(
+            "   Vérification conflits pour TX {} - read_set size: {}",
+            tx.id,
+            read_set.len()
+        );
+
         for (slot, version_read) in read_set.iter() {
             let current_version = self
                 .storage_versions
                 .get(slot)
                 .map(|v| *v.value())
                 .unwrap_or(0);
+            println!(
+                "     Slot {} : lu v{}, actuel v{} → {}",
+                slot,
+                version_read,
+                current_version,
+                if current_version == *version_read {
+                    "OK"
+                } else {
+                    "CONFLIT !"
+                }
+            );
+
             if current_version != *version_read {
                 println!(
                     "⚠️  Conflit détecté sur slot {} : lu v{}, actuel v{}",
@@ -303,27 +336,117 @@ impl OptimisticParallelEngine {
                 return false;
             }
         }
+        println!("   → Pas de conflit pour TX {}", tx.id);
         true
     }
 
-    /// ✅ Commit atomique des changements d'une transaction
+    /// ✅ Commit atomique des changements d'une transaction – VERSION PERSISTANTE DANS ROCKSDB
     async fn commit_transaction_changes(&self, tx: &ParallelTransaction) {
         let write_set = tx.write_set.read().await;
-        for (slot, new_value) in write_set.iter() {
-            let new_version = self.global_version_counter.fetch_add(1, Ordering::SeqCst);
-            self.storage_versions.insert(slot.clone(), new_version);
+
+        // On lock le VM une première fois pour accéder au storage_manager
+        let vm_guard = self.vm.lock().await;
+
+        // Cas sans RocksDB → commit mémoire volatile
+        if vm_guard.storage_manager.is_none() {
+            println!("⚠️ Pas de RocksDB configuré → commit en mémoire volatile seulement");
+
+            // Lock explicite du world_state (le guard vm reste vivant)
+            let mut world_state_guard = vm_guard.state.world_state.write().await;
+
+            for (slot, new_value) in write_set.iter() {
+                let new_version = self.global_version_counter.fetch_add(1, Ordering::SeqCst);
+                self.storage_versions.insert(slot.clone(), new_version);
+
+                let contract_storage = world_state_guard
+                    .storage
+                    .entry(tx.contract_address.clone())
+                    .or_insert_with(HashMap::new);
+
+                contract_storage.insert(slot.clone(), new_value.clone());
+
+                println!(
+                    "💾 [VOLATILE] Commit slot {} -> v{} ({} bytes)",
+                    slot,
+                    new_version,
+                    new_value.len()
+                );
+            }
+
+            // Les deux guards (vm_guard + world_state_guard) sont libérés ici
+            return;
+        }
+
+        // On a RocksDB → on clone le manager AVANT de drop vm_guard
+        let manager = vm_guard.storage_manager.as_ref().unwrap().clone();
+
+        // On peut libérer vm_guard maintenant (on n'en a plus besoin)
+        drop(vm_guard);
+
+        // ────────────────────────────────────────────────
+        // PARTIE ROCKSDB : VERSIONNING + ÉCRITURE PERSISTANTE
+        // ────────────────────────────────────────────────
+
+        // 1. Lecture de la version actuelle du contrat
+        let version_key = format!("version:{}", tx.contract_address);
+        let current_version_bytes = manager.read(&version_key).unwrap_or_default();
+        let current_version = if current_version_bytes.len() == 8 {
+            u64::from_be_bytes(current_version_bytes.try_into().unwrap_or([0; 8]))
+        } else {
+            0u64
+        };
+
+        // 2. Nouvelle version
+        let new_version = current_version + 1;
+        let version_bytes = new_version.to_be_bytes().to_vec();
+
+        // 3. Écriture de la nouvelle version globale
+        if let Err(e) = manager.write(&version_key, &version_bytes) {
             println!(
-                "💾 Commit slot {} -> v{} ({} bytes)",
-                slot,
+                "❌ [CRITIQUE] Échec écriture version {} pour {} : {}",
+                new_version, tx.contract_address, e
+            );
+            return;
+        }
+
+        println!(
+            "📈 [VERSION] Contrat {} passé à v{}",
+            tx.contract_address, new_version
+        );
+
+        // 4. Commit de chaque slot avec préfixe de version
+        // On reprend un nouveau lock VM uniquement pour world_state
+        let vm_guard_2 = self.vm.lock().await;
+        let mut world_state_guard = vm_guard_2.state.world_state.write().await;
+
+        for (slot, new_value) in write_set.iter() {
+            let keyed_slot = format!("v{}/storage:{}:{}", new_version, tx.contract_address, slot);
+
+            if let Err(e) = manager.write(&keyed_slot, &new_value.clone()) {
+                println!("❌ [ERREUR] Échec persistance slot {} : {}", keyed_slot, e);
+                continue;
+            }
+
+            // Mise à jour en mémoire
+            let contract_storage = world_state_guard
+                .storage
+                .entry(tx.contract_address.clone())
+                .or_insert_with(HashMap::new);
+            contract_storage.insert(slot.clone(), new_value.clone());
+
+            // Mise à jour des versions en mémoire
+            self.storage_versions.insert(slot.clone(), new_version);
+
+            println!(
+                "💾 [PERSISTANT] Commit v{} → slot {} ({} bytes) → clé {}",
                 new_version,
-                new_value.len()
+                slot,
+                new_value.len(),
+                keyed_slot
             );
         }
-    }
 
-    /// ✅ Collecte des transactions en conflit pour retry
-    async fn collect_conflicted_transactions(&self) -> Vec<ParallelTransaction> {
-        Vec::new() // Placeholder - sera rempli avec la logique de retry
+        // Tous les guards sont libérés automatiquement ici
     }
 
     /// ✅ Point d'entrée pour soumission de transaction parallèle
@@ -731,7 +854,7 @@ impl SlurachainVm {
     /// ✅ NOUVEAU: Exécution parallèle de batch
     pub async fn execute_parallel_transactions(
         &mut self,
-        transactions: Vec<(String, String, Vec<NerenaValue>, String, Option<Vec<u8>>)>, // Ajoute Option<Vec<u8>>
+        transactions: Vec<(String, String, Vec<NerenaValue>, String, Option<Vec<u8>>)>,
     ) -> Vec<Result<NerenaValue, String>> {
         if let Some(engine) = &self.parallel_engine {
             let parallel_txs: Vec<_> = transactions
@@ -739,7 +862,7 @@ impl SlurachainVm {
                 .enumerate()
                 .map(
                     |(i, (module_path, function_name, args, sender, calldata))| {
-                        ParallelTransaction {
+                        let tx = ParallelTransaction {
                             id: i as u64,
                             contract_address: Self::extract_address(&module_path).to_string(),
                             function_name,
@@ -749,11 +872,18 @@ impl SlurachainVm {
                             read_set: Arc::new(RwLock::new(HashMap::new())),
                             write_set: Arc::new(RwLock::new(HashMap::new())),
                             dependencies: Arc::new(RwLock::new(HashSet::new())),
-                            calldata, // <-- Passe le calldata ici
-                        }
+                            calldata,
+                        };
+
+                        // IMPORTANT : enregistre la tx dans active_transactions AVANT exécution
+                        engine.active_transactions.insert(tx.id, tx.clone());
+
+                        tx
                     },
                 )
                 .collect();
+
+            // Maintenant lance le batch
             engine.execute_parallel_batch(parallel_txs).await
         } else {
             // Fallback séquentiel
@@ -1553,7 +1683,7 @@ impl SlurachainVm {
                 _ => vec![0u8; 32],
             };
 
-            let _ = storage_manager.write(&storage_key, value_bytes);
+            let _ = storage_manager.write(&storage_key, &value_bytes);
         }
 
         // 2. FORÇAGE ABSOLU ET CONFORME EVM DU SLOT ERC-1967 IMPLEMENTATION
@@ -1591,7 +1721,7 @@ impl SlurachainVm {
 
             let canonical_key = format!("storage:{}:{}", contract_address, impl_slot_key);
             storage_manager
-                .write(&canonical_key, impl_bytes.to_vec())
+                .write(&canonical_key, &impl_bytes.to_vec())
                 .ok();
 
             let impl_addr = format!("0x{}", hex::encode(&impl_bytes[12..32]));
@@ -1720,13 +1850,81 @@ impl SlurachainVm {
             vyid, function_name
         );
 
-        // ✅ ÉTAPE CRUCIALE : RÉCUPÈRE LE BYTECODE RÉEL du contrat
-        let real_bytecode = {
-            let accounts = self.state.accounts.read();
+        // ────────────────────────────────────────────────
+        // ÉTAPE 1 : RECHARGEMENT VERSIONNÉ DEPUIS ROCKSDB
+        // ────────────────────────────────────────────────
+        if let Some(manager) = &self.storage_manager {
+            println!(
+                "🔄 [PERSIST READ] Rechargement depuis RocksDB pour {}",
+                vyid
+            );
 
-            if let Some(account) = accounts.await.get(vyid) {
+            // 1. Lire la dernière version persistée
+            let version_key = format!("version:{}", vyid);
+            let version_bytes = manager.read(&version_key).unwrap_or_default();
+            let version = if version_bytes.len() == 8 {
+                u64::from_be_bytes(version_bytes.try_into().unwrap_or([0; 8]))
+            } else {
+                0u64
+            };
+            println!("   → Dernière version persistée : v{}", version);
+
+            // 2. Scanner uniquement les slots de cette version
+            let prefix = format!("v{}/storage:{}:", version, vyid);
+            let mut reloaded_storage = HashMap::new();
+
+            match manager.scan_prefix(&prefix) {
+                Ok(entries) => {
+                    for (key, value) in entries {
+                        if key.starts_with(&prefix) {
+                            let slot = key.trim_start_matches(&prefix).to_string();
+                            reloaded_storage.insert(slot, value);
+                        }
+                    }
+                    println!(
+                        "   → {} slots rechargés (v{})",
+                        reloaded_storage.len(),
+                        version
+                    );
+                }
+                Err(e) => {
+                    println!("⚠️ [SCAN ERROR] Impossible de scanner {} : {}", prefix, e);
+                }
+            }
+
+            // 3. Mettre à jour world_state
+            let mut world_state = self.state.world_state.write().await;
+            world_state
+                .storage
+                .insert(vyid.to_string(), reloaded_storage.clone());
+
+            // Debug slot balances
+            let balances_slot =
+                "37439836327923360225337895871871055371921111519445254264255886447755104894253"
+                    .to_string();
+            if let Some(value) = reloaded_storage.get(&balances_slot) {
+                let u256_val = primitive_types::U256::from_big_endian(value);
+                println!(
+                    "🔍 [PERSIST READ CHECK] Slot balances rechargé = {} (hex: 0x{})",
+                    u256_val,
+                    hex::encode(value)
+                );
+            } else {
+                println!("⚠️ [PERSIST READ] Slot balances non trouvé en v{}", version);
+            }
+        } else {
+            println!("⚠️ Pas de storage_manager → stockage mémoire volatile seulement");
+        }
+
+        // ────────────────────────────────────────────────
+        // ÉTAPE 2 : CHARGEMENT DU BYTECODE RÉEL
+        // ────────────────────────────────────────────────
+        let real_bytecode = {
+            let accounts = self.state.accounts.read().await;
+
+            if let Some(account) = accounts.get(vyid) {
                 if account.is_contract && !account.contract_state.is_empty() {
-                    account.contract_state.clone() // ✅ BYTECODE RÉEL
+                    account.contract_state.clone()
                 } else {
                     return Err(format!("Contrat {} sans bytecode réel", vyid));
                 }
@@ -1741,14 +1939,17 @@ impl SlurachainVm {
             vyid
         );
 
-        // ✅ CALCUL DU SÉLECTEUR
+        // ────────────────────────────────────────────────
+        // ÉTAPE 3 : CALCUL DU SÉLECTEUR
+        // ────────────────────────────────────────────────
         let selector = Self::calculate_function_selector_from_signature(function_name, &args);
 
-        // ✅ 🔥 NOUVEAU: DÉTECTION PROXY ET UTILISATION DU BYTECODE DE L'IMPLÉMENTATION
+        // ────────────────────────────────────────────────
+        // ÉTAPE 4 : DÉTECTION PROXY (inchangé)
+        // ────────────────────────────────────────────────
         let impl_addr_opt = {
-            let accounts = self.state.accounts.read();
+            let accounts = self.state.accounts.read().await;
             accounts
-                .await
                 .get(vyid)
                 .and_then(|acc| acc.resources.get("implementation"))
                 .and_then(|v| v.as_str())
@@ -1763,10 +1964,9 @@ impl SlurachainVm {
             );
             println!("🔍 [PROXY STRATEGY] Utilise le bytecode de l'implémentation pour la recherche de fonctions");
 
-            // ✅ RÉCUPÈRE LE BYTECODE RÉEL DE L'IMPLÉMENTATION
             let impl_real_bytecode = {
-                let impl_accounts = self.state.accounts.read();
-                if let Some(impl_account) = impl_accounts.await.get(&impl_addr) {
+                let impl_accounts = self.state.accounts.read().await;
+                if let Some(impl_account) = impl_accounts.get(&impl_addr) {
                     if !impl_account.contract_state.is_empty() {
                         impl_account.contract_state.clone()
                     } else {
@@ -1782,7 +1982,6 @@ impl SlurachainVm {
                 impl_real_bytecode.len()
             );
 
-            // ✅ 🔥 CRITIQUE: Auto-détection avec le bytecode de l'implémentation
             if !self.modules.contains_key(&impl_addr) {
                 println!(
                     "🔄 [IMPL AUTO-DETECT] Analyse du bytecode d'implémentation ({} bytes)",
@@ -1791,11 +1990,9 @@ impl SlurachainVm {
                 self.auto_detect_contract_functions(&impl_addr, &impl_real_bytecode)?;
             }
 
-            // ✅ 🔥 RECHERCHE DE LA FONCTION DANS LE BYTECODE DE L'IMPLÉMENTATION
             let impl_function_meta =
                 self.find_or_create_function_metadata(&impl_addr, function_name, selector, &args)?;
 
-            // ✅ 🔥 UTILISE LE BYTECODE DE L'IMPLÉMENTATION POUR FIND_FUNCTION_OFFSET
             println!(
                 "🔍 [IMPL OFFSET SEARCH] Recherche offset pour {} dans bytecode d'implémentation",
                 function_name
@@ -1807,30 +2004,33 @@ impl SlurachainVm {
                 function_name, impl_function_meta.selector, impl_addr.as_str(), impl_real_bytecode.len()
             ))?;
 
-            println!("🎯 [IMPL EXECUTION] Fonction {} trouvée à l'offset 0x{:04x} dans bytecode d'implémentation", 
-                 function_name, impl_resolved_offset);
+            println!(
+            "🎯 [IMPL EXECUTION] Fonction {} trouvée à l'offset 0x{:04x} dans bytecode d'implémentation",
+            function_name, impl_resolved_offset
+        );
 
-            // ✅ EXÉCUTION AVEC CONTEXTE PROXY (storage du proxy) MAIS BYTECODE DE L'IMPLÉMENTATION
-            // 1. Prépare les arguments d'exécution
-
-            // Build dynamic storage for the proxy contract (vyid)
             let converted_storage = self
                 .build_dynamic_storage_from_contract_state(vyid)?
                 .unwrap_or_else(|| HashMap::new());
 
-            // ...existing code...
             let interpreter_args = self
                 .prepare_generic_execution_args(
                     vyid,
                     function_name,
                     args.clone(),
                     sender,
-                    &impl_function_meta,  // ou &function_meta selon le contexte
-                    impl_resolved_offset, // ou resolved_offset
+                    calldata,
+                    &impl_function_meta,
+                    impl_resolved_offset,
                 )
                 .await?;
 
-            // 2. Appelle execute_program avec &interpreter_args et &mut self.uvm_helpers
+            let calldata_bytes: Vec<u8> = if let Some(calldata) = calldata {
+                calldata.to_vec()
+            } else {
+                interpreter_args.state_data.clone()
+            };
+
             let result = {
                 let _guard = self.global_execution_lock.lock().await;
                 let mut interpreter = self.interpreter.lock().await;
@@ -1838,7 +2038,7 @@ impl SlurachainVm {
                     Some(&real_bytecode),
                     stack_usage,
                     &mem,
-                    &interpreter_args.state_data, // <-- CORRECTION : passe le vrai calldata ici !
+                    &calldata_bytes,
                     &mut self.uvm_helpers,
                     &self.allowed_memory,
                     return_type,
@@ -1849,17 +2049,18 @@ impl SlurachainVm {
                 .map_err(|e| e.to_string())
             };
 
-            // 3. Passe le résultat JSON à process_execution_result_generically
             if let Ok(ref val) = result {
                 self.process_execution_result_generically(vyid, val, &impl_function_meta)
-                    .await?; // ou &function_meta
+                    .await?;
             } else {
                 return result;
             }
             return result;
         }
 
-        // ✅ EXÉCUTION NORMALE (pas de proxy) - Code existant inchangé
+        // ────────────────────────────────────────────────
+        // ÉTAPE 5 : EXÉCUTION NORMALE (sans proxy)
+        // ────────────────────────────────────────────────
         if !self.modules.contains_key(vyid) {
             println!(
                 "🔄 [AUTO-DETECT] Analyse du bytecode réel ({} bytes)",
@@ -1867,7 +2068,6 @@ impl SlurachainVm {
             );
             self.auto_detect_contract_functions(vyid, &real_bytecode)?;
         } else {
-            // ✅ Met à jour le module avec le bytecode réel si nécessaire
             if let Some(module) = self.modules.get_mut(vyid) {
                 if module.bytecode.len() != real_bytecode.len() {
                     println!(
@@ -1876,78 +2076,98 @@ impl SlurachainVm {
                         real_bytecode.len()
                     );
                     module.bytecode = real_bytecode.clone();
-
-                    // Re-détection avec le nouveau bytecode
                     self.auto_detect_contract_functions(vyid, &real_bytecode)?;
                 }
             }
         }
 
-        // ✅ RECHERCHE STRICTE avec le bytecode réel
         let function_meta =
             self.find_or_create_function_metadata(vyid, function_name, selector, &args)?;
 
-        // ✅ RÉSOLUTION DE L'OFFSET avec le bytecode réel
-        println!(
-            "🔍 [OFFSET SEARCH] Recherche offset pour {} dans bytecode réel",
-            function_name
-        );
         let resolved_offset =
             Self::find_function_offset_in_bytecode(&real_bytecode, function_meta.selector)
                 .ok_or_else(|| {
                     format!(
-            "Fonction '{}' (sélecteur 0x{:08x}) introuvable dans le bytecode réel de {} bytes. \
-            Le contrat ne contient pas cette fonction.",
-            function_name, function_meta.selector, real_bytecode.len()
-        )
+                "Fonction '{}' (sélecteur 0x{:08x}) introuvable dans le bytecode réel de {} bytes.",
+                function_name, function_meta.selector, real_bytecode.len()
+            )
                 })?;
 
         println!(
-            "🎯 [REAL EXECUTION] Fonction {} trouvée à l'offset 0x{:04x} dans bytecode réel",
+            "🎯 [REAL EXECUTION] Fonction {} trouvée à l'offset 0x{:04x}",
             function_name, resolved_offset
         );
 
-        // ✅ EXÉCUTION NORMALE avec le bytecode réel
         let interpreter_args = self
             .prepare_generic_execution_args(
                 vyid,
                 function_name,
                 args.clone(),
                 sender,
+                calldata,
                 &function_meta,
                 resolved_offset,
             )
             .await?;
 
-        // Build dynamic storage for the contract
         let converted_storage = self
             .build_dynamic_storage_from_contract_state(vyid)?
             .unwrap_or_else(|| HashMap::new());
 
+        let calldata_bytes: Vec<u8> = if let Some(calldata) = calldata {
+            calldata.to_vec()
+        } else {
+            interpreter_args.state_data.clone()
+        };
+
+        println!(
+            "🟢 [DEBUG] Formation du calldata in UVM (state_data) : {}",
+            hex::encode(&calldata_bytes)
+        );
+
         let result = {
-            let _guard = self.global_execution_lock.lock();
-            let exec_future = uvm_runtime::interpreter::execute_program(
+            let _guard = self.global_execution_lock.lock().await;
+            let mut interpreter = self.interpreter.lock().await;
+            uvm_runtime::interpreter::execute_program(
                 Some(&real_bytecode),
                 stack_usage,
                 &mem,
-                &interpreter_args.state_data, // <-- CORRECTION : passe le vrai calldata ici !
+                &calldata_bytes,
                 &mut self.uvm_helpers,
                 &self.allowed_memory,
                 return_type,
                 &exports,
                 &interpreter_args,
                 Some(converted_storage),
-            );
-            exec_future.map_err(|e| e.to_string())
+            )
+            .map_err(|e| e.to_string())
         };
 
+        // ────────────────────────────────────────────────
+        // ÉTAPE 6 : PERSISTANCE APRÈS EXÉCUTION + VÉRIFICATION
+        // ────────────────────────────────────────────────
         if let Ok(ref val) = result {
             self.process_execution_result_generically(vyid, val, &function_meta)
                 .await?;
-        } else {
-            return result;
+
+            // Vérification post-persistance (debug direct depuis RocksDB)
+            if let Some(manager) = &self.storage_manager {
+                let balances_slot =
+                    "37439836327923360225337895871871055371921111519445254264255886447755104894253"
+                        .to_string();
+                let persisted_value = manager
+                    .read(&format!("storage:{}:{}", vyid, &balances_slot))
+                    .unwrap_or(vec![0u8; 32]);
+                let u256_val = primitive_types::U256::from_big_endian(&persisted_value);
+                println!(
+                    "🔍 [PERSIST WRITE CHECK] Slot balances après persistance = {} (hex: 0x{})",
+                    u256_val,
+                    hex::encode(&persisted_value)
+                );
+            }
         }
-        Ok(result?)
+
+        result
     }
 
     /// ✅ NOUVEAU: Post-processing générique des résultats d'exécution
@@ -2033,6 +2253,7 @@ impl SlurachainVm {
         function_name: &str,
         args: Vec<NerenaValue>,
         sender: &str,
+        calldata: Option<&[u8]>,
         function_meta: &FunctionMetadata,
         resolved_offset: usize,
     ) -> Result<uvm_runtime::interpreter::InterpreterArgs, String> {
@@ -2043,41 +2264,76 @@ impl SlurachainVm {
         let block_info = self.state.block_info.read().await;
         let block_number = block_info.number;
 
-        // ✅ CALDATA ABI 100% CORRECT ET GÉNÉRIQUE (selector UNE SEULE FOIS)
-        let min_calldata_len = if args.is_empty() {
-            68
+        // ────────────────────────────────────────────────
+        // 1. Construction du calldata ABI (priorité : calldata passé > génération auto)
+        // ────────────────────────────────────────────────
+        let calldata_bytes: Vec<u8> = if let Some(external_calldata) = calldata {
+            // Si on a passé un calldata brut (ex: depuis eth_call ou proxy)
+            println!(
+                "🟢 Utilisation du calldata brut passé (len = {})",
+                external_calldata.len()
+            );
+            external_calldata.to_vec()
         } else {
-            4 + args.len() * 32
-        };
-        let mut calldata = vec![0u8; min_calldata_len.max(68)]; // force au moins 68 bytes
-        calldata[0..4].copy_from_slice(&function_meta.selector.to_be_bytes());
+            // Sinon on génère le calldata ABI standard
+            let mut generated = Vec::with_capacity(4 + args.len() * 32);
 
-        for arg in &args {
-            match arg {
-                serde_json::Value::String(s) if s.starts_with("0x") && s.len() == 42 => {
-                    let mut padded = [0u8; 32];
-                    if let Ok(bytes) = hex::decode(&s[2..]) {
-                        padded[12..32].copy_from_slice(&bytes);
+            // Selector (4 bytes)
+            generated.extend_from_slice(&function_meta.selector.to_be_bytes());
+
+            // Arguments (chacun 32 bytes paddés)
+            for arg in &args {
+                let mut padded = [0u8; 32];
+
+                match arg {
+                    serde_json::Value::String(s) => {
+                        if s.starts_with("0x") && s.len() == 42 {
+                            // Adresse → padding à gauche
+                            if let Ok(bytes) = hex::decode(&s[2..]) {
+                                if bytes.len() == 20 {
+                                    padded[12..32].copy_from_slice(&bytes);
+                                }
+                            }
+                        } else {
+                            // String → padding à droite (pas ABI optimal mais acceptable ici)
+                            let bytes = s.as_bytes();
+                            if bytes.len() <= 32 {
+                                padded[..bytes.len()].copy_from_slice(bytes);
+                            }
+                        }
                     }
-                    calldata.extend_from_slice(&padded);
-                }
-                serde_json::Value::Number(n) => {
-                    let mut padded = [0u8; 32];
-                    if let Some(u) = n.as_u64() {
-                        padded[24..32].copy_from_slice(&u.to_be_bytes());
+                    serde_json::Value::Number(n) => {
+                        if let Some(u) = n.as_u64() {
+                            padded[24..32].copy_from_slice(&u.to_be_bytes());
+                        }
                     }
-                    calldata.extend_from_slice(&padded);
+                    serde_json::Value::Bool(b) => {
+                        padded[31] = if *b { 1 } else { 0 };
+                    }
+                    _ => {} // reste à zéro
                 }
-                _ => calldata.extend_from_slice(&[0u8; 32]),
+
+                generated.extend_from_slice(&padded);
             }
-        }
 
+            println!(
+                "🟢 Calldata généré automatiquement → len={}, hex=0x{}",
+                generated.len(),
+                hex::encode(&generated)
+            );
+
+            generated
+        };
+
+        // ────────────────────────────────────────────────
+        // 2. Création finale des InterpreterArgs
+        // ────────────────────────────────────────────────
         Ok(uvm_runtime::interpreter::InterpreterArgs {
             function_name: function_name.to_string(),
             contract_address: contract_address.to_string(),
             sender_address: sender.to_string(),
             args,
-            state_data: calldata,
+            state_data: calldata_bytes, // ← ICI : on passe le bon calldata_bytes
             gas_limit: function_meta.gas_limit.into(),
             gas_price: self.gas_price.into(),
             value: 0u64.into(),
@@ -2112,7 +2368,7 @@ impl SlurachainVm {
         let result_bytes = serde_json::to_vec(result)
             .map_err(|e| format!("Erreur sérialisation résultat: {}", e))?;
         storage_manager
-            .write(&result_key, result_bytes)
+            .write(&result_key, &result_bytes)
             .map_err(|e| format!("Erreur persistance: {}", e))?;
         println!("💾 [PERSIST] Résultat persisté: {}", result_key);
         Ok(())
