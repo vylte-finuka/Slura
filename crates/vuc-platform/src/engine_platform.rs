@@ -1323,7 +1323,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
                     {
                         let vm = self.vm.read().await;
                         let accounts = vm.state.accounts.read().await;
-                        let mut attempts = 0;
+                        let mut attempts: i32 = 0;
                         let mut final_addr = proposed.clone();
 
                         while accounts.contains_key(&final_addr) && attempts < 1000 {
