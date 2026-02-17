@@ -2348,29 +2348,55 @@ impl SlurachainVm {
             }
         }
 
+        // ────────────────────────────────────────────────
+        // 🔥 FORCE PERSISTENCE FINALE (TOUJOURS EXÉCUTÉE - MÊME POUR CONSTRUCTOR)
+        // ────────────────────────────────────────────────
+        let _ = self.force_persist_contract_storage(vyid).await;
+
+        // Debug final RocksDB
+        if let Some(manager) = &self.storage_manager {
+            let balances_slot = "37439836327923360225337895871871055371921111519445254264255886447755104894253".to_string();
+            if let Ok(val) = manager.read(&format!("storage:{}:{}", vyid, &balances_slot)) {
+                let u256 = primitive_types::U256::from_big_endian(&val);
+                println!("🔍 [FINAL ROCKSDB CHECK] Slot balances = {} (0x{})", u256, hex::encode(&val));
+            }
+        }
+
         result
     }
 
-/// ✅ FORCE PERSISTENCE (corrigée - plus de move)
+    /// ✅ FORCE PERSISTENCE ULTRA-AGRESSIVE (appelée à CHAQUE exécution)
     async fn force_persist_contract_storage(&mut self, contract_address: &str) -> Result<(), String> {
+        println!("🔥 [FORCE PERSIST START] Lecture mémoire pour {}", contract_address);
+
         let storage_manager = match &self.storage_manager {
             Some(m) => Arc::clone(m),
-            None => return Ok(()),
+            None => {
+                println!("⚠️ Pas de storage_manager → rien à persister");
+                return Ok(());
+            }
         };
 
         let current_storage = {
-            let world_state = self.state.world_state.read().await;
-            match world_state.storage.get(contract_address) {
-                Some(s) => s.clone(),
-                None => return Ok(()),
+            let world = self.state.world_state.read().await;
+            match world.storage.get(contract_address) {
+                Some(s) => {
+                    println!("📋 [FORCE] {} slots trouvés en mémoire", s.len());
+                    s.clone()
+                }
+                None => {
+                    println!("⚠️ [FORCE] Aucune entrée dans world_state.storage");
+                    return Ok(());
+                }
             }
         };
 
         if current_storage.is_empty() {
-            println!("⚠️ [FORCE PERSIST] Aucun slot en mémoire pour {}", contract_address);
+            println!("⚠️ [FORCE] Aucun slot en mémoire → rien à sauver");
             return Ok(());
         }
 
+        // Versionning
         let version_key = format!("version:{}", contract_address);
         let cur_bytes = storage_manager.read(&version_key).unwrap_or_default();
         let cur_ver = if cur_bytes.len() == 8 {
@@ -2379,7 +2405,6 @@ impl SlurachainVm {
         let new_ver = cur_ver + 1;
 
         let _ = storage_manager.write(&version_key, &new_ver.to_be_bytes().to_vec());
-        println!("📈 [FORCE PERSIST] {} → version v{} ({} slots)", contract_address, new_ver, current_storage.len());
 
         let mut accounts = self.state.accounts.write().await;
         let account = accounts
@@ -2393,9 +2418,7 @@ impl SlurachainVm {
         account.state_version = new_ver;
 
         let mut world = self.state.world_state.write().await;
-        let contract_storage = world.storage
-            .entry(contract_address.to_string())
-            .or_insert_with(HashMap::new);
+        let contract_storage = world.storage.entry(contract_address.to_string()).or_insert_with(HashMap::new);
 
         for (slot, value_bytes) in &current_storage {
             account.resources.insert(
@@ -2407,14 +2430,14 @@ impl SlurachainVm {
 
             let keyed_slot = format!("v{}/storage:{}:{}", new_ver, contract_address, slot);
             if let Err(e) = storage_manager.write(&keyed_slot, value_bytes) {
-                println!("⚠️ [FORCE] Échec {} : {}", keyed_slot, e);
+                println!("❌ [FORCE] Échec écriture {} : {}", keyed_slot, e);
             } else {
                 self.storage_versions.insert(slot.clone(), new_ver);
-                println!("💾 [FORCE SLOT] v{} → {} ({} bytes)", new_ver, slot, value_bytes.len());
+                println!("💾 [FORCE SLOT SUCCESS] v{} → slot {} = 0x{}", new_ver, slot, hex::encode(value_bytes));
             }
         }
 
-        println!("✅ [FORCE PERSIST] {} slots sauvegardés pour {}", current_storage.len(), contract_address);
+        println!("✅ [FORCE PERSIST END] {} slots sauvegardés pour {}", current_storage.len(), contract_address);
         Ok(())
     }
 
