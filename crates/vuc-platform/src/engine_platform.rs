@@ -1612,6 +1612,39 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
             }
         }
 
+        if let Some(storage_manager) = &self.storage_manager {
+            let version_key = format!("version:{}", vyid);
+            let _ = manager.write(&version_key, &new_version.to_be_bytes());
+
+            for (slot, value) in &write_set {
+                let keyed_slot = format!("v{}/storage:{}:{}", new_version, vyid, slot);
+                if let Err(e) = manager.write(&keyed_slot, value) {
+                    eprintln!("❌ Échec persistance slot {} : {}", keyed_slot, e);
+                } else {
+                    println!(
+                        "💾 [{}] Slot {} → v{} persisté ({} bytes)",
+                        if is_deployment { "DEPLOY" } else { "CALL" },
+                        slot,
+                        new_version,
+                        value.len()
+                    );
+                }
+            }
+        }
+
+        // Mise à jour versions en mémoire
+        for slot in write_set.keys() {
+            self.storage_versions.insert(slot.clone(), new_version);
+        }
+
+        println!(
+            "✅ Commit {} slots (vglobal = {}) pour {}",
+            write_set.len(),
+            new_version,
+            vyid
+        );
+    }
+
         let receipt_key_padded = format!("receipt:{}", tx_hash_padded);
         if let Ok(receipt_bytes) = serde_json::to_vec(&receipt) {
             if let Err(e) = storage_manager.write(&receipt_key_padded, &receipt_bytes) {
