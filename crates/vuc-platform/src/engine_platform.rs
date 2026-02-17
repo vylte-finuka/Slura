@@ -1341,7 +1341,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
                     }
 
                     // --- NOUVEAU: Exécution du creation code (constructor) ---
-                    let mut vm = self.vm.write().await;
+                    let vm = self.vm.write().await;
 
                     let interpreter_args = InterpreterArgs {
                         contract_address: contract_address.clone(),
