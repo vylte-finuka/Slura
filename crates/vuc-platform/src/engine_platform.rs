@@ -1444,14 +1444,23 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
 
                     // ✅ 4. PERSISTANCE IMMÉDIATE ET MULTIPLE
                     if let Some(storage_manager) = &vm.storage_manager {
-                        println!("💾 PERSISTANCE IMMÉDIATE du contrat {}", contract_address);
+                        let version_key = format!("version:{}", vyid);
+            let _ = storage_manager.write(&version_key, &new_version.to_be_bytes());
 
-                        // ... (persistence code inchangé) ...
-                        // Copie ici tout le bloc de persistance de ton code d'origine
-                    } else {
-                        eprintln!("❌ ERREUR CRITIQUE - Pas de storage manager disponible !");
-                        return Err("Storage manager requis pour la persistance".to_string());
-                    }
+            for (slot, value) in &write_set {
+                let keyed_slot = format!("v{}/storage:{}:{}", new_version, vyid, slot);
+                if let Err(e) = manager.write(&keyed_slot, value) {
+                    eprintln!("❌ Échec persistance slot {} : {}", keyed_slot, e);
+                } else {
+                    println!(
+                        "💾 [{}] Slot {} → v{} persisté ({} bytes)",
+                        if is_deployment { "DEPLOY" } else { "CALL" },
+                        slot,
+                        new_version,
+                        value.len()
+                    );
+                }
+            }
 
                     println!("✅ DÉPLOIEMENT + PERSISTANCE IMMÉDIATE RÉUSSI :");
                     println!("   • Adresse: {} (PERSISTÉ)", contract_address);
@@ -1611,39 +1620,6 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
                 println!("💾 Receipt {} persisté dans RocksDB", normalized_hash);
             }
         }
-
-        if let Some(storage_manager) = &self.storage_manager {
-            let version_key = format!("version:{}", vyid);
-            let _ = manager.write(&version_key, &new_version.to_be_bytes());
-
-            for (slot, value) in &write_set {
-                let keyed_slot = format!("v{}/storage:{}:{}", new_version, vyid, slot);
-                if let Err(e) = manager.write(&keyed_slot, value) {
-                    eprintln!("❌ Échec persistance slot {} : {}", keyed_slot, e);
-                } else {
-                    println!(
-                        "💾 [{}] Slot {} → v{} persisté ({} bytes)",
-                        if is_deployment { "DEPLOY" } else { "CALL" },
-                        slot,
-                        new_version,
-                        value.len()
-                    );
-                }
-            }
-        }
-
-        // Mise à jour versions en mémoire
-        for slot in write_set.keys() {
-            self.storage_versions.insert(slot.clone(), new_version);
-        }
-
-        println!(
-            "✅ Commit {} slots (vglobal = {}) pour {}",
-            write_set.len(),
-            new_version,
-            vyid
-        );
-    }
 
         let receipt_key_padded = format!("receipt:{}", tx_hash_padded);
         if let Ok(receipt_bytes) = serde_json::to_vec(&receipt) {
