@@ -77,7 +77,11 @@ impl OptimisticParallelEngine {
         let (tx_sender, tx_receiver) = crossbeam::channel::unbounded();
         let (commit_sender, _commit_receiver) = crossbeam::channel::unbounded();
         let (abort_sender, _abort_receiver) = crossbeam::channel::unbounded();
-
+        // ✅ Partage le storage_versions du VM
+    let storage_versions = {
+        let vm_guard = vm.blocking_lock();
+        vm_guard.storage_versions.clone()
+    };
         OptimisticParallelEngine {
             transaction_queue: tx_receiver,
             transaction_sender: tx_sender,
@@ -554,7 +558,7 @@ pub struct EventDefinition {
     pub data_params: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct AccountState {
     pub address: String,
     pub balance: u128,
@@ -769,6 +773,7 @@ pub struct SlurachainVm {
     pub uvm_helpers: HashMap<u32, fn(u64, u64, u64, u64, u64) -> u64>,
     pub last_storage: Option<HashMap<String, Vec<u8>>>,
     pub parallel_engine: Option<Arc<OptimisticParallelEngine>>,
+    pub storage_versions: DashMap<String, u64>,
     // ✅ AJOUT: Verrou global anti-reentrancy
     pub global_execution_lock: Arc<Mutex<()>>,
 }
@@ -790,6 +795,7 @@ impl Clone for SlurachainVm {
             uvm_helpers: self.uvm_helpers.clone(),
             last_storage: self.last_storage.clone(),
             parallel_engine: self.parallel_engine.as_ref().map(|arc| Arc::clone(arc)),
+            storage_versions: self.storage_versions.clone(),
             global_execution_lock: Arc::clone(&self.global_execution_lock),
         }
     }
@@ -811,6 +817,7 @@ impl SlurachainVm {
             uvm_helpers: HashMap::new(),
             last_storage: None,
             parallel_engine: None,
+            storage_versions: DashMap::new(),
             global_execution_lock: Arc::new(Mutex::new(())), // ✅ Init du lock
         };
 
