@@ -2347,57 +2347,6 @@ impl SlurachainVm {
         Ok(())
     }
 
-    /// ✅ POST-PROCESSING UNIFIÉ (appelée après chaque execute_program)
-    async fn process_execution_result_generically(
-        &mut self,
-        contract_address: &str,
-        result: &serde_json::Value,
-        function_meta: &FunctionMetadata,
-    ) -> Result<(), String> {
-        println!("🔄 [POST-PROCESS] Traitement résultat pour {} sur {}", function_meta.name, contract_address);
-
-        // NOUVEAU : enregistrement complet des slots par commit
-        let _ = self.persist_storage_slots_from_result(contract_address, result).await;
-
-        // Garde la gestion ERC-1967 (déjà parfaite)
-        let _ = self.persist_contract_state_immediate(contract_address, result).await;
-
-        // Logs & gas (inchangé)
-        if let Some(logs) = result.get("logs").and_then(|v| v.as_array()) {
-            let mut pending = self.state.pending_logs.write().await;
-            for log in logs {
-                if let (Some(addr), Some(topics)) = (
-                    log.get("address").and_then(|v| v.as_str()),
-                    log.get("topics").and_then(|v| v.as_array()),
-                ) {
-                    let topics_str: Vec<String> = topics.iter()
-                        .filter_map(|t| t.as_str())
-                        .map(|s| s.to_string())
-                        .collect();
-                    pending.push(UvmLog {
-                        address: addr.to_string(),
-                        topics: topics_str,
-                        data: log.get("data")
-                            .and_then(|d| hex::decode(d.as_str().unwrap_or("")).ok())
-                            .unwrap_or_default(),
-                    });
-                }
-            }
-        }
-
-        if let Some(gas) = result.get("gas_used").and_then(|v| v.as_u64()) {
-            let mut accs = self.state.accounts.write().await;
-            if let Some(acc) = accs.get_mut(contract_address) {
-                acc.gas_used = gas;
-            }
-        }
-
-        println!("✅ [POST-PROCESS] {} slots persistés pour {}", 
-                 result.get("storage").and_then(|s| s.as_object()).map(|o| o.len()).unwrap_or(0),
-                 contract_address);
-        Ok(())
-    }
-
     /// ✅ NOUVEAU: Conversion des resources en bytes de storage
     fn convert_resource_to_storage_bytes(&self, value: &serde_json::Value) -> Vec<u8> {
         match value {
