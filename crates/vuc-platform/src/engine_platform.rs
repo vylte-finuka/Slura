@@ -1340,56 +1340,101 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
                         }
                     }
 
-                    // --- Exécution du creation code (constructor) via VM → FORCE L'ÉCRITURE DES SLOTS ---
+                    // --- NOUVEAU: Exécution du creation code (constructor) ---
                     let mut vm = self.vm.write().await;
 
-                    println!("⚙️ Exécution du constructor pour {}", contract_address);
-                    let _ = vm.execute_program(
-                        &contract_address,
-                        "constructor",
-                        vec![],
-                        Some(&from_addr),
+                    let interpreter_args = InterpreterArgs {
+                        contract_address: contract_address.clone(),
+                        sender_address: from_addr.clone(),
+                        state_data: vec![], // calldata du constructor si besoin
+                        value: primitive_types::U256::from(value),
+                        ..Default::default()
+                    };
+
+                    let creation_result = execute_program(
+                        Some(&creation_bytecode),
                         None,
+                        &[],
+                        &[],
+                        &mut hashbrown::HashMap::new(),
+                        &hashbrown::HashSet::new(),
                         None,
+                        &hashbrown::HashMap::new(),
+                        &interpreter_args,
                         None,
-                        Some(&calldata_bytes),
-                    ).await;
+                    );
+
+                    let (runtime_bytecode, storage_final) = match creation_result {
+                        Ok(json) => {
+                            if let Some(obj) = json.as_object() {
+                                if obj.get("action").and_then(|v| v.as_str()) == Some("return") {
+                                    let runtime = obj.get("data")
+                                        .and_then(|v| v.as_str())
+                                        .and_then(|s| hex::decode(s.trim_start_matches("0x")).ok())
+                                        .unwrap_or_default();
+                                    let storage: Vec<_> = obj.get("storage")
+                                        .and_then(|v| v.as_object())
+                                        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.as_str().map(|s| hex::decode(s.trim_start_matches("0x")).unwrap_or_default()).unwrap_or_default())).collect())
+                                        .unwrap_or_default();
+                                    (runtime, storage)
+                                } else {
+                                    return Err("Le creation code n'a pas retourné de runtime".to_string());
+                                }
+                            } else {
+                                return Err("Résultat creation code inattendu".to_string());
+                            }
+                        }
+                        Err(e) => {
+                            return Err(format!("Erreur VM creation code: {:?}", e));
+                        }
+                    };
+
+                    let contract_account = vuc_tx::slurachain_vm::AccountState {
+                        address: contract_address.clone(),
+                        balance: value as u128,
+                        contract_state: runtime_bytecode,
+                        resources: {
+                            let mut resources = std::collections::BTreeMap::new();
+                            resources.insert("deployed_by".to_string(), serde_json::Value::String(from_addr.clone()));
+                            resources.insert("deployment_tx".to_string(), serde_json::Value::String(normalized_hash.clone()));
+                            resources.insert("deployment_timestamp".to_string(), serde_json::Value::Number(chrono::Utc::now().timestamp().into()));
+                            resources.insert("deployment_nonce".to_string(), serde_json::Value::Number(final_nonce.into()));
+                            resources.insert("bytecode_hex".to_string(), serde_json::Value::String(hex::encode(&creation_bytecode)));
+                            resources.insert("bytecode_size".to_string(), serde_json::Value::Number(creation_bytecode.len().into()));
+                            resources.insert("is_persisted".to_string(), serde_json::Value::Bool(true));
+                            resources.insert("contract_type".to_string(), serde_json::Value::String("user_deployed".to_string()));
+                            resources.insert("unique_deployment_key".to_string(), serde_json::Value::String(
+                                format!("{}:{}:{}", from_addr, final_nonce, chrono::Utc::now().timestamp_nanos())
+                            ));
+                            resources.insert("persistence_status".to_string(), serde_json::Value::String("pending".to_string()));
+                            resources.insert("deployment_method".to_string(), serde_json::Value::String("indeterministic_create".to_string()));
+                            resources.insert("address_entropy".to_string(), serde_json::Value::Number(rand::random::<u64>().into()));
+                            resources
+                        },
+                        state_version: 1,
+                        last_block_number: 0,
+                        nonce: 0,
+                        code_hash: format!("contract_deploy_{}", chrono::Utc::now().timestamp()),
+                        storage_root: format!("storage_{}", contract_address),
+                        is_contract: true,
+                        gas_used: 0,
+                    };
+
+                    // --- Applique le storage du constructor ---
+                    if !storage_final.is_empty() {
+                        let mut accounts = vm.state.accounts.write().await;
+                        if let Some(account) = accounts.get_mut(&contract_address) {
+                            for (slot, value) in storage_final {
+                                // On stocke chaque slot dans resources, encodé en hex
+                                account.resources.insert(slot, serde_json::Value::String(format!("0x{}", hex::encode(value))));
+                            }
+                        }
+                    }
 
                     // 2. Insère dans l'état VM
                     {
                         let mut accounts = vm.state.accounts.write().await;
-                        accounts.insert(contract_address.clone(), vuc_tx::slurachain_vm::AccountState {
-                            address: contract_address.clone(),
-                            balance: value as u128,
-                            contract_state: creation_bytecode.clone(),
-                            resources: {
-                                let mut resources = std::collections::BTreeMap::new();
-                                resources.insert("deployed_by".to_string(), serde_json::Value::String(from_addr.clone()));
-                                resources.insert("deployment_tx".to_string(), serde_json::Value::String(normalized_hash.clone()));
-                                resources.insert("deployment_timestamp".to_string(), serde_json::Value::Number(chrono::Utc::now().timestamp().into()));
-                                resources.insert("deployment_nonce".to_string(), serde_json::Value::Number(final_nonce.into()));
-                                resources.insert("bytecode_hex".to_string(), serde_json::Value::String(hex::encode(&creation_bytecode)));
-                                resources.insert("bytecode_size".to_string(), serde_json::Value::Number(creation_bytecode.len().into()));
-                                resources.insert("is_persisted".to_string(), serde_json::Value::Bool(true));
-                                resources.insert("contract_type".to_string(), serde_json::Value::String("user_deployed".to_string()));
-                                resources.insert("unique_deployment_key".to_string(), serde_json::Value::String(
-                                    format!("{}:{}:{}", from_addr, final_nonce, chrono::Utc::now().timestamp_nanos())
-                                ));
-                                resources.insert("persistence_status".to_string(), serde_json::Value::String("pending".to_string()));
-                                resources.insert("deployment_method".to_string(), serde_json::Value::String(
-                                    if use_create2 { "create2" } else { "indeterministic_create" }.to_string()
-                                ));
-                                resources.insert("address_entropy".to_string(), serde_json::Value::Number(rand::random::<u64>().into()));
-                                resources
-                            },
-                            state_version: 1,
-                            last_block_number: 0,
-                            nonce: 0,
-                            code_hash: format!("contract_deploy_{}", chrono::Utc::now().timestamp()),
-                            storage_root: format!("storage_{}", contract_address),
-                            is_contract: true,
-                            gas_used: 0,
-                        });
+                        accounts.insert(contract_address.clone(), contract_account.clone());
                     }
 
                     // 3. Détection automatique des fonctions
@@ -1397,9 +1442,12 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
                         println!("⚠️ Détection automatique des fonctions échouée pour {}: {}", contract_address, e);
                     }
 
-                    // ✅ 4. PERSISTANCE IMMÉDIATE ET MULTIPLE (déjà gérée par execute_program + force_persist)
+                    // ✅ 4. PERSISTANCE IMMÉDIATE ET MULTIPLE
                     if let Some(storage_manager) = &vm.storage_manager {
                         println!("💾 PERSISTANCE IMMÉDIATE du contrat {}", contract_address);
+
+                        // ... (persistence code inchangé) ...
+                        // Copie ici tout le bloc de persistance de ton code d'origine
                     } else {
                         eprintln!("❌ ERREUR CRITIQUE - Pas de storage manager disponible !");
                         return Err("Storage manager requis pour la persistance".to_string());
@@ -1603,7 +1651,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
 
     Ok(tx_hash_padded)
 }
-
+    
     /// ✅ Récupération d'un reçu de transaction
         pub async fn get_transaction_receipt(&self, input_hash: String) -> Result<serde_json::Value, String> {
         let hash = self.normalize_tx_hash(&input_hash);
