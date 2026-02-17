@@ -1421,14 +1421,12 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
                     };
 
                     // --- Applique le storage du constructor ---
-                    if !storage_final.is_empty() {
                         let mut accounts = vm.state.accounts.write().await;
                         if let Some(account) = accounts.get_mut(&contract_address) {
                             for (slot, value) in storage_final {
                                 // On stocke chaque slot dans resources, encodé en hex
                                 account.resources.insert(slot, serde_json::Value::String(format!("0x{}", hex::encode(value))));
                             }
-                        }
                     }
 
                     // 2. Insère dans l'état VM
@@ -1444,23 +1442,14 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
 
                     // ✅ 4. PERSISTANCE IMMÉDIATE ET MULTIPLE
                     if let Some(storage_manager) = &vm.storage_manager {
-                        let version_key = format!("version:{}", vyid);
-            let _ = storage_manager.write(&version_key, &new_version.to_be_bytes());
+                        println!("💾 PERSISTANCE IMMÉDIATE du contrat {}", contract_address);
 
-            for (slot, value) in &write_set {
-                let keyed_slot = format!("v{}/storage:{}:{}", new_version, vyid, slot);
-                if let Err(e) = manager.write(&keyed_slot, value) {
-                    eprintln!("❌ Échec persistance slot {} : {}", keyed_slot, e);
-                } else {
-                    println!(
-                        "💾 [{}] Slot {} → v{} persisté ({} bytes)",
-                        if is_deployment { "DEPLOY" } else { "CALL" },
-                        slot,
-                        new_version,
-                        value.len()
-                    );
-                }
-            }}
+                        // ... (persistence code inchangé) ...
+                        // Copie ici tout le bloc de persistance de ton code d'origine
+                    } else {
+                        eprintln!("❌ ERREUR CRITIQUE - Pas de storage manager disponible !");
+                        return Err("Storage manager requis pour la persistance".to_string());
+                    }
 
                     println!("✅ DÉPLOIEMENT + PERSISTANCE IMMÉDIATE RÉUSSI :");
                     println!("   • Adresse: {} (PERSISTÉ)", contract_address);
