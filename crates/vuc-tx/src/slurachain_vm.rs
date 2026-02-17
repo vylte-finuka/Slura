@@ -73,26 +73,27 @@ pub struct OptimisticParallelEngine {
 }
 
 impl OptimisticParallelEngine {
-    pub fn new(thread_pool_size: usize, batch_size: usize, vm: Arc<Mutex<SlurachainVm>>) -> Self {
+    pub fn new(
+        thread_pool_size: usize,
+        batch_size: usize,
+        vm: Arc<Mutex<SlurachainVm>>,
+        storage_versions: DashMap<String, u64>,   // ← NOUVEAU PARAMÈTRE
+    ) -> Self {
         let (tx_sender, tx_receiver) = crossbeam::channel::unbounded();
         let (commit_sender, _commit_receiver) = crossbeam::channel::unbounded();
         let (abort_sender, _abort_receiver) = crossbeam::channel::unbounded();
-        // ✅ Partage le storage_versions du VM
-    let storage_versions = {
-        let vm_guard = vm.blocking_lock();
-        vm_guard.storage_versions.clone()
-    };
+
         OptimisticParallelEngine {
             transaction_queue: tx_receiver,
             transaction_sender: tx_sender,
             global_version_counter: AtomicU64::new(0),
-            storage_versions: DashMap::new(),
+            storage_versions,                    // ← utilise celui passé (partagé)
             active_transactions: DashMap::new(),
             commit_queue: commit_sender,
             abort_queue: abort_sender,
             thread_pool_size,
             batch_size,
-            vm, // <-- Ajout du champ manquant
+            vm,
         }
     }
 
@@ -1274,13 +1275,17 @@ impl SlurachainVm {
         }
     }
 
-    /// ✅ NOUVEAU: Configuration du moteur parallèle
+    /// ✅ Configuration du moteur parallèle (version corrigée)
     pub fn with_parallel_engine(mut self, thread_count: usize, batch_size: usize) -> Self {
+        let storage_versions = self.storage_versions.clone();  // ← Clone AVANT le Arc
+
         let engine = Arc::new(OptimisticParallelEngine::new(
             thread_count,
             batch_size,
             Arc::new(Mutex::new(self.clone())),
+            storage_versions,   // ← DashMap partagé avec le VM
         ));
+
         self.parallel_engine = Some(engine);
         println!(
             "⚡ Moteur parallèle configuré: {} threads, batch {}",
