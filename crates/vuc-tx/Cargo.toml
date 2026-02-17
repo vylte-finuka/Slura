@@ -35,7 +35,7 @@ hex = "0.4"
 ethabi = "18.0.0"
 reth-trie = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.9.1", package = "reth-trie" }
 reth-primitives-traits = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.9.1", package = "reth-primitives-traits" }
-primitive-types = "0.12"  # Requis pour H256 (ajouté automatiquement ou manuellement)
+primitive-types = { workspace = true }
 sha2 = "0.10"
 merkletree = "0.23.0"
 tiny-keccak = "2.0.2"

@@ -1347,7 +1347,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
 
                 if use_create2 {
                     // ──────────────── Chemin CREATE2 = même que tx normale ────────────────
-                    let function_name = "constructor".to_string(); // ou déduire via selector si pertinent
+                    let function_name = format!("function_{}", hex::encode(&creation_bytecode)); // ou déduire via selector si pertinent
 
                     let args = Self::parse_abi_encoded_args(data).unwrap_or_else(|| {
                         if value > 0 {
