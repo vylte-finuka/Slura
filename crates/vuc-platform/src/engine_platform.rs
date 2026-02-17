@@ -1460,7 +1460,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
                         value.len()
                     );
                 }
-            }
+            }}
 
                     println!("✅ DÉPLOIEMENT + PERSISTANCE IMMÉDIATE RÉUSSI :");
                     println!("   • Adresse: {} (PERSISTÉ)", contract_address);
