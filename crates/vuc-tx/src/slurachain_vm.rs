@@ -73,12 +73,7 @@ pub struct OptimisticParallelEngine {
 }
 
 impl OptimisticParallelEngine {
-    pub fn new(
-        thread_pool_size: usize,
-        batch_size: usize,
-        vm: Arc<Mutex<SlurachainVm>>,
-        storage_versions: DashMap<String, u64>,   // ← NOUVEAU PARAMÈTRE
-    ) -> Self {
+    pub fn new(thread_pool_size: usize, batch_size: usize, vm: Arc<Mutex<SlurachainVm>>) -> Self {
         let (tx_sender, tx_receiver) = crossbeam::channel::unbounded();
         let (commit_sender, _commit_receiver) = crossbeam::channel::unbounded();
         let (abort_sender, _abort_receiver) = crossbeam::channel::unbounded();
@@ -87,13 +82,13 @@ impl OptimisticParallelEngine {
             transaction_queue: tx_receiver,
             transaction_sender: tx_sender,
             global_version_counter: AtomicU64::new(0),
-            storage_versions,                    // ← utilise celui passé (partagé)
+            storage_versions: DashMap::new(),
             active_transactions: DashMap::new(),
             commit_queue: commit_sender,
             abort_queue: abort_sender,
             thread_pool_size,
             batch_size,
-            vm,
+            vm, // <-- Ajout du champ manquant
         }
     }
 
@@ -559,7 +554,7 @@ pub struct EventDefinition {
     pub data_params: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AccountState {
     pub address: String,
     pub balance: u128,
@@ -774,7 +769,6 @@ pub struct SlurachainVm {
     pub uvm_helpers: HashMap<u32, fn(u64, u64, u64, u64, u64) -> u64>,
     pub last_storage: Option<HashMap<String, Vec<u8>>>,
     pub parallel_engine: Option<Arc<OptimisticParallelEngine>>,
-    pub storage_versions: DashMap<String, u64>,
     // ✅ AJOUT: Verrou global anti-reentrancy
     pub global_execution_lock: Arc<Mutex<()>>,
 }
@@ -796,7 +790,6 @@ impl Clone for SlurachainVm {
             uvm_helpers: self.uvm_helpers.clone(),
             last_storage: self.last_storage.clone(),
             parallel_engine: self.parallel_engine.as_ref().map(|arc| Arc::clone(arc)),
-            storage_versions: self.storage_versions.clone(),
             global_execution_lock: Arc::clone(&self.global_execution_lock),
         }
     }
@@ -818,7 +811,6 @@ impl SlurachainVm {
             uvm_helpers: HashMap::new(),
             last_storage: None,
             parallel_engine: None,
-            storage_versions: DashMap::new(),
             global_execution_lock: Arc::new(Mutex::new(())), // ✅ Init du lock
         };
 
@@ -1275,17 +1267,13 @@ impl SlurachainVm {
         }
     }
 
-    /// ✅ Configuration du moteur parallèle (version corrigée)
+    /// ✅ NOUVEAU: Configuration du moteur parallèle
     pub fn with_parallel_engine(mut self, thread_count: usize, batch_size: usize) -> Self {
-        let storage_versions = self.storage_versions.clone();  // ← Clone AVANT le Arc
-
         let engine = Arc::new(OptimisticParallelEngine::new(
             thread_count,
             batch_size,
             Arc::new(Mutex::new(self.clone())),
-            storage_versions,   // ← DashMap partagé avec le VM
         ));
-
         self.parallel_engine = Some(engine);
         println!(
             "⚡ Moteur parallèle configuré: {} threads, batch {}",
@@ -1839,175 +1827,6 @@ impl SlurachainVm {
         false
     }
 
-/// ✅ Préparation des arguments d'exécution (version finale corrigée)
-    async fn prepare_generic_execution_args(
-        &self,
-        contract_address: &str,
-        function_name: &str,
-        args: Vec<NerenaValue>,
-        sender: &str,
-        calldata: Option<&[u8]>,
-        function_meta: &FunctionMetadata,
-        resolved_offset: usize,
-    ) -> Result<uvm_runtime::interpreter::InterpreterArgs, String> {
-        let current_time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        let block_number = self.state.block_info.read().await.number;
-
-        // Construction du calldata ABI
-        let calldata_bytes: Vec<u8> = if let Some(external) = calldata {
-            external.to_vec()
-        } else {
-            let mut generated = Vec::with_capacity(4 + args.len() * 32);
-            generated.extend_from_slice(&function_meta.selector.to_be_bytes());
-
-            for arg in &args {
-                let mut padded = [0u8; 32];
-                match arg {
-                    serde_json::Value::String(s) if s.starts_with("0x") && s.len() == 42 => {
-                        if let Ok(bytes) = hex::decode(&s[2..]) {
-                            if bytes.len() == 20 {
-                                padded[12..32].copy_from_slice(&bytes);
-                            }
-                        }
-                    }
-                    serde_json::Value::Number(n) => {
-                        if let Some(u) = n.as_u64() {
-                            padded[24..32].copy_from_slice(&u.to_be_bytes());
-                        }
-                    }
-                    serde_json::Value::Bool(b) => {
-                        padded[31] = if *b { 1 } else { 0 };
-                    }
-                    _ => {}
-                }
-                generated.extend_from_slice(&padded);
-            }
-            generated
-        };
-
-        Ok(uvm_runtime::interpreter::InterpreterArgs {
-            function_name: function_name.to_string(),
-            contract_address: contract_address.to_string(),
-            sender_address: sender.to_string(),
-            args,
-            state_data: calldata_bytes,
-            gas_limit: function_meta.gas_limit.into(),
-            gas_price: self.gas_price.into(),
-            value: 0u64.into(),
-            call_depth: 0u64.into(),
-            block_number: block_number.into(),
-            timestamp: current_time.into(),
-            caller: sender.to_string(),
-            origin: sender.to_string(),
-            beneficiary: sender.to_string(),
-            function_offset: Some(resolved_offset),
-            base_fee: Some(0u64.into()),
-            blob_base_fee: Some(0u64.into()),
-            blob_hash: Some([0u8; 32]),
-        })
-    }
-
-/// ✅ ENREGISTREMENT DE SLOTS PAR COMMIT (UNIFIÉ avec déploiement send_transaction + parallel engine)
-    async fn persist_storage_slots_from_result(
-        &mut self,
-        contract_address: &str,
-        result: &serde_json::Value,
-    ) -> Result<(), String> {
-        let storage_obj = result
-            .get("storage")
-            .and_then(|v| v.as_object())
-            .or_else(|| result.get("storage_decoded").and_then(|v| v.as_object()));
-
-        let storage_obj = match storage_obj {
-            Some(obj) => obj,
-            None => return Ok(()),
-        };
-
-        let storage_manager = match &self.storage_manager {
-            Some(m) => Arc::clone(m),
-            None => {
-                // Fallback volatile (comme avant)
-                let mut world = self.state.world_state.write().await;
-                let contract_storage = world.storage
-                    .entry(contract_address.to_string())
-                    .or_insert_with(HashMap::new);
-
-                let mut accounts = self.state.accounts.write().await;
-                if let Some(acc) = accounts.get_mut(contract_address) {
-                    for (key, val) in storage_obj {
-                        let canonical = self.map_resource_key_to_slot(key);
-                        let bytes = self.convert_resource_to_storage_bytes(val);
-                        contract_storage.insert(canonical.clone(), bytes.clone());
-                        acc.resources.insert(
-                            canonical,
-                            serde_json::json!(format!("0x{}", hex::encode(&bytes))),
-                        );
-                    }
-                }
-                return Ok(());
-            }
-        };
-
-        // ==================== VERSIONNING ====================
-        let version_key = format!("version:{}", contract_address);
-        let cur_bytes = storage_manager.read(&version_key).unwrap_or_default();
-        let cur_ver = if cur_bytes.len() == 8 {
-            u64::from_be_bytes(cur_bytes.try_into().unwrap_or([0; 8]))
-        } else { 0 };
-        let new_ver = cur_ver + 1;
-
-        let _ = storage_manager.write(&version_key, &new_ver.to_be_bytes().to_vec());
-        println!("📈 [COMMIT SLOT] Contrat {} → version v{}", contract_address, new_ver);
-
-        // ==================== SLOTS INDIVIDUELS ====================
-        let mut world = self.state.world_state.write().await;
-        let contract_storage = world.storage
-            .entry(contract_address.to_string())
-            .or_insert_with(HashMap::new);
-
-        let mut accounts = self.state.accounts.write().await;
-        let account = accounts
-            .entry(contract_address.to_string())
-            .or_insert_with(|| AccountState {
-                address: contract_address.to_string(),
-                is_contract: true,
-                state_version: new_ver,
-                ..Default::default()
-            });
-        account.state_version = new_ver;
-
-        for (key, value_json) in storage_obj {
-            let canonical_slot = self.map_resource_key_to_slot(key);
-            let value_bytes = self.convert_resource_to_storage_bytes(value_json);
-
-            // 1. Mise à jour resources (exactement comme dans send_transaction deployment)
-            account.resources.insert(
-                canonical_slot.clone(),
-                serde_json::Value::String(format!("0x{}", hex::encode(&value_bytes))),
-            );
-
-            // 2. Mise à jour world_state
-            contract_storage.insert(canonical_slot.clone(), value_bytes.clone());
-
-            // 3. Persistance versionnée RocksDB (style parallel engine)
-            let keyed_slot = format!("v{}/storage:{}:{}", new_ver, contract_address, canonical_slot);
-            if let Err(e) = storage_manager.write(&keyed_slot, &value_bytes) {
-                println!("⚠️ [SLOT] Échec écriture {} : {}", keyed_slot, e);
-            } else {
-                println!("💾 [SLOT COMMIT] v{} → {} ({} bytes)", new_ver, canonical_slot, value_bytes.len());
-            }
-
-            // Mise à jour globale des versions (pour optimistic parallelism)
-            self.storage_versions.insert(canonical_slot.clone(), new_ver);
-        }
-
-        Ok(())
-    }
-
     /// ✅ EXÉCUTION STRICTE avec bytecode réel - CORRECTION MAJEURE POUR PROXY
     pub async fn execute_program(
         &mut self,
@@ -2200,7 +2019,7 @@ impl SlurachainVm {
                     function_name,
                     args.clone(),
                     sender,
-                    calldata,                    // ← OK maintenant
+                    calldata,
                     &impl_function_meta,
                     impl_resolved_offset,
                 )
@@ -2285,7 +2104,7 @@ impl SlurachainVm {
                 function_name,
                 args.clone(),
                 sender,
-                calldata,                    // ← OK maintenant
+                calldata,
                 &function_meta,
                 resolved_offset,
             )
@@ -2348,96 +2167,58 @@ impl SlurachainVm {
             }
         }
 
-        // ────────────────────────────────────────────────
-        // 🔥 FORCE PERSISTENCE FINALE (TOUJOURS EXÉCUTÉE - MÊME POUR CONSTRUCTOR)
-        // ────────────────────────────────────────────────
-        let _ = self.force_persist_contract_storage(vyid).await;
-
-        // Debug final RocksDB
-        if let Some(manager) = &self.storage_manager {
-            let balances_slot = "37439836327923360225337895871871055371921111519445254264255886447755104894253".to_string();
-            if let Ok(val) = manager.read(&format!("storage:{}:{}", vyid, &balances_slot)) {
-                let u256 = primitive_types::U256::from_big_endian(&val);
-                println!("🔍 [FINAL ROCKSDB CHECK] Slot balances = {} (0x{})", u256, hex::encode(&val));
-            }
-        }
-
         result
     }
 
-    /// ✅ FORCE PERSISTENCE ULTRA-AGRESSIVE (appelée à CHAQUE exécution)
-    async fn force_persist_contract_storage(&mut self, contract_address: &str) -> Result<(), String> {
-        println!("🔥 [FORCE PERSIST START] Lecture mémoire pour {}", contract_address);
-
-        let storage_manager = match &self.storage_manager {
-            Some(m) => Arc::clone(m),
-            None => {
-                println!("⚠️ Pas de storage_manager → rien à persister");
-                return Ok(());
-            }
-        };
-
-        let current_storage = {
-            let world = self.state.world_state.read().await;
-            match world.storage.get(contract_address) {
-                Some(s) => {
-                    println!("📋 [FORCE] {} slots trouvés en mémoire", s.len());
-                    s.clone()
-                }
-                None => {
-                    println!("⚠️ [FORCE] Aucune entrée dans world_state.storage");
-                    return Ok(());
-                }
-            }
-        };
-
-        if current_storage.is_empty() {
-            println!("⚠️ [FORCE] Aucun slot en mémoire → rien à sauver");
-            return Ok(());
+    /// ✅ NOUVEAU: Post-processing générique des résultats d'exécution
+    async fn process_execution_result_generically(
+        &mut self,
+        contract_address: &str,
+        result: &serde_json::Value,
+        function_meta: &FunctionMetadata,
+    ) -> Result<(), String> {
+        println!(
+            "🔄 [POST-PROCESS] Traitement du résultat pour {}",
+            function_meta.name
+        );
+        if let Some(storage_manager) = &self.storage_manager {
+            self.persist_result_to_storage(storage_manager, contract_address, result)?;
+            self.persist_contract_state_immediate(contract_address, result)
+                .await?;
         }
-
-        // Versionning
-        let version_key = format!("version:{}", contract_address);
-        let cur_bytes = storage_manager.read(&version_key).unwrap_or_default();
-        let cur_ver = if cur_bytes.len() == 8 {
-            u64::from_be_bytes(cur_bytes.try_into().unwrap_or([0; 8]))
-        } else { 0 };
-        let new_ver = cur_ver + 1;
-
-        let _ = storage_manager.write(&version_key, &new_ver.to_be_bytes().to_vec());
-
-        let mut accounts = self.state.accounts.write().await;
-        let account = accounts
-            .entry(contract_address.to_string())
-            .or_insert_with(|| AccountState {
-                address: contract_address.to_string(),
-                is_contract: true,
-                state_version: new_ver,
-                ..Default::default()
-            });
-        account.state_version = new_ver;
-
-        let mut world = self.state.world_state.write().await;
-        let contract_storage = world.storage.entry(contract_address.to_string()).or_insert_with(HashMap::new);
-
-        for (slot, value_bytes) in &current_storage {
-            account.resources.insert(
-                slot.clone(),
-                serde_json::Value::String(format!("0x{}", hex::encode(value_bytes))),
-            );
-
-            contract_storage.insert(slot.clone(), value_bytes.clone());
-
-            let keyed_slot = format!("v{}/storage:{}:{}", new_ver, contract_address, slot);
-            if let Err(e) = storage_manager.write(&keyed_slot, value_bytes) {
-                println!("❌ [FORCE] Échec écriture {} : {}", keyed_slot, e);
-            } else {
-                self.storage_versions.insert(slot.clone(), new_ver);
-                println!("💾 [FORCE SLOT SUCCESS] v{} → slot {} = 0x{}", new_ver, slot, hex::encode(value_bytes));
+        if let Some(logs) = result.get("logs").and_then(|v| v.as_array()) {
+            let mut pending_logs = self.state.pending_logs.write().await;
+            for log in logs {
+                if let (Some(address), Some(topics)) = (
+                    log.get("address").and_then(|v| v.as_str()),
+                    log.get("topics").and_then(|v| v.as_array()),
+                ) {
+                    let topics_str: Vec<String> = topics
+                        .iter()
+                        .filter_map(|t| t.as_str())
+                        .map(|s| s.to_string())
+                        .collect();
+                    pending_logs.push(UvmLog {
+                        address: address.to_string(),
+                        topics: topics_str,
+                        data: log
+                            .get("data")
+                            .and_then(|d| hex::decode(d.as_str().unwrap_or("")).ok())
+                            .unwrap_or_default(),
+                    });
+                }
             }
         }
-
-        println!("✅ [FORCE PERSIST END] {} slots sauvegardés pour {}", current_storage.len(), contract_address);
+        if let Some(gas_used) = result.get("gas_used").and_then(|v| v.as_u64()) {
+            let mut accounts = self.state.accounts.write().await;
+            if let Some(account) = accounts.get_mut(contract_address) {
+                account.gas_used = gas_used;
+            }
+        }
+        println!(
+            "✅ [POST-PROCESS] Traitement terminé pour {}",
+            function_meta.name
+        );
         Ok(())
     }
 
@@ -2465,58 +2246,108 @@ impl SlurachainVm {
         }
     }
 
-    //// ✅ POST-PROCESSING UNIFIÉ + FORCE PERSIST (appelée après CHAQUE exécution)
-    async fn process_execution_result_generically(
-        &mut self,
+    /// ✅ NOUVEAU: Préparation des arguments d'exécution génériques
+    async fn prepare_generic_execution_args(
+        &self,
         contract_address: &str,
-        result: &serde_json::Value,
+        function_name: &str,
+        args: Vec<NerenaValue>,
+        sender: &str,
+        calldata: Option<&[u8]>,
         function_meta: &FunctionMetadata,
-    ) -> Result<(), String> {
-        println!("🔄 [POST-PROCESS] {} → {}", function_meta.name, contract_address);
+        resolved_offset: usize,
+    ) -> Result<uvm_runtime::interpreter::InterpreterArgs, String> {
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let block_info = self.state.block_info.read().await;
+        let block_number = block_info.number;
 
-        // 1. Méthode normale (si l'interpréteur a renvoyé "storage")
-        let has_storage = result.get("storage").is_some() || result.get("storage_decoded").is_some();
-        if has_storage {
-            let _ = self.persist_storage_slots_from_result(contract_address, result).await;
-        }
+        // ────────────────────────────────────────────────
+        // 1. Construction du calldata ABI (priorité : calldata passé > génération auto)
+        // ────────────────────────────────────────────────
+        let calldata_bytes: Vec<u8> = if let Some(external_calldata) = calldata {
+            // Si on a passé un calldata brut (ex: depuis eth_call ou proxy)
+            println!(
+                "🟢 Utilisation du calldata brut passé (len = {})",
+                external_calldata.len()
+            );
+            external_calldata.to_vec()
+        } else {
+            // Sinon on génère le calldata ABI standard
+            let mut generated = Vec::with_capacity(4 + args.len() * 32);
 
-        // 2. FORCE PERSISTENCE (toujours exécutée) → SOLUTION PRINCIPALE
-        let _ = self.force_persist_contract_storage(contract_address).await;
+            // Selector (4 bytes)
+            generated.extend_from_slice(&function_meta.selector.to_be_bytes());
 
-        // 3. ERC-1967 (inchangé)
-        let _ = self.persist_contract_state_immediate(contract_address, result).await;
+            // Arguments (chacun 32 bytes paddés)
+            for arg in &args {
+                let mut padded = [0u8; 32];
 
-        // Logs & gas
-        if let Some(logs) = result.get("logs").and_then(|v| v.as_array()) {
-            let mut pending = self.state.pending_logs.write().await;
-            for log in logs {
-                if let (Some(addr), Some(topics)) = (
-                    log.get("address").and_then(|v| v.as_str()),
-                    log.get("topics").and_then(|v| v.as_array()),
-                ) {
-                    let topics_str: Vec<String> = topics.iter()
-                        .filter_map(|t| t.as_str())
-                        .map(|s| s.to_string())
-                        .collect();
-                    pending.push(UvmLog {
-                        address: addr.to_string(),
-                        topics: topics_str,
-                        data: log.get("data")
-                            .and_then(|d| hex::decode(d.as_str().unwrap_or("")).ok())
-                            .unwrap_or_default(),
-                    });
+                match arg {
+                    serde_json::Value::String(s) => {
+                        if s.starts_with("0x") && s.len() == 42 {
+                            // Adresse → padding à gauche
+                            if let Ok(bytes) = hex::decode(&s[2..]) {
+                                if bytes.len() == 20 {
+                                    padded[12..32].copy_from_slice(&bytes);
+                                }
+                            }
+                        } else {
+                            // String → padding à droite (pas ABI optimal mais acceptable ici)
+                            let bytes = s.as_bytes();
+                            if bytes.len() <= 32 {
+                                padded[..bytes.len()].copy_from_slice(bytes);
+                            }
+                        }
+                    }
+                    serde_json::Value::Number(n) => {
+                        if let Some(u) = n.as_u64() {
+                            padded[24..32].copy_from_slice(&u.to_be_bytes());
+                        }
+                    }
+                    serde_json::Value::Bool(b) => {
+                        padded[31] = if *b { 1 } else { 0 };
+                    }
+                    _ => {} // reste à zéro
                 }
-            }
-        }
 
-        if let Some(gas) = result.get("gas_used").and_then(|v| v.as_u64()) {
-            let mut accs = self.state.accounts.write().await;
-            if let Some(acc) = accs.get_mut(contract_address) {
-                acc.gas_used = gas;
+                generated.extend_from_slice(&padded);
             }
-        }
 
-        Ok(())
+            println!(
+                "🟢 Calldata généré automatiquement → len={}, hex=0x{}",
+                generated.len(),
+                hex::encode(&generated)
+            );
+
+            generated
+        };
+
+        // ────────────────────────────────────────────────
+        // 2. Création finale des InterpreterArgs
+        // ────────────────────────────────────────────────
+        Ok(uvm_runtime::interpreter::InterpreterArgs {
+            function_name: function_name.to_string(),
+            contract_address: contract_address.to_string(),
+            sender_address: sender.to_string(),
+            args,
+            state_data: calldata_bytes, // ← ICI : on passe le bon calldata_bytes
+            gas_limit: function_meta.gas_limit.into(),
+            gas_price: self.gas_price.into(),
+            value: 0u64.into(),
+            call_depth: 0u64.into(),
+            block_number: block_number.into(),
+            timestamp: current_time.into(),
+            caller: sender.to_string(),
+            origin: sender.to_string(),
+            beneficiary: sender.to_string(),
+            function_offset: Some(resolved_offset),
+            base_fee: Some(0u64.into()),
+            blob_base_fee: Some(0u64.into()),
+            blob_hash: Some([0u8; 32]),
+        })
     }
 
     /// ✅ NOUVEAU: Persistance des résultats dans le storage
