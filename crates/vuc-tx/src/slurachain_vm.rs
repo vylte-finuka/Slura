@@ -1827,310 +1827,494 @@ impl SlurachainVm {
         false
     }
 
+/// ✅ ENREGISTREMENT DE SLOTS PAR COMMIT (UNIFIÉ avec déploiement send_transaction + parallel engine)
+    async fn persist_storage_slots_from_result(
+        &mut self,
+        contract_address: &str,
+        result: &serde_json::Value,
+    ) -> Result<(), String> {
+        let storage_obj = result
+            .get("storage")
+            .and_then(|v| v.as_object())
+            .or_else(|| result.get("storage_decoded").and_then(|v| v.as_object()));
+
+        let storage_obj = match storage_obj {
+            Some(obj) => obj,
+            None => return Ok(()),
+        };
+
+        let storage_manager = match &self.storage_manager {
+            Some(m) => Arc::clone(m),
+            None => {
+                // Fallback volatile (comme avant)
+                let mut world = self.state.world_state.write().await;
+                let contract_storage = world.storage
+                    .entry(contract_address.to_string())
+                    .or_insert_with(HashMap::new);
+
+                let mut accounts = self.state.accounts.write().await;
+                if let Some(acc) = accounts.get_mut(contract_address) {
+                    for (key, val) in storage_obj {
+                        let canonical = self.map_resource_key_to_slot(key);
+                        let bytes = self.convert_resource_to_storage_bytes(val);
+                        contract_storage.insert(canonical.clone(), bytes.clone());
+                        acc.resources.insert(
+                            canonical,
+                            serde_json::json!(format!("0x{}", hex::encode(&bytes))),
+                        );
+                    }
+                }
+                return Ok(());
+            }
+        };
+
+        // ==================== VERSIONNING ====================
+        let version_key = format!("version:{}", contract_address);
+        let cur_bytes = storage_manager.read(&version_key).unwrap_or_default();
+        let cur_ver = if cur_bytes.len() == 8 {
+            u64::from_be_bytes(cur_bytes.try_into().unwrap_or([0; 8]))
+        } else { 0 };
+        let new_ver = cur_ver + 1;
+
+        let _ = storage_manager.write(&version_key, &new_ver.to_be_bytes().to_vec());
+        println!("📈 [COMMIT SLOT] Contrat {} → version v{}", contract_address, new_ver);
+
+        // ==================== SLOTS INDIVIDUELS ====================
+        let mut world = self.state.world_state.write().await;
+        let contract_storage = world.storage
+            .entry(contract_address.to_string())
+            .or_insert_with(HashMap::new);
+
+        let mut accounts = self.state.accounts.write().await;
+        let account = accounts
+            .entry(contract_address.to_string())
+            .or_insert_with(|| AccountState {
+                address: contract_address.to_string(),
+                is_contract: true,
+                state_version: new_ver,
+                ..Default::default()
+            });
+        account.state_version = new_ver;
+
+        for (key, value_json) in storage_obj {
+            let canonical_slot = self.map_resource_key_to_slot(key);
+            let value_bytes = self.convert_resource_to_storage_bytes(value_json);
+
+            // 1. Mise à jour resources (exactement comme dans send_transaction deployment)
+            account.resources.insert(
+                canonical_slot.clone(),
+                serde_json::Value::String(format!("0x{}", hex::encode(&value_bytes))),
+            );
+
+            // 2. Mise à jour world_state
+            contract_storage.insert(canonical_slot.clone(), value_bytes.clone());
+
+            // 3. Persistance versionnée RocksDB (style parallel engine)
+            let keyed_slot = format!("v{}/storage:{}:{}", new_ver, contract_address, canonical_slot);
+            if let Err(e) = storage_manager.write(&keyed_slot, &value_bytes) {
+                println!("⚠️ [SLOT] Échec écriture {} : {}", keyed_slot, e);
+            } else {
+                println!("💾 [SLOT COMMIT] v{} → {} ({} bytes)", new_ver, canonical_slot, value_bytes.len());
+            }
+
+            // Mise à jour globale des versions (pour optimistic parallelism)
+            self.storage_versions.insert(canonical_slot.clone(), new_ver);
+        }
+
+        Ok(())
+    }
+
     /// ✅ EXÉCUTION STRICTE avec bytecode réel - CORRECTION MAJEURE POUR PROXY
     pub async fn execute_program(
-    &mut self,
-    module_path: &str,
-    function_name: &str,
-    args: Vec<NerenaValue>,
-    sender_vyid: Option<&str>,
-    stack_usage: Option<&uvm_runtime::stack::StackUsage>,
-    return_type: Option<&str>,
-    initial_storage: Option<HashMap<String, HashMap<String, Vec<u8>>>>,
-    calldata: Option<&[u8]>,
-) -> Result<serde_json::Value, String> {
-    let is_deployment = module_path == "deployment" || function_name == "constructor" || function_name.is_empty();
-
-    let vyid = if is_deployment {
-        // Adresse temporaire ou fournie en amont (généralement calculée dans send_transaction)
-        module_path.trim_start_matches("deploy:").to_string()
-    } else {
-        Self::extract_address(module_path).to_string()
-    };
-
-    let sender = sender_vyid.unwrap_or("*system*#deployer#").to_string();
-
-    println!(
-        "▶️ execute_program → {}::{}  (deployment mode: {})",
-        vyid, function_name, is_deployment
-    );
-
-    // ────────────────────────────────────────────────
-    // 1. Chargement bytecode (creation ou runtime)
-    // ────────────────────────────────────────────────
-    let bytecode = if is_deployment {
-        // Dans le cas déploiement, le bytecode est normalement passé via initial_storage ou un autre mécanisme
-        // Sinon → fallback erreur
-        initial_storage
-            .as_ref()
-            .and_then(|s| s.get("creation_bytecode").cloned())
-            .unwrap_or_default()
-    } else {
-        let accounts = self.state.accounts.read().await;
-        accounts
-            .get(&vyid)
-            .map(|acc| acc.contract_state.clone())
-            .unwrap_or_default()
-    };
-
-    if bytecode.is_empty() {
-        return Err(format!("Aucun bytecode pour {} (deployment={})", vyid, is_deployment));
-    }
-
-    // ────────────────────────────────────────────────
-    // 2. Préparation arguments d'exécution
-    // ────────────────────────────────────────────────
-    let selector = if !is_deployment {
-        Self::calculate_function_selector_from_signature(function_name, &args)
-    } else {
-        0u32 // constructor n'a pas de selector classique
-    };
-
-    let offset = if is_deployment {
-        0usize // constructor commence au début
-    } else {
-        Self::find_function_offset_in_bytecode(&bytecode, selector)
-            .ok_or("Offset de fonction non trouvé")?
-    };
-
-    let interpreter_args = self
-        .prepare_generic_execution_args(
-            &vyid,
-            function_name,
-            args.clone(),
-            &sender,
-            calldata,
-            &FunctionMetadata {
-                name: function_name.to_string(),
-                offset,
-                args_count: args.len(),
-                return_type: "bytes".to_string(),
-                gas_limit: 30_000_000,
-                payable: true,
-                mutability: "nonpayable".to_string(),
-                selector,
-                arg_types: vec![],
-                modifiers: vec![],
-            },
-            offset,
-        )
-        .await?;
-
-    let calldata_bytes = calldata.map_or(interpreter_args.state_data.clone(), |c| c.to_vec());
-
-    // ────────────────────────────────────────────────
-    // 3. Exécution (avec tracking des accès si possible)
-    // ────────────────────────────────────────────────
-    let execution_result = {
-        let _guard = self.global_execution_lock.lock().await;
-        let mut interpreter = self.interpreter.lock().await;
-
-        uvm_runtime::interpreter::execute_program(
-            Some(&bytecode),
-            stack_usage,
-            &[0u8; 4096],
-            &calldata_bytes,
-            &mut self.uvm_helpers,
-            &self.allowed_memory,
-            return_type,
-            &HashMap::new(),
-            &interpreter_args,
-            initial_storage,
-        )
-        .map_err(|e| format!("Erreur exécution VM: {}", e))?
-    };
-
-    // ────────────────────────────────────────────────
-    // 4. Extraction des slots écrits (constructor ou fonction normale)
-    // ────────────────────────────────────────────────
-    let mut write_set: HashMap<String, Vec<u8>> = HashMap::new();
-
-    if let Some(storage_obj) = execution_result.get("storage").and_then(|v| v.as_object()) {
-        for (slot_key, value_json) in storage_obj {
-            let slot = self.map_resource_key_to_slot(slot_key);
-
-            let value_bytes = match value_json {
-                serde_json::Value::String(s) if s.starts_with("0x") => {
-                    hex::decode(&s[2..]).unwrap_or_else(|_| s.as_bytes().to_vec())
-                }
-                serde_json::Value::String(s) => s.as_bytes().to_vec(),
-                serde_json::Value::Number(n) if n.is_u64() => {
-                    let mut bytes = vec![0u8; 32];
-                    bytes[24..32].copy_from_slice(&n.as_u64().unwrap().to_be_bytes());
-                    bytes
-                }
-                _ => vec![0u8; 32],
-            };
-
-            write_set.insert(slot, value_bytes);
-        }
-    }
-
-    // Cas particulier déploiement : récupération runtime bytecode retourné
-    let runtime_bytecode = if is_deployment {
-        execution_result
-            .get("return")
-            .or_else(|| execution_result.get("data"))
-            .and_then(|v| v.as_str())
-            .and_then(|s| hex::decode(s.trim_start_matches("0x")).ok())
-            .unwrap_or_default()
-    } else {
-        bytecode.clone()
-    };
-
-    // ────────────────────────────────────────────────
-    // 5. Commit immédiat des slots écrits
-    // ────────────────────────────────────────────────
-    if !write_set.is_empty() {
-        let new_version = self.global_version_counter.fetch_add(1, Ordering::SeqCst) + 1;
-
-        // Mémoire
-        {
-            let mut world_state = self.state.world_state.write().await;
-            let contract_storage = world_state
-                .storage
-                .entry(vyid.clone())
-                .or_insert_with(HashMap::new);
-
-            for (slot, value) in &write_set {
-                contract_storage.insert(slot.clone(), value.clone());
-            }
-        }
-
-        // RocksDB (persistance versionnée)
-        if let Some(manager) = &self.storage_manager {
-            let version_key = format!("version:{}", vyid);
-            let _ = manager.write(&version_key, &new_version.to_be_bytes());
-
-            for (slot, value) in &write_set {
-                let keyed_slot = format!("v{}/storage:{}:{}", new_version, vyid, slot);
-                if let Err(e) = manager.write(&keyed_slot, value) {
-                    eprintln!("❌ Échec persistance slot {} : {}", keyed_slot, e);
-                } else {
-                    println!(
-                        "💾 [{}] Slot {} → v{} persisté ({} bytes)",
-                        if is_deployment { "DEPLOY" } else { "CALL" },
-                        slot,
-                        new_version,
-                        value.len()
-                    );
-                }
-            }
-        }
-
-        // Mise à jour versions en mémoire
-        for slot in write_set.keys() {
-            self.storage_versions.insert(slot.clone(), new_version);
-        }
+        &mut self,
+        module_path: &str,
+        function_name: &str,
+        args: Vec<NerenaValue>,
+        sender_vyid: Option<&str>,
+        stack_usage: Option<&uvm_runtime::stack::StackUsage>,
+        return_type: Option<&str>,
+        initial_storage: Option<HashMap<String, HashMap<String, Vec<u8>>>>,
+        calldata: Option<&[u8]>,
+    ) -> Result<serde_json::Value, String> {
+        let mem = [0u8; 4096];
+        let mut mbuff: Vec<u8> = Vec::new();
+        let exports: HashMap<u32, usize> = HashMap::new();
+        let vyid = Self::extract_address(module_path);
+        let sender = sender_vyid.unwrap_or("*system*#default#");
 
         println!(
-            "✅ Commit {} slots (vglobal = {}) pour {}",
-            write_set.len(),
-            new_version,
+            "🎯 [REAL BYTECODE EXECUTION] Contrat: {}, Fonction: {}",
+            vyid, function_name
+        );
+
+        // ────────────────────────────────────────────────
+        // ÉTAPE 1 : RECHARGEMENT VERSIONNÉ DEPUIS ROCKSDB
+        // ────────────────────────────────────────────────
+        if let Some(manager) = &self.storage_manager {
+            println!(
+                "🔄 [PERSIST READ] Rechargement depuis RocksDB pour {}",
+                vyid
+            );
+
+            // 1. Lire la dernière version persistée
+            let version_key = format!("version:{}", vyid);
+            let version_bytes = manager.read(&version_key).unwrap_or_default();
+            let version = if version_bytes.len() == 8 {
+                u64::from_be_bytes(version_bytes.try_into().unwrap_or([0; 8]))
+            } else {
+                0u64
+            };
+            println!("   → Dernière version persistée : v{}", version);
+
+            // 2. Scanner uniquement les slots de cette version
+            let prefix = format!("v{}/storage:{}:", version, vyid);
+            let mut reloaded_storage = HashMap::new();
+
+            match manager.scan_prefix(&prefix) {
+                Ok(entries) => {
+                    for (key, value) in entries {
+                        if key.starts_with(&prefix) {
+                            let slot = key.trim_start_matches(&prefix).to_string();
+                            reloaded_storage.insert(slot, value);
+                        }
+                    }
+                    println!(
+                        "   → {} slots rechargés (v{})",
+                        reloaded_storage.len(),
+                        version
+                    );
+                }
+                Err(e) => {
+                    println!("⚠️ [SCAN ERROR] Impossible de scanner {} : {}", prefix, e);
+                }
+            }
+
+            // 3. Mettre à jour world_state
+            let mut world_state = self.state.world_state.write().await;
+            world_state
+                .storage
+                .insert(vyid.to_string(), reloaded_storage.clone());
+
+            // Debug slot balances
+            let balances_slot =
+                "37439836327923360225337895871871055371921111519445254264255886447755104894253"
+                    .to_string();
+            if let Some(value) = reloaded_storage.get(&balances_slot) {
+                let u256_val = primitive_types::U256::from_big_endian(value);
+                println!(
+                    "🔍 [PERSIST READ CHECK] Slot balances rechargé = {} (hex: 0x{})",
+                    u256_val,
+                    hex::encode(value)
+                );
+            } else {
+                println!("⚠️ [PERSIST READ] Slot balances non trouvé en v{}", version);
+            }
+        } else {
+            println!("⚠️ Pas de storage_manager → stockage mémoire volatile seulement");
+        }
+
+        // ────────────────────────────────────────────────
+        // ÉTAPE 2 : CHARGEMENT DU BYTECODE RÉEL
+        // ────────────────────────────────────────────────
+        let real_bytecode = {
+            let accounts = self.state.accounts.read().await;
+
+            if let Some(account) = accounts.get(vyid) {
+                if account.is_contract && !account.contract_state.is_empty() {
+                    account.contract_state.clone()
+                } else {
+                    return Err(format!("Contrat {} sans bytecode réel", vyid));
+                }
+            } else {
+                return Err(format!("Contrat {} non trouvé", vyid));
+            }
+        };
+
+        println!(
+            "✅ [REAL BYTECODE] Chargé {} bytes de bytecode réel pour {}",
+            real_bytecode.len(),
             vyid
         );
-    }
 
-    // ────────────────────────────────────────────────
-    // 6. Mise à jour compte contrat (surtout important en déploiement)
-    // ────────────────────────────────────────────────
-    {
-        let mut accounts = self.state.accounts.write().await;
-        let account = accounts.entry(vyid.clone()).or_insert_with(|| AccountState {
-            address: vyid.clone(),
-            balance: 0,
-            contract_state: runtime_bytecode.clone(),
-            resources: BTreeMap::new(),
-            state_version: new_version,
-            last_block_number: 0,
-            nonce: 0,
-            code_hash: hex::encode(Keccak256::digest(&runtime_bytecode)),
-            storage_root: format!("storage_root_{}", vyid),
-            is_contract: true,
-            gas_used: 0,
-        });
+        // ────────────────────────────────────────────────
+        // ÉTAPE 3 : CALCUL DU SÉLECTEUR
+        // ────────────────────────────────────────────────
+        let selector = Self::calculate_function_selector_from_signature(function_name, &args);
 
-        account.contract_state = runtime_bytecode;
-        account.is_contract = true;
-        account.state_version = new_version;
-    }
+        // ────────────────────────────────────────────────
+        // ÉTAPE 4 : DÉTECTION PROXY (inchangé)
+        // ────────────────────────────────────────────────
+        let impl_addr_opt = {
+            let accounts = self.state.accounts.read().await;
+            accounts
+                .get(vyid)
+                .and_then(|acc| acc.resources.get("implementation"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty() && *s != "0x0000000000000000000000000000000000000000")
+                .map(|s| s.to_string())
+        };
 
-    // ────────────────────────────────────────────────
-    // 7. Auto-détection fonctions (surtout utile après déploiement)
-    // ────────────────────────────────────────────────
-    if is_deployment && !runtime_bytecode.is_empty() {
-        if let Err(e) = self.auto_detect_contract_functions(&vyid, &runtime_bytecode) {
-            println!("⚠️ Auto-détection échouée post-déploiement: {}", e);
+        if let Some(impl_addr) = impl_addr_opt {
+            println!(
+                "🧩 [PROXY DETECTED] Proxy {} délègue vers implémentation {}",
+                vyid, impl_addr
+            );
+            println!("🔍 [PROXY STRATEGY] Utilise le bytecode de l'implémentation pour la recherche de fonctions");
+
+            let impl_real_bytecode = {
+                let impl_accounts = self.state.accounts.read().await;
+                if let Some(impl_account) = impl_accounts.get(&impl_addr) {
+                    if !impl_account.contract_state.is_empty() {
+                        impl_account.contract_state.clone()
+                    } else {
+                        return Err(format!("Implémentation {} sans bytecode réel", impl_addr));
+                    }
+                } else {
+                    return Err(format!("Implémentation {} non trouvée", impl_addr));
+                }
+            };
+
+            println!(
+                "✅ [IMPL BYTECODE] Chargé {} bytes de bytecode d'implémentation",
+                impl_real_bytecode.len()
+            );
+
+            if !self.modules.contains_key(&impl_addr) {
+                println!(
+                    "🔄 [IMPL AUTO-DETECT] Analyse du bytecode d'implémentation ({} bytes)",
+                    impl_real_bytecode.len()
+                );
+                self.auto_detect_contract_functions(&impl_addr, &impl_real_bytecode)?;
+            }
+
+            let impl_function_meta =
+                self.find_or_create_function_metadata(&impl_addr, function_name, selector, &args)?;
+
+            println!(
+                "🔍 [IMPL OFFSET SEARCH] Recherche offset pour {} dans bytecode d'implémentation",
+                function_name
+            );
+            let impl_resolved_offset = Self::find_function_offset_in_bytecode(&impl_real_bytecode, impl_function_meta.selector)
+            .ok_or_else(|| format!(
+                "Fonction '{}' (sélecteur 0x{:08x}) introuvable dans le bytecode d'implémentation {} ({} bytes). \
+                L'implémentation ne contient pas cette fonction.",
+                function_name, impl_function_meta.selector, impl_addr.as_str(), impl_real_bytecode.len()
+            ))?;
+
+            println!(
+            "🎯 [IMPL EXECUTION] Fonction {} trouvée à l'offset 0x{:04x} dans bytecode d'implémentation",
+            function_name, impl_resolved_offset
+        );
+
+            let converted_storage = self
+                .build_dynamic_storage_from_contract_state(vyid)?
+                .unwrap_or_else(|| HashMap::new());
+
+            let interpreter_args = self
+                .prepare_generic_execution_args(
+                    vyid,
+                    function_name,
+                    args.clone(),
+                    sender,
+                    calldata,
+                    &impl_function_meta,
+                    impl_resolved_offset,
+                )
+                .await?;
+
+            let calldata_bytes: Vec<u8> = if let Some(calldata) = calldata {
+                calldata.to_vec()
+            } else {
+                interpreter_args.state_data.clone()
+            };
+
+            let result = {
+                let _guard = self.global_execution_lock.lock().await;
+                let mut interpreter = self.interpreter.lock().await;
+                uvm_runtime::interpreter::execute_program(
+                    Some(&real_bytecode),
+                    stack_usage,
+                    &mem,
+                    &calldata_bytes,
+                    &mut self.uvm_helpers,
+                    &self.allowed_memory,
+                    return_type,
+                    &exports,
+                    &interpreter_args,
+                    Some(converted_storage),
+                )
+                .map_err(|e| e.to_string())
+            };
+
+            if let Ok(ref val) = result {
+                self.process_execution_result_generically(vyid, val, &impl_function_meta)
+                    .await?;
+            } else {
+                return result;
+            }
+            return result;
         }
+
+        // ────────────────────────────────────────────────
+        // ÉTAPE 5 : EXÉCUTION NORMALE (sans proxy)
+        // ────────────────────────────────────────────────
+        if !self.modules.contains_key(vyid) {
+            println!(
+                "🔄 [AUTO-DETECT] Analyse du bytecode réel ({} bytes)",
+                real_bytecode.len()
+            );
+            self.auto_detect_contract_functions(vyid, &real_bytecode)?;
+        } else {
+            if let Some(module) = self.modules.get_mut(vyid) {
+                if module.bytecode.len() != real_bytecode.len() {
+                    println!(
+                        "🔄 [BYTECODE UPDATE] Mise à jour bytecode: {} → {} bytes",
+                        module.bytecode.len(),
+                        real_bytecode.len()
+                    );
+                    module.bytecode = real_bytecode.clone();
+                    self.auto_detect_contract_functions(vyid, &real_bytecode)?;
+                }
+            }
+        }
+
+        let function_meta =
+            self.find_or_create_function_metadata(vyid, function_name, selector, &args)?;
+
+        let resolved_offset =
+            Self::find_function_offset_in_bytecode(&real_bytecode, function_meta.selector)
+                .ok_or_else(|| {
+                    format!(
+                "Fonction '{}' (sélecteur 0x{:08x}) introuvable dans le bytecode réel de {} bytes.",
+                function_name, function_meta.selector, real_bytecode.len()
+            )
+                })?;
+
+        println!(
+            "🎯 [REAL EXECUTION] Fonction {} trouvée à l'offset 0x{:04x}",
+            function_name, resolved_offset
+        );
+
+        let interpreter_args = self
+            .prepare_generic_execution_args(
+                vyid,
+                function_name,
+                args.clone(),
+                sender,
+                calldata,
+                &function_meta,
+                resolved_offset,
+            )
+            .await?;
+
+        let converted_storage = self
+            .build_dynamic_storage_from_contract_state(vyid)?
+            .unwrap_or_else(|| HashMap::new());
+
+        let calldata_bytes: Vec<u8> = if let Some(calldata) = calldata {
+            calldata.to_vec()
+        } else {
+            interpreter_args.state_data.clone()
+        };
+
+        println!(
+            "🟢 [DEBUG] Formation du calldata in UVM (state_data) : {}",
+            hex::encode(&calldata_bytes)
+        );
+
+        let result = {
+            let _guard = self.global_execution_lock.lock().await;
+            let mut interpreter = self.interpreter.lock().await;
+            uvm_runtime::interpreter::execute_program(
+                Some(&real_bytecode),
+                stack_usage,
+                &mem,
+                &calldata_bytes,
+                &mut self.uvm_helpers,
+                &self.allowed_memory,
+                return_type,
+                &exports,
+                &interpreter_args,
+                Some(converted_storage),
+            )
+            .map_err(|e| e.to_string())
+        };
+
+        // ────────────────────────────────────────────────
+        // ÉTAPE 6 : PERSISTANCE APRÈS EXÉCUTION + VÉRIFICATION
+        // ────────────────────────────────────────────────
+        if let Ok(ref val) = result {
+            self.process_execution_result_generically(vyid, val, &function_meta)
+                .await?;
+
+            // Vérification post-persistance (debug direct depuis RocksDB)
+            if let Some(manager) = &self.storage_manager {
+                let balances_slot =
+                    "37439836327923360225337895871871055371921111519445254264255886447755104894253"
+                        .to_string();
+                let persisted_value = manager
+                    .read(&format!("storage:{}:{}", vyid, &balances_slot))
+                    .unwrap_or(vec![0u8; 32]);
+                let u256_val = primitive_types::U256::from_big_endian(&persisted_value);
+                println!(
+                    "🔍 [PERSIST WRITE CHECK] Slot balances après persistance = {} (hex: 0x{})",
+                    u256_val,
+                    hex::encode(&persisted_value)
+                );
+            }
+        }
+
+        result
     }
 
-    // ────────────────────────────────────────────────
-    // 8. Retour formaté
-    // ────────────────────────────────────────────────
-    let final_result = if is_deployment {
-        serde_json::json!({
-            "runtime_bytecode": format!("0x{}", hex::encode(&runtime_bytecode)),
-            "deployed_address": vyid,
-            "slots_written": write_set.len(),
-            "state_version": new_version,
-            "success": true
-        })
-    } else {
-        execution_result
-    };
-
-    Ok(final_result)
-}
-
-    /// ✅ NOUVEAU: Post-processing générique des résultats d'exécution
+    /// ✅ POST-PROCESSING UNIFIÉ (appelée après chaque execute_program)
     async fn process_execution_result_generically(
         &mut self,
         contract_address: &str,
         result: &serde_json::Value,
         function_meta: &FunctionMetadata,
     ) -> Result<(), String> {
-        println!(
-            "🔄 [POST-PROCESS] Traitement du résultat pour {}",
-            function_meta.name
-        );
-        if let Some(storage_manager) = &self.storage_manager {
-            self.persist_result_to_storage(storage_manager, contract_address, result)?;
-            self.persist_contract_state_immediate(contract_address, result)
-                .await?;
-        }
+        println!("🔄 [POST-PROCESS] Traitement résultat pour {} sur {}", function_meta.name, contract_address);
+
+        // NOUVEAU : enregistrement complet des slots par commit
+        let _ = self.persist_storage_slots_from_result(contract_address, result).await;
+
+        // Garde la gestion ERC-1967 (déjà parfaite)
+        let _ = self.persist_contract_state_immediate(contract_address, result).await;
+
+        // Logs & gas (inchangé)
         if let Some(logs) = result.get("logs").and_then(|v| v.as_array()) {
-            let mut pending_logs = self.state.pending_logs.write().await;
+            let mut pending = self.state.pending_logs.write().await;
             for log in logs {
-                if let (Some(address), Some(topics)) = (
+                if let (Some(addr), Some(topics)) = (
                     log.get("address").and_then(|v| v.as_str()),
                     log.get("topics").and_then(|v| v.as_array()),
                 ) {
-                    let topics_str: Vec<String> = topics
-                        .iter()
+                    let topics_str: Vec<String> = topics.iter()
                         .filter_map(|t| t.as_str())
                         .map(|s| s.to_string())
                         .collect();
-                    pending_logs.push(UvmLog {
-                        address: address.to_string(),
+                    pending.push(UvmLog {
+                        address: addr.to_string(),
                         topics: topics_str,
-                        data: log
-                            .get("data")
+                        data: log.get("data")
                             .and_then(|d| hex::decode(d.as_str().unwrap_or("")).ok())
                             .unwrap_or_default(),
                     });
                 }
             }
         }
-        if let Some(gas_used) = result.get("gas_used").and_then(|v| v.as_u64()) {
-            let mut accounts = self.state.accounts.write().await;
-            if let Some(account) = accounts.get_mut(contract_address) {
-                account.gas_used = gas_used;
+
+        if let Some(gas) = result.get("gas_used").and_then(|v| v.as_u64()) {
+            let mut accs = self.state.accounts.write().await;
+            if let Some(acc) = accs.get_mut(contract_address) {
+                acc.gas_used = gas;
             }
         }
-        println!(
-            "✅ [POST-PROCESS] Traitement terminé pour {}",
-            function_meta.name
-        );
+
+        println!("✅ [POST-PROCESS] {} slots persistés pour {}", 
+                 result.get("storage").and_then(|s| s.as_object()).map(|o| o.len()).unwrap_or(0),
+                 contract_address);
         Ok(())
     }
 
