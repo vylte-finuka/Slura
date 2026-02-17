@@ -1839,68 +1839,77 @@ impl SlurachainVm {
         false
     }
 
-fn prepare_generic_execution_args(
-    &self,
-    contract_address: &str,
-    function_name: &str,
-    args: Vec<NerenaValue>,
-    sender: &str,
-    function_meta: &FunctionMetadata,
-    resolved_offset: usize, // <-- utilise ce paramètre !
-) -> Result<uvm_runtime::interpreter::InterpreterArgs, String> {
+/// ✅ Préparation des arguments d'exécution (version finale corrigée)
+    async fn prepare_generic_execution_args(
+        &self,
+        contract_address: &str,
+        function_name: &str,
+        args: Vec<NerenaValue>,
+        sender: &str,
+        calldata: Option<&[u8]>,
+        function_meta: &FunctionMetadata,
+        resolved_offset: usize,
+    ) -> Result<uvm_runtime::interpreter::InterpreterArgs, String> {
         let current_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let block_number = self.state.block_info.read()
-            .map(|b| b.number)
-            .unwrap_or(1);
 
-        // ✅ CALDATA ABI 100% CORRECT ET GÉNÉRIQUE (selector UNE SEULE FOIS)
-        let mut calldata = Vec::with_capacity(4 + args.len() * 32);
-        calldata.extend_from_slice(&function_meta.selector.to_be_bytes()); // UNE SEULE FOIS
+        let block_number = self.state.block_info.read().await.number;
 
-        for arg in &args {
-            match arg {
-                serde_json::Value::String(s) if s.starts_with("0x") && s.len() == 42 => {
-                    let mut padded = [0u8; 32];
-                    if let Ok(bytes) = hex::decode(&s[2..]) {
-                        padded[12..32].copy_from_slice(&bytes);
+        // Construction du calldata ABI
+        let calldata_bytes: Vec<u8> = if let Some(external) = calldata {
+            external.to_vec()
+        } else {
+            let mut generated = Vec::with_capacity(4 + args.len() * 32);
+            generated.extend_from_slice(&function_meta.selector.to_be_bytes());
+
+            for arg in &args {
+                let mut padded = [0u8; 32];
+                match arg {
+                    serde_json::Value::String(s) if s.starts_with("0x") && s.len() == 42 => {
+                        if let Ok(bytes) = hex::decode(&s[2..]) {
+                            if bytes.len() == 20 {
+                                padded[12..32].copy_from_slice(&bytes);
+                            }
+                        }
                     }
-                    calldata.extend_from_slice(&padded);
-                }
-                serde_json::Value::Number(n) => {
-                    let mut padded = [0u8; 32];
-                    if let Some(u) = n.as_u64() {
-                        padded[24..32].copy_from_slice(&u.to_be_bytes());
+                    serde_json::Value::Number(n) => {
+                        if let Some(u) = n.as_u64() {
+                            padded[24..32].copy_from_slice(&u.to_be_bytes());
+                        }
                     }
-                    calldata.extend_from_slice(&padded);
+                    serde_json::Value::Bool(b) => {
+                        padded[31] = if *b { 1 } else { 0 };
+                    }
+                    _ => {}
                 }
-                _ => calldata.extend_from_slice(&[0u8; 32]),
+                generated.extend_from_slice(&padded);
             }
-        }
+            generated
+        };
 
         Ok(uvm_runtime::interpreter::InterpreterArgs {
             function_name: function_name.to_string(),
             contract_address: contract_address.to_string(),
             sender_address: sender.to_string(),
             args,
-            state_data: calldata,
-            gas_limit: function_meta.gas_limit,
-            gas_price: self.gas_price,
-            value: 0,
-            call_depth: 0,
-            block_number,
-            timestamp: current_time,
+            state_data: calldata_bytes,
+            gas_limit: function_meta.gas_limit.into(),
+            gas_price: self.gas_price.into(),
+            value: 0u64.into(),
+            call_depth: 0u64.into(),
+            block_number: block_number.into(),
+            timestamp: current_time.into(),
             caller: sender.to_string(),
             origin: sender.to_string(),
             beneficiary: sender.to_string(),
             function_offset: Some(resolved_offset),
-            base_fee: Some(0),
-            blob_base_fee: Some(0),
+            base_fee: Some(0u64.into()),
+            blob_base_fee: Some(0u64.into()),
             blob_hash: Some([0u8; 32]),
         })
-}
+    }
 
 /// ✅ ENREGISTREMENT DE SLOTS PAR COMMIT (UNIFIÉ avec déploiement send_transaction + parallel engine)
     async fn persist_storage_slots_from_result(
@@ -2191,7 +2200,7 @@ fn prepare_generic_execution_args(
                     function_name,
                     args.clone(),
                     sender,
-                    calldata,
+                    calldata,                    // ← OK maintenant
                     &impl_function_meta,
                     impl_resolved_offset,
                 )
@@ -2276,7 +2285,7 @@ fn prepare_generic_execution_args(
                 function_name,
                 args.clone(),
                 sender,
-                calldata,
+                calldata,                    // ← OK maintenant
                 &function_meta,
                 resolved_offset,
             )
@@ -2342,27 +2351,26 @@ fn prepare_generic_execution_args(
         result
     }
 
-/// ✅ FORCE PERSISTENCE : Sauvegarde TOUS les slots actuellement en mémoire (même si le result n'a pas "storage")
+/// ✅ FORCE PERSISTENCE (corrigée - plus de move)
     async fn force_persist_contract_storage(&mut self, contract_address: &str) -> Result<(), String> {
         let storage_manager = match &self.storage_manager {
             Some(m) => Arc::clone(m),
             None => return Ok(()),
         };
 
-        // Lecture de l'état mémoire actuel
-        let world_state = self.state.world_state.read().await;
-        let current_storage = match world_state.storage.get(contract_address) {
-            Some(s) => s.clone(),
-            None => return Ok(()),
+        let current_storage = {
+            let world_state = self.state.world_state.read().await;
+            match world_state.storage.get(contract_address) {
+                Some(s) => s.clone(),
+                None => return Ok(()),
+            }
         };
-        drop(world_state);
 
         if current_storage.is_empty() {
             println!("⚠️ [FORCE PERSIST] Aucun slot en mémoire pour {}", contract_address);
             return Ok(());
         }
 
-        // Versionning
         let version_key = format!("version:{}", contract_address);
         let cur_bytes = storage_manager.read(&version_key).unwrap_or_default();
         let cur_ver = if cur_bytes.len() == 8 {
@@ -2389,16 +2397,16 @@ fn prepare_generic_execution_args(
             .entry(contract_address.to_string())
             .or_insert_with(HashMap::new);
 
-        for (slot, value_bytes) in current_storage {
+        for (slot, value_bytes) in &current_storage {
             account.resources.insert(
                 slot.clone(),
-                serde_json::Value::String(format!("0x{}", hex::encode(&value_bytes))),
+                serde_json::Value::String(format!("0x{}", hex::encode(value_bytes))),
             );
 
             contract_storage.insert(slot.clone(), value_bytes.clone());
 
             let keyed_slot = format!("v{}/storage:{}:{}", new_ver, contract_address, slot);
-            if let Err(e) = storage_manager.write(&keyed_slot, &value_bytes) {
+            if let Err(e) = storage_manager.write(&keyed_slot, value_bytes) {
                 println!("⚠️ [FORCE] Échec {} : {}", keyed_slot, e);
             } else {
                 self.storage_versions.insert(slot.clone(), new_ver);
