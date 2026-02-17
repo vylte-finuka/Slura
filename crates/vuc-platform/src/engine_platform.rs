@@ -3324,36 +3324,117 @@ async fn main() {
     });
         
     // ✅ AJOUT: Implémentation de get_chain_id avec la configuration réseau
-            tokio::spawn({
-        let lurosonie_manager_clone = Arc::clone(&lurosonie_manager);
-        let value = engine_platform.clone();
-        let validator_address_generated = validator_address_generated.clone();
-        async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                let block_number = lurosonie_manager_clone.get_block_height().await;
-                if block_number == 1 {
-                    println!("🪙 Block #1 produit — déploiement du contrat VEZ...");
-    
-                    // 1) Déploiement VEZ
-                    let vez_target_addr = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_string();
-                    let vez_bytecode_hex = include_str!("../../../vez_bytecode.hex").trim();
-    
-                    let deploy_vez_tx = serde_json::json!({
-                        "from": validator_address_generated,
-                        "data": format!("0x{}", vez_bytecode_hex),
-                        "value": "0x0",
-                        "create2": true,
-                        "target_address": vez_target_addr,
-                    });
-                    let vez_tx_hash = value.send_transaction(deploy_vez_tx).await.unwrap();
-                    println!("✅ VEZ déployé à {} (tx: {})", vez_target_addr, vez_tx_hash);
-    
+tokio::spawn({
+    let lurosonie_manager_clone = Arc::clone(&lurosonie_manager);
+    let engine_clone = engine_platform.clone();
+    let validator_address_generated = validator_address_generated.clone();
+
+    async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            let block_number = lurosonie_manager_clone.get_block_height().await;
+
+            if block_number == 1 {
+                println!("🪙 Block #1 produit — déploiement du contrat VEZ...");
+
+                let vez_addr = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_string();
+                let vez_bytecode_hex = include_str!("../../../vez_bytecode.hex").trim();
+                let creation_bytecode = hex::decode(vez_bytecode_hex).unwrap_or_default();
+
+                if creation_bytecode.is_empty() {
+                    eprintln!("❌ Bytecode VEZ vide ou invalide");
                     break;
                 }
+
+                // ────────────────────────────────────────────────────────────────
+                // 1. INSÉRER MODULE + COMPTE AVANT LE DÉPLOIEMENT (clé pour éviter "non trouvé")
+                // ────────────────────────────────────────────────────────────────
+                {
+                    let mut vm = engine_clone.vm.write().await;
+
+                    // 1a. Module avec le bytecode de création (pas vide)
+                    if !vm.modules.contains_key(&vez_addr) {
+                        println!("🔧 Insertion Module initial pour VEZ (bytecode création)");
+
+                        let initial_module = vuc_tx::slurachain_vm::Module {
+                            name: "vez_constructor".to_string(),
+                            address: vez_addr.clone(),
+                            bytecode: creation_bytecode.clone(), // ← bytecode de création ici
+                            elf_buffer: vec![],
+                            context: uvm_runtime::UbfContext::new(),
+                            stack_usage: None,
+                            functions: hashbrown::HashMap::new(),
+                            gas_estimates: hashbrown::HashMap::new(),
+                            storage_layout: hashbrown::HashMap::new(),
+                            events: vec![],
+                            constructor_params: vec![],
+                        };
+
+                        vm.modules.insert(vez_addr.clone(), initial_module);
+                        println!("   → Module inséré avec {} bytes (création)", creation_bytecode.len());
+                    }
+
+                    // 1b. Compte minimal (is_contract = true)
+                    let mut accounts = vm.state.accounts.write().await;
+                    if !accounts.contains_key(&vez_addr) {
+                        let initial_account = vuc_tx::slurachain_vm::AccountState {
+                            address: vez_addr.clone(),
+                            balance: 0u128,
+                            contract_state: creation_bytecode.clone(), // ← même bytecode ici
+                            resources: {
+                                let mut r = BTreeMap::new();
+                                r.insert("constructor_pending".to_string(), serde_json::Value::Bool(true));
+                                r.insert("deployed_by".to_string(), serde_json::Value::String(validator_address_generated.clone()));
+                                r
+                            },
+                            state_version: 1,
+                            last_block_number: 0,
+                            nonce: 1,
+                            code_hash: "".to_string(),
+                            storage_root: format!("storage_{}", vez_addr),
+                            is_contract: true,
+                            gas_used: 0,
+                        };
+
+                        accounts.insert(vez_addr.clone(), initial_account);
+                        println!("   → Compte initial inséré (constructor pending)");
+                    }
+                }
+
+                // ────────────────────────────────────────────────────────────────
+                // 2. Lancement du déploiement (create2 forcé)
+                // ────────────────────────────────────────────────────────────────
+                let deploy_vez_tx = serde_json::json!({
+                    "from": validator_address_generated,
+                    "data": format!("0x{}", vez_bytecode_hex),
+                    "value": "0x0",
+                    "create2": true,
+                    "target_address": vez_addr,
+                });
+
+                match engine_clone.send_transaction(deploy_vez_tx).await {
+                    Ok(tx_hash) => {
+                        println!("✅ VEZ déployé avec succès à {} (tx: {})", vez_addr, tx_hash);
+
+                        // Optionnel : mise à jour finale post-déploiement
+                        // (le runtime devrait maintenant être dans vm.modules)
+                        {
+                            let vm = engine_clone.vm.read().await;
+                            if let Some(module) = vm.modules.get(&vez_addr) {
+                                println!("   → Bytecode final après déploiement : {} bytes", module.bytecode.len());
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("❌ Échec déploiement VEZ : {}", e);
+                    }
+                }
+
+                break;
             }
         }
-    });
+    }
+});
     
     let metrics_manager = lurosonie_manager.clone();
     let metrics_handle = tokio::spawn(async move {
