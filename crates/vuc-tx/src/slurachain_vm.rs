@@ -1839,6 +1839,69 @@ impl SlurachainVm {
         false
     }
 
+fn prepare_generic_execution_args(
+    &self,
+    contract_address: &str,
+    function_name: &str,
+    args: Vec<NerenaValue>,
+    sender: &str,
+    function_meta: &FunctionMetadata,
+    resolved_offset: usize, // <-- utilise ce paramètre !
+) -> Result<uvm_runtime::interpreter::InterpreterArgs, String> {
+        let current_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let block_number = self.state.block_info.read()
+            .map(|b| b.number)
+            .unwrap_or(1);
+
+        // ✅ CALDATA ABI 100% CORRECT ET GÉNÉRIQUE (selector UNE SEULE FOIS)
+        let mut calldata = Vec::with_capacity(4 + args.len() * 32);
+        calldata.extend_from_slice(&function_meta.selector.to_be_bytes()); // UNE SEULE FOIS
+
+        for arg in &args {
+            match arg {
+                serde_json::Value::String(s) if s.starts_with("0x") && s.len() == 42 => {
+                    let mut padded = [0u8; 32];
+                    if let Ok(bytes) = hex::decode(&s[2..]) {
+                        padded[12..32].copy_from_slice(&bytes);
+                    }
+                    calldata.extend_from_slice(&padded);
+                }
+                serde_json::Value::Number(n) => {
+                    let mut padded = [0u8; 32];
+                    if let Some(u) = n.as_u64() {
+                        padded[24..32].copy_from_slice(&u.to_be_bytes());
+                    }
+                    calldata.extend_from_slice(&padded);
+                }
+                _ => calldata.extend_from_slice(&[0u8; 32]),
+            }
+        }
+
+        Ok(uvm_runtime::interpreter::InterpreterArgs {
+            function_name: function_name.to_string(),
+            contract_address: contract_address.to_string(),
+            sender_address: sender.to_string(),
+            args,
+            state_data: calldata,
+            gas_limit: function_meta.gas_limit,
+            gas_price: self.gas_price,
+            value: 0,
+            call_depth: 0,
+            block_number,
+            timestamp: current_time,
+            caller: sender.to_string(),
+            origin: sender.to_string(),
+            beneficiary: sender.to_string(),
+            function_offset: Some(resolved_offset),
+            base_fee: Some(0),
+            blob_base_fee: Some(0),
+            blob_hash: Some([0u8; 32]),
+        })
+}
+
 /// ✅ ENREGISTREMENT DE SLOTS PAR COMMIT (UNIFIÉ avec déploiement send_transaction + parallel engine)
     async fn persist_storage_slots_from_result(
         &mut self,
