@@ -20,6 +20,7 @@ use tokio::time::{Duration, timeout};
 use vuc_core::service::slurachain_service::SlurEthService;
 use vuc_types::{committee::committee::EpochId, supported_protocol_versions::SupportedProtocolVersions};
 use vuc_events::time_warp::TimeWarp;
+use crate::extract_runtime_from_creation_bytecode;
 use vuc_tx::slura_merkle::build_state_trie;
 use uvm_runtime::interpreter::execute_program;
 use uvm_runtime::interpreter::InterpreterArgs;
@@ -3271,15 +3272,15 @@ tokio::spawn({
                 // 2. Extraction du runtime bytecode (utilise ta fonction existante)
                 // ────────────────────────────────────────────────────────────────
                 let runtime_bytecode = match extract_runtime_from_creation_bytecode(&creation_bytecode) {
-                    Ok(rt) => {
-                        println!("🔄 Runtime bytecode extrait avec succès ({} bytes)", rt.len());
-                        rt
-                    }
-                    Err(e) => {
-                        eprintln!("⚠️ Extraction runtime échouée : {}. Fallback sur creation bytecode.", e);
-                        creation_bytecode.clone()
-                    }
-                };
+    Ok(runtime) => {   // ← renamed variable to avoid any shadowing confusion
+        println!("🔄 Runtime bytecode extrait avec succès ({} bytes)", runtime.len());
+        runtime
+    }
+    Err(e) => {
+        eprintln!("⚠️ Extraction runtime échouée : {}. Fallback sur creation bytecode.", e);
+        creation_bytecode.clone()
+    }
+};
 
                 if creation_bytecode.is_empty() {
                     eprintln!("❌ Bytecode VEZ vide ou invalide");
