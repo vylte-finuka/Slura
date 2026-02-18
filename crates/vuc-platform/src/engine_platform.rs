@@ -3274,7 +3274,7 @@ async fn main() {
                         let initial_module = vuc_tx::slurachain_vm::Module {
                             name: "vez_constructor".to_string(),
                             address: vez_addr.clone(),
-                            bytecode: creation_bytecode.clone(), // ← bytecode de création ici
+                            bytecode: vec![],
                             elf_buffer: vec![],
                             context: uvm_runtime::UbfContext::new(),
                             stack_usage: None,
