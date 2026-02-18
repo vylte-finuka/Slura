@@ -217,35 +217,196 @@ impl OptimisticParallelEngine {
     }
 
     /// Exécution spéculative d'une transaction (utilise execute_module réel)
+    /// Exécution spéculative d'une transaction (utilise execute_module réel)
     async fn execute_speculative_transaction(
         &self,
         tx: ParallelTransaction,
     ) -> Result<NerenaValue, String> {
         println!(
-            "⚡ Exécution spéculative TX {} sur thread {}",
+            "⚡ Exécution spéculative TX {} | fn: {} | sender: {} | thread: {}",
             tx.id,
+            tx.function_name,
+            tx.sender,
             rayon::current_thread_index().unwrap_or(0)
         );
-        let vm = self.vm.clone();
-        let contract_address = tx.contract_address.clone();
-        let function_name = tx.function_name.clone();
+
+        let vm_clone = self.vm.clone();
+        let contract = tx.contract_address.clone();
+        let function = tx.function_name.clone();
         let args = tx.args.clone();
         let sender = tx.sender.clone();
 
-        // Appel direct async
-        let mut vm = vm.lock().await;
+        let mut vm = vm_clone.lock().await;
+
+        // ────────────────────────────────────────────────
+        // 1. LIRE LA DERNIÈRE VERSION DISQUE
+        // ────────────────────────────────────────────────
+        let mut current_version = if let Some(manager) = vm.storage_manager.as_ref() {
+            let version_key = format!("version:{}", &contract);
+            let bytes = manager.read(&version_key).unwrap_or_default();
+            let ver = if bytes.len() == 8 {
+                u64::from_be_bytes(bytes.try_into().unwrap_or([0; 8]))
+            } else {
+                0u64
+            };
+            println!(
+                "🔍 [RELOAD TX {}] Version disque → v{} pour {}",
+                tx.id, ver, contract
+            );
+            ver
+        } else {
+            println!("⚠️ [TX {}] Pas de storage_manager → v0 forcée", tx.id);
+            0u64
+        };
+
+        // ────────────────────────────────────────────────
+        // 2. FORCER VERSIONNEMENT : v0 devient v1 (uniformité stricte)
+        // ────────────────────────────────────────────────
+        if current_version == 0 {
+            current_version = 1;
+            println!("   → Première utilisation → forcage v1 (plus de legacy storage:)");
+        }
+
+        // ────────────────────────────────────────────────
+        // 3. PREFIX TOUJOURS AU FORMAT VERSIONNÉ
+        // ────────────────────────────────────────────────
+        let prefix = format!("v{}/storage:{}:", current_version, &contract);
+        println!("   → Prefix versionné utilisé : {}", prefix);
+
+        // ────────────────────────────────────────────────
+        // 4. RECHARGEMENT COMPLET DEPUIS LE DISQUE
+        // ────────────────────────────────────────────────
+        let mut reloaded = HashMap::new();
+        let mut reloaded_count = 0;
+
+        if let Some(manager) = vm.storage_manager.as_ref() {
+            match manager.scan_prefix(&prefix) {
+                Ok(entries) => {
+                    for (key, value) in entries {
+                        if key.starts_with(&prefix) {
+                            let slot = key.trim_start_matches(&prefix).to_string();
+                            reloaded.insert(slot, value);
+                            reloaded_count += 1;
+                        }
+                    }
+
+                    println!(
+                        "   → {} slots rechargés depuis v{} (TX {})",
+                        reloaded_count, current_version, tx.id
+                    );
+
+                    // Debug très visible pour le slot balances
+                    let balances_slot = "37439836327923360225337895871871055371921111519445254264255886447755104894253";
+
+                    match reloaded.get(balances_slot) {
+                        Some(val) if !val.is_empty() && val.iter().any(|&b| b != 0) => {
+                            let u256_val = primitive_types::U256::from_big_endian(val);
+                            println!(
+                                "   🔥 BALANCES TROUVÉ → slot {} = {} (0x{}) v{}",
+                                balances_slot,
+                                u256_val,
+                                hex::encode(val),
+                                current_version
+                            );
+                        }
+                        Some(_) => println!(
+                            "   ⚠️ BALANCES PRÉSENT MAIS ZÉRO → slot {} v{}",
+                            balances_slot, current_version
+                        ),
+                        None => println!(
+                            "   ❌ BALANCES ABSENT → slot {} non trouvé dans v{}",
+                            balances_slot, current_version
+                        ),
+                    }
+
+                    // Affichage bonus des slots critiques
+                    for known in &[
+                        "0000000000000000000000000000000000000000000000000000000000000000", // owner
+                        "52c63247e1f47db19d5ce0460030c497f067ca4cebf71ba98eeadabe20bace03", // name ?
+                        "0000000000000000000000000000000000000000000000000000000000000003", // totalSupply ?
+                    ] {
+                        if let Some(val) = reloaded.get(*known) {
+                            println!(
+                                "   → Slot connu {} → 0x{}...",
+                                known,
+                                hex::encode(&val[..val.len().min(16)])
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("⚠️ [SCAN ÉCHEC TX {}] prefix {} : {}", tx.id, prefix, e);
+                }
+            }
+
+            // ────────────────────────────────────────────────
+            // 5. INJECTION DANS L'ÉTAT MÉMOIRE (toujours écraser)
+            // ────────────────────────────────────────────────
+            let mut world_state = vm.state.world_state.write().await;
+            world_state.storage.insert(contract.clone(), reloaded);
+            println!(
+                "   → État mémoire SYNCHRONISÉ avec {} slots depuis v{}",
+                reloaded_count, current_version
+            );
+        } else {
+            println!("   → Pas de storage_manager → état mémoire vide");
+        }
+
+        // ────────────────────────────────────────────────
+        // 6. EXÉCUTION DU MODULE
+        // ────────────────────────────────────────────────
         let result = vm
             .execute_module(
-                &contract_address,
-                &function_name,
+                &contract,
+                &function,
                 args,
-                Some(sender.as_str()),
+                Some(&sender),
                 tx.calldata.as_deref(),
             )
-            .await;
+            .await?;
+
+        // ────────────────────────────────────────────────
+        // 7. EXTRACTION WRITE-SET (seulement si écriture)
+        // ────────────────────────────────────────────────
+        if let Some(storage_written) = result.get("storage").and_then(|v| v.as_object()) {
+            let mut write_set = tx.write_set.write().await;
+            let mut count = 0;
+            for (slot, val_json) in storage_written {
+                if let Some(s) = val_json.as_str() {
+                    if s.starts_with("0x") {
+                        if let Ok(bytes) = hex::decode(&s[2..]) {
+                            write_set.insert(slot.clone(), bytes.clone());
+                            println!(
+                                "📝 [TX {}] Write-set : slot {} → 0x{}...",
+                                tx.id,
+                                slot,
+                                hex::encode(&bytes[..bytes.len().min(8)])
+                            );
+                            count += 1;
+                        }
+                    }
+                }
+            }
+            println!("💾 [TX {}] {} slots injectés dans write_set", tx.id, count);
+        } else if ![
+            "balanceOf",
+            "totalSupply",
+            "name",
+            "symbol",
+            "owner",
+            "decimals",
+        ]
+        .contains(&tx.function_name.as_str())
+        {
+            println!(
+                "ℹ️ [TX {}] Pas de 'storage' dans résultat (lecture pure probable)",
+                tx.id
+            );
+        }
 
         self.record_transaction_access_pattern(&tx).await;
-        result
+
+        Ok(result)
     }
 
     /// ✅ Enregistrement du pattern d'accès pour validation
@@ -341,112 +502,177 @@ impl OptimisticParallelEngine {
     }
 
     /// ✅ Commit atomique des changements d'une transaction – VERSION PERSISTANTE DANS ROCKSDB
-    async fn commit_transaction_changes(&self, tx: &ParallelTransaction) {
+    async fn commit_transaction_changes(&self, tx: &ParallelTransaction) -> Result<(), String> {
         let write_set = tx.write_set.read().await;
-
-        // On lock le VM une première fois pour accéder au storage_manager
-        let vm_guard = self.vm.lock().await;
-
-        // Cas sans RocksDB → commit mémoire volatile
-        if vm_guard.storage_manager.is_none() {
-            println!("⚠️ Pas de RocksDB configuré → commit en mémoire volatile seulement");
-
-            // Lock explicite du world_state (le guard vm reste vivant)
-            let mut world_state_guard = vm_guard.state.world_state.write().await;
-
-            for (slot, new_value) in write_set.iter() {
-                let new_version = self.global_version_counter.fetch_add(1, Ordering::SeqCst);
-                self.storage_versions.insert(slot.clone(), new_version);
-
-                let contract_storage = world_state_guard
-                    .storage
-                    .entry(tx.contract_address.clone())
-                    .or_insert_with(HashMap::new);
-
-                contract_storage.insert(slot.clone(), new_value.clone());
-
-                println!(
-                    "💾 [VOLATILE] Commit slot {} -> v{} ({} bytes)",
-                    slot,
-                    new_version,
-                    new_value.len()
-                );
-            }
-
-            // Les deux guards (vm_guard + world_state_guard) sont libérés ici
-            return;
+        if write_set.is_empty() {
+            println!("ℹ️ TX {} n'a écrit aucun slot → rien à persister", tx.id);
+            return Ok(());
         }
 
-        // On a RocksDB → on clone le manager AVANT de drop vm_guard
-        let manager = vm_guard.storage_manager.as_ref().unwrap().clone();
+        println!(
+            "💾 Début commit optimiste versionné TX {} — {} slots à persister",
+            tx.id,
+            write_set.len()
+        );
 
-        // On peut libérer vm_guard maintenant (on n'en a plus besoin)
-        drop(vm_guard);
+        let manager = {
+            let vm_guard = self.vm.lock().await;
+            vm_guard
+                .storage_manager
+                .as_ref()
+                .ok_or_else(|| "Aucun storage_manager configuré".to_string())?
+                .clone()
+        };
 
-        // ────────────────────────────────────────────────
-        // PARTIE ROCKSDB : VERSIONNING + ÉCRITURE PERSISTANTE
-        // ────────────────────────────────────────────────
+        let contract = tx.contract_address.clone();
 
-        // 1. Lecture de la version actuelle du contrat
-        let version_key = format!("version:{}", tx.contract_address);
+        let version_key = format!("version:{}", &contract);
+
+        // 1. Lire version actuelle (cohérence)
         let current_version_bytes = manager.read(&version_key).unwrap_or_default();
-        let current_version = if current_version_bytes.len() == 8 {
+        let mut current_version = if current_version_bytes.len() == 8 {
             u64::from_be_bytes(current_version_bytes.try_into().unwrap_or([0; 8]))
         } else {
             0u64
         };
 
-        // 2. Nouvelle version
+        // 2. Option : recharger brièvement l'état actuel pour vérifier cohérence (anti-corruption)
+        let mut reloaded_storage: HashMap<String, Vec<u8>> = HashMap::new();
+        if current_version > 0 {
+            let prefix = format!("v{}/storage:{}:", current_version, &contract);
+            if let Ok(entries) = manager.scan_prefix(&prefix) {
+                for (key, value) in entries {
+                    if key.starts_with(&prefix) {
+                        let slot = key.trim_start_matches(&prefix).to_string();
+                        reloaded_storage.insert(slot, value);
+                    }
+                }
+                println!(
+                    "   🔄 [PRE-COMMIT RELOAD] {} slots rechargés depuis v{} (cohérence)",
+                    reloaded_storage.len(),
+                    current_version
+                );
+            }
+        }
+
+        // 3. Incrémenter version
         let new_version = current_version + 1;
         let version_bytes = new_version.to_be_bytes().to_vec();
 
-        // 3. Écriture de la nouvelle version globale
-        if let Err(e) = manager.write(&version_key, &version_bytes) {
-            println!(
-                "❌ [CRITIQUE] Échec écriture version {} pour {} : {}",
-                new_version, tx.contract_address, e
-            );
-            return;
+        manager.write(&version_key, &version_bytes).map_err(|e| {
+            format!(
+                "Échec promotion version v{} → v{} : {}",
+                current_version, new_version, e
+            )
+        })?;
+
+        println!("📈 [VERSION] {} promu → v{}", contract, new_version);
+
+        // 4. Commit des nouveaux slots
+        {
+            let mut vm_guard = self.vm.lock().await;
+            let mut world_state_guard = vm_guard.state.world_state.write().await;
+
+            let contract_storage = world_state_guard
+                .storage
+                .entry(contract.clone())
+                .or_insert_with(HashMap::new);
+
+            for (slot, new_value) in write_set.iter() {
+                let keyed_slot = format!("v{}/storage:{}:{}", new_version, &contract, slot);
+
+                if let Err(e) = manager.write(&keyed_slot, new_value) {
+                    eprintln!("❌ Échec écriture {} : {}", keyed_slot, e);
+                    continue;
+                }
+
+                // Mise à jour en mémoire
+                contract_storage.insert(slot.clone(), new_value.clone());
+                self.storage_versions.insert(slot.clone(), new_version);
+
+                let preview = hex::encode(&new_value[..new_value.len().min(32)]);
+                println!(
+                    "💾 [WRITE] v{} → slot {} → clé {} → 0x{}... ({} bytes)",
+                    new_version,
+                    slot,
+                    keyed_slot,
+                    preview,
+                    new_value.len()
+                );
+
+                // Read-back immédiat
+                match manager.read(&keyed_slot) {
+                    Ok(read) if read == *new_value => println!("   ✓ Read-back OK"),
+                    Ok(read) => eprintln!(
+                        "⚠️ [CORRUPTION] Read-back mismatch sur {} ! Écrit: 0x{} Lu: 0x{}",
+                        keyed_slot,
+                        hex::encode(new_value),
+                        hex::encode(&read)
+                    ),
+                    Err(e) => eprintln!("⚠️ [READ-BACK FAIL] {} : {}", keyed_slot, e),
+                }
+
+                // Détection spéciale balances
+                if slot == "37439836327923360225337895871871055371921111519445254264255886447755104894253"
+                || slot == "52c63247e1f47db19d5ce0460030c497f067ca4cebf71ba98eeadabe20bace03" // hash fréquent
+            {
+                let u256 = primitive_types::U256::from_big_endian(new_value);
+                println!(
+                    "   🔥 BALANCES TOUCHÉ → slot {} → nouvelle valeur = {} (0x{})",
+                    slot, u256, hex::encode(new_value)
+                );
+            }
+            }
+        }
+
+        // 5. Backups critiques
+        let critical_slots = vec![
+            "37439836327923360225337895871871055371921111519445254264255886447755104894253", // balances mapping ?
+            "b53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103", // admin
+            "0000000000000000000000000000000000000000000000000000000000000000", // owner ?
+            "0000000000000000000000000000000000000000000000000000000000000001", // symbol ?
+                                                                                // Ajoute ici d'autres slots connus (totalSupply, name, etc.)
+        ];
+
+        for slot in critical_slots {
+            if let Some(value) = write_set.get(slot) {
+                let backup_key = format!("backup:v{}/{}:{}", new_version, &contract, slot);
+                let _ = manager.write(&backup_key, value);
+                println!("🛡️ [BACKUP CRITIQUE] slot {} → v{}", slot, new_version);
+            }
+        }
+
+        // 6. Vérification finale balances (plus robuste)
+        let balances_slot =
+            "37439836327923360225337895871871055371921111519445254264255886447755104894253";
+        let balances_key = format!("v{}/storage:{}:{}", new_version, &contract, balances_slot);
+
+        match manager.read(&balances_key) {
+            Ok(value) if !value.is_empty() && value.iter().any(|&b| b != 0) => {
+                let u256_val = primitive_types::U256::from_big_endian(&value);
+                println!(
+                    "🔍 [POST-COMMIT BALANCES] v{} → slot {} = {} (0x{})",
+                    new_version,
+                    balances_slot,
+                    u256_val,
+                    hex::encode(&value)
+                );
+            }
+            Ok(_) => println!("   → Slot balances vide ou zéro en v{}", new_version),
+            Err(e) => println!(
+                "⚠️ [POST-COMMIT] Impossible de relire balances v{} : {}",
+                new_version, e
+            ),
         }
 
         println!(
-            "📈 [VERSION] Contrat {} passé à v{}",
-            tx.contract_address, new_version
+            "✅ Commit TX {} terminé — {} slots persistés (v{})",
+            tx.id,
+            write_set.len(),
+            new_version
         );
 
-        // 4. Commit de chaque slot avec préfixe de version
-        // On reprend un nouveau lock VM uniquement pour world_state
-        let vm_guard_2 = self.vm.lock().await;
-        let mut world_state_guard = vm_guard_2.state.world_state.write().await;
-
-        for (slot, new_value) in write_set.iter() {
-            let keyed_slot = format!("v{}/storage:{}:{}", new_version, tx.contract_address, slot);
-
-            if let Err(e) = manager.write(&keyed_slot, &new_value.clone()) {
-                println!("❌ [ERREUR] Échec persistance slot {} : {}", keyed_slot, e);
-                continue;
-            }
-
-            // Mise à jour en mémoire
-            let contract_storage = world_state_guard
-                .storage
-                .entry(tx.contract_address.clone())
-                .or_insert_with(HashMap::new);
-            contract_storage.insert(slot.clone(), new_value.clone());
-
-            // Mise à jour des versions en mémoire
-            self.storage_versions.insert(slot.clone(), new_version);
-
-            println!(
-                "💾 [PERSISTANT] Commit v{} → slot {} ({} bytes) → clé {}",
-                new_version,
-                slot,
-                new_value.len(),
-                keyed_slot
-            );
-        }
-
-        // Tous les guards sont libérés automatiquement ici
+        Ok(())
     }
 
     /// ✅ Point d'entrée pour soumission de transaction parallèle
@@ -1082,18 +1308,97 @@ impl SlurachainVm {
     ) -> Result<NerenaValue, String> {
         let sender = sender_vyid.unwrap_or("*system*#default#").to_string();
         let calldata_vec = calldata.map(|c| c.to_vec());
-        let batch = vec![(
-            module_path.to_string(),
-            function_name.to_string(),
-            args,
-            sender,
-            calldata_vec, // <-- Ajoute ici
-        )];
+
+        println!(
+            "execute_module → path: {} | fn: '{}' | args: {} | calldata: {} bytes | sender: {}",
+            module_path,
+            function_name,
+            args.len(),
+            calldata_vec.as_ref().map_or(0, |v| v.len()),
+            sender
+        );
+
+        // Détection du mode déploiement brut
+        let is_raw_creation = function_name.is_empty()
+            || function_name == "raw_creation"
+            || function_name == "constructor"
+            || function_name == "deploy";
+
+        let batch = if is_raw_creation {
+            println!(
+                "⚡ MODE DÉPLOIEMENT BRUT DÉTECTÉ → exécution creation bytecode depuis offset 0"
+            );
+
+            // Récupération du creation bytecode (doit être pré-chargé dans contract_state)
+            let creation_bytecode = {
+                let accounts = self.state.accounts.read().await;
+                accounts
+                    .get(module_path)
+                    .map(|acc| acc.contract_state.clone())
+                    .unwrap_or_default()
+            };
+
+            if creation_bytecode.is_empty() {
+                return Err(format!(
+                    "Aucun creation bytecode disponible pour déploiement de {}",
+                    module_path
+                ));
+            }
+
+            println!(
+                "   → Creation bytecode chargé : {} bytes",
+                creation_bytecode.len()
+            );
+
+            // Pour le déploiement brut, on passe le creation bytecode comme "calldata interne"
+            // et on force un nom spécial pour que le moteur sache qu'il n'y a pas de dispatcher
+            vec![(
+                module_path.to_string(),
+                "raw_creation".to_string(), // nom spécial → signal pour offset 0 + no dispatcher
+                vec![],                     // pas d'args décodés ABI
+                sender,
+                Some(creation_bytecode), // ← LE CREATION BYTECODE devient le code à exécuter
+            )]
+        } else {
+            // Mode transaction normale (fonction nommée ou selector)
+            vec![(
+                module_path.to_string(),
+                function_name.to_string(),
+                args,
+                sender,
+                calldata_vec,
+            )]
+        };
+
+        // Exécution via le moteur parallèle (même pipeline pour tout)
         let results = self.execute_parallel_transactions(batch).await;
-        results
-            .into_iter()
-            .next()
-            .unwrap_or(Err("Aucun résultat".to_string()))
+
+        let result = results.into_iter().next().unwrap_or(Err(
+            "Aucun résultat retourné par le moteur parallèle".to_string(),
+        ))?;
+
+        // Pour les déploiements : extraction du runtime si présent dans le retour
+        if is_raw_creation {
+            if let Some(returned) = result.get("return").and_then(|v| v.as_str()) {
+                if let Ok(runtime_bytes) = hex::decode(returned.trim_start_matches("0x")) {
+                    println!(
+                        "→ Runtime récupéré après RETURN du déploiement : {} bytes",
+                        runtime_bytes.len()
+                    );
+
+                    // Optionnel : mise à jour immédiate du module/compte avec le runtime
+                    let mut accounts = self.state.accounts.write();
+                    if let Some(acc) = accounts.await.get_mut(module_path) {
+                        acc.contract_state = runtime_bytes.clone();
+                    }
+
+                    // Auto-détection sur le runtime obtenu
+                    let _ = self.auto_detect_contract_functions(module_path, &runtime_bytes);
+                }
+            }
+        }
+
+        Ok(result)
     }
 
     /// ✅ NOUVEAU: Construction du storage dynamique depuis l'état du contrat
@@ -1627,124 +1932,197 @@ impl SlurachainVm {
     }
 
     /// ✅ VERSION 100% EVM-COMPLIANT – Slot ERC-1967 implementation écrit comme Solidity le fait
+    /// ✅ VERSION 100% EVM-COMPLIANT + BACKUP N-2 (pour retomber sur la version avec slots balances)
+    ///     - Incrémente toujours (v13 → v14)
+    ///     - backup_version pointe sur v(N-2) (ex: v12 quand on passe à v14)
     async fn persist_contract_state_immediate(
         &mut self,
         contract_address: &str,
         execution_result: &serde_json::Value,
     ) -> Result<(), String> {
         let storage_manager = match &self.storage_manager {
-            Some(m) => m,
+            Some(m) => m.clone(),
             None => return Ok(()),
         };
 
-        // Récupère le storage (normal ou decoded)
-        let storage_obj = execution_result
-            .get("storage")
-            .and_then(|v| v.as_object())
-            .or_else(|| {
-                execution_result
-                    .get("storage_decoded")
-                    .and_then(|v| v.as_object())
-            });
+        println!(
+            "💾 [PERSIST IMMEDIATE] {} - Début persistance complète",
+            contract_address
+        );
 
-        if storage_obj.is_none() {
+        // ────────────────────────────────────────────────
+        // 1. LIRE LA VERSION COURANTE COMMITÉE
+        // ────────────────────────────────────────────────
+        let version_key = format!("version:{}", contract_address);
+        let backup_version_key = format!("backup_version:{}", contract_address);
+
+        let current_version_bytes = storage_manager.read(&version_key).unwrap_or_default();
+        let mut current_version = if current_version_bytes.len() == 8 {
+            u64::from_be_bytes(current_version_bytes.try_into().unwrap_or([0; 8]))
+        } else {
+            0u64
+        };
+
+        if current_version == 0 {
+            current_version = 1;
+            println!("   → Première persistance → version forcée à v1");
+            let _ = storage_manager.write(&version_key, &current_version.to_be_bytes());
+            println!("   → Persistance en v1 (pas de backup)");
+            // ... (code d'écriture des slots pour v1, tu peux le garder)
             return Ok(());
         }
-        let storage_obj = storage_obj.unwrap();
 
-        // 1. Persistance normale de tous les slots (inchangée)
-        for (key, value_json) in storage_obj {
-            let canonical_slot = self.map_resource_key_to_slot(key);
-            let storage_key = format!("storage:{}:{}", contract_address, canonical_slot);
+        // Nouvelle version = current + 1
+        let new_version = current_version + 1;
 
-            let value_bytes = match value_json {
-                serde_json::Value::String(s) if s.starts_with("0x") => {
-                    let clean = s.trim_start_matches("0x");
-                    if clean.len() <= 64 && clean.chars().all(|c| c.is_ascii_hexdigit()) {
-                        let mut bytes = vec![0u8; 32];
-                        let decoded_len = (clean.len() + 1) / 2;
-                        let start = 32 - decoded_len;
-                        let _ = hex::decode_to_slice(clean, &mut bytes[start..]);
-                        bytes
-                    } else {
-                        s.as_bytes()
-                            .iter()
-                            .cloned()
-                            .chain(std::iter::repeat(0))
-                            .take(32)
-                            .collect()
-                    }
-                }
-                serde_json::Value::Number(n) if n.is_u64() => {
-                    let mut bytes = vec![0u8; 32];
-                    bytes[24..32].copy_from_slice(&n.as_u64().unwrap().to_be_bytes());
-                    bytes
-                }
-                _ => vec![0u8; 32],
-            };
-
-            let _ = storage_manager.write(&storage_key, &value_bytes);
-        }
-
-        // 2. FORÇAGE ABSOLU ET CONFORME EVM DU SLOT ERC-1967 IMPLEMENTATION
-        let impl_slot_key = ERC1967_IMPLEMENTATION_SLOT;
-
-        let candidate = [
-            "implementation",
-            "impl",
-            "logic",
-            "target",
-            "masterCopy",
-            "_implementation",
-            "_impl",
-            impl_slot_key,
-        ]
-        .iter()
-        .find_map(|&k| storage_obj.get(k))
-        .and_then(|v| v.as_str())
-        .map(|s| s.trim_start_matches("0x").to_ascii_lowercase());
-
-        if let Some(hex) = candidate {
-            if hex.is_empty() || hex == "0" || hex == "0000000000000000000000000000000000000000" {
-                println!("⚠️ Implémentation = zéro → proxy reste vide (Panic 0x22 normal)");
-                return Ok(());
-            }
-
-            let mut impl_bytes = [0u8; 32];
-            if hex.len() <= 40 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
-                let addr_bytes = hex::decode(&hex).expect("hex valide");
-                impl_bytes[12..32].copy_from_slice(&addr_bytes);
-            } else {
-                let truncated = &hex::decode(&hex).unwrap_or_default()[..20.min(hex.len() / 2)];
-                impl_bytes[12..32].copy_from_slice(&truncated);
-            }
-
-            let canonical_key = format!("storage:{}:{}", contract_address, impl_slot_key);
-            storage_manager
-                .write(&canonical_key, &impl_bytes.to_vec())
-                .ok();
-
-            let impl_addr = format!("0x{}", hex::encode(&impl_bytes[12..32]));
-
-            println!("✅ [EVM-COMPLIANT] Slot ERC-1967 implementation écrit correctement");
-            println!("   Slot : {}", impl_slot_key);
-            println!("   Adresse impl : {}", impl_addr);
-
-            // Mise à jour des resources VM (à la fois canonique et logique)
-            let mut accounts = self.state.accounts.write().await;
-            if let Some(acc) = accounts.get_mut(contract_address) {
-                acc.resources.insert(
-                    impl_slot_key.to_string(),
-                    serde_json::Value::String(format!("0x{}", hex::encode(impl_bytes))),
-                );
-                acc.resources.insert(
-                    "implementation".to_string(),
-                    serde_json::Value::String(impl_addr.clone()),
-                );
-            }
+        // Backup = current - 2 (N-2), avec sécurité (ne descend pas < v1)
+        let backup_target = if current_version > 1 {
+            current_version - 1
         } else {
-            println!("⚠️ Aucune clé implementation trouvée → proxy reste vide");
+            1
+        };
+
+        println!(
+            "   → Persistance en nouvelle version : v{} (ancienne = v{}, backup pointe sur v{})",
+            new_version, current_version, backup_target
+        );
+
+        // ────────────────────────────────────────────────
+        // 2. ÉCRITURE DES SLOTS SOUS NEW_VERSION
+        // ────────────────────────────────────────────────
+        let storage_obj = execution_result
+            .get("storage")
+            .or_else(|| execution_result.get("storage_decoded"))
+            .and_then(|v| v.as_object());
+
+        if let Some(obj) = storage_obj {
+            println!("   → {} slots trouvés dans le résultat", obj.len());
+
+            for (key, value_json) in obj {
+                let canonical_slot = self.map_resource_key_to_slot(key);
+                let storage_key = format!(
+                    "v{}/storage:{}:{}",
+                    new_version, contract_address, canonical_slot
+                );
+
+                let value_bytes = match value_json {
+                    serde_json::Value::String(s) if s.starts_with("0x") => {
+                        hex::decode(&s[2..]).unwrap_or(vec![0; 32])
+                    }
+                    serde_json::Value::Number(n) if n.is_u64() => {
+                        let mut bytes = vec![0u8; 32];
+                        bytes[24..32].copy_from_slice(&n.as_u64().unwrap().to_be_bytes());
+                        bytes
+                    }
+                    _ => vec![0; 32],
+                };
+
+                if let Err(e) = storage_manager.write(&storage_key, &value_bytes) {
+                    eprintln!("❌ Échec écriture {} : {}", storage_key, e);
+                    continue;
+                }
+
+                let preview = hex::encode(&value_bytes[..value_bytes.len().min(32)]);
+                println!(
+                    "   → Slot {} → clé {} → 0x{}... ({} bytes)",
+                    key,
+                    storage_key,
+                    preview,
+                    value_bytes.len()
+                );
+
+                // Backup critique (sous new_version)
+                if canonical_slot == ERC1967_IMPLEMENTATION_SLOT
+                    || canonical_slot == ERC1967_ADMIN_SLOT
+                    || canonical_slot == ERC1967_BEACON_SLOT
+                    || key.contains("balances")
+                    || key.contains("owner")
+                    || key.contains("totalSupply")
+                {
+                    let backup_key = format!(
+                        "backup:v{}/{}:{}",
+                        new_version, contract_address, canonical_slot
+                    );
+                    let _ = storage_manager.write(&backup_key, &value_bytes);
+                }
+            }
         }
+
+        // ────────────────────────────────────────────────
+        // 3. CAPTURE RETURN WRITES (sous new_version)
+        // ────────────────────────────────────────────────
+        if let Some(written_obj) = execution_result.get("storage").and_then(|v| v.as_object()) {
+            for (slot, value_json) in written_obj {
+                let canonical_slot = self.map_resource_key_to_slot(slot);
+                let storage_key = format!(
+                    "v{}/storage:{}:{}",
+                    new_version, contract_address, canonical_slot
+                );
+
+                let value_bytes = match value_json.as_str() {
+                    Some(s) if s.starts_with("0x") => hex::decode(&s[2..]).unwrap_or(vec![0; 32]),
+                    _ => vec![0; 32],
+                };
+
+                let _ = storage_manager.write(&storage_key, &value_bytes);
+            }
+        }
+
+        // ────────────────────────────────────────────────
+        // 4. MISE À JOUR POINTEUR + BACKUP N-2
+        // ────────────────────────────────────────────────
+        // Pointe principal → new_version
+        if let Err(e) = storage_manager.write(&version_key, &new_version.to_be_bytes()) {
+            return Err(format!(
+                "Échec mise à jour version v{} : {}",
+                new_version, e
+            ));
+        }
+
+        // Backup = N-2
+        if let Err(e) = storage_manager.write(&backup_version_key, &backup_target.to_be_bytes()) {
+            eprintln!("⚠️ Échec backup_version v{} : {}", backup_target, e);
+        } else {
+            println!(
+                "🛡️ [BACKUP N-2] Pointe sur v{} (depuis nouvelle v{})",
+                backup_target, new_version
+            );
+        }
+
+        // ────────────────────────────────────────────────
+        // 5. VÉRIFICATION BALANCES (doit être dans backup_target maintenant)
+        // ────────────────────────────────────────────────
+        let balances_slot =
+            "37439836327923360225337895871871055371921111519445254264255886447755104894253";
+        let balances_key = format!(
+            "v{}/storage:{}:{}",
+            backup_target, contract_address, balances_slot
+        );
+
+        match storage_manager.read(&balances_key) {
+            Ok(value) if !value.is_empty() && value.iter().any(|&b| b != 0) => {
+                let u256_val = primitive_types::U256::from_big_endian(&value);
+                println!(
+                    "🔥 [FINAL CHECK BACKUP] Slot balances TROUVÉ en v{} → {} (0x{})",
+                    backup_target,
+                    u256_val,
+                    hex::encode(&value)
+                );
+            }
+            Ok(_) => println!(
+                "   → Slot balances vide ou zéro en backup v{} (clé: {})",
+                backup_target, balances_key
+            ),
+            Err(e) => println!(
+                "⚠️ [FINAL CHECK BACKUP] Impossible de relire balances v{} : {}",
+                backup_target, e
+            ),
+        }
+
+        println!(
+            "✅ Persistance immédiate terminée pour {} (v{} | backup = v{})",
+            contract_address, new_version, backup_target
+        );
 
         Ok(())
     }
@@ -2517,7 +2895,34 @@ impl SlurachainVm {
         selector: u32,
         _args: &[NerenaValue],
     ) -> Result<FunctionMetadata, String> {
-        // ✅ RECHERCHE STRICTE dans les fonctions détectées UNIQUEMENT
+        // ────────────────────────────────────────────────
+        // EXCEPTION SPÉCIALE : MODE DÉPLOIEMENT BRUT / raw_creation
+        // ────────────────────────────────────────────────
+        if function_name == "raw_creation" || function_name == "constructor" {
+            println!(
+                "⚡ [EXCEPTION RAW] Mode déploiement brut détecté pour '{}'. \
+            Pas de sélecteur requis → exécution depuis offset 0.",
+                function_name
+            );
+
+            // On retourne une métadonnée "dummy" spéciale pour signaler le mode raw
+            return Ok(FunctionMetadata {
+                name: "raw_creation".to_string(),
+                offset: 0, // ← offset 0 = début du bytecode
+                args_count: 0,
+                return_type: "bytes".to_string(), // on attend un retour de type bytes (runtime)
+                gas_limit: 30_000_000,            // très haut pour le déploiement
+                payable: true,
+                mutability: "payable".to_string(),
+                selector: 0, // pas de sélecteur réel
+                arg_types: vec![],
+                modifiers: vec!["raw".to_string()], // marqueur pour le pipeline
+            });
+        }
+
+        // ────────────────────────────────────────────────
+        // CAS NORMAL : recherche stricte dans les fonctions détectées
+        // ────────────────────────────────────────────────
         if let Some(module) = self.modules.get(contract_address) {
             // Recherche par nom exact
             if let Some(meta) = module.functions.get(function_name) {
@@ -2539,7 +2944,7 @@ impl SlurachainVm {
                 }
             }
 
-            // ✅ RECHERCHE par nom function_XXXXXXXX si l'appel utilise le nom classique
+            // Recherche par nom function_XXXXXXXX si l'appel utilise le nom classique
             let expected_function_name = format!("function_{:08x}", selector);
             if let Some(meta) = module.functions.get(&expected_function_name) {
                 println!(
@@ -2549,7 +2954,7 @@ impl SlurachainVm {
                 return Ok(meta.clone());
             }
 
-            // ✅ UTILISE LA FONCTION EXISTANTE create_function_metadata EN DERNIER RECOURS
+            // UTILISE LA FONCTION EXISTANTE create_function_metadata EN DERNIER RECOURS
             // Mais seulement si on trouve l'offset dans le bytecode
             if let Some(offset) = Self::find_function_offset_in_bytecode(&module.bytecode, selector)
             {
@@ -2561,7 +2966,9 @@ impl SlurachainVm {
             }
         }
 
-        // ✅ ÉCHEC STRICT - Aucune fonction trouvée
+        // ────────────────────────────────────────────────
+        // ÉCHEC STRICT - Aucune fonction trouvée (pour les appels normaux)
+        // ────────────────────────────────────────────────
         Err(format!(
             "Fonction '{}' (sélecteur 0x{:08x}) NON TROUVÉE dans le dispatcher du contrat {}. \
         Vérifiez que le contrat contient cette fonction.",

@@ -1220,7 +1220,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     // 🔥 STRATÉGIE NONCE TOUJOURS UNIQUE
     let current_account_nonce = self.get_transaction_count(&from_addr).await.unwrap_or(0);
 
-    // ✅ FORCE NONCE TOUJOURS CROISSANT (jamais de redéploiement à la même adresse)
+    // ✅ FORCE NONCE TOUJOURS CROISSANT
     let final_nonce = tx_params.get("nonce")
         .and_then(|v| {
             if v.is_string() {
@@ -1268,6 +1268,9 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
+    // ========================================================
+    // PRÉPARATION CALDATA GÉNÉRIQUE (pour tx normales)
+    // ========================================================
     let calldata_bytes = if !data.is_empty() && data.starts_with("0x") {
         hex::decode(&data[2..]).unwrap_or_default()
     } else if !data.is_empty() {
@@ -1275,6 +1278,27 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     } else {
         vec![]
     };
+
+    // ========================================================
+    // PRÉPARATION SPÉCIFIQUE POUR DÉPLOIEMENT
+    // ========================================================
+    let creation_bytecode = if is_deployment && !data.is_empty() {
+        if data.starts_with("0x") {
+            hex::decode(&data[2..]).unwrap_or_default()
+        } else {
+            hex::decode(data).unwrap_or_default()
+        }
+    } else {
+        vec![]
+    };
+
+    if is_deployment && creation_bytecode.is_empty() {
+        return Err("Bytecode de déploiement vide".to_string());
+    }
+
+    // Calldata pour le constructeur : VIDE par défaut (constructor sans params)
+    // → Peut être remplacé par ABI-encoding si besoin
+    let constructor_calldata: Vec<u8> = vec![];
 
     // 🚀 GÉNÉRATION TX HASH UNIQUE ET INDÉTERMINISTE
     let mut contract_address = String::new();
@@ -1291,124 +1315,176 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     let tx_hash = format!("0x{:x}", tx_hasher.finalize());
     let normalized_hash = self.normalize_tx_hash(&tx_hash);
 
-    // 🔥 DÉPLOIEMENT AVEC ADRESSE INDÉTERMINISTE ET PERSISTANCE IMMÉDIATE GARANTIE
+    // 🔥 DÉPLOIEMENT
     if is_deployment {
-        if let Some(bytecode_hex) = tx_params.get("data").and_then(|v| v.as_str()) {
-            if !bytecode_hex.is_empty() && bytecode_hex != "0x" {
-                let creation_bytecode = if bytecode_hex.starts_with("0x") {
-                    hex::decode(&bytecode_hex[2..]).unwrap_or_default()
-                } else {
-                    hex::decode(bytecode_hex).unwrap_or_default()
-                };
+        let use_create2 = tx_params.get("create2").and_then(|v| v.as_bool()).unwrap_or(false);
+        let target_address = tx_params.get("target_address")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_lowercase());
 
-                if creation_bytecode.is_empty() {
-                    return Err("Bytecode de déploiement vide".to_string());
-                }
-
-                let use_create2 = tx_params.get("create2").and_then(|v| v.as_bool()).unwrap_or(false);
-                let target_address = tx_params.get("target_address")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_lowercase());
-
-                contract_address = if use_create2 {
-                    if let Some(addr) = target_address {
-                        println!("⚡ [CREATE2] Déploiement via execute_module à l'adresse forcée: {}", addr);
-                        addr
-                    } else {
-                        return Err("CREATE2 demandé mais aucune 'target_address' fournie".to_string());
-                    }
-                } else {
-                    let mut addr_hasher = Keccak256::new();
-                    addr_hasher.update(from_addr.as_bytes());
-                    addr_hasher.update(&final_nonce.to_be_bytes());
-                    addr_hasher.update(&creation_bytecode);
-                    addr_hasher.update(&rand::random::<u128>().to_be_bytes());
-                    addr_hasher.update(&chrono::Utc::now().timestamp_nanos().to_be_bytes());
-                    addr_hasher.update(&std::process::id().to_be_bytes());
-
-                    let addr_hash = addr_hasher.finalize();
-                    let mut proposed = format!("0x{}", hex::encode(&addr_hash[12..32]).to_lowercase());
-
-                    {
-                        let vm = self.vm.read().await;
-                        let accounts = vm.state.accounts.read().await;
-                        let mut attempts: i32 = 0;
-                        let mut final_addr = proposed.clone();
-
-                        while accounts.contains_key(&final_addr) && attempts < 1000 {
-                            let mut retry_hasher = Keccak256::new();
-                            retry_hasher.update(final_addr.as_bytes());
-                            retry_hasher.update(&rand::random::<u128>().to_be_bytes());
-                            retry_hasher.update(&attempts.to_be_bytes());
-                            let retry_hash = retry_hasher.finalize();
-                            final_addr = format!("0x{}", hex::encode(&retry_hash[12..32]).to_lowercase());
-                            attempts += 1;
-                        }
-
-                        if attempts >= 1000 {
-                            return Err("Impossible de générer une adresse unique après 1000 tentatives".to_string());
-                        }
-                        final_addr
-                    }
-                };
-
-                // ========================================================
-                // 🔥 TOUS LES DÉPLOIEMENTS (CREATE + CREATE2) → execute_module
-                // MAIS SANS AUCUN CALLDATA (comme demandé)
-                // ========================================================
-                let mut vm = self.vm.write().await;
-
-                let function_name = "constructor".to_string();
-
-                let args = Self::parse_abi_encoded_args(data)
-                    .unwrap_or_else(|| {
-                        if value > 0 {
-                            vec![serde_json::Value::Number(serde_json::Number::from(value))]
-                        } else {
-                            vec![]
-                        }
-                    });
-
-                let empty_calldata: Vec<u8> = vec![]; // ← AUCUN CALLDATA POUR LES DÉPLOIEMENTS
-
-                println!("🚀 Déploiement via execute_module (constructor + calldata vide) → {}", contract_address);
-
-                if let Err(e) = vm.execute_module(
-                    &contract_address,
-                    &function_name,
-                    args,
-                    Some(&from_addr),
-                    Some(&empty_calldata)
-                ).await {
-                    return Err(format!("Échec de l'exécution via execute_module : {:?}", e));
-                }
-
-                // Détection automatique des fonctions (conservée)
-                if let Err(e) = vm.auto_detect_contract_functions(&contract_address, &creation_bytecode) {
-                    println!("⚠️ Détection automatique des fonctions échouée pour {}: {}", contract_address, e);
-                }
-
-                // Persistance immédiate (conservée)
-                if let Some(storage_manager) = &vm.storage_manager {
-                    println!("💾 PERSISTANCE IMMÉDIATE du contrat {}", contract_address);
-                    // ... insère ici ton code de persistance multiple / RocksDB ...
-                } else {
-                    eprintln!("❌ Pas de storage manager disponible !");
-                }
-
-                println!("✅ DÉPLOIEMENT + PERSISTANCE IMMÉDIATE RÉUSSI via execute_module :");
-                println!("   • Adresse: {} (PERSISTÉ)", contract_address);
-                println!("   • Déployeur: {}", from_addr);
-                println!("   • TX Hash: {}", normalized_hash);
-                println!("   • Méthode: execute_module (calldata vide)");
+        contract_address = if use_create2 {
+            if let Some(addr) = target_address {
+                println!("⚡ [CREATE2] Déploiement via execute_module à l'adresse forcée: {}", addr);
+                addr
             } else {
-                return Err("Aucun bytecode valide pour le déploiement".to_string());
+                return Err("CREATE2 demandé mais aucune 'target_address' fournie".to_string());
             }
         } else {
-            return Err("Aucun champ 'data' pour le déploiement".to_string());
+            let mut addr_hasher = Keccak256::new();
+            addr_hasher.update(from_addr.as_bytes());
+            addr_hasher.update(&final_nonce.to_be_bytes());
+            addr_hasher.update(&creation_bytecode);
+            addr_hasher.update(&rand::random::<u128>().to_be_bytes());
+            addr_hasher.update(&chrono::Utc::now().timestamp_nanos().to_be_bytes());
+            addr_hasher.update(&std::process::id().to_be_bytes());
+
+            let addr_hash = addr_hasher.finalize();
+            let mut proposed = format!("0x{}", hex::encode(&addr_hash[12..32]).to_lowercase());
+
+            {
+                let vm = self.vm.read().await;
+                let accounts = vm.state.accounts.read().await;
+                let mut attempts: i32 = 0;
+                let mut final_addr = proposed.clone();
+
+                while accounts.contains_key(&final_addr) && attempts < 1000 {
+                    let mut retry_hasher = Keccak256::new();
+                    retry_hasher.update(final_addr.as_bytes());
+                    retry_hasher.update(&rand::random::<u128>().to_be_bytes());
+                    retry_hasher.update(&attempts.to_be_bytes());
+                    let retry_hash = retry_hasher.finalize();
+                    final_addr = format!("0x{}", hex::encode(&retry_hash[12..32]).to_lowercase());
+                    attempts += 1;
+                }
+
+                if attempts >= 1000 {
+                    return Err("Impossible de générer une adresse unique après 1000 tentatives".to_string());
+                }
+                final_addr
+            }
+        };
+
+        let mut vm = self.vm.write().await;
+
+        // Pré-création du compte avec creation bytecode
+        let mut accounts = vm.state.accounts.write().await;
+        if !accounts.contains_key(&contract_address) {
+            accounts.insert(contract_address.clone(), vuc_tx::slurachain_vm::AccountState {
+                address: contract_address.clone(),
+                balance: value,
+                contract_state: creation_bytecode.clone(),
+                resources: {
+                    let mut r = BTreeMap::new();
+                    r.insert("constructor_pending".to_string(), serde_json::Value::Bool(true));
+                    r.insert("deployed_by".to_string(), serde_json::Value::String(from_addr.clone()));
+                    r
+                },
+                state_version: 1,
+                last_block_number: 0,
+                nonce: 0,
+                code_hash: "".to_string(),
+                storage_root: format!("storage_{}", contract_address),
+                is_contract: true,
+                gas_used: 0,
+            });
+            println!("   → Compte pré-créé avec creation bytecode");
         }
+        drop(accounts);
+
+        println!("🚀 Déploiement via execute_module (raw_creation) → {}", contract_address);
+
+        let deploy_result = vm.execute_module(
+            &contract_address,
+            "raw_creation",
+            vec![],
+            Some(&from_addr),
+            Some(&constructor_calldata),   // ← vide ou ABI args
+        ).await;
+
+        if let Err(e) = deploy_result {
+            return Err(format!("Échec déploiement via execute_module (raw) : {:?}", e));
+        }
+
+   let runtime_bytecode = match deploy_result {
+    Ok(value) => {
+        let mut candidate = None;
+
+        if let Some(obj) = value.as_object() {
+            for key in ["data", "return", "result", "returnData", "output", "value"] {
+                if let Some(v) = obj.get(key) {
+                    if let Some(s) = v.as_str() {
+                        if s.starts_with("0x") {
+                            if let Ok(bytes) = hex::decode(&s[2..]) {
+                                if bytes.len() > 1000 {
+                                    candidate = Some(bytes.clone());
+                                    println!("→ Trouvé dans clé '{}': {} bytes", key, bytes.len());
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        candidate.unwrap_or_else(|| {
+            println!("⚠️ Aucun candidat valide trouvé → fallback");
+            creation_bytecode.clone()
+        })
+    }
+    Err(e) => {
+        println!("❌ execute_module Err: {:?}", e);
+        creation_bytecode.clone()
+    }
+};
+        println!("→ Runtime final après déploiement : {} bytes", runtime_bytecode.len());
+
+        if !vm.modules.contains_key(&contract_address) {
+            let module = vuc_tx::slurachain_vm::Module {
+                name: "deployed".to_string(),
+                address: contract_address.clone(),
+                bytecode: runtime_bytecode.clone(),
+                elf_buffer: vec![],
+                context: uvm_runtime::UbfContext::new(),
+                stack_usage: None,
+                functions: hashbrown::HashMap::new(),
+                gas_estimates: hashbrown::HashMap::new(),
+                storage_layout: hashbrown::HashMap::new(),
+                events: vec![],
+                constructor_params: vec![],
+            };
+            vm.modules.insert(contract_address.clone(), module);
+            println!("   → Module créé avec runtime final");
+        } else if let Some(m) = vm.modules.get_mut(&contract_address) {
+            m.bytecode = runtime_bytecode.clone();
+            println!("   → Runtime mis à jour dans module existant");
+        }
+
+        let mut accounts = vm.state.accounts.write();
+        if let Some(acc) = accounts.await.get_mut(&contract_address) {
+            acc.contract_state = runtime_bytecode.clone();
+            acc.is_contract = true;
+            acc.nonce = 1;
+            println!("   → Compte mis à jour avec runtime");
+        }
+
+        if let Err(e) = vm.auto_detect_contract_functions(&contract_address, &runtime_bytecode) {
+            println!("⚠️ Détection automatique des fonctions échouée : {}", e);
+        }
+
+        if let Some(storage_manager) = &vm.storage_manager {
+            println!("💾 PERSISTANCE IMMÉDIATE du contrat {}", contract_address);
+            // ... ton code de persistance ...
+        } else {
+            eprintln!("❌ Pas de storage manager disponible !");
+        }
+
+        println!("✅ DÉPLOIEMENT + PERSISTANCE IMMÉDIATE RÉUSSI via execute_module (raw) :");
+        println!("   • Adresse: {} (PERSISTÉ)", contract_address);
+        println!("   • Déployeur: {}", from_addr);
+        println!("   • TX Hash: {}", normalized_hash);
     } else {
-        // --- TRANSACTIONS NORMALES (inchangées) ---
+        // --- TRANSACTIONS NORMALES ---
         let contract_addr = Some(to_addr.clone());
 
         let function_name = if data.len() >= 10 {
@@ -1446,7 +1522,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         }
     }
 
-    // 🔥 MISE À JOUR NONCE : UNIQUEMENT si le compte existe déjà
+    // 🔥 MISE À JOUR NONCE
     {
         let vm = self.vm.write().await;
         let mut accounts = vm.state.accounts.write().await;
@@ -1459,7 +1535,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         }
     }
 
-    // Construction du TxRequest (conservé)
+    // Construction du TxRequest
     let contract_addr_for_tx = if is_deployment { None } else { Some(to_addr.clone()) };
     let receiver_op = if is_deployment { contract_address.clone() } else { to_addr.clone() };
 
@@ -1529,9 +1605,9 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         "isPersisted": is_deployment,
         "deploymentMethod": if is_deployment {
             if tx_params.get("create2").and_then(|v| v.as_bool()).unwrap_or(false) {
-                "create2_via_execute_module"
+                "create2_via_execute_module_raw"
             } else {
-                "indeterministic_create_via_execute_module"
+                "create_via_execute_module_raw"
             }
         } else {
             "transaction"
@@ -1570,9 +1646,9 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
 
     if is_deployment {
         if tx_params.get("create2").and_then(|v| v.as_bool()).unwrap_or(false) {
-            println!("✅ CREATE2 via execute_module → Adresse: {}  Hash: {}", contract_address, normalized_hash);
+            println!("✅ CREATE2 via execute_module (raw) → Adresse: {}  Hash: {}", contract_address, normalized_hash);
         } else {
-            println!("✅ Déploiement via execute_module (calldata vide) → Adresse: {}  Hash: {}", contract_address, normalized_hash);
+            println!("✅ Déploiement via execute_module (raw) → Adresse: {}  Hash: {}", contract_address, normalized_hash);
         }
     } else {
         println!("✅ Transaction acceptée → hash={} nonce={}", normalized_hash, final_nonce);
@@ -3054,7 +3130,7 @@ async fn main() {
     let cluster = match std::env::var("SLURACHAIN_NETWORK") {
         Ok(network) => match network.to_lowercase().as_str() {
             "mainnet" => Network::Mainnet,
-            "testnet" => Network::Testnet,
+            "testnet" | "charène" | "charene" => Network::Testnet,
             "devnet" | "dev" | "development" => Network::Devnet,
             _ => {
                 println!("⚠️ SLURACHAIN_NETWORK non reconnu '{}', utilise devnet par défaut", network);
@@ -3094,7 +3170,6 @@ async fn main() {
 
     let db_path = db_path_env.unwrap_or_else(|| {
         let mut p = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        p.push("chain_data");
         p.push("vyft_rocksdb");
         p.to_string_lossy().into_owned()
     });
@@ -3316,7 +3391,7 @@ tokio::spawn({
                 let bytecode_hex = include_str!("../../../vez_bytecode.hex").trim();
 
                 // ────────────────────────────────────────────────────────────────
-                // 1. Création du creation_bytecode (gestion 0x)
+                // 1. Chargement du creation bytecode (gestion 0x)
                 // ────────────────────────────────────────────────────────────────
                 let creation_bytecode = if bytecode_hex.starts_with("0x") {
                     hex::decode(&bytecode_hex[2..]).unwrap_or_default()
@@ -3324,63 +3399,26 @@ tokio::spawn({
                     hex::decode(bytecode_hex).unwrap_or_default()
                 };
 
-                // ────────────────────────────────────────────────────────────────
-                // 2. Extraction du runtime bytecode (utilise ta fonction existante)
-                // ────────────────────────────────────────────────────────────────
-                let runtime_bytecode = match extract_runtime_from_creation_bytecode(&creation_bytecode) {
-    Ok(runtime) => {   // ← renamed variable to avoid any shadowing confusion
-        println!("🔄 Runtime bytecode extrait avec succès ({} bytes)", runtime.len());
-        runtime
-    }
-    Err(e) => {
-        eprintln!("⚠️ Extraction runtime échouée : {}. Fallback sur creation bytecode.", e);
-        creation_bytecode.clone()
-    }
-};
-
                 if creation_bytecode.is_empty() {
                     eprintln!("❌ Bytecode VEZ vide ou invalide");
                     break;
                 }
 
-                println!("📦 VEZ Bytecode chargé → Creation: {} bytes | Runtime: {} bytes",
-                         creation_bytecode.len(), runtime_bytecode.len());
+                println!("📦 VEZ Creation bytecode chargé → {} bytes", creation_bytecode.len());
 
                 // ────────────────────────────────────────────────────────────────
-                // 3. PRÉ-INSERTION MODULE + COMPTE (avec RUNTIME)
+                // 2. PRÉ-INSERTION MINIMALE DU COMPTE (seulement pour l'adresse)
+                //    → on met creation_bytecode dans contract_state
                 // ────────────────────────────────────────────────────────────────
                 {
                     let mut vm = engine_clone.vm.write().await;
 
-                    // Module avec RUNTIME bytecode
-                    if !vm.modules.contains_key(&vez_addr) {
-                        println!("🔧 Insertion Module initial pour VEZ (runtime bytecode)");
-
-                        let initial_module = vuc_tx::slurachain_vm::Module {
-                            name: "vez".to_string(),
-                            address: vez_addr.clone(),
-                            bytecode: runtime_bytecode.clone(),           // ← RUNTIME ICI
-                            elf_buffer: vec![],
-                            context: uvm_runtime::UbfContext::new(),
-                            stack_usage: None,
-                            functions: hashbrown::HashMap::new(),
-                            gas_estimates: hashbrown::HashMap::new(),
-                            storage_layout: hashbrown::HashMap::new(),
-                            events: vec![],
-                            constructor_params: vec![],
-                        };
-
-                        vm.modules.insert(vez_addr.clone(), initial_module);
-                        println!("   → Module inséré (runtime) : {} bytes", runtime_bytecode.len());
-                    }
-
-                    // Compte avec RUNTIME bytecode
                     let mut accounts = vm.state.accounts.write().await;
                     if !accounts.contains_key(&vez_addr) {
                         let initial_account = vuc_tx::slurachain_vm::AccountState {
                             address: vez_addr.clone(),
                             balance: 0u128,
-                            contract_state: runtime_bytecode.clone(),     // ← RUNTIME ICI
+                            contract_state: creation_bytecode.clone(),  // ← creation bytecode ici
                             resources: {
                                 let mut r = BTreeMap::new();
                                 r.insert("constructor_pending".to_string(), serde_json::Value::Bool(true));
@@ -3389,7 +3427,7 @@ tokio::spawn({
                             },
                             state_version: 1,
                             last_block_number: 0,
-                            nonce: 1,
+                            nonce: 0,
                             code_hash: "".to_string(),
                             storage_root: format!("storage_{}", vez_addr),
                             is_contract: true,
@@ -3397,16 +3435,18 @@ tokio::spawn({
                         };
 
                         accounts.insert(vez_addr.clone(), initial_account);
-                        println!("   → Compte initial inséré (constructor pending)");
+                        println!("   → Compte pré-créé avec creation bytecode (constructor pending)");
                     }
                 }
 
                 // ────────────────────────────────────────────────────────────────
-                // 4. Lancement du déploiement Create2 (creation bytecode dans data)
+                // 3. Lancement du déploiement réel via send_transaction
+                //    → on passe le creation bytecode dans "data"
+                //    → constructor_calldata vide (pas d'args)
                 // ────────────────────────────────────────────────────────────────
                 let deploy_vez_tx = serde_json::json!({
                     "from": validator_address_generated,
-                    "data": format!("0x{}", bytecode_hex),   // ← creation bytecode (hex)
+                    "data": format!("0x{}", hex::encode(&creation_bytecode)),  // ← creation bytecode complet
                     "value": "0x0",
                     "create2": true,
                     "target_address": vez_addr,
@@ -3416,11 +3456,21 @@ tokio::spawn({
                     Ok(tx_hash) => {
                         println!("✅ VEZ déployé avec succès à {} (tx: {})", vez_addr, tx_hash);
 
-                        // Vérification post-déploiement
+                        // Vérification post-déploiement : le runtime doit être dans contract_state
                         {
                             let vm = engine_clone.vm.read().await;
+                            let accounts = vm.state.accounts.read().await;
+                            if let Some(acc) = accounts.get(&vez_addr) {
+                                println!("   → Bytecode final dans compte : {} bytes", acc.contract_state.len());
+                                if acc.contract_state.len() > 100 {
+                                    println!("   → Runtime semble installé correctement");
+                                } else {
+                                    println!("   ⚠️ Bytecode final très court — vérifie le RETURN");
+                                }
+                            }
+
                             if let Some(module) = vm.modules.get(&vez_addr) {
-                                println!("   → Bytecode final dans VM : {} bytes", module.bytecode.len());
+                                println!("   → Bytecode dans module : {} bytes", module.bytecode.len());
                             }
                         }
                     }

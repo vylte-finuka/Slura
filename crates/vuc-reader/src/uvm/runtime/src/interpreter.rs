@@ -993,7 +993,7 @@ pub fn execute_program(
     const IR_OUT_OF_OFFSET: u64 = 0x2e;
     const IR_FATAL_EXTERNAL_ERROR: u64 = 0x36;
 
-        // 🔎 LOG de la formation du calldata (state_data)
+    // 🔎 LOG de la formation du calldata (state_data)
     println!(
         "🟢 [DEBUG] Formation du calldata (state_data) : {}",
         hex::encode(&interpreter_args.state_data)
@@ -1203,6 +1203,9 @@ pub fn execute_program(
     // ✅ Scan des JUMPDEST valides (conforme EVM)
     let valid_jumpdests = scan_valid_jumpdests(prog);
 
+    // NOUVEAU : buffer temporaire pour tous les SSTORE pendant l'exécution
+    let mut temp_storage_writes: HashMap<String, Vec<u8>> = HashMap::new();
+
     while bytecode_pc < prog.len() && instruction_count < MAX_INSTRUCTIONS {
         let opcode = prog[bytecode_pc];
 
@@ -1213,7 +1216,14 @@ pub fn execute_program(
             //___ 0x00 STOP
             0x00 => {
                 println!("🛑 [STOP] Halting execution");
-                return Ok(create_stop_action());
+
+                // Créer le résultat de base
+                let mut result = create_stop_action();
+
+                // Ajouter les writes capturés
+                add_storage_written_to_result(&mut result, &temp_storage_writes);
+
+                return Ok(result);
             }
 
             //___ 0x01 ADD
@@ -2053,25 +2063,36 @@ pub fn execute_program(
 
             //___ 0x55 SSTORE
             0x55 => {
+                // SSTORE
                 if evm_stack.len() < 2 {
                     return Ok(halt_json_ebpf("Stack underflow on SSTORE"));
                 }
                 let key = evm_stack.pop().unwrap();
                 let value = evm_stack.pop().unwrap();
+
                 let key_hex = format!("{:064x}", key);
 
-                let mut value_bytes = vec![0u8; 32];
+                let mut value_bytes = [0u8; 32];
                 value.to_big_endian(&mut value_bytes);
 
+                // 1. On stocke dans le buffer temporaire (clé = slot hex)
+                temp_storage_writes.insert(key_hex.clone(), value_bytes.to_vec());
+
+                // 2. On applique aussi immédiatement dans world_state (cohérence live)
                 set_storage(
                     &mut execution_context.world_state,
                     &interpreter_args.contract_address,
                     &key_hex,
-                    value_bytes,
+                    value_bytes.to_vec(),
                 );
 
-                println!("💾 [SSTORE] storage[{}] := {}", key, value);
-                consume_gas_amount(&mut execution_context, 100)?; // Simplified gas
+                println!(
+                    "💾 [SSTORE] storage[{}] := 0x{}",
+                    key_hex,
+                    hex::encode(&value_bytes)
+                );
+
+                consume_gas_amount(&mut execution_context, 100)?; // gas approximatif
             }
 
             //___ 0x56 JUMP - Implémentation style eBPF avec validation EVM
@@ -2288,6 +2309,7 @@ pub fn execute_program(
 
             //___ 0xf3 RETURN - Style eBPF avec action et résultat
             0xf3 => {
+                // RETURN
                 if evm_stack.len() < 2 {
                     return Ok(halt_json_ebpf("Stack underflow on RETURN"));
                 }
@@ -2297,16 +2319,38 @@ pub fn execute_program(
                 let offset_usize = as_usize_or_fail(offset);
                 let size_usize = as_usize_or_fail(size);
 
-                let mut output_bytes = Vec::new();
-                if size_usize != 0 {
+                let mut output_bytes = vec![0u8; size_usize];
+                if size_usize > 0 {
                     if !resize_memory_ebpf(&mut global_mem, offset_usize, size_usize) {
                         return Ok(halt_json_ebpf("Memory resize failed on RETURN"));
                     }
-                    output_bytes = memory_slice_len(&global_mem, offset_usize, size_usize).to_vec();
+                    let src = memory_slice_len(&global_mem, offset_usize, size_usize);
+                    output_bytes[..src.len()].copy_from_slice(src);
                 }
 
-                println!("✅ [RETURN] offset={}, size={}", offset, size);
-                return Ok(create_return_action(output_bytes));
+                println!(
+                    "✅ [RETURN] offset={}, size={}, runtime={} bytes",
+                    offset,
+                    size,
+                    output_bytes.len()
+                );
+
+                // NOUVEAU : avant de retourner, on construit le résultat avec les writes
+                let mut result = create_return_action(output_bytes);
+
+                if let Some(obj) = result.as_object_mut() {
+                    // On ajoute une clé "storage" avec tous les slots modifiés
+                    let mut storage_written = serde_json::Map::new();
+                    for (slot, val) in temp_storage_writes {
+                        storage_written
+                            .insert(slot, JsonValue::String(format!("0x{}", hex::encode(&val))));
+                    }
+                    if !storage_written.is_empty() {
+                        obj.insert("storage".to_string(), JsonValue::Object(storage_written));
+                    }
+                }
+
+                return Ok(result);
             }
 
             //___ 0xfd REVERT
@@ -2322,49 +2366,16 @@ pub fn execute_program(
 
                 let mut revert_data = vec![0u8; size.min(1024)];
                 if offset + revert_data.len() <= global_mem.len() {
-                    ensure_memory_size(
-                        &mut global_mem,
-                        offset + revert_data.len(),
-                        &mut execution_context.free_memory_pointer,
-                    )?;
                     let src_slice = &global_mem[offset..offset + revert_data.len()];
                     revert_data.copy_from_slice(src_slice);
                 }
 
-                let error_msg = if offset == 0 && size >= 4 {
-                    let selector = u32::from_be_bytes([
-                        global_mem.get(offset).copied().unwrap_or(0),
-                        global_mem.get(offset + 1).copied().unwrap_or(0),
-                        global_mem.get(offset + 2).copied().unwrap_or(0),
-                        global_mem.get(offset + 3).copied().unwrap_or(0),
-                    ]);
+                let mut result = create_revert_action(revert_data);
 
-                    if selector == 0x4e487b71 && size >= 36 {
-                        let code = u32::from_be_bytes([
-                            global_mem.get(offset + 4).copied().unwrap_or(0),
-                            global_mem.get(offset + 5).copied().unwrap_or(0),
-                            global_mem.get(offset + 6).copied().unwrap_or(0),
-                            global_mem.get(offset + 7).copied().unwrap_or(0),
-                        ]);
-                        format!("Panic(0x{:02x})", code)
-                    } else {
-                        format!("Error(0x{:08x})", selector)
-                    }
-                } else {
-                    format!("Revert ({} bytes)", size)
-                };
+                // Ajouter les writes capturés (même en cas d'erreur !)
+                add_storage_written_to_result(&mut result, &temp_storage_writes);
 
-                println!("   → {}", error_msg);
-                println!("   → DATA: 0x{}", hex::encode(&revert_data));
-
-                let mut result = serde_json::Map::new();
-                result.insert("error".to_string(), JsonValue::String(error_msg));
-                result.insert(
-                    "revert_data".to_string(),
-                    JsonValue::String(hex::encode(&revert_data)),
-                );
-
-                return Ok(JsonValue::Object(result));
+                return Ok(result);
             }
 
             //___ 0xfe INVALID - Halt avec erreur spécifique eBPF
@@ -2397,12 +2408,37 @@ pub fn execute_program(
         }
     }
 
-    // Fin normale : équivalent à STOP
-    println!("🏁 [END] Reached end of bytecode or max instructions");
-    Ok(create_stop_action())
+    // Fin naturelle du bytecode (sans opcode de terminaison explicite)
+    println!("🏁 [END] Reached end of bytecode");
+    let mut result = create_stop_action();
+    add_storage_written_to_result(&mut result, &temp_storage_writes);
+    Ok(result)
 }
 
-// ✅ HELPERS supplémentaires pour les nouveaux opcodes
+fn add_storage_written_to_result(
+    result: &mut serde_json::Value,
+    writes: &HashMap<String, Vec<u8>>,
+) {
+    if writes.is_empty() {
+        return;
+    }
+
+    println!(
+        "🔄 [STORAGE CAPTURE] Ajout de {} slots écrits au résultat",
+        writes.len()
+    );
+
+    if let Some(obj) = result.as_object_mut() {
+        let mut storage_written = serde_json::Map::new();
+        for (slot, val) in writes {
+            storage_written.insert(
+                slot.clone(),
+                JsonValue::String(format!("0x{}", hex::encode(val))),
+            );
+        }
+        obj.insert("storage".to_string(), JsonValue::Object(storage_written));
+    }
+}
 
 /// Hash Keccak-256 (stub - implémentation réelle nécessiterait une crate crypto)
 fn keccak_hash(data: &[u8]) -> [u8; 32] {
