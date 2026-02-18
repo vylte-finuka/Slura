@@ -1920,18 +1920,12 @@ impl SlurachainVm {
         // ÉTAPE 2 : CHARGEMENT DU BYTECODE RÉEL
         // ────────────────────────────────────────────────
         let real_bytecode = {
-            let accounts = self.state.accounts.read().await;
-
-            if let Some(account) = accounts.get(vyid) {
-                if account.is_contract && !account.contract_state.is_empty() {
-                    account.contract_state.clone()
-                } else {
-                    return Err(format!("Contrat {} sans bytecode réel", vyid));
-                }
-            } else {
-                return Err(format!("Contrat {} non trouvé", vyid));
-            }
-        };
+    let accounts = self.state.accounts.read().await;
+    accounts.get(vyid)
+        .filter(|account| account.is_contract && !account.contract_state.is_empty())
+        .map(|account| account.contract_state.clone())
+        .unwrap_or_default()  // → Vec::new() si contrat absent ou sans bytecode
+};
 
         println!(
             "✅ [REAL BYTECODE] Chargé {} bytes de bytecode réel pour {}",
