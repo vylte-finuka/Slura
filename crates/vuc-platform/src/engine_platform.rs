@@ -3295,7 +3295,7 @@ async fn main() {
                         let initial_account = vuc_tx::slurachain_vm::AccountState {
                             address: vez_addr.clone(),
                             balance: 0u128,
-                            contract_state: creation_bytecode.clone(), // ← même bytecode ici
+                            contract_state: vec![];
                             resources: {
                                 let mut r = BTreeMap::new();
                                 r.insert("constructor_pending".to_string(), serde_json::Value::Bool(true));
