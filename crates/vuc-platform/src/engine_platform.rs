@@ -1428,7 +1428,7 @@ if let Some(account) = accounts.await.get_mut(&contract_address) {
         let hex_value = format!("0x{}", hex::encode(value));
 
         // 🔥 Ajout du log
-        log::info!(
+        println!(
             "Writing storage slot {:?} with value {} for contract {:?}",
             slot,
             hex_value,
