@@ -3239,7 +3239,10 @@ async fn main() {
         engine_clone.start_server().await;
     });
         
-    tokio::spawn({
+    // ────────────────────────────────────────────────────────────────
+// TASK DÉPLOIEMENT VEZ AU BLOCK #1 (RUNTIME BYTECODE)
+// ────────────────────────────────────────────────────────────────
+tokio::spawn({
     let lurosonie_manager_clone = Arc::clone(&lurosonie_manager);
     let engine_clone = engine_platform.clone();
     let validator_address_generated = validator_address_generated.clone();
@@ -3253,28 +3256,53 @@ async fn main() {
                 println!("🪙 Block #1 produit — déploiement du contrat VEZ...");
 
                 let vez_addr = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_string();
-                let vez_bytecode_hex = include_str!("../../../vez_bytecode.hex").trim();
-                let creation_bytecode = hex::decode(vez_bytecode_hex).unwrap_or_default();
+                let bytecode_hex = include_str!("../../../vez_bytecode.hex").trim();
+
+                // ────────────────────────────────────────────────────────────────
+                // 1. Création du creation_bytecode (gestion 0x)
+                // ────────────────────────────────────────────────────────────────
+                let creation_bytecode = if bytecode_hex.starts_with("0x") {
+                    hex::decode(&bytecode_hex[2..]).unwrap_or_default()
+                } else {
+                    hex::decode(bytecode_hex).unwrap_or_default()
+                };
+
+                // ────────────────────────────────────────────────────────────────
+                // 2. Extraction du runtime bytecode (utilise ta fonction existante)
+                // ────────────────────────────────────────────────────────────────
+                let runtime_bytecode = match extract_runtime_from_creation_bytecode(&creation_bytecode) {
+                    Ok(rt) => {
+                        println!("🔄 Runtime bytecode extrait avec succès ({} bytes)", rt.len());
+                        rt
+                    }
+                    Err(e) => {
+                        eprintln!("⚠️ Extraction runtime échouée : {}. Fallback sur creation bytecode.", e);
+                        creation_bytecode.clone()
+                    }
+                };
 
                 if creation_bytecode.is_empty() {
                     eprintln!("❌ Bytecode VEZ vide ou invalide");
                     break;
                 }
 
+                println!("📦 VEZ Bytecode chargé → Creation: {} bytes | Runtime: {} bytes",
+                         creation_bytecode.len(), runtime_bytecode.len());
+
                 // ────────────────────────────────────────────────────────────────
-                // 1. INSÉRER MODULE + COMPTE AVANT LE DÉPLOIEMENT (clé pour éviter "non trouvé")
+                // 3. PRÉ-INSERTION MODULE + COMPTE (avec RUNTIME)
                 // ────────────────────────────────────────────────────────────────
                 {
                     let mut vm = engine_clone.vm.write().await;
 
-                    // 1a. Module avec le bytecode de création (pas vide)
+                    // Module avec RUNTIME bytecode
                     if !vm.modules.contains_key(&vez_addr) {
-                        println!("🔧 Insertion Module initial pour VEZ (bytecode création)");
+                        println!("🔧 Insertion Module initial pour VEZ (runtime bytecode)");
 
                         let initial_module = vuc_tx::slurachain_vm::Module {
-                            name: "vez_constructor".to_string(),
+                            name: "vez".to_string(),
                             address: vez_addr.clone(),
-                            bytecode: creation_bytecode.clone(), // ← bytecode de création ici
+                            bytecode: runtime_bytecode.clone(),           // ← RUNTIME ICI
                             elf_buffer: vec![],
                             context: uvm_runtime::UbfContext::new(),
                             stack_usage: None,
@@ -3286,16 +3314,16 @@ async fn main() {
                         };
 
                         vm.modules.insert(vez_addr.clone(), initial_module);
-                        println!("   → Module inséré avec {} bytes (création)", creation_bytecode.len());
+                        println!("   → Module inséré (runtime) : {} bytes", runtime_bytecode.len());
                     }
 
-                    // 1b. Compte minimal (is_contract = true)
+                    // Compte avec RUNTIME bytecode
                     let mut accounts = vm.state.accounts.write().await;
                     if !accounts.contains_key(&vez_addr) {
                         let initial_account = vuc_tx::slurachain_vm::AccountState {
                             address: vez_addr.clone(),
                             balance: 0u128,
-                            contract_state: creation_bytecode.clone(), // ← même bytecode ici
+                            contract_state: runtime_bytecode.clone(),     // ← RUNTIME ICI
                             resources: {
                                 let mut r = BTreeMap::new();
                                 r.insert("constructor_pending".to_string(), serde_json::Value::Bool(true));
@@ -3317,11 +3345,11 @@ async fn main() {
                 }
 
                 // ────────────────────────────────────────────────────────────────
-                // 2. Lancement du déploiement (create2 forcé)
+                // 4. Lancement du déploiement Create2 (creation bytecode dans data)
                 // ────────────────────────────────────────────────────────────────
                 let deploy_vez_tx = serde_json::json!({
                     "from": validator_address_generated,
-                    "data": format!("0x{}", vez_bytecode_hex),
+                    "data": format!("0x{}", bytecode_hex),   // ← creation bytecode (hex)
                     "value": "0x0",
                     "create2": true,
                     "target_address": vez_addr,
@@ -3331,12 +3359,11 @@ async fn main() {
                     Ok(tx_hash) => {
                         println!("✅ VEZ déployé avec succès à {} (tx: {})", vez_addr, tx_hash);
 
-                        // Optionnel : mise à jour finale post-déploiement
-                        // (le runtime devrait maintenant être dans vm.modules)
+                        // Vérification post-déploiement
                         {
                             let vm = engine_clone.vm.read().await;
                             if let Some(module) = vm.modules.get(&vez_addr) {
-                                println!("   → Bytecode final après déploiement : {} bytes", module.bytecode.len());
+                                println!("   → Bytecode final dans VM : {} bytes", module.bytecode.len());
                             }
                         }
                     }
