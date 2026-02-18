@@ -20,7 +20,6 @@ use tokio::time::{Duration, timeout};
 use vuc_core::service::slurachain_service::SlurEthService;
 use vuc_types::{committee::committee::EpochId, supported_protocol_versions::SupportedProtocolVersions};
 use vuc_events::time_warp::TimeWarp;
-use crate::extract_runtime_from_creation_bytecode;
 use vuc_tx::slura_merkle::build_state_trie;
 use uvm_runtime::interpreter::execute_program;
 use uvm_runtime::interpreter::InterpreterArgs;
