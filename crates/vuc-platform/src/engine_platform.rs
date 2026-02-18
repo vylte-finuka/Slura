@@ -3274,7 +3274,7 @@ async fn main() {
                         let initial_module = vuc_tx::slurachain_vm::Module {
                             name: "vez_constructor".to_string(),
                             address: vez_addr.clone(),
-                            bytecode: vec![],
+                            bytecode: creation_bytecode.clone(), // ← bytecode de création ici
                             elf_buffer: vec![],
                             context: uvm_runtime::UbfContext::new(),
                             stack_usage: None,
@@ -3295,7 +3295,7 @@ async fn main() {
                         let initial_account = vuc_tx::slurachain_vm::AccountState {
                             address: vez_addr.clone(),
                             balance: 0u128,
-                            contract_state: vec![],
+                            contract_state: creation_bytecode.clone(), // ← même bytecode ici
                             resources: {
                                 let mut r = BTreeMap::new();
                                 r.insert("constructor_pending".to_string(), serde_json::Value::Bool(true));
