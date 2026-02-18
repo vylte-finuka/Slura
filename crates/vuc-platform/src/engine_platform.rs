@@ -1422,7 +1422,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
 
                     // --- Applique le storage du constructor ---
                         let mut accounts = vm.state.accounts.write();
-                        if let Some(account) = accounts.get_mut(&contract_address) {
+                        if let Some(account) = accounts.await.get_mut(&contract_address) {
                             for (slot, value) in storage_final {
                                 // On stocke chaque slot dans resources, encodé en hex
                                 account.resources.insert(slot, serde_json::Value::String(format!("0x{}", hex::encode(value))));
