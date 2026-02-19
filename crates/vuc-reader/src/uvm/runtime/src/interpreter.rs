@@ -185,6 +185,7 @@ pub struct UvmWorldState {
     pub storage: HashMap<String, HashMap<String, Vec<u8>>>, // contract_addr -> slot -> value
     pub code: HashMap<String, Vec<u8>>,                     // contract_addr -> code
     pub block_info: BlockInfo,
+    pub transient_storage: HashMap<[u8; 32], [u8; 32]>, // clé 32 bytes → valeur 32 bytes
     pub chain_id: u256, // Added field for chain ID
 }
 
@@ -217,6 +218,8 @@ impl Default for UvmWorldState {
                 blob_hash: [0u8; 32],
                 prev_randao: [0u8; 32],
             },
+            
+            transient_storage: HashMap::new(),
             chain_id: u256::from(45056u64),
         }
     }
@@ -2351,6 +2354,77 @@ pub fn execute_program(
                 }
 
                 return Ok(result);
+            }
+
+            // ___ 0xf9 TSTORE (EIP-1153 Transient Storage Store)
+            0xf9 => {
+                if evm_stack.len() < 2 {
+                    return Ok(halt_json_ebpf("Stack underflow on TSTORE"));
+                }
+
+                let value_u256 = evm_stack.pop().unwrap();
+                let key_u256 = evm_stack.pop().unwrap();
+
+                // Conversion en bytes
+                let mut key_bytes = [0u8; 32];
+                let mut value_bytes = [0u8; 32];
+                key_u256.to_big_endian(&mut key_bytes);
+                value_u256.to_big_endian(&mut value_bytes);
+
+                // Écriture dans transient storage
+                if value_u256.is_zero() {
+                    // TSTORE 0 = delete (comme SSTORE)
+                    execution_context.world_state.transient_storage.remove(&key_bytes);
+                    println!(
+                        "🗑️ [TSTORE] transient[0x{}] ← DELETE",
+                        hex::encode(&key_bytes)
+                    );
+                } else {
+                    execution_context
+                        .world_state.transient_storage
+                        .insert(key_bytes, value_bytes);
+                    println!(
+                        "💾 [TSTORE] transient[0x{}] ← 0x{:064x}",
+                        hex::encode(&key_bytes),
+                        value_u256
+                    );
+                }
+
+                // Gas : 100 (warm) ou 2100 (cold/change) – simplifié à 100
+                consume_gas_amount(&mut execution_context, 100)?;
+            }
+
+            // ___ 0xfa TLOAD (EIP-1153 Transient Storage Load)
+            0xfa => {
+                if evm_stack.is_empty() {
+                    return Ok(halt_json_ebpf("Stack underflow on TLOAD"));
+                }
+
+                let key_u256 = evm_stack.pop().unwrap();
+
+                // Conversion clé u256 → [u8; 32] (big-endian)
+                let mut key_bytes = [0u8; 32];
+                key_u256.to_big_endian(&mut key_bytes);
+
+                // Lecture dans transient storage
+                let value_bytes = execution_context
+                    .world_state.transient_storage
+                    .get(&key_bytes)
+                    .copied()
+                    .unwrap_or([0u8; 32]); // cold = 0 par défaut
+
+                let value = u256::from_big_endian(&value_bytes);
+
+                evm_stack.push(value);
+
+                println!(
+                    "🔄 [TLOAD] transient[0x{}] = 0x{:064x}",
+                    hex::encode(&key_bytes),
+                    value
+                );
+
+                // Gas : 100 (warm) – on simplifie à 100 (pas de tracking warm/cold ici)
+                consume_gas_amount(&mut execution_context, 100)?;
             }
 
             //___ 0xfd REVERT
