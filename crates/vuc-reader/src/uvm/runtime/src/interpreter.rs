@@ -416,6 +416,16 @@ fn consume_gas_amount(context: &mut UvmExecutionContext, amount: u64) -> Result<
     Ok(())
 }
 
+// argument adresse et len
+fn get_codesize(world_state: &UvmWorldState, address: &str) -> u256 {
+    world_state
+        .accounts
+        .get(address)
+        .map(|acc| acc.code.len() as u64)
+        .unwrap_or(0)
+        .into()
+}
+
 /// ✅ AJOUT: Scan préalable de tous les JUMPDEST valides au début de l'exécution
 fn scan_valid_jumpdests(prog: &[u8]) -> HashSet<usize> {
     let mut valid_jumpdests = HashSet::new();
@@ -1841,6 +1851,19 @@ pub fn execute_program(
                 consume_gas_amount(&mut execution_context, 2)?;
             }
 
+            //___ 0x3b EXTCODESIZE
+            0x3b => {
+                if evm_stack.is_empty() {
+                    return Ok(halt_json_ebpf("Stack underflow on EXTCODESIZE"));
+                }
+                let address_u256 = evm_stack.pop().unwrap();
+                let address = u256_to_address(address_u256);
+                let code_size = get_codesize(&execution_context.world_state, &address);
+                evm_stack.push(code_size.into());
+                println!("📏 [EXTCODESIZE] codesize({}) = {}", address, code_size);
+                consume_gas_amount(&mut execution_context, 100)?; // Assume warm
+            }
+
             //___ 0x40 BLOCKHASH
             0x40 => {
                 if evm_stack.is_empty() {
@@ -2310,6 +2333,88 @@ pub fn execute_program(
                 consume_gas_amount(&mut execution_context, 100)?;
             }
 
+            // 0xf1 CALL
+            0xf1 => {
+                // CALL - Similaire à CALLCODE mais exécute dans le contexte du contract appelé
+                if evm_stack.len() < 7 {
+                    return Ok(halt_json_ebpf("Stack underflow on CALL"));
+                }
+
+                let gas = evm_stack.pop().unwrap();
+                let to_addr_u256 = evm_stack.pop().unwrap();
+                let value = evm_stack.pop().unwrap();
+                let in_offset = evm_stack.pop().unwrap();
+                let in_size = evm_stack.pop().unwrap();
+                let out_offset = evm_stack.pop().unwrap();
+                let out_size = evm_stack.pop().unwrap();
+
+                let to_address = u256_to_address(to_addr_u256);
+                println!(
+                    "📞 [CALL] to={}, value={}, gas={}, in=mem[{}:{}], out=mem[{}:{}]",
+                    to_address, value, gas, in_offset, in_size, out_offset, out_size
+                );
+
+                // Simulate call (stub - real implementation would execute the call)
+                let call_success = true; // Assume success for stub
+                let return_data = vec![0u8; out_size.low_u64() as usize]; // Empty return data
+
+                // Write return data to memory
+                if !resize_memory_ebpf(&mut global_mem, out_offset.low_u64() as usize, out_size.low_u64() as usize) {
+                    return Ok(halt_json_ebpf("Memory resize failed on CALL"));
+                }
+                for i in 0..(out_size.low_u64() as usize) {
+                    if out_offset.low_u64() as usize + i < global_mem.len() {
+                        global_mem[out_offset.low_u64() as usize + i] = return_data[i];
+                    }
+                }
+
+                // Push success status onto stack
+                evm_stack.push(if call_success { u256::one() } else { u256::zero() });
+
+                consume_gas_amount(&mut execution_context, 700)?; // Simplified gas cost
+            }
+
+            //___ 0xf2 CALLCODE
+            0xf2 => {
+                // CALLCODE - Similaire à CALL mais exécute dans le contexte du contract appelant
+                if evm_stack.len() < 7 {
+                    return Ok(halt_json_ebpf("Stack underflow on CALLCODE"));
+                }
+
+                let gas = evm_stack.pop().unwrap();
+                let to_addr_u256 = evm_stack.pop().unwrap();
+                let value = evm_stack.pop().unwrap();
+                let in_offset = evm_stack.pop().unwrap();
+                let in_size = evm_stack.pop().unwrap();
+                let out_offset = evm_stack.pop().unwrap();
+                let out_size = evm_stack.pop().unwrap();
+
+                let to_address = u256_to_address(to_addr_u256);
+                println!(
+                    "📞 [CALLCODE] to={}, value={}, gas={}, in=mem[{}:{}], out=mem[{}:{}]",
+                    to_address, value, gas, in_offset, in_size, out_offset, out_size
+                );
+
+                // Simulate callcode (stub - real implementation would execute the call)
+                let call_success = true; // Assume success for stub
+                let return_data = vec![0u8; out_size.low_u64() as usize]; // Empty return data
+
+                // Write return data to memory
+                if !resize_memory_ebpf(&mut global_mem, out_offset.low_u64() as usize, out_size.low_u64() as usize) {
+                    return Ok(halt_json_ebpf("Memory resize failed on CALLCODE"));
+                }
+                for i in 0..(out_size.low_u64() as usize) {
+                    if out_offset.low_u64() as usize + i < global_mem.len() {
+                        global_mem[out_offset.low_u64() as usize + i] = return_data[i];
+                    }
+                }
+
+                // Push success status onto stack
+                evm_stack.push(if call_success { u256::one() } else { u256::zero() });
+
+                consume_gas_amount(&mut execution_context, 700)?; // Simplified gas cost
+            }
+
             //___ 0xf3 RETURN - Style eBPF avec action et résultat
             0xf3 => {
                 // RETURN
@@ -2394,38 +2499,84 @@ pub fn execute_program(
                 consume_gas_amount(&mut execution_context, 100)?;
             }
 
-            // ___ 0xfa TLOAD (EIP-1153 Transient Storage Load)
-            0xfa => {
-                if evm_stack.is_empty() {
-                    return Ok(halt_json_ebpf("Stack underflow on TLOAD"));
+            // 0xf4 DELEGATECALL - Similaire à CALLCODE mais sans transfert de valeur
+            0xf4 => {
+                if evm_stack.len() < 7 {
+                    return Ok(halt_json_ebpf("Stack underflow on DELEGATECALL"));
                 }
 
-                let key_u256 = evm_stack.pop().unwrap();
+                let gas = evm_stack.pop().unwrap();
+                let to_addr_u256 = evm_stack.pop().unwrap();
+                let in_offset = evm_stack.pop().unwrap();
+                let in_size = evm_stack.pop().unwrap();
+                let out_offset = evm_stack.pop().unwrap();
+                let out_size = evm_stack.pop().unwrap();
 
-                // Conversion clé u256 → [u8; 32] (big-endian)
-                let mut key_bytes = [0u8; 32];
-                key_u256.to_big_endian(&mut key_bytes);
-
-                // Lecture dans transient storage
-                let value_bytes = execution_context
-                    .world_state.transient_storage
-                    .get(&key_bytes)
-                    .copied()
-                    .unwrap_or([0u8; 32]); // cold = 0 par défaut
-
-                let value = u256::from_big_endian(&value_bytes);
-
-                evm_stack.push(value);
-
+                let to_address = u256_to_address(to_addr_u256);
                 println!(
-                    "🔄 [TLOAD] transient[0x{}] = 0x{:064x}",
-                    hex::encode(&key_bytes),
-                    value
+                    "📞 [DELEGATECALL] to={}, gas={}, in=mem[{}:{}], out=mem[{}:{}]",
+                    to_address, gas, in_offset, in_size, out_offset, out_size
                 );
 
-                // Gas : 100 (warm) – on simplifie à 100 (pas de tracking warm/cold ici)
-                consume_gas_amount(&mut execution_context, 100)?;
+                // Simulate delegate call (stub - real implementation would execute the call)
+                let call_success = true; // Assume success for stub
+                let return_data = vec![0u8; out_size.low_u64() as usize]; // Empty return data
+
+                // Write return data to memory
+                if !resize_memory_ebpf(&mut global_mem, out_offset.low_u64() as usize, out_size.low_u64() as usize) {
+                    return Ok(halt_json_ebpf("Memory resize failed on DELEGATECALL"));
+                }
+                for i in 0..(out_size.low_u64() as usize) {
+                    if out_offset.low_u64() as usize + i < global_mem.len() {
+                        global_mem[out_offset.low_u64() as usize + i] = return_data[i];
+                    }
+                }
+
+                // Push success status onto stack
+                evm_stack.push(if call_success { u256::one() } else { u256::zero() });
+
+                consume_gas_amount(&mut execution_context, 700)?; // Simplified gas cost
             }
+
+            // ___ 0xfa STATICCALL (EIP-1153 Static Call)
+            0xfa => {
+                if evm_stack.len() < 6 {
+                    return Ok(halt_json_ebpf("Stack underflow on STATICCALL"));
+                }
+
+                let gas = evm_stack.pop().unwrap();
+                let to_addr_u256 = evm_stack.pop().unwrap();
+                let in_offset = evm_stack.pop().unwrap();
+                let in_size = evm_stack.pop().unwrap();
+                let out_offset = evm_stack.pop().unwrap();
+                let out_size = evm_stack.pop().unwrap();
+
+                let to_address = u256_to_address(to_addr_u256);
+                println!(
+                    "📞 [STATICCALL] to={}, gas={}, in=mem[{}:{}], out=mem[{}:{}]",
+                    to_address, gas, in_offset, in_size, out_offset, out_size
+                );
+
+                // Simulate static call (stub - real implementation would execute the call)
+                let call_success = true; // Assume success for stub
+                let return_data = vec![0u8; out_size.low_u64() as usize]; // Empty return data
+
+                // Write return data to memory
+                if !resize_memory_ebpf(&mut global_mem, out_offset.low_u64() as usize, out_size.low_u64() as usize) {
+                    return Ok(halt_json_ebpf("Memory resize failed on STATICCALL"));
+                }
+                for i in 0..(out_size.low_u64() as usize) {
+                    if out_offset.low_u64() as usize + i < global_mem.len() {
+                        global_mem[out_offset.low_u64() as usize + i] = return_data[i];
+                    }
+                }
+
+                // Push success status onto stack
+                evm_stack.push(if call_success { u256::one() } else { u256::zero() });
+
+                consume_gas_amount(&mut execution_context, 700)?; // Simplified gas cost
+            }
+              
 
             //___ 0xfd REVERT
             0xfd => {
