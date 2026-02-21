@@ -1,0 +1,3 @@
+curl -X POST http://localhost:8082 \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"eth_call","params":[{"to":"0x093c5974dd70C910B1045D1703792C0aE67995AE","data":"0x06fdde03"},"latest"],"id":1}'
