@@ -260,74 +260,58 @@ impl EnginePlatform {
 /// Retourne le runtime pur (60806040...) ou une erreur claire.
 pub fn extract_runtime_from_creation_bytecode(full: &[u8]) -> Result<Vec<u8>, String> {
     if full.is_empty() {
-        return Err("Bytecode vide".to_string());
+        return Ok(vec![]);
     }
 
-    // Recherche du DERNIER RETURN suivi d'un pattern runtime valide
-    let mut last_return = None;
+    // Déjà runtime pur ?
+    if full.len() >= 7 && full[0..7] == [0x60, 0x80, 0x60, 0x40, 0x52, 0x34, 0x80 ] {
+        return Ok(full.to_vec());
+    }
+
+    let mut runtime_start = None;
     let mut i = full.len().saturating_sub(1);
 
-    while i >= 5 {
-        if full[i] == 0xf3 {
-            let start_candidate = i + 1;
-            let mut pos = start_candidate;
+    while i >= 3 {
+        if full[i] == 0xf3 {  // RETURN
+            if i >= 2 && (0x60..=0x7f).contains(&full[i - 2]) {
+                let mut pos = i + 1;
 
-            // Skip un seul FE (INVALID) isolé
-            if pos < full.len() && full[pos] == 0xfe {
-                pos += 1;
-            }
+                // Gestion du pattern courant : FE juste avant le runtime
+                if pos < full.len() && full[pos] == 0xfe {
+                    pos += 1;
+                    println!("→ FE détecté → décalage automatique à offset {}", pos);
+                }
 
-            // Doit commencer par 60806040 ou pattern Solidity proche
-            if pos + 4 <= full.len() && full[pos..pos + 4] == [0x60, 0x80, 0x60, 0x40] {
-                last_return = Some(i);
+                if pos + 4 <= full.len() && full[pos..pos + 4] == [0x60, 0x80, 0x60, 0x40] {
+                    runtime_start = Some(pos);
+                    println!("→ Runtime trouvé à offset {} (début 60806040)", pos);
+                    break; // On prend le premier qui matche (le plus tardif car on part de la fin)
+                }
             }
         }
-        if i == 0 { break; }
-        i -= 1;
+        i = i.saturating_sub(1);
     }
 
-    let return_pos = last_return.ok_or_else(|| {
-        format!("Aucun RETURN valide suivi de 60806040. Length={}, premiers bytes: {:02x?}", 
-                full.len(), &full[0..64.min(full.len())])
+    let start = runtime_start.ok_or_else(|| {
+        "Aucun RETURN valide suivi de 60806040 (même après décalage FE)".to_string()
     })?;
 
-    let mut runtime_start = return_pos + 1;
-    if runtime_start < full.len() && full[runtime_start] == 0xfe {
-        runtime_start += 1;
+    let mut runtime = full[start..].to_vec();
+
+    // Coupe les metadata CBOR (dernier marqueur)
+    let cbor_marker = b"a2646970667358221220";
+    if let Some(cbor_pos) = runtime.windows(cbor_marker.len()).rposition(|w| w == cbor_marker) {
+        runtime.truncate(cbor_pos);
+        println!("→ Metadata CBOR supprimée (len runtime final: {})", runtime.len());
     }
 
-    if runtime_start + 4 > full.len() || full[runtime_start..runtime_start + 4] != [0x60, 0x80, 0x60, 0x40] {
-        return Err("Après RETURN, pas de 60806040 valide".to_string());
+    if runtime.len() < 4 || runtime[0..4] != [0x60, 0x80, 0x60, 0x40] {
+        return Err(format!(
+            "Validation finale échouée - offset={}, len={}, début: {:02x?}",
+            start, runtime.len(), &runtime[0..4.min(runtime.len())]
+        ));
     }
 
-    let mut runtime = full[runtime_start..].to_vec();
-
-    // Coupe metadata agressivement
-let cbor_markers: &[&[u8]] = &[
-    b"a2646970667358221220",           // ipfs standard     20 bytes
-    b"a271657468657265756d22",         // swarm variant     20 bytes
-    b"64736f6c634300",                 // solc version      14 bytes ← OK maintenant
-    b"a165627a7a72305820",             // ancien solc       20 bytes
-];
-
-    for marker in cbor_markers {
-        if let Some(pos) = runtime.windows(marker.len()).rposition(|w| w == *marker) {
-            runtime.truncate(pos);
-            println!("Metadata coupée à offset {}", pos);
-            break;
-        }
-    }
-
-    // Enlève padding final 00
-    while !runtime.is_empty() && runtime.last() == Some(&0) {
-        runtime.pop();
-    }
-
-    if runtime.len() < 64 {
-        return Err(format!("Runtime trop court après nettoyage: {} bytes", runtime.len()));
-    }
-
-    println!("Runtime extrait : {} bytes (début {:02x?})", runtime.len(), &runtime[0..8]);
     Ok(runtime)
 }
         
