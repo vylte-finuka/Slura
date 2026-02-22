@@ -5,31 +5,24 @@ pragma solidity ^0.8.26;
 
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
 import "./EACAggregatorProxy.sol";
 
-// ───────────────────────────────────────────────────────────────────────
-//                          VEZproxy – Token principal
-// ───────────────────────────────────────────────────────────────────────
-// Dépend de VEZcustodian pour mint/redeem fiat et de reservVEZ pour PoR
+///====≈====≈===
+/// VEZproxy – Vyft Enhancing ZER
+/// Token déflationniste avec burn et disburse – version non-upgradable pour simplifier
+/// Owner = Gnosis Safe (VEZIssuer)
+///====≈====≈===
+contract VEZproxy is ERC20, Ownable, UUPSUpgradeable {
 
-contract VEZproxy is ERC20, Ownable, ReentrancyGuard, UUPSUpgradeable {
-
-    // ────────────────────────────────────────────────────────────────
-    //                         CONSTANTES
-    // ────────────────────────────────────────────────────────────────
+    ///====≈====≈=== CONSTANTES
     uint256 private constant TRANSFER_BURN_PCT   = 10;
     uint256 private constant DISBURSE_BURN_PCT   = 10;
     uint256 private constant MAX_SAFE_AMOUNT     = type(uint256).max / 10;
-    uint256 public constant MAX_MINT_PER_TX      = 1_000_000 * 10**18;
+    uint256 public constant MAX_MINT_PER_TX      = 1_000_000 * 10**18; // Limite max par mint
 
-    // ────────────────────────────────────────────────────────────────
-    //                         VARIABLES
-    // ────────────────────────────────────────────────────────────────
+    ///====≈====≈=== VARIABLES
     EACAggregatorProxy public priceFeed;       // Oracle EUR/USD
-    VEZcustodian public custodian;             // Contrat qui gère dépôts/retraits fiat
-    reservVEZ public reserves;                 // Contrat Proof of Reserves
-
     string public currency = "EUR";
     address public me;
     uint256 public complet_quant;
@@ -41,9 +34,7 @@ contract VEZproxy is ERC20, Ownable, ReentrancyGuard, UUPSUpgradeable {
     mapping(address => uint256) public validatorRelayPower;
     uint256 public totalRelayPower;
 
-    // ────────────────────────────────────────────────────────────────
-    //                         EVENTS
-    // ────────────────────────────────────────────────────────────────
+    ///====≈====≈=== EVENTS
     event TransferWithBurn(address indexed from, address indexed to, uint256 amount, uint256 burned);
     event DisbursedWithBurn(uint256 amount, uint256 burned);
     event Blacklisted(address indexed account);
@@ -54,24 +45,16 @@ contract VEZproxy is ERC20, Ownable, ReentrancyGuard, UUPSUpgradeable {
     event RelayPowerUpdated(address indexed validator, uint256 delegatedAmount, uint256 totalPower);
     event LurosonieRewardDistributed(address indexed holder, uint256 amount, uint256 timestamp);
     event MintLimited(address indexed to, uint256 amount);
-    event FiatMinted(address indexed to, uint256 amount, string proof);
-    event FiatRedeemRequested(address indexed from, uint256 amount, string proof);
 
-    // ────────────────────────────────────────────────────────────────
-    //                         CONSTRUCTOR
-    // ────────────────────────────────────────────────────────────────
+    ///====≈====≈=== CONSTRUCTOR (initialisation)
     constructor(
         address _priceFeed,
-        address _custodian,
-        address _reserves,
         address _initialOwner,
         address _initialMe
     ) ERC20("Vyft Enhancing ZER", "VEZ") Ownable(_initialOwner) {
-        priceFeed   = EACAggregatorProxy(_priceFeed);
-        custodian   = VEZcustodian(_custodian);
-        reserves    = reservVEZ(_reserves);
-        me          = _initialMe;
-        complet_quant = 888_000_000 * 10**18;
+        priceFeed      = EACAggregatorProxy(_priceFeed);
+        me             = _initialMe;
+        complet_quant  = 888_000_000 * 10**18;
 
         _mint(me, complet_quant);
 
@@ -79,40 +62,25 @@ contract VEZproxy is ERC20, Ownable, ReentrancyGuard, UUPSUpgradeable {
         _paused = false;
     }
 
-    // ────────────────────────────────────────────────────────────────
-    //                         MINT (via custodian seulement)
-    // ────────────────────────────────────────────────────────────────
-    function mint(address to, uint256 amount, string calldata proof) external nonReentrant {
-        require(msg.sender == address(custodian), "Only custodian can mint");
-        require(amount > 0 && amount <= MAX_MINT_PER_TX, "Invalid mint amount");
+    ///====≈====≈=== MINT (limité + oracle)
+    function mint(address to, uint256 amount) external onlyOwner {
+        require(amount > 0, "Amount must be > 0");
+        require(amount <= MAX_MINT_PER_TX, "Mint exceeds per-tx limit");
 
+        // Vérification oracle EUR/USD
         (, int256 price,,,) = priceFeed.latestRoundData();
         require(price > 0, "Oracle price invalid");
 
         _mint(to, amount);
-
-        emit FiatMinted(to, amount, proof);
         emit MintLimited(to, amount);
     }
 
-    // ────────────────────────────────────────────────────────────────
-    //                         REDEEM (burn + demande fiat)
-    // ────────────────────────────────────────────────────────────────
-    function redeem(uint256 amount, string calldata proof) external nonReentrant {
-        require(amount > 0 && balanceOf(msg.sender) >= amount, "Invalid redeem");
-
-        _burn(msg.sender, amount);
-
-        // Demande de remboursement fiat via custodian
-        emit FiatRedeemRequested(msg.sender, amount, proof);
-    }
-
-    // ────────────────────────────────────────────────────────────────
-    //               TRANSFER & TRANSFER_FROM (avec burn – inchangé)
-    // ────────────────────────────────────────────────────────────────
+    ///====≈====≈=== TRANSFER & TRANSFER_FROM (avec burn)
     function transfer(address to, uint256 amount) public virtual override returns (bool) {
-        require(!_blacklisted[msg.sender] && !_blacklisted[to], "Blacklisted");
-        require(amount <= MAX_SAFE_AMOUNT && !_paused, "Invalid transfer");
+        require(!_blacklisted[msg.sender], "Sender is blacklisted");
+        require(!_blacklisted[to], "Recipient is blacklisted");
+        require(amount <= MAX_SAFE_AMOUNT, "Amount too large");
+        require(!_paused, "Transfers paused");
 
         uint256 burnAmount = amount * TRANSFER_BURN_PCT / 100;
         uint256 sendAmount = amount - burnAmount;
@@ -125,8 +93,10 @@ contract VEZproxy is ERC20, Ownable, ReentrancyGuard, UUPSUpgradeable {
     }
 
     function transferFrom(address from, address to, uint256 amount) public virtual override returns (bool) {
-        require(!_blacklisted[from] && !_blacklisted[to], "Blacklisted");
-        require(amount <= MAX_SAFE_AMOUNT && !_paused, "Invalid transferFrom");
+        require(!_blacklisted[from], "From is blacklisted");
+        require(!_blacklisted[to], "Recipient is blacklisted");
+        require(amount <= MAX_SAFE_AMOUNT, "Amount too large");
+        require(!_paused, "Transfers paused");
 
         uint256 burnAmount = amount * TRANSFER_BURN_PCT / 100;
         uint256 sendAmount = amount - burnAmount;
@@ -138,11 +108,12 @@ contract VEZproxy is ERC20, Ownable, ReentrancyGuard, UUPSUpgradeable {
         return success;
     }
 
-    // ────────────────────────────────────────────────────────────────
-    //                        DISBURSE (inchangé)
-    // ────────────────────────────────────────────────────────────────
+    ///====≈====≈=== DISBURSE
     function disburse(uint256 amount, address disburser) external {
-        require(amount > 0 && amount <= MAX_SAFE_AMOUNT && balanceOf(disburser) >= amount && !_paused, "Invalid disburse");
+        require(amount > 0, "Amount must be > 0");
+        require(amount <= MAX_SAFE_AMOUNT, "Amount too large");
+        require(balanceOf(disburser) >= amount, "Insufficient balance");
+        require(!_paused, "Disburse paused");
 
         uint256 burnAmount = amount * DISBURSE_BURN_PCT / 100;
         _burn(disburser, burnAmount + (amount - burnAmount));
@@ -150,10 +121,11 @@ contract VEZproxy is ERC20, Ownable, ReentrancyGuard, UUPSUpgradeable {
         emit DisbursedWithBurn(amount, burnAmount);
     }
 
-    // ────────────────────────────────────────────────────────────────
-    //                 RELAYED PoS & REWARDS (inchangé)
-    // ────────────────────────────────────────────────────────────────
-    function relay_master(address validator, uint256 delegatedAmount) external onlyOwner returns (uint256) {
+    ///====≈====≈=== RELAYED PoS & REWARDS
+    function relay_master(address validator, uint256 delegatedAmount)
+        external onlyOwner
+        returns (uint256)
+    {
         totalRelayPower -= validatorRelayPower[validator];
         uint256 newPower = balanceOf(validator) + delegatedAmount;
         validatorRelayPower[validator] = newPower;
@@ -169,9 +141,7 @@ contract VEZproxy is ERC20, Ownable, ReentrancyGuard, UUPSUpgradeable {
         emit LurosonieRewardDistributed(holder, rewardAmount, block.timestamp);
     }
 
-    // ────────────────────────────────────────────────────────────────
-    //                     BLACKLIST & PAUSE (inchangé)
-    // ────────────────────────────────────────────────────────────────
+    ///====≈====≈=== BLACKLIST & PAUSE
     function blacklist(address account) external onlyOwner {
         _blacklisted[account] = true;
         emit Blacklisted(account);
@@ -188,13 +158,13 @@ contract VEZproxy is ERC20, Ownable, ReentrancyGuard, UUPSUpgradeable {
     }
 
     function pause() external onlyOwner {
-        require(!_paused);
+        require(!_paused, "Already paused");
         _paused = true;
         emit Paused(msg.sender);
     }
 
     function unpause() external onlyOwner {
-        require(_paused);
+        require(_paused, "Not paused");
         _paused = false;
         emit Unpaused(msg.sender);
     }
@@ -202,19 +172,19 @@ contract VEZproxy is ERC20, Ownable, ReentrancyGuard, UUPSUpgradeable {
     function _authorizeUpgrade(address) internal override onlyOwner {}
 }
 
-// ───────────────────────────────────────────────────────────────────────
-//                          reservVEZ – Proof of Reserves
-// ───────────────────────────────────────────────────────────────────────
-
+///====≈====≈===
+/// reservVEZ - Proof of Reserves officiel
+/// Transparence totale du collatéral euro pour VEZ
+///====≈====≈===
 contract reservVEZ {
 
-    address public immutable VEZIssuer;
-    address public immutable VEZasset;
+    address public immutable VEZIssuer;     // Gnosis Safe
+    address public immutable VEZasset;      // Adresse de VEZproxy
 
-    EACAggregatorProxy public priceFeed;
+    EACAggregatorProxy public priceFeed;    // Oracle EUR/USD
 
-    uint256 public supplySolde;
-    string  public lienIpfs;
+    uint256 public supplySolde;             // Supply déclarée collatéralisée
+    string  public lienIpfs;                // Lien IPFS du relevé bancaire
     uint256 public lastUpdate;
 
     event ReservesUpdated(uint256 supplySolde, string lienIpfs, uint256 date);
@@ -225,8 +195,11 @@ contract reservVEZ {
         priceFeed = EACAggregatorProxy(_priceFeed);
     }
 
+    /// @notice Mise à jour des réserves (uniquement par le Gnosis Safe)
     function updateReserves(uint256 _supplySolde, string calldata _lienIpfs) external {
         require(msg.sender == VEZIssuer, "Only VEZIssuer");
+
+        // Vérification oracle EUR/USD
         (, int256 price,,,) = priceFeed.latestRoundData();
         require(price > 0, "Oracle price invalid");
 
@@ -237,6 +210,7 @@ contract reservVEZ {
         emit ReservesUpdated(_supplySolde, _lienIpfs, block.timestamp);
     }
 
+    /// @notice Vue publique des réserves
     function getReserves() external view returns (
         uint256 onChainSupply,
         uint256 supplySolde,
@@ -251,81 +225,8 @@ contract reservVEZ {
 }
 
 // ───────────────────────────────────────────────────────────────────────
-//                          VEZCUSTODIAN – Gestion dépôts/retraits €
+//                          INTERFACE SIMPLIFIÉE
 // ───────────────────────────────────────────────────────────────────────
-
-contract VEZcustodian is Ownable, ReentrancyGuard {
-
-    VEZproxy public immutable vezProxy;
-    address public treasury;
-
-    mapping(address => uint256) public depositedEuro;
-    mapping(address => uint256) public pendingWithdrawals;
-
-    uint256 public totalDeposited;
-    uint256 public totalWithdrawn;
-
-    event EuroDeposited(address indexed user, uint256 amountEuro, uint256 vezMinted);
-    event WithdrawalRequested(address indexed user, uint256 amountEuro, uint256 vezBurned);
-    event EuroWithdrawn(address indexed user, uint256 amountEuro);
-
-    constructor(address _vezProxy, address _treasury, address _initialOwner) Ownable(_initialOwner) {
-        vezProxy  = VEZproxy(_vezProxy);
-        treasury  = _treasury;
-    }
-
-    function depositEuro(uint256 amountEuro, string calldata proof) external onlyOwner nonReentrant {
-        require(amountEuro > 0, "Montant nul");
-
-        // Mint 1:1 VEZ à l’utilisateur
-        vezProxy.mint(msg.sender, amountEuro * 10**18);
-
-        depositedEuro[msg.sender] += amountEuro;
-        totalDeposited += amountEuro;
-
-        emit EuroDeposited(msg.sender, amountEuro, amountEuro * 10**18);
-    }
-
-    function requestWithdrawal(uint256 amountEuro) external nonReentrant {
-        require(amountEuro > 0, "Montant nul");
-        require(vezProxy.balanceOf(msg.sender) >= amountEuro * 10**18, "Solde insuffisant");
-
-        // Burn VEZ
-        vezProxy.transferFrom(msg.sender, address(this), amountEuro * 10**18);
-        vezProxy.burn(address(this), amountEuro * 10**18);
-
-        pendingWithdrawals[msg.sender] += amountEuro;
-        totalWithdrawn += amountEuro;
-
-        emit WithdrawalRequested(msg.sender, amountEuro, amountEuro * 10**18);
-    }
-
-    function confirmWithdrawal(address user, uint256 amountEuro) external onlyOwner nonReentrant {
-        require(pendingWithdrawals[user] >= amountEuro, "Montant non pending");
-
-        pendingWithdrawals[user] -= amountEuro;
-
-        emit EuroWithdrawn(user, amountEuro);
-        // Le owner envoie amountEuro € à user hors-chain
-    }
-
-    function getUserBalance(address user) external view returns (uint256 deposited, uint256 pending) {
-        return (depositedEuro[user], pendingWithdrawals[user]);
-    }
-
-    function getGlobalStats() external view returns (uint256 totalDep, uint256 totalWithd, uint256 supply) {
-        return (totalDeposited, totalWithdrawn, vezProxy.totalSupply());
-    }
-}
-
-// ───────────────────────────────────────────────────────────────────────
-//                          Interfaces nécessaires
-// ───────────────────────────────────────────────────────────────────────
-
-interface VEZproxy {
-    function mint(address to, uint256 amount) external;
-    function burn(address from, uint256 amount) external;
-    function balanceOf(address account) external view returns (uint256);
-    function transferFrom(address from, address to, uint256 amount) external returns (bool);
+interface IERC20 {
     function totalSupply() external view returns (uint256);
 }
