@@ -261,96 +261,87 @@ impl EnginePlatform {
 /// Retourne le runtime pur (60806040...) ou une erreur claire.
 >>>>>>> c33d5dca50728ea7f7856d339b04ad833a6fe66f
 pub fn extract_runtime_from_creation_bytecode(full: &[u8]) -> Result<Vec<u8>, String> {
-    if full.len() < 300 {
-        return Err(format!("Bytecode trop court pour être valide: {} bytes", full.len()));
+    if full.len() < 500 {
+        return Err(format!("Bytecode trop court pour contenir un RETURN valide: {} bytes", full.len()));
     }
 
-    println!("Analyse creation bytecode → taille totale: {} bytes", full.len());
+    println!("Début extraction runtime - taille creation bytecode: {} bytes", full.len());
 
     let mut code = full.to_vec();
 
-    // 1. Supprime la metadata CBOR finale si présente (IPFS + solc version)
-    let markers: [&[u8]; 2] = [
-        b"a2646970667358221220",     // IPFS marker
-        b"64736f6c634300",           // solc marker
+    // 1. Coupe metadata finale si présente (IPFS/solc)
+    let markers: Vec<&[u8]> = vec![
+        b"a2646970667358221220",
+        b"64736f6c634300",
     ];
 
-    for &marker in markers.iter() {
-        if let Some(pos) = code.windows(marker.len()).rposition(|w| w == marker) {
-            let old_len = code.len();
+    for marker in &markers {
+        if let Some(pos) = code.windows(marker.len()).rposition(|w: &[u8]| w == *marker) {
             code.truncate(pos);
-            println!("→ Metadata CBOR supprimée à offset 0x{:04x} (gain: {} bytes)", pos, old_len - pos);
+            println!("→ Metadata tronquée à offset {} (reste: {} bytes)", pos, code.len());
             break;
         }
     }
 
-    // 2. Recherche du DERNIER 0xf3 (RETURN) → le plus fiable dans Solidity >= 0.8
-    let mut return_pos: Option<usize> = None;
+    // 2. Recherche du DERNIER f3 (c'est toujours le bon dans Solidity récent)
+    let mut return_offset = None;
     for i in (0..code.len()).rev() {
         if code[i] == 0xf3 {
-            return_pos = Some(i);
-            println!("→ Dernier RETURN (0xf3) détecté à offset 0x{:04x}", i);
+            return_offset = Some(i);
+            println!("→ Dernier RETURN (0xf3) trouvé à offset 0x{:04x}", i);
             break;
         }
     }
 
-    let return_pos = return_pos.ok_or_else(|| "Aucun opcode RETURN (0xf3) trouvé dans le bytecode".to_string())?;
+    let return_pos = return_offset.ok_or("Aucun 0xf3 trouvé dans tout le bytecode !".to_string())?;
 
-    // 3. Déterminer où commence vraiment le runtime après le RETURN
+    // 3. Ce qui suit le f3 (doit être fe ou direct 60806040)
+    let suffix = &code[return_pos + 1..];
+
+    // Déclaration mutable ici pour pouvoir réassigner dans la boucle de tolérance
     let mut runtime_start = return_pos + 1;
 
-    let suffix = &code[return_pos + 1..];
-    if suffix.starts_with(&[0xfe, 0x60, 0x80, 0x60, 0x40]) {
-        runtime_start += 1; // saute le fe (padding fréquent)
-        println!("→ Padding 'fe' détecté → runtime commence à 0x{:04x}", runtime_start);
+    if suffix.starts_with(&[0xfe]) && suffix.len() > 5 && &suffix[1..6] == [0x60, 0x80, 0x60, 0x40] {
+        runtime_start = return_pos + 2;  // saute fe
+        println!("→ fe60806040 détecté directement après f3");
     } else if suffix.starts_with(&[0x60, 0x80, 0x60, 0x40]) {
-        println!("→ Pattern runtime direct après RETURN");
+        runtime_start = return_pos + 1;
+        println!("→ 60806040 direct après f3");
     } else {
-        // Tolérance légère (max 10 bytes de padding bizarre)
+        // Tolérance max 8 bytes après f3 (padding rare mais possible)
         let mut pos = return_pos + 1;
-        let max_tolerance = 10;
-        while pos + 4 < code.len() && pos < return_pos + 1 + max_tolerance {
+        let max_skip = 8;
+        while pos + 4 < code.len() && pos < return_pos + 1 + max_skip {
             if &code[pos..pos + 4] == [0x60, 0x80, 0x60, 0x40] {
-                println!("→ Pattern 60806040 trouvé après décalage de {} bytes (offset 0x{:04x})", pos - return_pos - 1, pos);
-                runtime_start = pos;
+                println!("→ Pattern runtime trouvé après décalage de {} bytes (offset 0x{:04x})", pos - return_pos - 1, pos);
+                runtime_start = pos;  // ← réassignation OK car mut
                 break;
             }
             pos += 1;
         }
 
-        if runtime_start == return_pos + 1 {
+        if pos + 4 >= code.len() || pos >= return_pos + 1 + max_skip {
             return Err(format!(
-                "Aucun pattern runtime (60806040) trouvé après RETURN à 0x{:04x} (suffix 20 bytes: {:02x?})",
+                "Pas de 60806040 après f3 à 0x{:04x} (suffix={:02x?})",
                 return_pos,
                 &suffix[..20.min(suffix.len())]
             ));
         }
     }
 
-    // 4. Extraction du runtime
-    if runtime_start >= code.len() {
-        return Err("Offset runtime invalide (après la fin du bytecode)".to_string());
-    }
-
     let runtime = &code[runtime_start..];
 
-    // Vérifications finales
-    if runtime.len() < 1000 {
-        return Err(format!("Runtime trop court: {} bytes", runtime.len()));
-    }
-
-    if runtime[0..4] != [0x60, 0x80, 0x60, 0x40] {
+    if runtime.len() < 3000 || runtime[0..4] != [0x60, 0x80, 0x60, 0x40] {
         return Err(format!(
-            "Runtime invalide - ne commence pas par 60806040 (prefix: {:02x?})",
-            &runtime[0..8.min(runtime.len())]
+            "Runtime extrait invalide: {} bytes, prefix={:02x?}",
+            runtime.len(),
+            &runtime[0..4.min(runtime.len())]
         ));
     }
 
-    println!("→ Extraction réussie ! Runtime extrait: {} bytes (début à 0x{:04x})", runtime.len(), runtime_start);
-    println!("  → Premiers 8 bytes du runtime: {:02x?}", &runtime[0..8]);
-
+    println!("→ Extraction réussie ! Runtime: {} bytes (début offset 0x{:04x})", runtime.len(), runtime_start);
     Ok(runtime.to_vec())
-        }
+}
         
         /// ✅ NOUVEAU: Restauration d'un compte
         async fn restore_account_from_data(&self, address: &str, account_data: &serde_json::Value) -> Result<bool, String> {
