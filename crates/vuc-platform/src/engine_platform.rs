@@ -255,6 +255,11 @@ impl EnginePlatform {
                     }
                 }
 
+<<<<<<< HEAD
+=======
+/// Extrait le runtime bytecode du bytecode de déploiement (comme eth_getCode / Erigon).
+/// Retourne le runtime pur (60806040...) ou une erreur claire.
+>>>>>>> c33d5dca50728ea7f7856d339b04ad833a6fe66f
 pub fn extract_runtime_from_creation_bytecode(full: &[u8]) -> Result<Vec<u8>, String> {
     if full.len() < 500 {
         return Err(format!("Bytecode trop court pour contenir un RETURN valide: {} bytes", full.len()));
@@ -1669,6 +1674,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
             return Err(format!("Échec déploiement via execute_module (raw) : {:?}", e));
         }
 
+<<<<<<< HEAD
 let runtime_bytecode = match deploy_result {
     Ok(value) => {
         let mut candidate: Option<Vec<u8>> = None;
@@ -1685,11 +1691,30 @@ let runtime_bytecode = match deploy_result {
                                 if bytes.len() > 32 && bytes.starts_with(&[0x60, 0x80, 0x60, 0x40]) {
                                     candidate = Some(bytes);
                                     break;
+=======
+        let runtime_bytecode = match deploy_result {
+            Ok(value) => {
+                let mut candidate = None;
+
+                if let Some(obj) = value.as_object() {
+                    for key in ["data", "return", "result", "returnData", "output", "value"] {
+                        if let Some(v) = obj.get(key) {
+                            if let Some(s) = v.as_str() {
+                                if s.starts_with("0x") {
+                                    if let Ok(bytes) = hex::decode(&s[2..]) {
+                                        if bytes.len() > 1000 {
+                                            candidate = Some(bytes.clone());
+                                            println!("→ Trouvé dans clé '{}': {} bytes", key, bytes.len());
+                                            break;
+                                        }
+                                    }
+>>>>>>> c33d5dca50728ea7f7856d339b04ad833a6fe66f
                                 }
                             }
                         }
                     }
                 }
+<<<<<<< HEAD
             }
 
             // Si rien → scan toutes les clés restantes
@@ -1814,6 +1839,90 @@ let _ = vm.auto_detect_contract_functions(&contract_address, &runtime_bytecode);
                     .map(|(name, _)| name.clone())
                     .or_else(|| Some(format!("function_{:08x}", selector)))
             } else {
+=======
+
+                candidate.unwrap_or_else(|| {
+                    println!("⚠️ Aucun candidat valide trouvé → fallback sur creation_bytecode");
+                    creation_bytecode.clone()
+                })
+            }
+            Err(e) => {
+                println!("❌ execute_module Err: {:?}", e);
+                creation_bytecode.clone()
+            }
+        };
+
+        println!("→ Runtime final après déploiement : {} bytes", runtime_bytecode.len());
+
+        // Mise à jour du module avec le runtime
+        if !vm.modules.contains_key(&contract_address) {
+            let module = vuc_tx::slurachain_vm::Module {
+                name: "deployed".to_string(),
+                address: contract_address.clone(),
+                bytecode: runtime_bytecode.clone(),
+                elf_buffer: vec![],
+                context: uvm_runtime::UbfContext::new(),
+                stack_usage: None,
+                functions: hashbrown::HashMap::new(),
+                gas_estimates: hashbrown::HashMap::new(),
+                storage_layout: hashbrown::HashMap::new(),
+                events: vec![],
+                constructor_params: vec![],
+            };
+            vm.modules.insert(contract_address.clone(), module);
+            println!("   → Module créé avec runtime final");
+        } else if let Some(m) = vm.modules.get_mut(&contract_address) {
+            m.bytecode = runtime_bytecode.clone();
+            println!("   → Runtime mis à jour dans module existant");
+        }
+
+        // Mise à jour finale du compte (nonce, etc.)
+        {
+            let mut accounts = vm.state.accounts.write().await;
+            if let Some(acc) = accounts.get_mut(&contract_address) {
+                acc.is_contract = true;
+                acc.nonce = 1;
+                acc.contract_state = runtime_bytecode.clone(); // On met le runtime comme code final
+                println!("   → Compte mis à jour (is_contract + nonce + runtime dans contract_state)");
+            }
+        }
+
+        // Persistance finale du runtime (après exécution)
+        if let Some(storage_manager) = &vm.storage_manager {
+            let account_prefix = format!("account:{}", contract_address);
+            let contract_state_key = format!("{}:contract_state", account_prefix);
+
+            if let Err(e) = storage_manager.write(&contract_state_key, &runtime_bytecode) {
+                eprintln!("❌ Échec persistance runtime final : {}", e);
+            } else {
+                println!("   → Runtime final persisté ({} bytes)", runtime_bytecode.len());
+            }
+        }
+
+        if let Err(e) = vm.auto_detect_contract_functions(&contract_address, &runtime_bytecode) {
+            println!("⚠️ Détection automatique des fonctions échouée : {}", e);
+        }
+
+        println!("✅ DÉPLOIEMENT + PERSISTANCE RÉUSSIE");
+        println!("   • Adresse: {}", contract_address);
+        println!("   • Bytecode clé: account:{}:contract_state", contract_address);
+        println!("   • Déployeur: {}", from_addr);
+        println!("   • TX Hash: {}", normalized_hash);
+    } else {
+        // --- TRANSACTIONS NORMALES ---
+        let contract_addr = Some(to_addr.clone());
+
+        let function_name = if data.len() >= 10 {
+            let selector_hex = &data[2..10];
+            let selector = u32::from_str_radix(selector_hex, 16).unwrap_or(0);
+            let vm = self.vm.read().await;
+            if let Some(module) = vm.modules.get(&to_addr) {
+                module.functions.iter()
+                    .find(|(_, meta)| meta.selector == selector)
+                    .map(|(name, _)| name.clone())
+                    .or_else(|| Some(format!("function_{:08x}", selector)))
+            } else {
+>>>>>>> c33d5dca50728ea7f7856d339b04ad833a6fe66f
                 Some(format!("function_{:08x}", selector))
             }
         } else {

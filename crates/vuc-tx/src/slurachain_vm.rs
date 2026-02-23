@@ -1283,7 +1283,6 @@ impl SlurachainVm {
                 bytecode.len()
             );
         } else {
-            // ✅ Met à jour le bytecode existant s'il était vide
             if let Some(module) = self.modules.get_mut(contract_address) {
                 if module.bytecode.is_empty() && !bytecode.is_empty() {
                     module.bytecode = bytecode.to_vec();
