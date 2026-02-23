@@ -255,6 +255,11 @@ impl EnginePlatform {
                     }
                 }
 
+<<<<<<< HEAD
+=======
+/// Extrait le runtime bytecode du bytecode de déploiement (comme eth_getCode / Erigon).
+/// Retourne le runtime pur (60806040...) ou une erreur claire.
+>>>>>>> c33d5dca50728ea7f7856d339b04ad833a6fe66f
 pub fn extract_runtime_from_creation_bytecode(full: &[u8]) -> Result<Vec<u8>, String> {
     if full.len() < 300 {
         return Err(format!("Bytecode trop court pour être valide: {} bytes", full.len()));
@@ -345,7 +350,7 @@ pub fn extract_runtime_from_creation_bytecode(full: &[u8]) -> Result<Vec<u8>, St
     println!("  → Premiers 8 bytes du runtime: {:02x?}", &runtime[0..8]);
 
     Ok(runtime.to_vec())
-}
+        }
         
         /// ✅ NOUVEAU: Restauration d'un compte
         async fn restore_account_from_data(&self, address: &str, account_data: &serde_json::Value) -> Result<bool, String> {
