@@ -4,6 +4,7 @@ use alloy_primitives::B256;
 use base64::engine::general_purpose::STANDARD as base64_standard;
 use base64::Engine as _;
 use chrono::Utc;
+use ethers::utils::keccak256;
 use lazy_static::lazy_static;
 use reth_trie::root::state_root;
 use serde_json;
@@ -14,6 +15,7 @@ use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::time::{interval, Duration, Instant};
 use tracing::{error, info, warn};
 use vuc_events::time_warp::TimeWarp;
+ use uvm_runtime::lib::BTreeMap;
 use vuc_events::timestamp_release::TimestampRelease;
 use vuc_storage::storing_access::{RocksDBManager, RocksDBManagerImpl, SlurachainMetadata};
 use vuc_tx::slura_merkle::build_state_trie;
@@ -166,7 +168,7 @@ impl LurosonieManager {
     }
 
     pub async fn start_lurosonie_consensus(&self) {
-        println!("🚀 Démarrage du consensus LUROSONIE - Mode forcé sans blocage centralisation");
+        println!("🚀 Démarrage du consensus LUROSONIE - Mode forcé sans blocage");
         println!("   → Toutes les conditions de stake/power sont désactivées");
         println!("   → Production de blocs illimitée même si stake = 0");
 
@@ -182,7 +184,7 @@ impl LurosonieManager {
                     let block_number = self.get_block_height().await + 1;
 
                     let block_producer = self.select_block_producer().await;
-                    let is_system_block = true; // forcé système pour éviter blocage
+                    let is_system_block = true; // forcé système
 
                     println!(
                         "🔄 Bloc #{} - Producteur forcé: {} (round {})",
@@ -194,7 +196,6 @@ impl LurosonieManager {
                         continue;
                     }
 
-                    // Consensus désactivé : on accepte directement
                     println!("✅ Bloc #{} accepté automatiquement (consensus désactivé)", block_number);
                 }
             }
@@ -293,17 +294,14 @@ impl LurosonieManager {
         let start_time = Instant::now();
 
         println!(
-            "🔄 Production bloc #{} autorisée sans aucune condition (mode forcé)",
+            "🔄 Production bloc #{} autorisée sans condition (mode forcé)",
             block_number
         );
 
-        // 1. Lecture du mempool (read lock suffit ici)
+        // 1. Récupère toutes les tx du mempool
         let pending = self.pending_transactions.read().await;
-
-        // On clone les valeurs pour pouvoir travailler après avoir libéré le lock
         let transactions: Vec<TxRequest> = pending.values().cloned().collect();
-
-        drop(pending); // on libère immédiatement le read lock
+        drop(pending);
 
         println!(
             "📦 {} transactions à traiter dans le bloc forcé #{}",
@@ -311,10 +309,9 @@ impl LurosonieManager {
             block_number
         );
 
-        // Power forcé (valeur énorme pour compatibilité)
         let relay_power = FORCED_SYSTEM_POWER;
 
-        // Création du bloc
+        // Création du bloc vide au départ
         let block = TimestampRelease {
             timestamp: Utc::now(),
             log: format!(
@@ -329,77 +326,16 @@ impl LurosonieManager {
         let mut execution_results: HashMap<String, serde_json::Value> = HashMap::new();
         let mut processed_hashes: Vec<String> = Vec::new();
 
-        // Exécution des transactions
-        for tx in &transactions {
-            // On recalcule EXACTEMENT la même clé que dans add_pending_transaction
-            let tx_hash = format!(
-                "{}:{}:{}:{}",
-                tx.from_op, tx.receiver_op, tx.value_tx, tx.nonce_tx
-            );
-
-            match self.execute_transaction_in_block(tx).await {
-                Ok(result) => {
-                    execution_results.insert(tx_hash.clone(), result.clone());
-                    processed_hashes.push(tx_hash.clone());
-
-                    // Capture des états de stockage si le VM en retourne
-                    if let Some(storage_obj) = result.get("storage") {
-                        if let Some(storage_map) = storage_obj.as_object() {
-                            for (slot, hex_value) in storage_map {
-                                if let Some(hex_str) = hex_value.as_str() {
-                                    if let Ok(bytes) = hex::decode(hex_str) {
-                                        let storage_key = format!(
-                                            "{}:{}",
-                                            tx.contract_addr.as_deref().unwrap_or(&tx.receiver_op),
-                                            slot
-                                        );
-                                        contract_states.insert(storage_key.clone(), bytes);
-                                        println!(
-                                            "📦 [BLOCK] Storage capturé: {} = 0x{} (tx: {})",
-                                            storage_key, hex_str, tx_hash
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Sauvegarde métadonnées
-                    let metadata = SlurachainMetadata {
-                        from_op: tx.from_op.clone(),
-                        receiver_op: tx.receiver_op.clone(),
-                        fees_tx: 0,
-                        value_tx: tx.value_tx.clone(),
-                        nonce_tx: tx.nonce_tx,
-                        hash_tx: tx_hash.clone(),
-                    };
-                    if let Err(e) = self.storage.store_metadata(&tx_hash, &metadata) {
-                        error!("❌ Erreur sauvegarde tx {}: {}", tx_hash, e);
-                    } else {
-                        println!("💾 Transaction {} persistée", tx_hash);
-                    }
-                }
-                Err(e) => {
-                    error!("❌ Échec exécution tx {} : {}", tx_hash, e);
-                    execution_results.insert(
-                        tx_hash.clone(),
-                        serde_json::json!({"status": "failed", "error": e.to_string()}),
-                    );
-                    processed_hashes.push(tx_hash.clone());
-                }
-            }
-        }
-
-        // Création de l'objet BlockData
+        // 3. Finalisation du bloc
         let block_data = BlockData {
             block,
-            transactions, // on passe directement la Vec (pas besoin de clone ici)
+            transactions,
             validator: producer.to_string(),
             contract_states,
             execution_results,
             relay_power,
             delegated_stake: 0,
-            is_system_block: true,
+            is_system_block,
         };
 
         // Ajout à la chaîne
@@ -408,9 +344,8 @@ impl LurosonieManager {
             return Err(e);
         }
 
-        // Vidage forcé du mempool (toutes les tx traitées sont retirées)
-        self.remove_processed_transactions(processed_hashes.clone())
-            .await;
+        // Vidage du mempool
+        self.remove_processed_transactions(processed_hashes.clone()).await;
 
         println!(
             "✅ Bloc #{} produit avec succès en mode forcé en {:?} ({} tx traitées)",
@@ -1114,84 +1049,6 @@ impl LurosonieManager {
             "is_deployed": vm.modules.contains_key(contract_address),
             "latest_states": history.iter().rev().take(5).collect::<Vec<_>>()
         })
-    }
-
-    pub async fn execute_transaction_in_block(
-        &self,
-        tx: &TxRequest,
-    ) -> Result<serde_json::Value, String> {
-        let mut vm = self.vm.write().await;
-
-        let contract_addr = tx.contract_addr.as_deref();
-        let function = tx.function_name.as_deref().unwrap_or("function_a9059cbb");
-        let to_addr = tx.receiver_op.clone();
-        let value = tx.value_tx.parse::<u128>().unwrap_or(0);
-
-        let is_contract = contract_addr
-            .and_then(|addr| vm.modules.get(addr))
-            .is_some();
-
-        println!(
-            "🔁 Exécution tx {} sur {} : {} -> {} (valeur {})",
-            tx.hash,
-            contract_addr.unwrap_or(&to_addr),
-            tx.from_op,
-            to_addr,
-            value
-        );
-
-        if is_contract {
-            let args = tx.arguments.clone().unwrap_or_else(|| {
-                vec![
-                    serde_json::Value::String(to_addr.clone()),
-                    serde_json::Value::Number(serde_json::Number::from(value)),
-                ]
-            });
-            match vm
-                .execute_module(
-                    contract_addr.unwrap(),
-                    function,
-                    args,
-                    Some(&tx.from_op),
-                    None,
-                )
-                .await
-            {
-                Ok(result) => {
-                    println!("✅ VM {} ok pour tx {}", function, tx.hash);
-                    Ok(serde_json::json!({
-                        "status": "success",
-                        "from": tx.from_op,
-                        "to": to_addr,
-                        "value": value,
-                        "nonce": tx.nonce_tx,
-                        "hash": tx.hash,
-                        "result": result
-                    }))
-                }
-                Err(e) => {
-                    error!(
-                        "❌ VM.execute_module {} failed for tx {}: {}",
-                        function, tx.hash, e
-                    );
-                    Err(format!("execute_module failed: {}", e))
-                }
-            }
-        } else {
-            println!(
-                "⏩ Transaction ignorée : {} n'est pas un contrat déployé",
-                to_addr
-            );
-            Ok(serde_json::json!({
-                "status": "ignored",
-                "from": tx.from_op,
-                "to": to_addr,
-                "value": value,
-                "nonce": tx.nonce_tx,
-                "hash": tx.hash,
-                "result": "ignored_non_contract"
-            }))
-        }
     }
 
     async fn execute_native_transfer(

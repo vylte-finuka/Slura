@@ -608,7 +608,7 @@ pub struct EventDefinition {
     pub data_params: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct AccountState {
     pub address: String,
     pub balance: u128,
