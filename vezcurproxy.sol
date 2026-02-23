@@ -11,7 +11,7 @@ import "./EACAggregatorProxy.sol";
 
 ///====≈====≈===
 /// VEZproxy – Token principal (déflationniste + stablecoin hybride)
-/// Mint déclenché automatiquement par VEZcustodian
+/// Mint déclenché via custodian (même pour l'initial supply)
 ///====≈====≈===
 contract VEZproxy is ERC20, Ownable, UUPSUpgradeable {
 
@@ -23,7 +23,7 @@ contract VEZproxy is ERC20, Ownable, UUPSUpgradeable {
 
     ///====≈====≈=== VARIABLES
     EACAggregatorProxy public priceFeed;
-    address public custodian;                  // Seul autorisé à mint automatiquement
+    address public custodian;                  // Doit mint l'initial supply et les ajouts
     string public currency = "EUR";
     address public me;
     uint256 public complet_quant;
@@ -50,7 +50,7 @@ contract VEZproxy is ERC20, Ownable, UUPSUpgradeable {
     event CustodianUpdated(address oldCustodian, address newCustodian);
     event ObtainRequested(address indexed user, uint256 amount, string proof);
 
-    ///====≈====≈=== CONSTRUCTOR
+    ///====≈====≈=== CONSTRUCTOR – mint initial via la logique mint()
     constructor(
         address _priceFeed,
         address _custodian,
@@ -62,15 +62,18 @@ contract VEZproxy is ERC20, Ownable, UUPSUpgradeable {
         me             = _initialMe;
         complet_quant  = 888_000_000 * 10**18;
 
-        _mint(me, complet_quant);
+        // IMPORTANT : mint initial via la fonction mint() (coherent avec custodian)
+        // On suppose que _custodian ou _initialOwner est autorisé
+        mint(me, complet_quant);  // ← appel à mint au lieu de _mint direct
 
         blacklister = _initialOwner;
         _paused = false;
     }
 
-    ///====≈====≈=== MINT – Automatisé par custodian
-    function mint(address to, uint256 amount) external {
-        require(msg.sender == custodian, "Only custodian can mint automatically");
+    ///====≈====≈=== MINT – Automatisé par custodian (y compris initial)
+    function mint(address to, uint256 amount) public {
+        // Autorisé seulement par custodian (pour cohérence avec les dépôts)
+        require(msg.sender == custodian, "Only custodian can mint");
 
         require(amount > 0 && amount <= MAX_MINT_PER_TX, "Invalid mint amount");
 
@@ -277,7 +280,6 @@ contract VEZcustodian is Ownable, ReentrancyGuard {
 
     ///====≈====≈=== Demande de retrait (obtain depuis VEZproxy)
     function registerObtain(address user, uint256 amountEuro) external {
-        // Vérifie que l'appel vient bien de VEZproxy (ObtainRequested)
         require(msg.sender == address(vezProxy), "Only VEZproxy can register obtain");
 
         pendingObtains[user] += amountEuro;
@@ -305,7 +307,7 @@ contract VEZcustodian is Ownable, ReentrancyGuard {
 //                          INTERFACES
 // ───────────────────────────────────────────────────────────────────────
 
-interface VEZproxy {
+interface VEZproxyInterface {
     function mint(address to, uint256 amount) external;
     function balanceOf(address account) external view returns (uint256);
 }
