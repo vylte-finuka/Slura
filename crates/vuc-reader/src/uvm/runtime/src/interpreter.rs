@@ -2632,12 +2632,7 @@ pub fn execute_program(
             return Ok(halt_json_ebpf("Stack overflow"));
         }
     }
-
-    // Fin naturelle du bytecode (sans opcode de terminaison explicite)
-    println!("🏁 [END] Reached end of bytecode");
-    let mut result = create_stop_action();
-    add_storage_written_to_result(&mut result, &temp_storage_writes);
-    Ok(result)
+Ok(().into())
 }
 
 fn add_storage_written_to_result(
