@@ -1022,7 +1022,7 @@ pub fn execute_program(
     let mut evm_stack: Vec<u256> = Vec::with_capacity(1024);
     let mut global_mem = vec![0u8; 0x10000];
     let mut instruction_count = 0u64;
-    const MAX_INSTRUCTIONS: u64 = 100_000;
+    const MAX_INSTRUCTIONS: u64 = 1;
 
     // NOUVEAU : buffer temporaire pour tous les SSTORE pendant l'exécution
     let mut temp_storage_writes: HashMap<String, Vec<u8>> = HashMap::new();
