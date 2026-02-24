@@ -256,7 +256,7 @@ impl EnginePlatform {
                 }
 
 pub fn extract_runtime_from_creation_bytecode(full: &[u8]) -> Result<Vec<u8>, String> {
-    if full.len() < 500 {
+    if full.len() < 8000 {
         return Err(format!("Bytecode trop court pour contenir un RETURN valide: {} bytes", full.len()));
     }
 
@@ -309,7 +309,7 @@ pub fn extract_runtime_from_creation_bytecode(full: &[u8]) -> Result<Vec<u8>, St
         while pos + 4 < code.len() && pos < return_pos + 1 + max_skip {
             if &code[pos..pos + 4] == [0x60, 0x80, 0x60, 0x40] {
                 println!("→ Pattern runtime trouvé après décalage de {} bytes (offset 0x{:04x})", pos - return_pos - 1, pos);
-                runtime_start = pos;  // ← réassignation OK car mut
+                runtime_start = pos;
                 break;
             }
             pos += 1;

@@ -102,28 +102,6 @@ fn decode_bytes_heuristic(bytes: &[u8]) -> Option<JsonValue> {
     None
 }
 
-/// Refunds the contract's balance to the specified owner address and sets the contract's balance to zero.
-fn refund_contract_balance_to_owner(
-    world_state: &mut UvmWorldState,
-    contract_address: &str,
-    owner_address: &str,
-) {
-    let contract_balance = get_balance(world_state, contract_address);
-    if contract_balance > u256::zero() {
-        let owner_balance = get_balance(world_state, owner_address);
-        set_balance(world_state, contract_address, u256::zero());
-        set_balance(
-            world_state,
-            owner_address,
-            u256::from(owner_balance.saturating_add(contract_balance)),
-        );
-        println!(
-            "💸 [REFUND] Transferred {} from contract {} to owner {}",
-            contract_balance, contract_address, owner_address
-        );
-    }
-}
-
 #[derive(Clone)]
 pub struct InterpreterArgs {
     pub function_name: String,
@@ -426,92 +404,6 @@ fn get_codesize(world_state: &UvmWorldState, address: &str) -> u256 {
         .into()
 }
 
-/// ✅ AJOUT: Scan préalable de tous les JUMPDEST valides au début de l'exécution
-fn scan_valid_jumpdests(prog: &[u8]) -> HashSet<usize> {
-    let mut valid_jumpdests = HashSet::new();
-    let mut i = 0;
-
-    while i < prog.len() {
-        let opcode = prog[i];
-
-        if opcode == 0x5b {
-            // JUMPDEST
-            valid_jumpdests.insert(i);
-            i += 1;
-        } else if opcode >= 0x60 && opcode <= 0x7f {
-            // PUSH1-PUSH32
-            let push_size = (opcode - 0x60 + 1) as usize;
-            i += 1 + push_size; // Saute les données du PUSH
-        } else {
-            i += 1;
-        }
-    }
-
-    println!(
-        "🎯 [JUMPDEST SCAN] {} destinations valides trouvées",
-        valid_jumpdests.len()
-    );
-    for &addr in &valid_jumpdests {}
-
-    valid_jumpdests
-}
-
-/// ✅ Helper: vérifie qu'une destination de saut est valide (dans le code, opcode JUMPDEST, et pré-scannée)
-fn is_valid_jumpdest(dest: usize, prog: &[u8], valid_jumpdests: &HashSet<usize>) -> bool {
-    if dest >= prog.len() {
-        return false;
-    }
-    if prog[dest] != 0x5b {
-        return false;
-    }
-    valid_jumpdests.contains(&dest)
-}
-
-fn clamped_offset(offset_u256: u256) -> usize {
-    const MAX_SAFE: u64 = 1 << 30; // 1 GiB
-    let raw = offset_u256.low_u64();
-    if raw > MAX_SAFE {
-        println!("⚠️ Offset clamped from 0x{:x} to 0x{:x}", raw, MAX_SAFE);
-        MAX_SAFE as usize
-    } else {
-        raw as usize
-    }
-}
-
-fn ensure_memory_size(
-    mem: &mut Vec<u8>,
-    requested_offset: usize,
-    fmp: &mut usize,
-) -> Result<(), Error> {
-    // PATCH: Limite stricte pour éviter tout overflow/panic
-    const MAX_MEM: usize = 16 * 1024 * 1024; // 16 MiB, ajustable
-    if requested_offset > MAX_MEM {
-        println!(
-            "⚠️ [EVM] MSTORE/MLOAD ignoré : offset trop grand (0x{:x} > 0x{:x})",
-            requested_offset, MAX_MEM
-        );
-        return Ok(()); // Ignore l'opération, EVM-style
-    }
-    if requested_offset > mem.len() {
-        let rounded = requested_offset
-            .saturating_add(31)
-            .saturating_div(32)
-            .saturating_mul(32);
-        let needed = rounded.saturating_add(0x4000);
-        if needed > mem.len() && needed <= MAX_MEM {
-            mem.resize(needed, 0);
-            *fmp = needed;
-            // Sync FMP dans mem[0x40..0x60]
-            if mem.len() >= 0x60 {
-                let mut fmp_bytes = [0u8; 32];
-                u256::from(*fmp as u64).to_big_endian(&mut fmp_bytes);
-                mem[0x40..0x60].copy_from_slice(&fmp_bytes);
-            }
-        }
-    }
-    Ok(())
-}
-
 // ✅ AJOUT: Helpers pour interaction avec l'état mondial
 fn get_balance(world_state: &UvmWorldState, address: &str) -> u256 {
     world_state
@@ -588,24 +480,6 @@ fn decode_return_data_generic(data: &[u8], len: usize) -> JsonValue {
         // Sinon hex
         return JsonValue::String(format!("0x{}", hex::encode(data)));
     }
-}
-
-fn transfer_value(
-    world_state: &mut UvmWorldState,
-    from: &str,
-    to: &str,
-    amount: u256,
-) -> Result<(), Error> {
-    let from_balance = u256::from(get_balance(world_state, from));
-    if from_balance < amount {
-        return Err(Error::new(ErrorKind::Other, "Insufficient balance"));
-    }
-
-    let to_balance = u256::from(get_balance(world_state, to));
-    set_balance(world_state, from, from_balance - amount);
-    set_balance(world_state, to, to_balance + amount);
-
-    Ok(())
 }
 
 fn get_storage(world_state: &UvmWorldState, contract: &str, slot: &str) -> Vec<u8> {
@@ -891,19 +765,6 @@ fn analyze_revert_context(data: &[u8], len: usize) -> (bool, String) {
     }
 }
 
-/// Encodage spécialisé pour adresses Ethereum
-fn encode_ethereum_address_to_u64(addr: &str) -> u64 {
-    if addr.len() >= 18 {
-        // "0x" + 16 caractères minimum
-        let hex_part = &addr[2..18]; // Prend les 8 premiers bytes
-        u64::from_str_radix(hex_part, 16).unwrap_or_else(|_| {
-            encode_address_to_u64(addr) // Fallback
-        })
-    } else {
-        encode_address_to_u64(addr)
-    }
-}
-
 /// Encodage spécialisé pour adresses UIP-10
 fn encode_uip10_address_to_u64(addr: &str) -> u64 {
     let parts: Vec<&str> = addr.split('#').collect();
@@ -920,23 +781,6 @@ fn encode_uip10_address_to_u64(addr: &str) -> u64 {
     }
 }
 
-fn find_real_dispatcher(
-    prog: &[u8],
-    _valid_jumpdests: &HashSet<usize>,
-    interpreter_args: &InterpreterArgs,
-) -> Option<usize> {
-    // Exécution EVM naturelle: ne force aucun fallback spécifique
-    if interpreter_args.function_name.starts_with("function_") {
-        prog.windows(8)
-            .enumerate()
-            .skip(100)
-            .find(|(_, w)| *w == [0x60, 0x80, 0x60, 0x40, 0x52, 0x60, 0x04, 0x36])
-            .map(|(i, _)| i)
-    } else {
-        None
-    }
-}
-
 /// ✅ Encodage d'adresse vers u64
 fn encode_address_to_u64(addr: &str) -> u64 {
     use std::collections::hash_map::DefaultHasher;
@@ -945,35 +789,6 @@ fn encode_address_to_u64(addr: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
     addr.hash(&mut hasher);
     hasher.finish()
-}
-
-// Helper safe pour u256 → u64 (évite panic)
-fn safe_u256_to_u64(val: &u256) -> u64 {
-    if val.bits() > 64 {
-        u64::MAX
-    } else {
-        val.low_u64()
-    }
-}
-
-fn check_memory_bounds(offset: usize, size: usize, max_mem: usize) -> Result<(), Error> {
-    if size == 0 {
-        return Ok(());
-    }
-    if offset > max_mem || size > max_mem {
-        return Err(Error::new(ErrorKind::Other, "EVM Panic(0x41): Memory OOB"));
-    }
-    if let Some(end) = offset.checked_add(size) {
-        if end > max_mem {
-            return Err(Error::new(ErrorKind::Other, "EVM Panic(0x41): Memory OOB"));
-        }
-    } else {
-        return Err(Error::new(
-            ErrorKind::Other,
-            "EVM Panic(0x41): Memory overflow",
-        ));
-    }
-    Ok(())
 }
 
 pub fn execute_program(
@@ -1132,10 +947,6 @@ pub fn execute_program(
         }
     }
 
-    fn is_valid_legacy_jump(dest: usize, prog: &[u8], valid_jumpdests: &HashSet<usize>) -> bool {
-        is_valid_jumpdest(dest, prog, valid_jumpdests)
-    }
-
     let prog = match prog_ {
         Some(prog) => prog,
         None => {
@@ -1212,9 +1023,6 @@ pub fn execute_program(
     let mut global_mem = vec![0u8; 0x10000];
     let mut instruction_count = 0u64;
     const MAX_INSTRUCTIONS: u64 = 100_000;
-
-    // ✅ Scan des JUMPDEST valides (conforme EVM)
-    let valid_jumpdests = scan_valid_jumpdests(prog);
 
     // NOUVEAU : buffer temporaire pour tous les SSTORE pendant l'exécution
     let mut temp_storage_writes: HashMap<String, Vec<u8>> = HashMap::new();
@@ -2130,13 +1938,6 @@ pub fn execute_program(
                 let target_u256 = evm_stack.pop().unwrap();
                 let target = as_usize_saturated(target_u256);
 
-                if !is_valid_legacy_jump(target, prog, &valid_jumpdests) {
-                    return Ok(halt_json_ebpf(&format!(
-                        "Invalid jump destination 0x{:04x}",
-                        target
-                    )));
-                }
-
                 bytecode_pc = target;
                 skip_advance = true;
 
@@ -2155,12 +1956,7 @@ pub fn execute_program(
                 let target = as_usize_saturated(target_u256);
 
                 if !cond.is_zero() {
-                    if !is_valid_legacy_jump(target, prog, &valid_jumpdests) {
-                        return Ok(halt_json_ebpf(&format!(
-                            "Invalid jumpi destination 0x{:04x}",
-                            target
-                        )));
-                    }
+             
                     bytecode_pc = target;
                     skip_advance = true;
                     println!("↪️ [JUMPI] condition vraie → 0x{:04x}", target);
@@ -2193,20 +1989,20 @@ pub fn execute_program(
                 consume_gas_amount(&mut execution_context, 2)?;
             }
 
-            //___ 0x5b JUMPDEST - Marqueur valide (no-op en exécution)
+            //___ 0x5b JUMPDEST - Marqueur de destination valide pour JUMP/JUMPI
             0x5b => {
-                println!("🎯 [JUMPDEST] PC=0x{:04x} (valid target)", bytecode_pc);
+                println!("🔒 [JUMPDEST]");
                 consume_gas_amount(&mut execution_context, 1)?;
             }
 
-            //___ 0x5f-0x7f PUSH0-PUSH32
+            //___ 0x5f PUSH0
             0x5f => {
                 evm_stack.push(u256::zero());
                 println!("📌 [PUSH0] 0");
                 consume_gas_amount(&mut execution_context, 2)?;
             }
 
-            //___ 0x60-0x7f PUSH0-PUSH32
+            //___ 0x60-0x7f PUSH1-PUSH32
             0x60..=0x7f => {
                 let push_size = (opcode - 0x60 + 1) as usize;
                 let mut data = vec![0u8; 32];
@@ -2623,6 +2419,7 @@ pub fn execute_program(
             skip_advance = false;
         } else {
             bytecode_pc += advance;
+            println!("➡️ [ADVANCE] PC → 0x{:04x}", bytecode_pc);
         }
 
         instruction_count += 1;
