@@ -608,7 +608,7 @@ pub struct EventDefinition {
     pub data_params: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AccountState {
     pub address: String,
     pub balance: u128,
@@ -1283,6 +1283,7 @@ impl SlurachainVm {
                 bytecode.len()
             );
         } else {
+            // ✅ Met à jour le bytecode existant s'il était vide
             if let Some(module) = self.modules.get_mut(contract_address) {
                 if module.bytecode.is_empty() && !bytecode.is_empty() {
                     module.bytecode = bytecode.to_vec();
