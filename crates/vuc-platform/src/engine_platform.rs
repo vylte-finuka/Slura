@@ -1737,15 +1737,6 @@ for marker in markers {
     }
 }
 
-        // Validation finale stricte
-        if runtime.len() < 4 || runtime[0..4] != [0x60, 0x80, 0x60, 0x40] {
-            return Err(format!(
-                "Échec extraction runtime valide après nettoyage (len={}, prefix={:02x?})",
-                runtime.len(),
-                &runtime[0..4.min(runtime.len())]
-            ));
-        }
-
         runtime
     }
 
