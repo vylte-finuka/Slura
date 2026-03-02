@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::committee::committee::EpochId;
+use crate::committee::EpochId;
 use crate::messages_checkpoint::messages_checkpoint::CheckpointSequenceNumber;
 
 #[derive(Debug, Serialize, Deserialize)]

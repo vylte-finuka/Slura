@@ -1,7 +1,10 @@
 use ethers::types::U256;
 use ethers::utils::keccak256;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, mpsc, broadcast}; // Ajoute broadcast
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use rand::Rng;
+use tracing::warn;
 use alloy_primitives::Keccak256;
 
 // Ensure the correct module path for TimestampRelease
@@ -16,11 +19,11 @@ use chrono::Utc;
 use jsonrpsee_types::error::ErrorCode;
 use tracing_subscriber;
 use sha3::Digest;
-use tokio::time::{Duration, timeout};
+use tokio::time::{Duration, interval, timeout};
 
 // ✅ AJOUTS POUR LA FONCTION MAIN
 use vuc_core::service::slurachain_service::SlurEthService;
-use vuc_types::{committee::committee::EpochId, supported_protocol_versions::SupportedProtocolVersions};
+use vuc_types::{committee::EpochId, supported_protocol_versions::SupportedProtocolVersions};
 use vuc_events::time_warp::TimeWarp;
 use vuc_tx::slura_merkle::build_state_trie;
 use uvm_runtime::interpreter::execute_program;
@@ -29,6 +32,7 @@ use vuc_platform::{slurachain_rpc_service::slurachainRpcService, consensus::luro
 use vuc_storage::storing_access::RocksDBManagerImpl;
 use vuc_storage::storing_access::RocksDBManager;
 use reth_trie::{root::state_root, TrieAccount};
+use reth_primitives::Account;
 use jsonrpsee_server::{RpcModule, ServerBuilder};
 use vuc_tx::slurachain_vm::SlurachainVm;
 use uvm_runtime::lib::BTreeMap;
@@ -54,6 +58,17 @@ pub enum OwnershipType {
     SingleOwner,
     MultiSig,
     Dao,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct SyncHeartbeat {
+    protocol: String,           // "slu"
+    epoch: u64,
+    state_root: String,         // 0x...
+    last_block_hash: String,    // 0x...
+    node_id: String,            // "node-xy-9274" ou pubkey courte
+    timestamp: i64,
+    signature: Option<String>,  // optionnel phase 1
 }
 
 #[derive(Clone, Debug)]
@@ -2291,6 +2306,201 @@ pub async fn eth_call(&self, call_object: serde_json::Value) -> Result<String, S
         Ok(ethereum_accounts)
     }
 
+    // Génère le heartbeat actuel (à appeler périodiquement)
+    pub async fn generate_heartbeat(&self) -> String {
+        let current_epoch = self.get_current_epoch();
+        let state_root = self.compute_current_state_root().await;
+        let last_block_hash = self.rpc_service.lurosonie_manager.get_last_block_hash().await
+            .unwrap_or("0x0".to_string());
+
+        let hb = SyncHeartbeat {
+            protocol: "slu".to_string(),
+            epoch: current_epoch,
+            state_root,
+            last_block_hash,
+            node_id: self.vyftid.clone(),
+            timestamp: Utc::now().timestamp(),
+            signature: None,
+        };
+
+        format!("{}#{}#{}#{}#{}#",
+            hb.protocol,
+            hb.epoch,
+            hb.state_root.trim_start_matches("0x"),
+            hb.last_block_hash.trim_start_matches("0x"),
+            hb.node_id
+        )
+    }
+
+    // Vérifie si on est en retard par rapport à un pair
+    pub async fn should_sync_with(&self, remote_hb: &str) -> Option<(u64, String)> {
+        let parts: Vec<&str> = remote_hb.split('#').collect();
+        if parts.len() < 6 || parts[0] != "slu" {
+            return None;
+        }
+
+        let remote_epoch: u64 = parts[1].parse().unwrap_or(0);
+        let remote_state_root = format!("0x{}", parts[2]);
+        let remote_block_hash = format!("0x{}", parts[3]);
+
+        let local_epoch = self.get_current_epoch();
+        let local_state_root = self.compute_current_state_root().await;
+
+        if remote_epoch > local_epoch || remote_state_root != local_state_root {
+            Some((remote_epoch, remote_block_hash))
+        } else {
+            None
+        }
+    }
+
+    pub async fn connect_to_peer(&self, addr: SocketAddr) -> anyhow::Result<tokio::net::TcpStream> {
+    let mut stream = TcpStream::connect(addr).await?;
+    // Handshake très simple
+    stream.write_all(b"SLU/1.0\n").await?;
+    Ok(stream)
+}
+
+
+// se basé par exemple sur le nombre de blocs finalisés ou sur une métrique de progression de la synchronisation
+pub fn get_current_epoch(&self) -> u64 {
+    // Placeholder : à implémenter avec la logique réelle de suivi de l'époque
+    0
+}
+
+pub async fn run_peer_loop(&self, stream: TcpStream) {
+    // Pas de 'mut' ici car on consomme stream immédiatement
+    let (reader, mut writer) = stream.into_split();  // into_split() consomme et donne Owned halves
+
+    let engine_clone_for_heartbeat = self.clone();
+
+    // Tâche d'envoi heartbeat (écrit périodiquement)
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            let heartbeat = engine_clone_for_heartbeat.generate_heartbeat().await;
+            if let Err(e) = writer.write_all((heartbeat + "\n").as_bytes()).await {
+                error!("Échec écriture heartbeat : {}", e);
+                break;
+            }
+        }
+        info!("Tâche heartbeat terminée");
+    });
+
+    // Tâche de réception (lit en boucle)
+    let engine_clone_for_receive = self.clone();
+    tokio::spawn(async move {
+        let mut reader = reader; // pour éviter warning unused_mut
+        let mut buf = vec![0u8; 8192];
+
+        loop {
+            match reader.read(&mut buf).await {
+                Ok(0) => {
+                    info!("Pair déconnecté (fin de stream)");
+                    break;
+                }
+                Ok(n) => {
+                    let text = String::from_utf8_lossy(&buf[..n]).into_owned();
+                    for line in text.lines() {
+                        let trimmed = line.trim();
+                        if trimmed.starts_with("slu#") {
+                            engine_clone_for_receive.handle_incoming_slu_message(trimmed).await;
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("Erreur lecture du pair : {}", e);
+                    break;
+                }
+            }
+        }
+        info!("Tâche réception terminée");
+    });
+}
+
+pub async fn handle_incoming_slu_message(&self, message: &str) {
+    if let Some((remote_epoch, remote_block_hash)) = self.should_sync_with(message).await {
+        println!("⚠️ Synchronisation nécessaire avec pair (epoch {}, block {})", remote_epoch, remote_block_hash);
+    }
+}
+
+    // Hash racine actuel de l'état (compatible reth_trie / slura_merkle)
+/// Calcule (ou récupère) la racine d'état actuelle (state root) en priorité depuis RocksDB
+/// Si elle n'existe pas dans la DB, fallback sur le calcul en mémoire (comme avant)
+pub async fn compute_current_state_root(&self) -> String {
+    let vm = self.vm.read().await;
+
+    // 1. On tente d'abord de récupérer la racine déjà persistée dans RocksDB
+    if let Some(storage) = &vm.storage_manager {
+        // Clé conventionnelle pour la state root globale (tu peux la changer)
+        let state_root_key = "global_state_root".to_string();
+
+        match storage.read(&state_root_key) {
+            Ok(root_bytes) => {
+                // On s'attend à 32 bytes (B256 / keccak256)
+                if root_bytes.len() == 32 {
+                    let hex_root = format!("0x{}", hex::encode(&root_bytes));
+                    info!("State root récupérée depuis RocksDB : {}", hex_root);
+                    return hex_root;
+                } else {
+                    warn!(
+                        "State root dans DB invalide ({} bytes au lieu de 32) → fallback calcul",
+                        root_bytes.len()
+                    );
+                }
+            }
+            Ok(none) => {
+                info!("Aucune state root persistée dans RocksDB → calcul en mémoire");
+            }
+            Err(e) => {
+                error!("Erreur lecture state root depuis DB : {} → fallback calcul", e);
+            }
+        }
+    } else {
+        warn!("Aucun storage manager disponible → calcul state root en mémoire");
+    }
+
+    // 2. Fallback : calcul en mémoire (comme dans la version originale)
+    let accounts = {
+        let guard = vm.state.accounts.read().await;
+        guard.clone()
+    };
+
+    let trie_accounts: Vec<(alloy_primitives::B256, reth_trie::TrieAccount)> = accounts
+        .iter()
+        .filter_map(|(address, opt_account)| {
+            opt_account(|acc: &Account| {
+                let trie_account = reth_trie::TrieAccount {
+                    nonce: acc.nonce,
+                    balance: acc.balance,
+                    storage_root: Default::default(),
+                    code_hash: Default::default(),
+                };
+                (address.clone(), trie_account)
+            })
+        });
+        .collect();
+
+    // Pas besoin de sort_by si tu utilises un BTreeMap ou si l'ordre n'importe pas pour le hash
+    // trie_accounts.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let state_root = reth_trie::root::state_root(trie_accounts.into_iter());
+
+    let state_root_hex = format!("0x{}", hex::encode(state_root.as_slice()));
+
+    // Optionnel : persister la nouvelle racine calculée pour les prochains appels
+    if let Some(storage) = &vm.storage_manager {
+        let root_bytes: Vec<u8> = state_root.as_slice().to_vec();
+        if let Err(e) = storage.write("global_state_root", &root_bytes) {
+            error!("Échec persistance state root dans RocksDB : {}", e);
+        } else {
+            info!("State root persistée dans RocksDB pour futures lectures rapides");
+        }
+    }
+
+    state_root_hex
+}
+
         pub async fn start_server(&self) {
             
         let socket_addr: SocketAddr = format!("{}:{}", "0.0.0.0", self.rpc_service.port)
@@ -3952,6 +4162,19 @@ let already_exists = if let manager = storage.as_ref() {
         println!("👥 Total accounts created: {}", user_accounts);
         println!("🏦 System accounts: {} (system + VEZ contract)", accounts.len() - user_accounts);
     }
+
+    let engine_clone_for_p2p = engine_platform.clone();
+
+tokio::spawn(async move {
+    let listener = TcpListener::bind("0.0.0.0:45054").await.unwrap();
+    loop {
+        let (stream, peer_addr) = listener.accept().await.unwrap();
+        let engine_inner = engine_clone_for_p2p.clone();   // clone à chaque connexion
+        tokio::spawn(async move {
+            engine_inner.run_peer_loop(stream).await;
+        });
+    }
+});
     
     println!("🛑 Press Ctrl+C to stop\n");
 

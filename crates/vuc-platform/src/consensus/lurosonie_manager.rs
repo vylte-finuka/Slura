@@ -20,7 +20,7 @@ use vuc_events::timestamp_release::TimestampRelease;
 use vuc_storage::storing_access::{RocksDBManager, RocksDBManagerImpl, SlurachainMetadata};
 use vuc_tx::slura_merkle::build_state_trie;
 use vuc_tx::slurachain_vm::SlurachainVm;
-use vuc_types::committee::committee::EpochId;
+use vuc_types::committee::EpochId;
 use vuc_types::supported_protocol_versions::SupportedProtocolVersions;
 
 lazy_static! {
