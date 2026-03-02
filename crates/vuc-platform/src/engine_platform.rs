@@ -2430,106 +2430,45 @@ pub async fn handle_incoming_slu_message(&self, message: &str) {
 pub async fn compute_current_state_root(&self) -> String {
     let vm = self.vm.read().await;
 
-    // 1. On tente d'abord de récupérer la racine déjà persistée dans RocksDB
+    // Tentative de lecture depuis la DB
     if let Some(storage) = &vm.storage_manager {
-        // Clé conventionnelle pour la state root globale (tu peux la changer)
-        let state_root_key = "global_state_root".to_string();
-
-        match storage.read(&state_root_key) {
-            Ok(root_bytes) => {
-                // On s'attend à 32 bytes (B256 / keccak256)
-                if root_bytes.len() == 32 {
-                    let hex_root = format!("0x{}", hex::encode(&root_bytes));
-                    info!("State root récupérée depuis RocksDB : {}", hex_root);
-                    return hex_root;
-                } else {
-                    warn!(
-                        "State root dans DB invalide ({} bytes au lieu de 32) → fallback calcul",
-                        root_bytes.len()
-                    );
-                }
+        let key = "current_state_root".to_string();
+        if let Ok(Some(bytes)) = storage.read(&key) {
+            if bytes.len() == 32 {
+                return format!("0x{}", hex::encode(bytes));
             }
-            Ok(none) => {
-                info!("Aucune state root persistée dans RocksDB → calcul en mémoire");
-            }
-            Err(e) => {
-                error!("Erreur lecture state root depuis DB : {} → fallback calcul", e);
-            }
-        }
-    } else {
-        warn!("Aucun storage manager disponible → calcul state root en mémoire");
-    }
-
-    // 2. Fallback : calcul en mémoire (comme dans la version originale)
-    let accounts = {
-        let guard = vm.state.accounts.read().await;
-        guard.clone()
-    };
-
-    let trie_accounts: Vec<(alloy_primitives::B256, reth_trie::TrieAccount)> = accounts
-        .iter()
-        .filter_map(|(address, opt_account)| {
-            opub async fn compute_current_state_root(&self) -> String {
-    let vm = self.vm.read().await;
-
-    // Priorité 1 : tentative de lecture depuis RocksDB
-    if let Some(storage) = &vm.storage_manager {
-        let state_root_key = "global_state_root".to_string();
-
-        match storage.read(&state_root_key) {
-            Ok(Some(root_bytes)) if root_bytes.len() == 32 => {
-                let hex_root = format!("0x{}", hex::encode(&root_bytes));
-                info!("State root chargée depuis RocksDB : {}", hex_root);
-                return hex_root;
-            }
-            Ok(Some(bytes)) => {
-                warn!("State root en DB a {} bytes (attendu 32) → recalcul", bytes.len());
-            }
-            Ok(None) => info!("Aucune state root en DB → calcul en mémoire"),
-            Err(e) => error!("Erreur lecture DB state root : {} → calcul en mémoire", e),
         }
     }
 
-    // Priorité 2 : calcul en mémoire
-    let accounts = {
-        let guard = vm.state.accounts.read().await;
-        guard.clone()
-    };
+    // Calcul simple
+    let accounts = vm.state.accounts.read().await;
+    let mut sorted_addrs: Vec<&String> = accounts.keys().collect();
+    sorted_addrs.sort();
 
-    let trie_accounts: Vec<(alloy_primitives::B256, reth_trie::TrieAccount)> = accounts
-        .iter()
-        .map(|(address, account)| {
-            // account est &AccountState ici
-            let trie_account = reth_trie::TrieAccount {
-                nonce: account.nonce,
-                balance: account.balance,
-                storage_root: Default::default(),
-                code_hash: Default::default(),
-            };
-            (address.clone(), trie_account)
-        })
-        .collect();
+    let mut hasher = Keccak256::new();
 
-    // Tri optionnel (seulement si l'ordre des clés doit être déterministe)
-    // trie_accounts.sort_by(|a, b| a.0.cmp(&b.0));
-
-    let state_root = reth_trie::root::state_root(trie_accounts.into_iter());
-
-    let state_root_hex = format!("0x{}", hex::encode(state_root.as_slice()));
-
-    // Optionnel : sauvegarder pour les prochains appels
-    if let Some(storage) = &vm.storage_manager {
-        let root_bytes = state_root.as_slice().to_vec();
-        if let Err(e) = storage.write("global_state_root", &root_bytes) {
-            error!("Échec écriture state root dans DB : {}", e);
-        } else {
-            info!("State root persistée dans RocksDB");
+    for addr in sorted_addrs {
+        if let Some(acc) = accounts.get(addr) {
+            hasher.update(addr.as_bytes());
+            hasher.update(&acc.balance.to_be_bytes());
+            hasher.update(&acc.nonce.to_be_bytes());
+            if !acc.contract_state.is_empty() {
+                hasher.update(keccak256(&acc.contract_state).as_slice());
+            }
         }
     }
 
-    state_root_hex
+    let root = hasher.finalize();
+    let hex_root = format!("0x{}", hex::encode(root));
+
+    // Sauvegarde pour la prochaine fois (optionnel mais utile)
+    if let Some(storage) = &vm.storage_manager {
+        let _ = storage.write("current_state_root", root.as_slice());
+    }
+
+    hex_root
 }
-
+        
         pub async fn start_server(&self) {
             
         let socket_addr: SocketAddr = format!("{}:{}", "0.0.0.0", self.rpc_service.port)
