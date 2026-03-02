@@ -1654,20 +1654,19 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
             }
         }
 
+        //convert vec to &str
+        let constructor = std::str::from_utf8(&creation_bytecode).unwrap_or("");
+
         // 3. Exécution du déploiement (maintenant le bytecode est dans l'état)
         println!("🚀 Déploiement via execute_module (raw_creation) → {}", contract_address);
 
         let deploy_result = vm.execute_module(
             &contract_address,
-            "raw_creation",
+            constructor,
             vec![],
             Some(&from_addr),
             Some(&constructor_calldata),
         ).await;
-
-        if let Err(e) = deploy_result {
-            return Err(format!("Échec déploiement via execute_module (raw) : {:?}", e));
-        }
 
 let runtime_bytecode = match deploy_result {
     Ok(value) => {
