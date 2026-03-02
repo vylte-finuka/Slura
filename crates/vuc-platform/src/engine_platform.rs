@@ -2469,32 +2469,61 @@ pub async fn compute_current_state_root(&self) -> String {
     let trie_accounts: Vec<(alloy_primitives::B256, reth_trie::TrieAccount)> = accounts
         .iter()
         .filter_map(|(address, opt_account)| {
-            opt_account(|acc: &Account| {
-                let trie_account = reth_trie::TrieAccount {
-                    nonce: acc.nonce,
-                    balance: acc.balance,
-                    storage_root: Default::default(),
-                    code_hash: Default::default(),
-                };
-                (address.clone(), trie_account)
-            })
-        });
+            opub async fn compute_current_state_root(&self) -> String {
+    let vm = self.vm.read().await;
+
+    // Priorité 1 : tentative de lecture depuis RocksDB
+    if let Some(storage) = &vm.storage_manager {
+        let state_root_key = "global_state_root".to_string();
+
+        match storage.read(&state_root_key) {
+            Ok(Some(root_bytes)) if root_bytes.len() == 32 => {
+                let hex_root = format!("0x{}", hex::encode(&root_bytes));
+                info!("State root chargée depuis RocksDB : {}", hex_root);
+                return hex_root;
+            }
+            Ok(Some(bytes)) => {
+                warn!("State root en DB a {} bytes (attendu 32) → recalcul", bytes.len());
+            }
+            Ok(None) => info!("Aucune state root en DB → calcul en mémoire"),
+            Err(e) => error!("Erreur lecture DB state root : {} → calcul en mémoire", e),
+        }
+    }
+
+    // Priorité 2 : calcul en mémoire
+    let accounts = {
+        let guard = vm.state.accounts.read().await;
+        guard.clone()
+    };
+
+    let trie_accounts: Vec<(alloy_primitives::B256, reth_trie::TrieAccount)> = accounts
+        .iter()
+        .map(|(address, account)| {
+            // account est &AccountState ici
+            let trie_account = reth_trie::TrieAccount {
+                nonce: account.nonce,
+                balance: account.balance,
+                storage_root: Default::default(),
+                code_hash: Default::default(),
+            };
+            (address.clone(), trie_account)
+        })
         .collect();
 
-    // Pas besoin de sort_by si tu utilises un BTreeMap ou si l'ordre n'importe pas pour le hash
+    // Tri optionnel (seulement si l'ordre des clés doit être déterministe)
     // trie_accounts.sort_by(|a, b| a.0.cmp(&b.0));
 
     let state_root = reth_trie::root::state_root(trie_accounts.into_iter());
 
     let state_root_hex = format!("0x{}", hex::encode(state_root.as_slice()));
 
-    // Optionnel : persister la nouvelle racine calculée pour les prochains appels
+    // Optionnel : sauvegarder pour les prochains appels
     if let Some(storage) = &vm.storage_manager {
-        let root_bytes: Vec<u8> = state_root.as_slice().to_vec();
+        let root_bytes = state_root.as_slice().to_vec();
         if let Err(e) = storage.write("global_state_root", &root_bytes) {
-            error!("Échec persistance state root dans RocksDB : {}", e);
+            error!("Échec écriture state root dans DB : {}", e);
         } else {
-            info!("State root persistée dans RocksDB pour futures lectures rapides");
+            info!("State root persistée dans RocksDB");
         }
     }
 
