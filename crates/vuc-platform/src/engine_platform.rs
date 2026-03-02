@@ -2433,7 +2433,7 @@ pub async fn compute_current_state_root(&self) -> String {
     // Tentative de lecture depuis la DB
     if let Some(storage) = &vm.storage_manager {
         let key = "current_state_root".to_string();
-        if let Ok(Some(bytes)) = storage.read(&key) {
+        if let Ok(bytes) = storage.read(&key) {
             if bytes.len() == 32 {
                 return format!("0x{}", hex::encode(bytes));
             }
