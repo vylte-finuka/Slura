@@ -37,9 +37,8 @@ pub const LUROSONIE_MIN_RELAY_STAKE: u64 = 30_000;
 pub const LUROSONIE_SYSTEM_VALIDATOR: &str = "0x53ae54b11251d5003e9aa51422405bc35a2ef32d";
 
 // Valeur forcée énorme pour que le système soit toujours valide
-const FORCED_SYSTEM_POWER: u64 = 1_000_000_000; // 1 milliard VEZ → jamais bloqué
+const FORCED_SYSTEM_POWER: u64 = 1_000_000_000;
 
-// Selectors Solidity (placeholders)
 const RELAY_MASTER_SELECTOR: &str = "relay_master(address,uint256)";
 const REWARD_HOLDER_SELECTOR: &str = "reward_lurosonie_holder(address,uint256)";
 const GET_POWER_SELECTOR: &str = "getValidatorRelayPower(address)";

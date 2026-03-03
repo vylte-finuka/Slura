@@ -3,9 +3,15 @@ use ethers::utils::keccak256;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, mpsc, broadcast}; // Ajoute broadcast
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use k256::{
+    ecdsa::{SigningKey, VerifyingKey, RecoveryId, Signature as K256Signature},
+    elliptic_curve::sec1::ToEncodedPoint,
+    FieldBytes,
+};
 use rand::Rng;
 use tracing::warn;
 use alloy_primitives::Keccak256;
+use k256::ecdsa::signature::Signer;
 
 // Ensure the correct module path for TimestampRelease
 use vuc_events::timestamp_release::TimestampRelease;
@@ -61,7 +67,7 @@ pub enum OwnershipType {
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-struct SyncHeartbeat {
+struct SyncProSync {
     protocol: String,           // "slu"
     epoch: u64,
     state_root: String,         // 0x...
@@ -112,12 +118,24 @@ pub struct EnginePlatform {
     pub vm: Arc<tokio::sync::RwLock<SlurachainVm>>,
     pub tx_receipts: Arc<tokio::sync::RwLock<HashMap<String, serde_json::Value>>>,
     pub validator_address: String,
+    // Ajout dans la struct EnginePlatform
+    pub known_peers: Arc<TokioRwLock<HashMap<SocketAddr, PeerInfo>>>,
     pub current_block_number: Arc<TokioRwLock<u64>>,
     pub block_transactions: Arc<TokioRwLock<HashMap<u64, Vec<String>>>>,
     // AJOUTS POUR RECEIPT INSTANTANÉ
     pub block_finalized_tx: Arc<broadcast::Sender<Vec<String>>>,
 
     pub pending_deployments: Arc<tokio::sync::RwLock<HashMap<String, String>>>,
+}
+
+#[derive(Clone)]
+pub struct PeerInfo {
+    pub node_id: String,
+    pub validator_address: Option<String>,     // adresse Ethereum du validateur du pair
+    pub public_key: Option<[u8; 33]>,          // pubkey compressée secp256k1 (33 bytes)
+    pub last_state_root: Option<String>,
+    pub last_verified: i64,
+    pub last_signature: Option<Vec<u8>>,
 }
 
 impl EnginePlatform {
@@ -129,7 +147,11 @@ impl EnginePlatform {
         validator_address: String,
         cluster: String,
     ) -> Self {
+        // On crée known_peers ici → plus besoin de le passer
+        let known_peers = Arc::new(TokioRwLock::new(HashMap::<SocketAddr, PeerInfo>::new()));
+
         let (block_finalized_tx, _) = broadcast::channel(10_000);
+
         EnginePlatform {
             vyftid,
             bytecode,
@@ -137,12 +159,142 @@ impl EnginePlatform {
             vm,
             tx_receipts: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             validator_address,
+            known_peers,                                 // ← initialisé ici
             current_block_number: Arc::new(TokioRwLock::new(1)),
             block_transactions: Arc::new(TokioRwLock::new(HashMap::new())),
             block_finalized_tx: Arc::new(block_finalized_tx),
             pending_deployments: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         }
     }
+
+    /// Vérifie un ProSync signé reçu d'un pair
+/// Retourne Ok(()) si valide, Err(raison) sinon
+pub async fn verify_incoming_ProSync(&self, message: &str, peer_addr: SocketAddr) -> Result<(), String> {
+    // Format attendu : slu#epoch#stateroot#lastblockhash#nodeid#signature (65 bytes hex)
+    let parts: Vec<&str> = message.trim_end_matches('\n').split('#').collect();
+    if parts.len() != 6 {
+        return Err(format!("Format ProSync invalide ({} parts au lieu de 6)", parts.len()));
+    }
+
+    let protocol = parts[0];
+    let epoch_str = parts[1];
+    let state_root = format!("0x{}", parts[2]);
+    let last_block_hash = format!("0x{}", parts[3]);
+    let node_id = parts[4];
+    let sig_hex = parts[5];
+
+    if protocol != "slu" {
+        return Err("Protocole non reconnu".to_string());
+    }
+
+    let epoch: u64 = epoch_str.parse()
+        .map_err(|_| "Échec parsing epoch".to_string())?;
+
+    if !sig_hex.starts_with("0x") || sig_hex.len() != 132 + 2 { // 65 bytes = 130 hex + 0x
+        return Err(format!("Signature mal formée: {}", sig_hex));
+    }
+
+    let signature_bytes = hex::decode(&sig_hex[2..])
+        .map_err(|e| format!("Signature hex invalide: {}", e))?;
+
+    if signature_bytes.len() != 65 {
+        return Err(format!("Signature doit faire 65 bytes, reçu {}", signature_bytes.len()));
+    }
+
+    // Reconstruire le payload signé (sans la signature)
+    let payload = format!("slu#{}#{}#{}#{}#{}",
+        epoch,
+        state_root.trim_start_matches("0x"),
+        last_block_hash.trim_start_matches("0x"),
+        node_id
+    );
+
+    let msg_hash = keccak256(payload.as_bytes());
+
+    // Extraire r, s, v
+    let r = &signature_bytes[0..32];
+    let s = &signature_bytes[32..64];
+    let v_byte = signature_bytes[64];
+
+    let recovery_id = match v_byte {
+        27 => RecoveryId::new(false, false),
+        28 => RecoveryId::new(true, false),
+        _ => return Err(format!("v invalide: {}", v_byte)),
+    };
+
+    let signature = K256Signature::from_scalars(
+        k256::FieldBytes::clone_from_slice(r),
+        k256::FieldBytes::clone_from_slice(s),
+    ).map_err(|_| "Signature r/s invalide".to_string())?;
+
+    // Récupérer la clé publique du pair (depuis known_peers ou via ecrecover)
+    let verifying_key = {
+        let peers = self.known_peers.read().await;
+        if let Some(peer) = peers.get(&peer_addr) {
+            if let Some(pk_bytes) = peer.public_key {
+                VerifyingKey::from_sec1_bytes(&pk_bytes)
+                    .map_err(|_| "Clé publique stockée invalide".to_string())?
+            } else {
+                // Fallback : ecrecover (on récupère la pubkey et on la stocke)
+                let recovered = signature.recover_verify_key_from_digest_bytes(
+                    &msg_hash.into()
+                ).map_err(|_| "Impossible de récupérer la clé publique".to_string())?;
+
+                let pk_compressed = recovered.to_encoded_point(true).as_bytes().to_vec();
+                if pk_compressed.len() != 33 {
+                    return Err("Clé publique récupérée de taille invalide".to_string());
+                }
+
+                // Mettre à jour le pair
+                let mut peers_mut = self.known_peers.write().await;
+                if let Some(peer_mut) = peers_mut.get_mut(&peer_addr) {
+                    peer_mut.public_key = Some(pk_compressed.try_into().unwrap());
+                    peer_mut.last_verified = Utc::now().timestamp();
+                }
+
+                recovered
+            }
+        } else {
+            // Premier contact → on utilise ecrecover et on enregistre
+            let recovered = signature.recover_verify_key_from_digest_bytes(
+                &msg_hash.into()
+            ).map_err(|_| "Premier contact : impossible de récupérer pubkey".to_string())?;
+
+            let pk_compressed = recovered.to_encoded_point(true).as_bytes().to_vec();
+            let mut peers_mut = self.known_peers.write().await;
+            peers_mut.insert(peer_addr, PeerInfo {
+                node_id: node_id.to_string(),
+                validator_address: None, // À remplir si tu as un mapping node_id → address
+                public_key: Some(pk_compressed.try_into().unwrap()),
+                last_state_root: Some(state_root.clone()),
+                last_verified: Utc::now().timestamp(),
+                last_signature: Some(signature_bytes),
+            });
+
+            recovered
+        }
+    };
+
+    // Vérification finale
+    if verifying_key.verify_digest(msg_hash.into(), &signature).is_ok() {
+        // Mise à jour des infos du pair
+        {
+            let mut peers = self.known_peers.write().await;
+            if let Some(peer) = peers.get_mut(&peer_addr) {
+                peer.last_state_root = Some(state_root);
+                peer.last_verified = Utc::now().timestamp();
+                peer.last_signature = Some(signature_bytes);
+            }
+        }
+
+        info!("ProSync signé valide de {} (epoch {}, state root {})", 
+              peer_addr, epoch, state_root);
+        
+        Ok(())
+    } else {
+        Err("Signature invalide".to_string())
+    }
+}
 
     fn normalize_tx_hash(&self, hash: &str) -> String {
         let cleaned = hash.trim().strip_prefix("0x").unwrap_or(hash);
@@ -888,7 +1040,7 @@ pub async fn get_account_balance(&self, address: &str) -> Result<U256, String> {
         Ok(serde_json::json!({
             "status": "active",
             "chainId": self.get_chain_id(),
-            "networkName": "Slurachain Charene",
+            "networkName": self.get_chain_name(),
             "consensus": "Lurosonie BFT Relayed PoS",
             "nativeToken": "VEZ",
             "totalAccounts": total_accounts,
@@ -2306,14 +2458,14 @@ pub async fn eth_call(&self, call_object: serde_json::Value) -> Result<String, S
         Ok(ethereum_accounts)
     }
 
-    // Génère le heartbeat actuel (à appeler périodiquement)
-    pub async fn generate_heartbeat(&self) -> String {
+    // Génère le ProSync actuel (à appeler périodiquement)
+    pub async fn generate_ProSync(&self) -> String {
         let current_epoch = self.get_current_epoch();
         let state_root = self.compute_current_state_root().await;
         let last_block_hash = self.rpc_service.lurosonie_manager.get_last_block_hash().await
             .unwrap_or("0x0".to_string());
 
-        let hb = SyncHeartbeat {
+        let hb = SyncProSync {
             protocol: "slu".to_string(),
             epoch: current_epoch,
             state_root,
@@ -2371,20 +2523,20 @@ pub async fn run_peer_loop(&self, stream: TcpStream) {
     // Pas de 'mut' ici car on consomme stream immédiatement
     let (reader, mut writer) = stream.into_split();  // into_split() consomme et donne Owned halves
 
-    let engine_clone_for_heartbeat = self.clone();
+    let engine_clone_for_ProSync = self.clone();
 
-    // Tâche d'envoi heartbeat (écrit périodiquement)
+    // Tâche d'envoi ProSync (écrit périodiquement)
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(60));
         loop {
             interval.tick().await;
-            let heartbeat = engine_clone_for_heartbeat.generate_heartbeat().await;
-            if let Err(e) = writer.write_all((heartbeat + "\n").as_bytes()).await {
-                error!("Échec écriture heartbeat : {}", e);
+            let ProSync = engine_clone_for_ProSync.generate_ProSync().await;
+            if let Err(e) = writer.write_all((ProSync + "\n").as_bytes()).await {
+                error!("Échec écriture ProSync : {}", e);
                 break;
             }
         }
-        info!("Tâche heartbeat terminée");
+        info!("Tâche ProSync terminée");
     });
 
     // Tâche de réception (lit en boucle)
@@ -2404,7 +2556,7 @@ pub async fn run_peer_loop(&self, stream: TcpStream) {
                     for line in text.lines() {
                         let trimmed = line.trim();
                         if trimmed.starts_with("slu#") {
-                            engine_clone_for_receive.handle_incoming_slu_message(trimmed).await;
+                            engine_clone_for_receive.handle_incoming_slu_message(trimmed, peer_addr).await;
                         }
                     }
                 }
@@ -2418,9 +2570,24 @@ pub async fn run_peer_loop(&self, stream: TcpStream) {
     });
 }
 
-pub async fn handle_incoming_slu_message(&self, message: &str) {
-    if let Some((remote_epoch, remote_block_hash)) = self.should_sync_with(message).await {
-        println!("⚠️ Synchronisation nécessaire avec pair (epoch {}, block {})", remote_epoch, remote_block_hash);
+pub async fn handle_incoming_slu_message(&self, message: &str, peer_addr: SocketAddr) {
+    match self.verify_incoming_ProSync(message, peer_addr).await {
+        Ok(()) => {
+            // Signature valide → on peut faire confiance au state root
+            if let Some((remote_epoch, remote_block_hash)) = self.should_sync_with(message).await {
+                info!("Synchronisation nécessaire avec {} → epoch {} vs local {}, block hash {}",
+                      peer_addr, remote_epoch, self.get_current_epoch(), remote_block_hash);
+                
+                // → Ici tu lances la sync (GET_BLOCK, etc.)
+            } else {
+                info!("Pair {} synchronisé (signature valide)", peer_addr);
+            }
+        }
+        Err(e) => {
+            warn!("ProSync invalide de {} : {}", peer_addr, e);
+            // Optionnel : déconnexion agressive du pair
+            // self.disconnect_peer(peer_addr).await;
+        }
     }
 }
 
@@ -2430,43 +2597,96 @@ pub async fn handle_incoming_slu_message(&self, message: &str) {
 pub async fn compute_current_state_root(&self) -> String {
     let vm = self.vm.read().await;
 
-    // Tentative de lecture depuis la DB
-    if let Some(storage) = &vm.storage_manager {
-        let key = "current_state_root".to_string();
-        if let Ok(bytes) = storage.read(&key) {
-            if bytes.len() == 32 {
-                return format!("0x{}", hex::encode(bytes));
+    // 1. Tentative de lecture du cache signé (hash + signature)
+    if let Some(storage) = vm.storage_manager.as_ref() {
+        let hash_key = b"state_root_current".str().as_bytes().to_vec();
+        if let Ok(cached_hash) = storage.read(&hash_key) {
+            if cached_hash.len() == 32 {
+                // Optionnel : on peut aussi vérifier la signature ici si on veut être parano
+                return format!("0x{}", hex::encode(cached_hash));
             }
         }
     }
 
-    // Calcul simple
-    let accounts = vm.state.accounts.read().await;
-    let mut sorted_addrs: Vec<&String> = accounts.keys().collect();
-    sorted_addrs.sort();
+    // 2. Calcul déterministe du state root
+    let accounts_guard = vm.state.accounts.read().await;
+    let mut sorted: Vec<(&String, &vuc_tx::slurachain_vm::AccountState)> =
+        accounts_guard.iter().collect();
+
+    sorted.sort_by(|a, b| a.0.cmp(b.0));
 
     let mut hasher = Keccak256::new();
 
-    for addr in sorted_addrs {
-        if let Some(acc) = accounts.get(addr) {
-            hasher.update(addr.as_bytes());
-            hasher.update(&acc.balance.to_be_bytes());
-            hasher.update(&acc.nonce.to_be_bytes());
-            if !acc.contract_state.is_empty() {
-                hasher.update(keccak256(&acc.contract_state).as_slice());
+    for (addr, acc) in &sorted {
+        hasher.update(addr.as_bytes());
+        hasher.update(&acc.balance.to_be_bytes());
+        hasher.update(&acc.nonce.to_be_bytes());
+
+        if !acc.contract_state.is_empty() {
+            hasher.update(keccak256(&acc.contract_state).as_slice());
+        }
+
+        if let Some(root_val) = acc.resources.get("storage_root") {
+            if let Some(s) = root_val.as_str() {
+                hasher.update(s.as_bytes());
+            }
+        }
+
+        hasher.update(&acc.state_version.to_be_bytes());
+    }
+
+    let state_root = hasher.finalize().vec();
+    let state_root_hex = format!("0x{}", hex::encode(&state_root));
+
+    // 3. Signature avec la clé privée du validateur
+    let signature_opt = self.sign_state_root(&state_root).await;
+
+    // 4. Persistance (hash + signature si disponible)
+    if let Some(storage) = vm.storage_manager.as_ref() {
+        let hash_key = b"state_root_current".str().as_bytes().to_vec();
+        let _ = storage.write(&hash_key, &state_root.to_vec());
+
+        if let Some(sig) = signature_opt {
+            let sig_key = b"state_root_signature_current".str().as_bytes().to_vec();
+            let _ = storage.write(&sig_key, &sig);
+        }
+    }
+
+    state_root_hex
+}
+
+/// Signe le state root avec la clé privée du validateur (secp256k1)
+async fn sign_state_root(&self, message: &[u8]) -> Option<Vec<u8>> {
+    let vm = self.vm.read().await;
+    let accounts = vm.state.accounts.read().await;
+
+    // Récupérer la clé privée du validateur
+    if let Some(acc) = accounts.get(&self.validator_address.to_lowercase()) {
+        if let Some(privkey_json) = acc.resources.get("private_key") {
+            if let Some(privkey_hex) = privkey_json.as_str() {
+                let privkey_clean = privkey_hex.trim_start_matches("0x");
+                if let Ok(priv_bytes) = hex::decode(privkey_clean) {
+                    if priv_bytes.len() == 32 {
+                        if let Ok(signing_key) = SigningKey::from_bytes(&priv_bytes.into()) {
+                            // keccak256 du message (standard Ethereum)
+                            let msg_hash = keccak256(message);
+
+                            if let Ok(signature) = signing_key.sign(&msg_hash) {
+                                let sig_bytes: [u8; 64] = signature.to_bytes().into();
+                                let v = if signature.recovery_id().unwrap_or(0) == 0 { 27 } else { 28 };
+                                let mut full_sig = sig_bytes.to_vec();
+                                full_sig.push(v);
+                                return Some(full_sig); // 65 bytes : r,s,v
+                            }
+                        }
+                    }
+                }
             }
         }
     }
 
-    let root = hasher.finalize();
-    let hex_root = format!("0x{}", hex::encode(root));
-
-    // Sauvegarde pour la prochaine fois (optionnel mais utile)
-    if let Some(storage) = &vm.storage_manager {
-        let _ = storage.write("current_state_root", root.as_slice());
-    }
-
-    hex_root
+    error!("Impossible de signer le state root : clé privée du validateur introuvable");
+    None
 }
         
         pub async fn start_server(&self) {
@@ -3379,7 +3599,6 @@ module.register_async_method("eth_getCode", move |params, _meta, _| {
     /// ✅ AJOUT: Conversion d'adresse Ethereum vers UIP-10 
     fn convert_ethereum_to_uip10(&self, eth_addr: &str) -> String {
         // Pour l'instant, retourner l'adresse telle quelle
-        // Dans une implémentation complète, il faudrait une table de mapping
         eth_addr.to_string()
     }
 }
@@ -3635,7 +3854,7 @@ pub fn extract_runtime_from_creation_bytecode(full: &[u8]) -> Result<Vec<u8>, St
     let mut i = full.len().saturating_sub(1);
 
     while i >= 3 {
-        if full[i] == 0xf3 {  // RETURN
+        if full[i] == 0xf3 {
             if i >= 2 && (0x60..=0x7f).contains(&full[i - 2]) {
                 let mut pos = i + 1;
 
@@ -3715,7 +3934,7 @@ async fn main() {
         Network::Devnet => "devnet",
     };
 
-    println!("🌐 Réseau Slurachain sélectionné: {} ({})", cluster_str, match cluster {
+    println!("🌐 Réseau Vyft slura sélectionné: {} ({})", cluster_str, match cluster {
         Network::Mainnet => "Production - Réseau principal",
         Network::Testnet => "Test - Réseau de test public (Charène)", 
         Network::Devnet => "Développement - Réseau local",
@@ -4133,14 +4352,26 @@ let already_exists = if let manager = storage.as_ref() {
 
     let engine_clone_for_p2p = engine_platform.clone();
 
+// Dans run_peer_loop
 tokio::spawn(async move {
-    let listener = TcpListener::bind("0.0.0.0:45054").await.unwrap();
+    let mut reader = reader;
+    let mut buf = vec![0u8; 8192];
+
     loop {
-        let (stream, peer_addr) = listener.accept().await.unwrap();
-        let engine_inner = engine_clone_for_p2p.clone();   // clone à chaque connexion
-        tokio::spawn(async move {
-            engine_inner.run_peer_loop(stream).await;
-        });
+        match reader.read(&mut buf).await {
+            Ok(0) => { info!("Pair déconnecté"); break; }
+            Ok(n) => {
+                let text = String::from_utf8_lossy(&buf[..n]).into_owned();
+                for line in text.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with("slu#") {
+                        // ← On passe maintenant peer_addr
+                        engine_clone_for_receive.handle_incoming_slu_message(trimmed, peer_addr).await;
+                    }
+                }
+            }
+            Err(e) => { error!("Erreur lecture: {}", e); break; }
+        }
     }
 });
     
@@ -4266,6 +4497,14 @@ impl EnginePlatform {
             "mainnet" => 45056,
             "testnet" => 45057,
             "devnet" | _ => 45058,
+        }
+    }
+
+        pub fn get_chain_name(&self) -> String {
+        match std::env::var("SLURACHAIN_NETWORK").unwrap_or("devnet".to_string()).as_str() {
+            "mainnet" => "Vyft slura".to_string(),
+            "testnet" => "Vyft slura Charene".to_string(),
+            "devnet" | _ => "Vyft slura Devnet".to_string(),
         }
     }
 }
