@@ -3743,6 +3743,239 @@ println!("🟢 {} receipts restaurés depuis RocksDB au démarrage", loaded_rece
 
     println!("✅ Engine Platform initialisé");
 
+    // ────────────────────────────────────────────────
+// P2P RÉEL EN PRODUCTION — PORTS SELON CLUSTER
+// ────────────────────────────────────────────────
+let p2p_port: u16 = match cluster {
+    Network::Mainnet => 30303,
+    Network::Testnet => 30304,
+    Network::Devnet   => 30305,
+};
+
+let p2p_addr: SocketAddr = format!("0.0.0.0:{}", p2p_port).parse().unwrap();
+
+println!("P2P réel démarré sur {} (cluster: {})", p2p_addr, cluster_str);
+
+// 1. TCP Listener — accepte connexions entrantes (pulses + sync)
+let tcp_listener = TcpListener::bind(p2p_addr).await.unwrap_or_else(|e| {
+    eprintln!("Échec bind TCP P2P {} : {}", p2p_port, e);
+    std::process::exit(1);
+});
+
+tokio::spawn({
+    let engine = engine_platform.clone();
+    let lurosonie = lurosonie_manager.clone();
+
+    async move {
+        loop {
+            let (mut socket, peer) = match tcp_listener.accept().await {
+                Ok(conn) => conn,
+                Err(e) => {
+                    error!("Accept TCP échoué : {}", e);
+                    continue;
+                }
+            };
+
+            info!("Nouvelle connexion P2P depuis {}", peer);
+
+            tokio::spawn({
+                let engine = engine.clone();
+                let lurosonie = lurosonie.clone();
+
+                async move {
+                    let mut buf = vec![0u8; 65536]; // 64 KiB en prod
+
+                    loop {
+                        let n = match socket.read(&mut buf).await {
+                            Ok(0) => break,
+                            Ok(n) => n,
+                            Err(e) => {
+                                error!("Lecture TCP échouée depuis {} : {}", peer, e);
+                                break;
+                            }
+                        };
+
+                        let msg = String::from_utf8_lossy(&buf[0..n]).to_string();
+
+                        if !msg.starts_with("slu#") { continue; }
+
+                        // Pulse reçu
+                        if msg.starts_with("slu#baga#1#") {
+                            let parts: Vec<&str> = msg.split('|').collect();
+                            if parts.len() >= 5 {
+                                if let Ok(height) = parts[2].parse::<u64>() {
+                                    let local_height = lurosonie.get_block_height().await;
+                                    if height > local_height + 5 {
+                                        info!("Pair {} est en avance : {} vs local {}", peer, height, local_height);
+                                    }
+                                }
+                            }
+                        }
+
+                        // Réponse à une demande sync
+                        else if msg.starts_with("slu#resp#full#") {
+                            let parts: Vec<&str> = msg.split('|').collect();
+                            if parts.len() < 3 { continue; }
+
+                            let count_str = parts[1].strip_prefix("count:").unwrap_or("0");
+                            let count: u64 = count_str.parse().unwrap_or(0);
+                            let payload_b64 = parts[2];
+
+                            match base64_url::decode(payload_b64) {
+                                Ok(compressed) => {
+                                    match decompress_to_vec_zlib(&compressed) {
+                                        Ok(json_bytes) => {
+                                            match serde_json::from_slice::<Vec<serde_json::Value>>(&json_bytes) {
+                                                Ok(blocks) => {
+                                                    if let Some(storage) = engine.vm.read().await.storage_manager.clone() {
+                                                        let mut imported = 0;
+                                                        for block_json in blocks {
+                                                            let number = block_json["number"].as_u64().unwrap_or(0);
+
+                                                            // Bloc complet
+                                                            let block_key = format!("block:full:{}", number);
+                                                            if let Ok(bytes) = serde_json::to_vec(&block_json) {
+                                                                if storage.write(&block_key, &bytes).is_ok() {
+                                                                    imported += 1;
+                                                                }
+                                                            }
+
+                                                            // Transactions
+                                                            if let Some(txs) = block_json.get("transactions").and_then(|v| v.as_array()) {
+                                                                for tx in txs {
+                                                                    if let Some(hash) = tx.get("hash").and_then(|h| h.as_str()) {
+                                                                        let tx_key = format!("tx:{}", hash);
+                                                                        if let Ok(tx_bytes) = serde_json::to_vec(tx) {
+                                                                            let _ = storage.write(&tx_key, &tx_bytes);
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+
+                                                            // Receipts (à compléter de la même façon)
+                                                        }
+                                                        info!("{} blocs importés depuis {}", imported, peer);
+                                                    }
+                                                }
+                                                Err(e) => error!("JSON invalide reçu : {}", e),
+                                            }
+                                        }
+                                        Err(e) => error!("Décompression zlib échouée : {:?}", e),
+                                    }
+                                }
+                                Err(e) => error!("Base64url invalide : {:?}", e),
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    }
+});
+
+// 2. UDP Discovery — permet aux autres nœuds de te trouver
+let udp_socket = UdpSocket::bind(p2p_addr).await.unwrap_or_else(|e| {
+    eprintln!("Échec bind UDP {} : {}", p2p_port, e);
+    std::process::exit(1);
+});
+
+tokio::spawn(async move {
+    let mut buf = [0u8; 1024];
+    loop {
+        if let Ok((len, src)) = udp_socket.recv_from(&mut buf).await {
+            let msg = String::from_utf8_lossy(&buf[0..len]);
+            if msg.contains("slu#") || msg.contains("find_node") {
+                let pong = format!(
+                    "slu#node#id:node_{}|port:{}|head:{}",
+                    p2p_port,
+                    lurosonie_manager.get_block_height().await
+                );
+                let _ = udp_socket.send_to(pong.as_bytes(), src).await;
+                info!("Répondu à discovery depuis {}", src);
+            }
+        }
+    }
+});
+
+// 3. Boucle proactive de synchronisation (tous les 20s)
+tokio::spawn({
+    let engine = engine_platform.clone();
+    let lurosonie = lurosonie_manager.clone();
+
+    async move {
+        loop {
+            sleep(Duration::from_secs(20)).await;
+
+            let my_head = lurosonie.get_block_height().await;
+
+            // Seeds + pairs découverts (en prod, remplace par une vraie liste dynamique)
+            let peers = vec![
+                format!("127.0.0.1:{}", p2p_port), // Pour test local
+                // Ajoute tes vrais seeds mainnet ici
+                // "seed1.mainnet.slurachain.net:30303".to_string(),
+                // "seed2.mainnet.slurachain.net:30303".to_string(),
+            ];
+
+            for peer_str in peers {
+                let peer_addr: SocketAddr = match peer_str.parse() {
+                    Ok(a) => a,
+                    Err(_) => continue,
+                };
+
+                let mut stream = match TcpStream::connect(peer_addr).await {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+
+                // Envoi pulse pour connaître son head
+                let pulse = format!(
+                    "slu#baga#1#{}|node|{}|0x0000000000000000000000000000000000000000000000000000000000000000|0x0000000000000000000000000000000000000000000000000000000000000000|sig",
+                    chrono::Utc::now().timestamp_millis(),
+                    my_head
+                );
+
+                if stream.write_all(pulse.as_bytes()).await.is_err() { continue; }
+
+                // Lecture réponse pulse (timeout 10s)
+                let mut buf = [0u8; 4096];
+                if let Ok(Ok(n)) = timeout(Duration::from_secs(10), stream.read(&mut buf)).await {
+                    let resp = String::from_utf8_lossy(&buf[0..n]);
+
+                    if resp.starts_with("slu#baga#1#") {
+                        let parts: Vec<&str> = resp.split('|').collect();
+                        if parts.len() >= 5 {
+                            if let Ok(peer_head) = parts[2].parse::<u64>() {
+                                if peer_head > my_head + 5 {
+                                    info!("Retard détecté vs {} : {} vs {}", peer_addr, my_head, peer_head);
+
+                                    let req = format!(
+                                        "slu#req#full#since:{}|limit:20|want_txs:1|want_receipts:1|want_state:0|{}|sig",
+                                        my_head + 1,
+                                        chrono::Utc::now().timestamp_millis()
+                                    );
+
+                                    if stream.write_all(req.as_bytes()).await.is_err() { continue; }
+
+                                    // Lecture réponse sync (timeout 60s, buffer grand)
+                                    let mut sync_buf = vec![0u8; 262144]; // 256 KiB
+                                    if let Ok(Ok(n)) = timeout(Duration::from_secs(60), stream.read(&mut sync_buf)).await {
+                                        let sync_msg = String::from_utf8_lossy(&sync_buf[0..n]);
+
+                                        if sync_msg.starts_with("slu#resp#full#") {
+                                            info!("Réponse sync reçue de {}", peer_addr);
+                                            // Le traitement est déjà dans le listener TCP
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+});
+
     // ✅ Créer et émettre le bloc genesis Lurosonie
     println!("📦 Creating Lurosonie genesis block...");
     let genesis_block = TimestampRelease {
