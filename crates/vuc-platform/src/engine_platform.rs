@@ -3827,50 +3827,50 @@ tokio::spawn({
                             let count: u64 = count_str.parse().unwrap_or(0);
                             let payload_b64 = parts[2];
 
-                            match base64_url::decode(payload_b64) {
-                                Ok(compressed) => {
-                                    match decompress_to_vec_zlib(&compressed) {
-                                        Ok(json_bytes) => {
-                                            match serde_json::from_slice::<Vec<serde_json::Value>>(&json_bytes) {
-                                                Ok(blocks) => {
-                                                    if let Some(storage) = engine.vm.read().await.storage_manager.clone() {
-                                                        let mut imported = 0;
-                                                        for block_json in blocks {
-                                                            let number = block_json["number"].as_u64().unwrap_or(0);
+                            // Dans la partie traitement de "slu#resp#full#"
+match base64_url::decode(payload_b64) {
+    Ok(compressed) => {
+        // Utilisation correcte de miniz_oxide (API 0.7+ / 0.8)
+        match miniz_oxide::inflate::decompress_to_vec_zlib(&compressed) {
+            Ok(json_bytes_vec) => {  // ← retourne déjà Vec<u8>, Sized !
+                match serde_json::from_slice::<Vec<serde_json::Value>>(&json_bytes_vec) {
+                    Ok(blocks) => {
+                        if let Some(storage) = engine.vm.read().await.storage_manager.clone() {
+                            let mut imported = 0usize;
+                            for block_json in blocks {
+                                let number = block_json["number"].as_u64().unwrap_or(0);
 
-                                                            // Bloc complet
-                                                            let block_key = format!("block:full:{}", number);
-                                                            if let Ok(bytes) = serde_json::to_vec(&block_json) {
-                                                                if storage.write(&block_key, &bytes).is_ok() {
-                                                                    imported += 1;
-                                                                }
-                                                            }
-
-                                                            // Transactions
-                                                            if let Some(txs) = block_json.get("transactions").and_then(|v| v.as_array()) {
-                                                                for tx in txs {
-                                                                    if let Some(hash) = tx.get("hash").and_then(|h| h.as_str()) {
-                                                                        let tx_key = format!("tx:{}", hash);
-                                                                        if let Ok(tx_bytes) = serde_json::to_vec(tx) {
-                                                                            let _ = storage.write(&tx_key, &tx_bytes);
-                                                                        }
-                                                                    }
-                                                                }
-                                                            }
-
-                                                            // Receipts (à compléter de la même façon)
-                                                        }
-                                                        info!("{} blocs importés depuis {}", imported, peer);
-                                                    }
-                                                }
-                                                Err(e) => error!("JSON invalide reçu : {}", e),
-                                            }
-                                        }
-                                        Err(e) => error!("Décompression zlib échouée : {:?}", e),
+                                // Sauvegarde bloc complet
+                                let block_key = format!("block:full:{}", number);
+                                if let Ok(bytes) = serde_json::to_vec(&block_json) {
+                                    if storage.write(&block_key, &bytes).is_ok() {
+                                        imported += 1;
                                     }
                                 }
-                                Err(e) => error!("Base64url invalide : {:?}", e),
+
+                                // Transactions (comme avant)
+                                if let Some(txs) = block_json.get("transactions").and_then(|v| v.as_array()) {
+                                    for tx in txs {
+                                        if let Some(hash) = tx.get("hash").and_then(|h| h.as_str()) {
+                                            let tx_key = format!("tx:{}", hash);
+                                            if let Ok(tx_bytes) = serde_json::to_vec(tx) {
+                                                let _ = storage.write(&tx_key, &tx_bytes);
+                                            }
+                                        }
+                                    }
+                                }
                             }
+                            info!("{} blocs importés depuis {}", imported, peer);
+                        }
+                    }
+                    Err(e) => error!("JSON invalide reçu : {}", e),
+                }
+            }
+            Err(e) => error!("Décompression zlib échouée : {:?}", e),
+        }
+    }
+    Err(e) => error!("Base64url invalide : {:?}", e),
+}
                         }
                     }
                 }
