@@ -3957,7 +3957,7 @@ tokio::spawn({
                                         chrono::Utc::now().timestamp_millis()
                                     );
 
-                                    if stream.write_all(req.as_bytes()).await.is_err() { continue; }
+                                    if stream.write(req.as_bytes()).await.is_err() { continue; }
 
                                     // Lecture réponse sync (timeout 60s, buffer grand)
                                     let mut sync_buf = vec![0u8; 262144]; // 256 KiB
