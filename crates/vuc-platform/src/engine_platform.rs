@@ -3723,6 +3723,83 @@ println!("🟢 {} receipts restaurés depuis RocksDB au démarrage", loaded_rece
             }
         }
     });
+
+    tokio::spawn({
+    let engine = engine_platform.clone();
+    let lurosonie = lurosonie_manager.clone();
+
+    async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(15)).await;
+
+            let my_head = lurosonie.get_block_height().await;
+            let peers = /* ta liste de pairs connectés */;
+
+            for peer in peers {
+                // Envoie pulse → reçoit pulse du pair
+                let peer_head = /* via ton canal P2P ou broadcast */;
+
+                if peer_head > my_head + 10 {
+                    println!("Sync needed: je suis à {}, pair à {}", my_head, peer_head);
+
+                    let req = format!(
+                        "slu#req#full#since:{}|limit:50|want_txs:1|want_receipts:1|want_state:0|{}|{}",
+                        my_head + 1,
+                        Utc::now().timestamp_millis(),
+                        /* signature sur le message */
+                    );
+
+                    // Envoie au pair (via ton transport P2P existant)
+                    send_to_peer(peer, &req).await;
+
+                    // Attend réponse (timeout 30s)
+                    if let Some(resp) = receive_from_peer(peer, Duration::from_secs(30)).await {
+                        if resp.starts_with("slu#resp#full#") {
+                            let parts: Vec<&str> = resp.split('|').collect();
+                            if parts.len() >= 3 {
+                                let count: u64 = parts[1].split(':').nth(1).unwrap_or("0").parse().unwrap_or(0);
+                                let payload_b64 = parts[2];
+
+                                // Décompresse
+                                if let Ok(compressed) = base64_url::decode(payload_b64) {
+                                    if let Ok(json_bytes) = decompress_zlib(&compressed) {
+                                        if let Ok(blocks) = serde_json::from_slice::<Vec<serde_json::Value>>(&json_bytes) {
+                                            for block_json in blocks {
+                                                let number = block_json["number"].as_u64().unwrap_or(0);
+
+                                                // Sauvegarde bloc complet
+                                                let key = format!("block:full:{}", number);
+                                                let value = serde_json::to_vec(&block_json).unwrap_or_default();
+                                                if let Some(storage) = engine.vm.read().await.storage_manager.as_ref() {
+                                                    let _ = storage.write(&key, &value);
+                                                }
+
+                                                // Sauvegarde tx individuellement
+                                                if let Some(txs) = block_json["transactions"].as_array() {
+                                                    for tx in txs {
+                                                        if let Some(hash) = tx["hash"].as_str() {
+                                                            let tx_key = format!("tx:{}", hash);
+                                                            let tx_value = serde_json::to_vec(tx).unwrap_or_default();
+                                                            let _ = storage.write(&tx_key, &tx_value);
+                                                        }
+                                                    }
+                                                }
+
+                                                // Idem receipts...
+                                            }
+
+                                            println!("→ Sync OK : {} blocs importés depuis {}", count, peer);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+});
     
     // ✅ MODE INSTANT-FINALITY POUR DEV LOCAL (MetaMask UX parfaite)
     let engine_clone = Arc::clone(&engine_platform);
@@ -3766,6 +3843,93 @@ println!("🟢 {} receipts restaurés depuis RocksDB au démarrage", loaded_rece
     let server_handle = tokio::spawn(async move {
         engine_clone.start_server().await;
     });
+
+    // ────────────────────────────────────────────────
+// ÉCOUTE P2P (TCP + UDP) pour échanges entre nœuds
+// ────────────────────────────────────────────────
+let p2p_port = match cluster {
+    Network::Mainnet => 30303,
+    Network::Testnet => 30304,
+    Network::Devnet   => 30305,
+};
+
+let p2p_addr: SocketAddr = format!("0.0.0.0:{}", p2p_port).parse().unwrap();
+
+println!("→ Écoute P2P démarrée sur {}", p2p_addr);
+
+// 1. TCP — pour les messages complets (pulses, demandes sync, réponses)
+let tcp_listener = TcpListener::bind(p2p_addr).await.expect("Échec bind TCP P2P");
+
+tokio::spawn(async move {
+    println!("→ TCP P2P actif sur {}", p2p_addr);
+    loop {
+        let (mut socket, peer) = tcp_listener.accept().await.expect("Accept TCP failed");
+        println!("Connexion entrante depuis {}", peer);
+
+        let engine = engine_platform.clone();
+        let lurosonie = lurosonie_manager.clone();
+
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 8192];
+            loop {
+                match socket.read(&mut buf).await {
+                    Ok(0) => break, // fin de connexion
+                    Ok(n) => {
+                        let msg = String::from_utf8_lossy(&buf[0..n]).to_string();
+                        if msg.starts_with("slu#") {
+                            println!("Message reçu de {} : {}", peer, msg.trim());
+
+                            if msg.starts_with("slu#baga#1#") {
+                                // Pulse → mise à jour de la tête connue du pair
+                                let parts: Vec<&str> = msg.split('|').collect();
+                                if parts.len() >= 5 {
+                                    let block_num: u64 = parts[2].parse().unwrap_or(0);
+                                    println!("Pair {} signale head à {}", peer, block_num);
+                                    // → tu peux stocker ça pour déclencher sync si besoin
+                                }
+                            }
+                            else if msg.starts_with("slu#req#full#") {
+                                // Demande de blocs → répondre avec des données
+                                let response = format!(
+                                    "slu#resp#full#count:1|payload:WyJibG9jayB0ZXN0Il0=|sig"
+                                );
+                                let _ = socket.write_all(response.as_bytes()).await;
+                                println!("Réponse sync envoyée à {}", peer);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Erreur TCP depuis {} : {}", peer, e);
+                        break;
+                    }
+                }
+            }
+            println!("Connexion fermée avec {}", peer);
+        });
+    }
+});
+
+// 2. UDP — pour discovery rapide (trouver les autres nœuds)
+let udp_socket = UdpSocket::bind(p2p_addr).await.expect("Échec bind UDP");
+
+tokio::spawn(async move {
+    println!("→ UDP discovery actif sur {}", p2p_addr);
+    let mut buf = [0u8; 512];
+    loop {
+        match udp_socket.recv_from(&mut buf).await {
+            Ok((len, src)) => {
+                let msg = String::from_utf8_lossy(&buf[0..len]);
+                if msg.contains("slu#") {
+                    println!("Ping discovery de {} : {}", src, msg.trim());
+                    // Réponse simple avec mon identité
+                    let pong = format!("slu#node#id:local|port:{}|head:{}", p2p_port, lurosonie.get_block_height().await);
+                    let _ = udp_socket.send_to(pong.as_bytes(), src).await;
+                }
+            }
+            Err(e) => eprintln!("Erreur UDP : {}", e),
+        }
+    }
+});
         
 tokio::spawn({
     let lurosonie_manager_clone = Arc::clone(&lurosonie_manager);
