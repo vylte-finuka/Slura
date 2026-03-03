@@ -3885,24 +3885,33 @@ let udp_socket = UdpSocket::bind(p2p_addr).await.unwrap_or_else(|e| {
     std::process::exit(1);
 });
 
-tokio::spawn(async move {
-    let mut buf = [0u8; 1024];
-    loop {
-        if let Ok((len, src)) = udp_socket.recv_from(&mut buf).await {
-            let msg = String::from_utf8_lossy(&buf[0..len]);
-            if msg.contains("slu#") || msg.contains("find_node") {
-                let pong = format!(
-                    "slu#node#id:node_{}|port:{}|head:{}",
-                    p2p_port,
-                    lurosonie_manager.get_block_height().await
-                );
-                let _ = udp_socket.send_to(pong.as_bytes(), src).await;
-                info!("Répondu à discovery depuis {}", src);
+tokio::spawn({
+    let engine = engine_platform.clone();           // Pour accéder à vyftid
+    let lurosonie = lurosonie_manager.clone();
+
+    async move {
+        let node_id = engine.vyftid.clone();        // ← Utilise directement vyftid (ex: "vyft_slurachain_devnet")
+        let mut buf = [0u8; 1024];
+
+        loop {
+            if let Ok((len, src)) = udp_socket.recv_from(&mut buf).await {
+                let msg = String::from_utf8_lossy(&buf[0..len]);
+                if msg.contains("slu#") || msg.contains("find_node") {
+                    let head = lurosonie.get_block_height().await;
+                    let pong = format!(
+                        "slu#node#id:{}|port:{}|head:{}",
+                        node_id,          // ← vyftid réel ici
+                        p2p_port,
+                        head
+                    );
+                    let _ = udp_socket.send_to(pong.as_bytes(), src).await;
+                    info!("Répondu à discovery depuis {} → node_id: {}, head: {}", src, node_id, head);
+                }
             }
         }
     }
 });
-
+    
 // 3. Boucle proactive de synchronisation (tous les 20s)
 tokio::spawn({
     let engine = engine_platform.clone();
