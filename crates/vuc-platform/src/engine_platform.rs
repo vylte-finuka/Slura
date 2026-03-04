@@ -3871,6 +3871,81 @@ match base64_url::decode(payload_b64) {
     }
     Err(e) => error!("Base64url invalide : {:?}", e),
 }
+                            // ────────────────────────────────────────────────
+// NOUVEAU : TRAITEMENT DU DELTA D'ÉTAT (si demandé et envoyé)
+// ────────────────────────────────────────────────
+if parts.len() >= 4 && parts[3].starts_with("state_delta:") {
+    let state_b64 = parts[3].strip_prefix("state_delta:").unwrap_or("");
+    
+    match base64_url::decode(state_b64) {
+        Ok(compressed_state) => {
+            match miniz_oxide::inflate::decompress_to_vec_zlib(&compressed_state) {
+                Ok(state_bytes) => {
+                    match serde_json::from_slice::<HashMap<String, serde_json::Value>>(&state_bytes) {
+                        Ok(state_delta) => {
+                            if let Some(storage) = engine.vm.read().await.storage_manager.clone() {
+                                let mut vm = engine.vm.write().await;
+                                let mut accounts = vm.state.accounts.write().await;
+
+                                let mut updated = 0usize;
+                                for (addr, delta) in state_delta.into_iter() {
+                                    if let Some(acc) = accounts.get_mut(&addr) {
+                                        // Mise à jour des champs critiques
+                                        if let Some(bal) = delta.get("balance").and_then(|v| v.as_u64()) {
+                                            acc.balance = bal as u128;
+                                        }
+                                        if let Some(nonce) = delta.get("nonce").and_then(|v| v.as_u64()) {
+                                            acc.nonce = nonce;
+                                        }
+                                        if let Some(code) = delta.get("code_hash").and_then(|v| v.as_str()) {
+                                            acc.code_hash = code.to_string();
+                                        }
+                                        if let Some(root) = delta.get("storage_root").and_then(|v| v.as_str()) {
+                                            acc.storage_root = root.to_string();
+                                        }
+                                        if let Some(is_contract) = delta.get("is_contract").and_then(|v| v.as_bool()) {
+                                            acc.is_contract = is_contract;
+                                        }
+                                        updated += 1;
+                                    } else {
+                                        // Création si compte inconnu
+                                        let new_acc = vuc_tx::slurachain_vm::AccountState {
+                                            address: addr.clone(),
+                                            balance: delta.get("balance").and_then(|v| v.as_u64()).unwrap_or(0) as u128,
+                                            nonce: delta.get("nonce").and_then(|v| v.as_u64()).unwrap_or(0),
+                                            contract_state: vec![],
+                                            resources: BTreeMap::new(),
+                                            state_version: 1,
+                                            last_block_number: 0,
+                                            code_hash: delta.get("code_hash").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                            storage_root: delta.get("storage_root").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                            is_contract: delta.get("is_contract").and_then(|v| v.as_bool()).unwrap_or(false),
+                                            gas_used: 0,
+                                        };
+                                        accounts.insert(addr.clone(), new_acc);
+                                        updated += 1;
+                                    }
+
+                                    // Persistance immédiate du compte mis à jour
+                                    let acc_key = format!("account:{}", addr);
+                                    if let Some(acc) = accounts.get(&addr) {
+                                        if let Ok(acc_bytes) = serde_json::to_vec(acc) {
+                                            let _ = storage.write(&acc_key, &acc_bytes);
+                                        }
+                                    }
+                                }
+                                info!("État synchronisé : {} comptes/contrats mis à jour depuis {}", updated, peer);
+                            }
+                        }
+                        Err(e) => error!("Échec parsing state_delta JSON : {}", e),
+                    }
+                }
+                Err(e) => error!("Décompression state_delta zlib échouée : {:?}", e),
+            }
+        }
+        Err(e) => error!("Base64 state_delta invalide : {:?}", e),
+    }
+                            }
                         }
                     }
                 }
@@ -3964,10 +4039,10 @@ tokio::spawn({
                                     info!("Retard détecté vs {} : {} vs {}", peer_addr, my_head, peer_head);
 
                                     let req = format!(
-                                        "slu#req#full#since:{}|limit:20|want_txs:1|want_receipts:1|want_state:0|{}|sig",
-                                        my_head + 1,
-                                        chrono::Utc::now().timestamp_millis()
-                                    );
+    "slu#req#full#since:{}|limit:20|want_txs:1|want_receipts:1|want_state:1|{}|sig",
+    my_head + 1,
+    chrono::Utc::now().timestamp_millis()
+);
 
                                     if stream.write(req.as_bytes()).await.is_err() { continue; }
 
