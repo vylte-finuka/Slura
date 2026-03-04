@@ -14,6 +14,7 @@ use tokio::net::TcpListener;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::time::sleep;
+use clap::Parser;
 use tokio::net::TcpStream;
 use tokio::sync::RwLock as TokioRwLock;
 use hashbrown::HashMap;
@@ -3506,6 +3507,19 @@ pub fn extract_runtime_from_creation_bytecode(full: &[u8]) -> Result<Vec<u8>, St
     Ok(runtime)
 }
 
+// ─── CLI PARSER ───
+#[derive(Parser, Debug)]
+#[command(name = "slurachain", about = "Slurachain node - Lurosonie consensus")]
+struct Cli {
+    /// Port P2P à utiliser pour ce nœud (obligatoire en dev local)
+    #[arg(long = "p2p-port", value_name = "PORT", required = true)]
+    p2p_port: u16,   // ← required = true → clap exigera le flag
+
+    /// Liste de bootnodes (format: ip:port,ip:port,...)
+    #[arg(long = "bootnodes", value_delimiter = ',', value_name = "IP:PORT")]
+    bootnodes: Vec<String>,
+}
+
 // Define the Network enum for cluster selection
 #[derive(Clone, Debug)]
 enum Network {
@@ -3554,6 +3568,21 @@ async fn main() {
         Network::Testnet => (8081, 45057, "Lurosonie_bft"),
         Network::Devnet => (8082, 45058, "Lurosonie_bft"),
     };
+
+// Parser les flags → clap va panic automatiquement si --p2p-port absent
+    let cli = Cli::parse();
+
+    // Le port vient UNIQUEMENT du flag
+let p2p_port = cli.p2p_port;                    // ← déjà défini plus haut
+let p2p_addr: SocketAddr = format!("0.0.0.0:{}", p2p_port)
+    .parse()
+    .expect("Adresse P2P invalide");
+
+println!("P2P écoute sur {} (flag --p2p-port utilisé)", p2p_addr);
+
+    // Bootnodes (inchangé)
+let bootnodes = cli.bootnodes.clone();
+    println!("🔗 Bootnodes utilisés : {:?}", bootnodes);
 
     // ────────────────────────────────────────────────
     // CONFIGURATION ROCKSDB - TRÈS TÔT AVANT TOUT LE RESTE
@@ -3749,18 +3778,18 @@ println!("🟢 {} receipts restaurés depuis RocksDB au démarrage", loaded_rece
 
     println!("✅ Engine Platform initialisé");
 
-    // ────────────────────────────────────────────────
-// P2P RÉEL EN PRODUCTION — PORTS SELON CLUSTER
-// ────────────────────────────────────────────────
-let p2p_port: u16 = match cluster {
-    Network::Mainnet => 30303,
-    Network::Testnet => 30304,
-    Network::Devnet   => 30305,
-};
+// On NE force PLUS le port en fonction du cluster
+// Le port vient UNIQUEMENT du flag CLI (ou panic si absent, grâce à required=true)
+let p2p_port = cli.p2p_port;  // ← déjà défini plus haut, on le réutilise
 
-let p2p_addr: SocketAddr = format!("0.0.0.0:{}", p2p_port).parse().unwrap();
+let p2p_addr: SocketAddr = format!("0.0.0.0:{}", p2p_port)
+    .parse()
+    .expect("Adresse P2P invalide");
 
-println!("P2P réel démarré sur {} (cluster: {})", p2p_addr, cluster_str);
+println!("P2P écoute sur {}", p2p_addr);
+
+// ─── AJOUT CRITIQUE : Liste dynamique partagée des pairs connus ───
+let known_peers: Arc<TokioRwLock<Vec<SocketAddr>>> = Arc::new(TokioRwLock::new(Vec::new()));
 
 // 1. TCP Listener — accepte connexions entrantes (pulses + sync)
 let tcp_listener = TcpListener::bind(p2p_addr).await.unwrap_or_else(|e| {
@@ -3771,6 +3800,7 @@ let tcp_listener = TcpListener::bind(p2p_addr).await.unwrap_or_else(|e| {
 tokio::spawn({
     let engine = engine_platform.clone();
     let lurosonie = lurosonie_manager.clone();
+    let known_peers = known_peers.clone();
 
     async move {
         loop {
@@ -3781,6 +3811,15 @@ tokio::spawn({
                     continue;
                 }
             };
+
+            // ─── AJOUT : mémoriser le pair qui se connecte à nous ───
+            {
+                let mut peers = known_peers.write().await;
+                if !peers.contains(&peer) && !peer.ip().is_loopback() {
+                    peers.push(peer);
+                    info!("Nouveau pair connecté via TCP : {}", peer);
+                }
+            }
 
             info!("Nouvelle connexion P2P depuis {}", peer);
 
@@ -3827,124 +3866,115 @@ tokio::spawn({
                             let count: u64 = count_str.parse().unwrap_or(0);
                             let payload_b64 = parts[2];
 
-                            // Dans la partie traitement de "slu#resp#full#"
-match base64_url::decode(payload_b64) {
-    Ok(compressed) => {
-        // Utilisation correcte de miniz_oxide (API 0.7+ / 0.8)
-        match miniz_oxide::inflate::decompress_to_vec_zlib(&compressed) {
-            Ok(json_bytes_vec) => {  // ← retourne déjà Vec<u8>, Sized !
-                match serde_json::from_slice::<Vec<serde_json::Value>>(&json_bytes_vec) {
-                    Ok(blocks) => {
-                        if let Some(storage) = engine.vm.read().await.storage_manager.clone() {
-                            let mut imported = 0usize;
-                            for block_json in blocks {
-                                let number = block_json["number"].as_u64().unwrap_or(0);
+                            match base64_url::decode(payload_b64) {
+                                Ok(compressed) => {
+                                    match miniz_oxide::inflate::decompress_to_vec_zlib(&compressed) {
+                                        Ok(json_bytes_vec) => {
+                                            match serde_json::from_slice::<Vec<serde_json::Value>>(&json_bytes_vec) {
+                                                Ok(blocks) => {
+                                                    if let Some(storage) = engine.vm.read().await.storage_manager.clone() {
+                                                        let mut imported = 0usize;
+                                                        for block_json in blocks {
+                                                            let number = block_json["number"].as_u64().unwrap_or(0);
 
-                                // Sauvegarde bloc complet
-                                let block_key = format!("block:full:{}", number);
-                                if let Ok(bytes) = serde_json::to_vec(&block_json) {
-                                    if storage.write(&block_key, &bytes).is_ok() {
-                                        imported += 1;
-                                    }
-                                }
+                                                            let block_key = format!("block:full:{}", number);
+                                                            if let Ok(bytes) = serde_json::to_vec(&block_json) {
+                                                                if storage.write(&block_key, &bytes).is_ok() {
+                                                                    imported += 1;
+                                                                }
+                                                            }
 
-                                // Transactions (comme avant)
-                                if let Some(txs) = block_json.get("transactions").and_then(|v| v.as_array()) {
-                                    for tx in txs {
-                                        if let Some(hash) = tx.get("hash").and_then(|h| h.as_str()) {
-                                            let tx_key = format!("tx:{}", hash);
-                                            if let Ok(tx_bytes) = serde_json::to_vec(tx) {
-                                                let _ = storage.write(&tx_key, &tx_bytes);
+                                                            if let Some(txs) = block_json.get("transactions").and_then(|v| v.as_array()) {
+                                                                for tx in txs {
+                                                                    if let Some(hash) = tx.get("hash").and_then(|h| h.as_str()) {
+                                                                        let tx_key = format!("tx:{}", hash);
+                                                                        if let Ok(tx_bytes) = serde_json::to_vec(tx) {
+                                                                            let _ = storage.write(&tx_key, &tx_bytes);
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                        info!("{} blocs importés depuis {}", imported, peer);
+                                                    }
+                                                }
+                                                Err(e) => error!("JSON invalide reçu : {}", e),
                                             }
                                         }
+                                        Err(e) => error!("Décompression zlib échouée : {:?}", e),
                                     }
                                 }
+                                Err(e) => error!("Base64url invalide : {:?}", e),
                             }
-                            info!("{} blocs importés depuis {}", imported, peer);
-                        }
-                    }
-                    Err(e) => error!("JSON invalide reçu : {}", e),
-                }
-            }
-            Err(e) => error!("Décompression zlib échouée : {:?}", e),
-        }
-    }
-    Err(e) => error!("Base64url invalide : {:?}", e),
-}
-                            // ────────────────────────────────────────────────
-// NOUVEAU : TRAITEMENT DU DELTA D'ÉTAT (si demandé et envoyé)
-// ────────────────────────────────────────────────
-if parts.len() >= 4 && parts[3].starts_with("state_delta:") {
-    let state_b64 = parts[3].strip_prefix("state_delta:").unwrap_or("");
-    
-    match base64_url::decode(state_b64) {
-        Ok(compressed_state) => {
-            match miniz_oxide::inflate::decompress_to_vec_zlib(&compressed_state) {
-                Ok(state_bytes) => {
-                    match serde_json::from_slice::<HashMap<String, serde_json::Value>>(&state_bytes) {
-                        Ok(state_delta) => {
-                            if let Some(storage) = engine.vm.read().await.storage_manager.clone() {
-                                let mut vm = engine.vm.write().await;
-                                let mut accounts = vm.state.accounts.write().await;
 
-                                let mut updated = 0usize;
-                                for (addr, delta) in state_delta.into_iter() {
-                                    if let Some(acc) = accounts.get_mut(&addr) {
-                                        // Mise à jour des champs critiques
-                                        if let Some(bal) = delta.get("balance").and_then(|v| v.as_u64()) {
-                                            acc.balance = bal as u128;
-                                        }
-                                        if let Some(nonce) = delta.get("nonce").and_then(|v| v.as_u64()) {
-                                            acc.nonce = nonce;
-                                        }
-                                        if let Some(code) = delta.get("code_hash").and_then(|v| v.as_str()) {
-                                            acc.code_hash = code.to_string();
-                                        }
-                                        if let Some(root) = delta.get("storage_root").and_then(|v| v.as_str()) {
-                                            acc.storage_root = root.to_string();
-                                        }
-                                        if let Some(is_contract) = delta.get("is_contract").and_then(|v| v.as_bool()) {
-                                            acc.is_contract = is_contract;
-                                        }
-                                        updated += 1;
-                                    } else {
-                                        // Création si compte inconnu
-                                        let new_acc = vuc_tx::slurachain_vm::AccountState {
-                                            address: addr.clone(),
-                                            balance: delta.get("balance").and_then(|v| v.as_u64()).unwrap_or(0) as u128,
-                                            nonce: delta.get("nonce").and_then(|v| v.as_u64()).unwrap_or(0),
-                                            contract_state: vec![],
-                                            resources: BTreeMap::new(),
-                                            state_version: 1,
-                                            last_block_number: 0,
-                                            code_hash: delta.get("code_hash").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                                            storage_root: delta.get("storage_root").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                                            is_contract: delta.get("is_contract").and_then(|v| v.as_bool()).unwrap_or(false),
-                                            gas_used: 0,
-                                        };
-                                        accounts.insert(addr.clone(), new_acc);
-                                        updated += 1;
-                                    }
+                            // ─── TRAITEMENT DU DELTA D'ÉTAT ───
+                            if parts.len() >= 4 && parts[3].starts_with("state_delta:") {
+                                let state_b64 = parts[3].strip_prefix("state_delta:").unwrap_or("");
+                                match base64_url::decode(state_b64) {
+                                    Ok(compressed_state) => {
+                                        match miniz_oxide::inflate::decompress_to_vec_zlib(&compressed_state) {
+                                            Ok(state_bytes) => {
+                                                match serde_json::from_slice::<HashMap<String, serde_json::Value>>(&state_bytes) {
+                                                    Ok(state_delta) => {
+                                                        if let Some(storage) = engine.vm.read().await.storage_manager.clone() {
+                                                            let mut vm = engine.vm.write().await;
+                                                            let mut accounts = vm.state.accounts.write().await;
+                                                            let mut updated = 0usize;
 
-                                    // Persistance immédiate du compte mis à jour
-                                    let acc_key = format!("account:{}", addr);
-                                    if let Some(acc) = accounts.get(&addr) {
-                                        if let Ok(acc_bytes) = serde_json::to_vec(acc) {
-                                            let _ = storage.write(&acc_key, &acc_bytes);
+                                                            for (addr, delta) in state_delta.into_iter() {
+                                                                if let Some(acc) = accounts.get_mut(&addr) {
+                                                                    if let Some(bal) = delta.get("balance").and_then(|v| v.as_u64()) {
+                                                                        acc.balance = bal as u128;
+                                                                    }
+                                                                    if let Some(nonce) = delta.get("nonce").and_then(|v| v.as_u64()) {
+                                                                        acc.nonce = nonce;
+                                                                    }
+                                                                    if let Some(code) = delta.get("code_hash").and_then(|v| v.as_str()) {
+                                                                        acc.code_hash = code.to_string();
+                                                                    }
+                                                                    if let Some(root) = delta.get("storage_root").and_then(|v| v.as_str()) {
+                                                                        acc.storage_root = root.to_string();
+                                                                    }
+                                                                    if let Some(is_contract) = delta.get("is_contract").and_then(|v| v.as_bool()) {
+                                                                        acc.is_contract = is_contract;
+                                                                    }
+                                                                    updated += 1;
+                                                                } else {
+                                                                    let new_acc = vuc_tx::slurachain_vm::AccountState {
+                                                                        address: addr.clone(),
+                                                                        balance: delta.get("balance").and_then(|v| v.as_u64()).unwrap_or(0) as u128,
+                                                                        nonce: delta.get("nonce").and_then(|v| v.as_u64()).unwrap_or(0),
+                                                                        contract_state: vec![],
+                                                                        resources: BTreeMap::new(),
+                                                                        state_version: 1,
+                                                                        last_block_number: 0,
+                                                                        code_hash: delta.get("code_hash").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                                                        storage_root: delta.get("storage_root").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                                                        is_contract: delta.get("is_contract").and_then(|v| v.as_bool()).unwrap_or(false),
+                                                                        gas_used: 0,
+                                                                    };
+                                                                    accounts.insert(addr.clone(), new_acc);
+                                                                    updated += 1;
+                                                                }
+
+                                                                let acc_key = format!("account:{}", addr);
+                                                                if let Some(acc) = accounts.get(&addr) {
+                                                                    if let Ok(acc_bytes) = serde_json::to_vec(acc) {
+                                                                        let _ = storage.write(&acc_key, &acc_bytes);
+                                                                    }
+                                                                }
+                                                            }
+                                                            info!("État synchronisé : {} comptes/contrats mis à jour depuis {}", updated, peer);
+                                                        }
+                                                    }
+                                                    Err(e) => error!("Échec parsing state_delta JSON : {}", e),
+                                                }
+                                            }
+                                            Err(e) => error!("Décompression state_delta zlib échouée : {:?}", e),
                                         }
                                     }
+                                    Err(e) => error!("Base64 state_delta invalide : {:?}", e),
                                 }
-                                info!("État synchronisé : {} comptes/contrats mis à jour depuis {}", updated, peer);
-                            }
-                        }
-                        Err(e) => error!("Échec parsing state_delta JSON : {}", e),
-                    }
-                }
-                Err(e) => error!("Décompression state_delta zlib échouée : {:?}", e),
-            }
-        }
-        Err(e) => error!("Base64 state_delta invalide : {:?}", e),
-    }
                             }
                         }
                     }
@@ -3954,110 +3984,153 @@ if parts.len() >= 4 && parts[3].starts_with("state_delta:") {
     }
 });
 
-// 2. UDP Discovery — permet aux autres nœuds de te trouver
+// 2. UDP Discovery — écoute permanente + mémorisation des pairs
 let udp_socket = UdpSocket::bind(p2p_addr).await.unwrap_or_else(|e| {
     eprintln!("Échec bind UDP {} : {}", p2p_port, e);
     std::process::exit(1);
 });
 
+// ─── SOLUTION OFFICIELLE TOKIO : wrap dans Arc pour pouvoir "cloner" ───
+let shared_udp = Arc::new(udp_socket);  // Un seul socket, partagé via Arc
+
 tokio::spawn({
-    let engine = engine_platform.clone();           // Pour accéder à vyftid
+    let engine = engine_platform.clone();
     let lurosonie = lurosonie_manager.clone();
+    let known_peers = known_peers.clone();
+    let shared_udp = shared_udp.clone();  // Clone l'Arc (léger !)
 
     async move {
-        let node_id = engine.vyftid.clone();        // ← Utilise directement vyftid (ex: "vyft_slurachain_devnet")
+        let node_id = engine.vyftid.clone();
         let mut buf = [0u8; 1024];
 
         loop {
-            if let Ok((len, src)) = udp_socket.recv_from(&mut buf).await {
+            if let Ok((len, src)) = shared_udp.recv_from(&mut buf).await {
                 let msg = String::from_utf8_lossy(&buf[0..len]);
+
                 if msg.contains("slu#") || msg.contains("find_node") {
+                    {
+                        let mut peers = known_peers.write().await;
+                        if !peers.contains(&src) && !src.ip().is_loopback() {
+                            peers.push(src);
+                            info!("Nouveau pair découvert via UDP incoming : {}", src);
+                        }
+                    }
+
                     let head = lurosonie.get_block_height().await;
                     let pong = format!(
                         "slu#node#id:{}|port:{}|head:{}",
-                        node_id,          // ← vyftid réel ici
-                        p2p_port,
-                        head
+                        node_id, p2p_port, head
                     );
-                    let _ = udp_socket.send_to(pong.as_bytes(), src).await;
+                    let _ = shared_udp.send_to(pong.as_bytes(), src).await;
                     info!("Répondu à discovery depuis {} → node_id: {}, head: {}", src, node_id, head);
                 }
             }
         }
     }
 });
-    
-// 3. Boucle proactive de synchronisation (tous les 20s)
+
+// 3. Boucle proactive : sync + DÉCOUVERTE ACTIVE permanente
 tokio::spawn({
-    let engine = engine_platform.clone();
-    let lurosonie = lurosonie_manager.clone();
+        let engine = engine_platform.clone();
+        let lurosonie = lurosonie_manager.clone();
+        let known_peers = known_peers.clone();
+        let shared_udp = shared_udp.clone();
 
-    async move {
+        async move {
+            let mut discovery_interval = tokio::time::interval(Duration::from_secs(30));
+            let mut sync_interval = tokio::time::interval(Duration::from_secs(20));
+
+            // ─── PREMIER DISCOVERY ACTIF AU DÉMARRAGE (comme Geth boot) ───
+            info!("🚀 Premier scan de découverte P2P au démarrage...");
+            let discovery_msg = "slu#find_node".to_string();
+
+            // Broadcast LAN immédiat
+            if let Ok(bcast) = format!("255.255.255.255:{}", p2p_port).parse::<SocketAddr>() {
+                let _ = shared_udp.send_to(discovery_msg.as_bytes(), bcast).await;
+                info!("Broadcast find_node envoyé sur LAN (255.255.255.255:{})", p2p_port);
+            }
+
+            // Envoi immédiat vers bootnodes
+            for boot in &bootnodes {
+                if let Ok(addr) = boot.parse::<SocketAddr>() {
+                    let _ = shared_udp.send_to(discovery_msg.as_bytes(), addr).await;
+                    info!("find_node envoyé au bootnode {}", addr);
+                }
+            }
+
         loop {
-            sleep(Duration::from_secs(20)).await;
+            tokio::select! {
+                _ = sync_interval.tick() => {
+                    let my_head = lurosonie.get_block_height().await;
+                    let peers: Vec<SocketAddr> = known_peers.read().await.clone();
 
-            let my_head = lurosonie.get_block_height().await;
+                    if peers.is_empty() {
+                        info!("Aucun pair connu pour l'instant, en attente de découverte...");
+                        continue;
+                    }
 
-            // Seeds + pairs découverts (en prod, remplace par une vraie liste dynamique)
-            let peers = vec![
-                format!("127.0.0.1:{}", p2p_port), // Pour test local
-                // Ajoute tes vrais seeds mainnet ici
-                // "seed1.mainnet.slurachain.net:30303".to_string(),
-                // "seed2.mainnet.slurachain.net:30303".to_string(),
-            ];
+                    for peer_addr in peers {
+                        let mut stream = match TcpStream::connect(peer_addr).await {
+                            Ok(s) => s,
+                            Err(_) => continue,
+                        };
 
-            for peer_str in peers {
-                let peer_addr: SocketAddr = match peer_str.parse() {
-                    Ok(a) => a,
-                    Err(_) => continue,
-                };
+                        let pulse = format!(
+                            "slu#baga#1#{}|node|{}|0x0000000000000000000000000000000000000000000000000000000000000000|0x0000000000000000000000000000000000000000000000000000000000000000|sig",
+                            chrono::Utc::now().timestamp_millis(),
+                            my_head
+                        );
 
-                let mut stream = match TcpStream::connect(peer_addr).await {
-                    Ok(s) => s,
-                    Err(_) => continue,
-                };
+                        if stream.write_all(pulse.as_bytes()).await.is_err() { continue; }
 
-                // Envoi pulse pour connaître son head
-                let pulse = format!(
-                    "slu#baga#1#{}|node|{}|0x0000000000000000000000000000000000000000000000000000000000000000|0x0000000000000000000000000000000000000000000000000000000000000000|sig",
-                    chrono::Utc::now().timestamp_millis(),
-                    my_head
-                );
+                        let mut buf = [0u8; 4096];
+                        if let Ok(Ok(n)) = timeout(Duration::from_secs(10), stream.read(&mut buf)).await {
+                            let resp = String::from_utf8_lossy(&buf[0..n]);
 
-                if stream.write_all(pulse.as_bytes()).await.is_err() { continue; }
+                            if resp.starts_with("slu#baga#1#") {
+                                let parts: Vec<&str> = resp.split('|').collect();
+                                if parts.len() >= 5 {
+                                    if let Ok(peer_head) = parts[2].parse::<u64>() {
+                                        if peer_head > my_head + 5 {
+                                            info!("Retard détecté vs {} : {} vs {}", peer_addr, my_head, peer_head);
 
-                // Lecture réponse pulse (timeout 10s)
-                let mut buf = [0u8; 4096];
-                if let Ok(Ok(n)) = timeout(Duration::from_secs(10), stream.read(&mut buf)).await {
-                    let resp = String::from_utf8_lossy(&buf[0..n]);
+                                            let req = format!(
+                                                "slu#req#full#since:{}|limit:20|want_txs:1|want_receipts:1|want_state:1|{}|sig",
+                                                my_head + 1,
+                                                chrono::Utc::now().timestamp_millis()
+                                            );
 
-                    if resp.starts_with("slu#baga#1#") {
-                        let parts: Vec<&str> = resp.split('|').collect();
-                        if parts.len() >= 5 {
-                            if let Ok(peer_head) = parts[2].parse::<u64>() {
-                                if peer_head > my_head + 5 {
-                                    info!("Retard détecté vs {} : {} vs {}", peer_addr, my_head, peer_head);
+                                            if stream.write(req.as_bytes()).await.is_err() { continue; }
 
-                                    let req = format!(
-    "slu#req#full#since:{}|limit:20|want_txs:1|want_receipts:1|want_state:1|{}|sig",
-    my_head + 1,
-    chrono::Utc::now().timestamp_millis()
-);
-
-                                    if stream.write(req.as_bytes()).await.is_err() { continue; }
-
-                                    // Lecture réponse sync (timeout 60s, buffer grand)
-                                    let mut sync_buf = vec![0u8; 262144]; // 256 KiB
-                                    if let Ok(Ok(n)) = timeout(Duration::from_secs(60), stream.read(&mut sync_buf)).await {
-                                        let sync_msg = String::from_utf8_lossy(&sync_buf[0..n]);
-
-                                        if sync_msg.starts_with("slu#resp#full#") {
-                                            info!("Réponse sync reçue de {}", peer_addr);
-                                            // Le traitement est déjà dans le listener TCP
+                                            let mut sync_buf = vec![0u8; 262144];
+                                            if let Ok(Ok(n)) = timeout(Duration::from_secs(60), stream.read(&mut sync_buf)).await {
+                                                let sync_msg = String::from_utf8_lossy(&sync_buf[0..n]);
+                                                if sync_msg.starts_with("slu#resp#full#") {
+                                                    info!("Réponse sync reçue de {}", peer_addr);
+                                                }
+                                            }
                                         }
                                     }
                                 }
                             }
+                        }
+                    }
+                }
+
+                _ = discovery_interval.tick() => {
+                    let discovery_msg = "slu#find_node".to_string();
+
+                    // Broadcast LAN
+                    if let Ok(bcast) = format!("255.255.255.255:{}", p2p_port).parse::<SocketAddr>() {
+                        let _ = shared_udp.send_to(discovery_msg.as_bytes(), bcast).await;
+                        info!("Broadcast discovery UDP envoyé (LAN)");
+                    }
+
+                    // Envoi vers seeds (ajoute tes vrais seeds ici en prod)
+                    let seeds = vec!["127.0.0.1:30305".to_string()];
+                    for seed_str in seeds {
+                        if let Ok(seed_addr) = seed_str.parse::<SocketAddr>() {
+                            let _ = shared_udp.send_to(discovery_msg.as_bytes(), seed_addr).await;
                         }
                     }
                 }
@@ -4077,6 +4150,61 @@ tokio::spawn({
 
     lurosonie_manager.add_block_to_chain(genesis_block.clone(), None).await;
     println!("✅ Bloc genesis Lurosonie ajouté: {:?}", genesis_block);
+
+    // ─── SYNC FORCÉE AU DÉMARRAGE POUR NŒUD NEUF ───
+println!("🔄 Vérification synchronisation initiale...");
+
+let local_head = lurosonie_manager.get_block_height().await;
+println!("Head local au démarrage : {}", local_head);
+
+if local_head <= 1 {
+    println!("⚡ Nœud neuf ou en retard → sync forcée avant de démarrer");
+
+    // Utilise directement les bootnodes passés via --bootnodes
+    let seeds = if !cli.bootnodes.is_empty() {
+        cli.bootnodes.clone()
+    } else {
+        // Fallback minimal si aucun bootnode n'est passé (rare en dev)
+        vec!["127.0.0.1:30305".to_string()]
+    };
+
+    let mut synced = false;
+    for seed_str in seeds {
+        if let Ok(peer_addr) = seed_str.parse::<SocketAddr>() {
+            println!("→ Tentative sync avec seed {}", peer_addr);
+
+            if let Ok(mut stream) = TcpStream::connect(peer_addr).await {
+                let req = format!(
+                    "slu#req#full#since:0|limit:100|want_txs:1|want_receipts:1|want_state:1|{}|sig",
+                    chrono::Utc::now().timestamp_millis()
+                );
+
+                if stream.write_all(req.as_bytes()).await.is_ok() {
+                    let mut sync_buf = vec![0u8; 1_048_576];
+                    if let Ok(Ok(n)) = timeout(Duration::from_secs(120), stream.read(&mut sync_buf)).await {
+                        let sync_msg = String::from_utf8_lossy(&sync_buf[0..n]);
+                        if sync_msg.starts_with("slu#resp#full#") {
+                            println!("✅ Sync initiale réussie depuis {}", peer_addr);
+                            synced = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        } else {
+            println!("⚠️ Bootnode invalide ignoré : {}", seed_str);
+        }
+    }
+
+    if !synced {
+        println!("⚠️ Aucun bootnode n'a répondu → on continue en mode solo pour l'instant");
+        // Option : panic!() si tu veux forcer la sync
+        // panic!("Impossible de synchroniser au démarrage - vérifie tes bootnodes");
+    }
+
+    let new_head = lurosonie_manager.get_block_height().await;
+    println!("Head après sync forcée : {}", new_head);
+}
 
     // ✅ Démarrage des services...
     let lurosonie_consensus = lurosonie_manager.clone();
