@@ -7,10 +7,12 @@ use alloy_primitives::Keccak256;
 // Ensure the correct module path for TimestampRelease
 use vuc_events::timestamp_release::TimestampRelease;
 use vuc_platform::slurachain_rpc_service::TxRequest;
-use std::net::SocketAddr;
+use std::net::{SocketAddr,ToSocketAddrs};
+use local_ip_address::{local_ip, Error as LocalIpError};
 use std::sync::{Arc, RwLock};
 use tokio::net::UdpSocket;
 use tokio::net::TcpListener;
+use std::str::FromStr;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::time::sleep;
@@ -3222,6 +3224,14 @@ impl EnginePlatform {
     }
 }
 
+fn resolve_bootnode(s: &str) -> Option<SocketAddr> {
+    if let Ok(mut addrs) = (s, 0).to_socket_addrs() {
+        addrs.next()
+    } else {
+        None
+    }
+}
+
 /// Génère une clé privée secp256k1 et l'associe à l'adresse système aléatoire
 pub fn assign_private_key_to_system_account(vm: &mut SlurachainVm) -> Result<String, anyhow::Error> {
     use k256::ecdsa::SigningKey;
@@ -3509,14 +3519,24 @@ pub fn extract_runtime_from_creation_bytecode(full: &[u8]) -> Result<Vec<u8>, St
 
 // ─── CLI PARSER ───
 #[derive(Parser, Debug)]
-#[command(name = "slurachain", about = "Slurachain node - Lurosonie consensus")]
+#[command(name = "slura", about = "Slura client execution side")]
 struct Cli {
-    /// Port P2P à utiliser pour ce nœud (obligatoire en dev local)
-    #[arg(long = "p2p-port", value_name = "PORT", required = true)]
-    p2p_port: u16,   // ← required = true → clap exigera le flag
+    /// Port P2P local d'écoute (obligatoire)
+    #[arg(long = "p2p-port", required = true)]
+    p2p_port: u16,
 
-    /// Liste de bootnodes (format: ip:port,ip:port,...)
-    #[arg(long = "bootnodes", value_delimiter = ',', value_name = "IP:PORT")]
+    /// Adresse IP externe / publique à annoncer aux autres nœuds
+    /// Ex: 192.168.1.42, 85.23.145.67, ou ton domaine si tu as du DNS dynamique
+    #[arg(long = "external-addr", short = 'e')]
+    external_addr: Option<String>,
+
+    /// Plage CIDR autorisée pour les connexions entrantes (sécurité)
+    /// Ex: 192.168.1.0/24, 10.0.0.0/16
+    #[arg(long = "cidr-addr", short = 'c')]
+    allowed_cidr: Option<String>,
+
+    /// Bootnodes au format IP:PORT ou domaine:PORT
+    #[arg(long = "bootnodes", value_delimiter = ',')]
     bootnodes: Vec<String>,
 }
 
@@ -3571,6 +3591,41 @@ async fn main() {
 
 // Parser les flags → clap va panic automatiquement si --p2p-port absent
     let cli = Cli::parse();
+
+// ─── CONFIGURATION RÉSEAU ANNONCÉE ───
+let announced_ip: String = if let Some(external) = &cli.external_addr {
+    // L'utilisateur a explicitement fourni --external-addr → on prend ça
+    external.clone()
+} else {
+    // Sinon on tente de détecter une IP locale non-loopback
+    match local_ip() {
+        Ok(ip) => {
+            let ip_str = ip.to_string();
+            println!("🌐 IP locale détectée automatiquement : {}", ip_str);
+            ip_str
+        }
+        Err(LocalIpError::LocalIpAddressNotFound) => {
+            println!("⚠️ Aucune interface réseau non-loopback trouvée, fallback vers localhost");
+            "127.0.0.1".to_string()
+        }
+        Err(e) => {
+            eprintln!("⚠️ Impossible de détecter l'IP locale : {}. Fallback vers localhost", e);
+            "127.0.0.1".to_string()
+        }
+    }
+};
+
+let announced_addr = format!("{}:{}", announced_ip, cli.p2p_port);
+println!("🌐 Adresse réseau que ce nœud annonce aux autres pairs : {}", announced_addr);
+
+// Optionnel : validation CIDR si fourni
+let allowed_network: Option<ipnetwork::IpNetwork> = cli.allowed_cidr
+    .as_ref()
+    .and_then(|cidr| ipnetwork::IpNetwork::from_str(cidr).ok());
+
+if let Some(cidr) = &allowed_network {
+    println!("🔒 Connexions entrantes limitées à la plage : {}", cidr);
+}
 
     // Le port vient UNIQUEMENT du flag
 let p2p_port = cli.p2p_port;                    // ← déjà défini plus haut
@@ -3803,14 +3858,23 @@ tokio::spawn({
     let known_peers = known_peers.clone();
 
     async move {
-        loop {
-            let (mut socket, peer) = match tcp_listener.accept().await {
-                Ok(conn) => conn,
-                Err(e) => {
-                    error!("Accept TCP échoué : {}", e);
-                    continue;
-                }
-            };
+      loop {
+    let (mut socket, peer) = match tcp_listener.accept().await {
+        Ok(conn) => conn,
+        Err(e) => {
+            error!("Accept TCP échoué : {}", e);
+            continue;           // ou sleep + continue si tu veux éviter spam
+        }
+    };
+
+// Filtrage CIDR si configuré
+if let Some(cidr) = &allowed_network {
+    if !cidr.contains(peer.ip()) {
+        info!("Connexion refusée (hors CIDR autorisé) : {}", peer);
+        let _ = socket.shutdown().await;
+        continue;
+    }
+}
 
             // ─── AJOUT : mémoriser le pair qui se connecte à nous ───
             {
@@ -3986,43 +4050,60 @@ tokio::spawn({
 
 // 2. UDP Discovery — écoute permanente + mémorisation des pairs
 let udp_socket = UdpSocket::bind(p2p_addr).await.unwrap_or_else(|e| {
-    eprintln!("Échec bind UDP {} : {}", p2p_port, e);
+    eprintln!("Échec bind UDP sur {} : {}", p2p_addr, e);
     std::process::exit(1);
 });
 
-// ─── SOLUTION OFFICIELLE TOKIO : wrap dans Arc pour pouvoir "cloner" ───
-let shared_udp = Arc::new(udp_socket);  // Un seul socket, partagé via Arc
+let shared_udp = Arc::new(udp_socket);
 
 tokio::spawn({
     let engine = engine_platform.clone();
     let lurosonie = lurosonie_manager.clone();
     let known_peers = known_peers.clone();
-    let shared_udp = shared_udp.clone();  // Clone l'Arc (léger !)
+    let shared_udp = shared_udp.clone();
+    let announced_addr = announced_addr.clone();  // ← on clone ici pour move dans la closure
 
     async move {
         let node_id = engine.vyftid.clone();
         let mut buf = [0u8; 1024];
 
         loop {
-            if let Ok((len, src)) = shared_udp.recv_from(&mut buf).await {
-                let msg = String::from_utf8_lossy(&buf[0..len]);
+            match shared_udp.recv_from(&mut buf).await {
+                Ok((len, src)) => {
+                    let msg = String::from_utf8_lossy(&buf[0..len]);
 
-                if msg.contains("slu#") || msg.contains("find_node") {
-                    {
-                        let mut peers = known_peers.write().await;
-                        if !peers.contains(&src) && !src.ip().is_loopback() {
-                            peers.push(src);
-                            info!("Nouveau pair découvert via UDP incoming : {}", src);
+                    if msg.contains("slu#") || msg.contains("find_node") {
+                        // Mémorisation du pair (sauf loopback)
+                        {
+                            let mut peers = known_peers.write().await;
+                            if !peers.contains(&src) && !src.ip().is_loopback() {
+                                peers.push(src);
+                                info!("Nouveau pair découvert via UDP incoming : {}", src);
+                            }
+                        }
+
+                        // Réponse pong avec l'adresse que NOUS annonçons
+                        let head = lurosonie.get_block_height().await;
+                        let pong = format!(
+                            "slu#node#id:{}|addr:{}|head:{}",
+                            node_id, announced_addr, head
+                        );
+
+                        // Envoi de la réponse
+                        if let Err(e) = shared_udp.send_to(pong.as_bytes(), src).await {
+                            tracing::warn!("Échec envoi pong UDP à {} : {}", src, e);
+                        } else {
+                            info!(
+                                "Pong envoyé à {} → id: {}, addr: {}, head: {}",
+                                src, node_id, announced_addr, head
+                            );
                         }
                     }
-
-                    let head = lurosonie.get_block_height().await;
-                    let pong = format!(
-                        "slu#node#id:{}|port:{}|head:{}",
-                        node_id, p2p_port, head
-                    );
-                    let _ = shared_udp.send_to(pong.as_bytes(), src).await;
-                    info!("Répondu à discovery depuis {} → node_id: {}, head: {}", src, node_id, head);
+                }
+                Err(e) => {
+                    error!("Erreur réception UDP : {}", e);
+                    // Option : sleep court pour éviter spam en cas d'erreur persistante
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                 }
             }
         }
@@ -4076,10 +4157,11 @@ tokio::spawn({
                         };
 
                         let pulse = format!(
-                            "slu#baga#1#{}|node|{}|0x0000000000000000000000000000000000000000000000000000000000000000|0x0000000000000000000000000000000000000000000000000000000000000000|sig",
-                            chrono::Utc::now().timestamp_millis(),
-                            my_head
-                        );
+    "slu#baga#1#{}|node|{}|...|addr:{}|...",
+    chrono::Utc::now().timestamp_millis(),
+    my_head,
+    announced_addr
+);
 
                         if stream.write_all(pulse.as_bytes()).await.is_err() { continue; }
 
@@ -4170,8 +4252,8 @@ if local_head <= 1 {
 
     let mut synced = false;
     for seed_str in seeds {
-        if let Ok(peer_addr) = seed_str.parse::<SocketAddr>() {
-            println!("→ Tentative sync avec seed {}", peer_addr);
+     if let Some(peer_addr) = resolve_bootnode(&seed_str) {
+        println!("→ Tentative sync avec {}", peer_addr);
 
             if let Ok(mut stream) = TcpStream::connect(peer_addr).await {
                 let req = format!(
