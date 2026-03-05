@@ -3094,8 +3094,147 @@ module.register_async_method("eth_getCode", move |params, _meta, _| {
             }
         }).expect("Failed to register eth_accounts method");
 
-
         println!("Registered endpoint: eth_accounts");
+
+        // Endpoint eth_getStorageAt – avec parsing robuste et fallback storage
+        let engine_clone = self.clone();
+        module.register_async_method("eth_getStorageAt", move |params, _meta, _| {
+            let engine = engine_clone.clone();
+            async move {
+                let params: Vec<serde_json::Value> = params.parse().unwrap_or_default();
+
+                if params.len() < 2 {
+                    return Err(jsonrpsee_types::error::ErrorObject::owned(
+                        ErrorCode::InvalidParams.code(),
+                        "eth_getStorageAt requires at least [address, slot]",
+                        None::<()>,
+                    ));
+                }
+
+                let address = params[0].as_str().unwrap_or("").to_lowercase();
+                let slot_hex = params[1].as_str().unwrap_or("0x0");
+
+                if !address.starts_with("0x") || address.len() != 42 {
+                    return Err(jsonrpsee_types::error::ErrorObject::owned(
+                        ErrorCode::InvalidParams.code(),
+                        "Invalid address (must be 0x + 40 hex chars)",
+                        None::<()>,
+                    ));
+                }
+
+                // Slot → U256
+                let slot = match U256::from_str_radix(slot_hex.trim_start_matches("0x"), 16) {
+                    Ok(s) => s,
+                    Err(_) => return Err(jsonrpsee_types::error::ErrorObject::owned(
+                        ErrorCode::InvalidParams.code(),
+                        "Invalid slot (must be valid hex)",
+                        None::<()>,
+                    )),
+                };
+
+                let vm = engine.vm.read().await;
+                let accounts = vm.state.accounts.read().await;
+
+                let value_hex = if let Some(account) = accounts.get(&address) {
+                    // Si tu as un vrai storage (ex: HashMap<B256, B256>)
+                    // let slot_b256 = B256::from(slot);
+                    // account.storage.get(&slot_b256).map_or("0x0".to_string(), |v| format!("0x{:064x}", v))
+
+                    // Sinon, fallback via resources ou RocksDB
+                    if let Some(val) = account.resources.get(&format!("storage_{:064x}", slot)) {
+                        val.as_str().unwrap_or("0x0").to_string()
+                    } else {
+                        "0x0000000000000000000000000000000000000000000000000000000000000000".to_string()
+                    }
+                } else {
+                    "0x0000000000000000000000000000000000000000000000000000000000000000".to_string()
+                };
+
+                Ok(serde_json::json!(value_hex))
+            }
+        }).expect("Failed to register eth_getStorageAt");
+
+        println!("Registered endpoint: eth_getStorageAt");
+
+        // Endpoint eth_maxPriorityFeePerGas – Simulation dynamique pour Remix (EIP-1559)
+let engine_clone = self.clone();
+module.register_async_method("eth_maxPriorityFeePerGas", move |_params, _meta, _| {
+    let engine = engine_clone.clone();
+    async move {
+        let height = engine.rpc_service.lurosonie_manager.get_block_height().await;
+
+        let base_priority = 1_000_000_000u64; // 1 Gwei minimum
+        let activity_bonus = (height % 100) * 10_000_000; // +0.01 Gwei par 100 blocs
+        let recent_tx_bonus = if engine.tx_receipts.read().await.len() > 10 { 500_000_000 } else { 0 };
+
+        let priority_fee = base_priority + activity_bonus + recent_tx_bonus;
+        let capped_fee = priority_fee.min(5_000_000_000); // max 5 Gwei
+
+        // Explicit type to help inference
+        Ok::<_, jsonrpsee_types::error::ErrorObject>(serde_json::json!(format!("0x{:x}", capped_fee)))
+    }
+}).expect("Failed to register eth_maxPriorityFeePerGas");
+
+        println!("Registered endpoint: eth_maxPriorityFeePerGas");
+
+// Endpoint eth_feeHistory – Simulation réaliste pour Remix (EIP-1559)
+let engine_clone = self.clone();
+module.register_async_method("eth_feeHistory", move |params, _meta, _| {
+    let engine = engine_clone.clone();
+    async move {
+        // Parsing params (conforme spec EIP-1559)
+        // [blockCount: QUANTITY, newestBlock: TAG, rewardPercentiles: [FLOAT]]
+        let (block_count_raw, newest_block_tag, percentiles_raw): (Option<String>, Option<String>, Option<Vec<f64>>) =
+            params.parse().unwrap_or_default();
+
+        let block_count = block_count_raw
+            .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+            .unwrap_or(5)
+            .min(1024); // limite sécurité
+
+        let _newest_block = newest_block_tag.unwrap_or("latest".to_string());
+
+        let percentiles = percentiles_raw.unwrap_or(vec![25.0, 50.0, 75.0]);
+
+        let current_height = engine.rpc_service.lurosonie_manager.get_block_height().await;
+
+        let mut base_fee_history = Vec::new();
+        let mut gas_used_ratio = Vec::new();
+        let mut reward_history: Vec<Vec<String>> = Vec::new();
+
+        // Simulation réaliste : base fee faible + légère variation
+        for i in 0..block_count {
+            let block_num = current_height.saturating_sub(i);
+
+            // Base fee : 0.5–2 Gwei, augmente légèrement avec le block number
+            let base_fee = 500_000_000 + (block_num % 20) * 75_000_000; // 0.5 → 2 Gwei
+            base_fee_history.push(format!("0x{:x}", base_fee));
+
+            // Gas used ratio : 20–80 % (réseau solo → faible charge)
+            let ratio = 0.2 + ((block_num as f64 * 0.03) % 0.6);
+            gas_used_ratio.push(ratio);
+
+            // Rewards par percentile (tips réalistes : 0.5–3 Gwei)
+            let mut rewards = Vec::new();
+            for p in &percentiles {
+                // Plus le percentile est haut, plus le tip est élevé
+                let tip_gwei = 500_000_000 + ((p / 100.0) * 2_500_000_000.0) as u64;
+                rewards.push(format!("0x{:x}", tip_gwei));
+            }
+            reward_history.push(rewards);
+        }
+
+        // Format exact attendu par la spec
+        Ok::<_, jsonrpsee_types::error::ErrorObject>(serde_json::json!({
+            "baseFeePerGas": base_fee_history,
+            "gasUsedRatio": gas_used_ratio,
+            "oldestBlock": format!("0x{:x}", current_height.saturating_sub(block_count)),
+            "reward": reward_history
+        }))
+    }
+}).expect("Failed to register eth_feeHistory");
+
+        println!("Registered endpoint: eth_feeHistory");
 
         // ✅ AJOUT: Endpoint eth_gasPrice pour Remix
         let engine_platform_clone = self.clone();
@@ -3144,6 +3283,8 @@ module.register_async_method("eth_getCode", move |params, _meta, _| {
                 }
             }
         }).expect("Failed to register eth_getBalance method");
+        
+        println!("Registered endpoint: eth_getBalance");
 
         // Enregistrer le endpoint `get_ledger_info`
         let engine_platform_clone = self.clone();
@@ -4503,6 +4644,9 @@ let already_exists = if let manager = storage.as_ref() {
     println!("   • net_version");
     println!("   • eth_accounts");
     println!("   • eth_gasPrice");
+    println!("   • eth_getStorageAt");
+    println!("   • eth_feeHistory");
+    println!("   • eth_maxPriorityFeePerGas");
     println!("   • eth_getBalance");
     println!("   • get_ledger_info");
     println!("   • build_acc");
