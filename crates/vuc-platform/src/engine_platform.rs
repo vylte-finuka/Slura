@@ -1174,7 +1174,8 @@ pub async fn get_transaction_count(&self, address: &str) -> Result<u64, String> 
 }
 
     /// Recharge tous les receipts persistés depuis RocksDB dans tx_receipts (mémoire)
-pub async fn load_persisted_receipts(&self) -> Result<u32, String> {
+/// Restaure TOUS les contrats + leurs adresses SLU zk-print depuis RocksDB
+pub async fn load_persisted_contracts(&self) -> Result<u32, String> {
     let mut loaded = 0u32;
 
     let storage_manager = {
@@ -1183,44 +1184,119 @@ pub async fn load_persisted_receipts(&self) -> Result<u32, String> {
     };
 
     let Some(manager) = storage_manager else {
-        println!("⚠️ Pas de storage manager → receipts non rechargés");
+        println!("⚠️ Pas de storage manager → aucun contrat restauré");
         return Ok(0);
     };
 
-    println!("🔄 Rechargement des receipts depuis RocksDB...");
+    println!("🔄 Scan RocksDB → restauration complète des contrats + SLU zk-print");
 
-    let prefix = "receipt:".to_string();
+    let prefix = "account:".to_string();
     let entries = manager.scan_prefix(&prefix)
-        .map_err(|e| format!("Échec scan prefix 'receipt:': {}", e))?;
+        .map_err(|e| format!("Échec scan prefix 'account:': {}", e))?;
 
-    println!("→ {} clés receipt trouvées", entries.len());
-
-    let mut receipts_map = self.tx_receipts.write().await;
+    println!("→ {} clés trouvées avec préfixe 'account:'", entries.len());
 
     for (key, value) in entries {
-        if !key.starts_with("receipt:") {
+        // On ne traite que les clés "account:0x..." (pas les :contract_state)
+        if !key.starts_with("account:") || key.contains(":contract_state") {
             continue;
         }
 
-        let tx_hash = key.trim_start_matches("receipt:").to_string();
-        println!("→ Receipt potentiel : {}", tx_hash);
-
-        match serde_json::from_slice::<serde_json::Value>(&value) {
-            Ok(receipt_json) => {
-                receipts_map.insert(tx_hash.clone(), receipt_json);
-                loaded += 1;
-                println!("   → Receipt chargé : {}", tx_hash);
-            }
-            Err(e) => {
-                println!("   ⚠️ Échec désérialisation receipt {} : {}", tx_hash, e);
-            }
+        let address = key.strip_prefix("account:").unwrap_or("").to_string();
+        if address.len() != 42 || !address.starts_with("0x") {
+            continue;
         }
+
+        println!("→ Restauration compte : {}", address);
+
+        // 1. Lecture du JSON complet du compte
+        let account_json: serde_json::Value = match serde_json::from_slice(&value) {
+            Ok(json) => json,
+            Err(_) => {
+                println!("   ⚠️ JSON invalide pour {}", address);
+                continue;
+            }
+        };
+
+        // 2. Récupération de l'adresse SLU zk-print sauvegardée (IMPORTANT)
+        let slu_zk_address = account_json
+            .get("resources")
+            .and_then(|r| r.get("slu_zk_address"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(&address)
+            .to_string();
+
+        // 3. Lecture du bytecode (clé séparée)
+        let bytecode_key = format!("account:{}:contract_state", address);
+        let bytecode = match manager.read(&bytecode_key) {
+            Ok(data) => data,
+            Err(_) => {
+                println!("   ⚠️ Pas de bytecode pour {}", address);
+                continue;
+            }
+        };
+
+        // 4. Création du AccountState
+        let account = vuc_tx::slurachain_vm::AccountState {
+            eth_address: address.clone(),
+            slu_zk_address: slu_zk_address.clone(),   // ← on garde la vraie SLU zk
+            balance: account_json.get("balance").and_then(|v| v.as_u64()).unwrap_or(0) as u128,
+            nonce: account_json.get("nonce").and_then(|v| v.as_u64()).unwrap_or(0),
+            contract_state: bytecode.clone(),
+            resources: account_json.get("resources")
+                .and_then(|v| v.as_object())
+                .cloned()
+                .map(|map| map.into_iter().collect())
+                .unwrap_or_default(),
+            state_version: account_json.get("state_version").and_then(|v| v.as_u64()).unwrap_or(1),
+            last_block_number: account_json.get("last_block_number").and_then(|v| v.as_u64()).unwrap_or(0),
+            code_hash: account_json.get("code_hash").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            storage_root: account_json.get("storage_root").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            is_contract: true,
+            gas_used: account_json.get("gas_used").and_then(|v| v.as_u64()).unwrap_or(0),
+        };
+
+        // 5. Insertion dans la VM
+        {
+            let mut vm = self.vm.write().await;
+            let mut accounts = vm.state.accounts.write().await;
+            accounts.insert(address.clone(), account);
+        }
+
+        // 6. Restauration du Module
+        {
+            let mut vm = self.vm.write().await;
+
+            let module = vuc_tx::slurachain_vm::Module {
+                name: "restored".to_string(),
+                address: address.clone(),
+                bytecode: bytecode.clone(),
+                elf_buffer: vec![],
+                context: uvm_runtime::UbfContext::new(),
+                stack_usage: None,
+                functions: hashbrown::HashMap::new(),
+                gas_estimates: hashbrown::HashMap::new(),
+                storage_layout: hashbrown::HashMap::new(),
+                events: vec![],
+                constructor_params: vec![],
+            };
+
+            vm.modules.insert(address.clone(), module);
+
+            let _ = vm.auto_detect_contract_functions(&address, &bytecode);
+        }
+
+        loaded += 1;
+
+        // ← AFFICHAGE APRÈS INSERTION (plus de borrow error)
+        println!("✅ Compte restauré : {} → SLU zk-print : {}", 
+                 address, slu_zk_address);
     }
 
     if loaded == 0 {
-        println!("ℹ️ Aucun receipt valide trouvé dans RocksDB");
+        println!("ℹ️ Aucun contrat trouvé dans RocksDB");
     } else {
-        println!("🟢 {} receipts rechargés en mémoire depuis RocksDB", loaded);
+        println!("🟢 {} contrats + leurs identités SLU zk-print restaurés avec succès", loaded);
     }
 
     Ok(loaded)
