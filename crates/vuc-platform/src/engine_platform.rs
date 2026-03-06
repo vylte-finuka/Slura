@@ -2785,6 +2785,7 @@ module.register_async_method("wallet_addEthereumChain", move |params, _meta, _| 
                 .and_then(|v| v.as_array())
                 .map(|arr| arr.clone())
                 .unwrap_or_else(|| vec!["http://localhost:8080".into()]),
+                "iconUrls": "./asset/Slura.png"
             "nativeCurrency": {
                 "name": "Vyft Enhancing ZER",
                 "symbol": "VEZ",
