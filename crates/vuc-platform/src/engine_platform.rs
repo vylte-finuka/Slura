@@ -393,7 +393,7 @@ async fn restore_account_from_data(&self, address: &str, account_data: &serde_js
         gas_used: account_data.get("gas_used").and_then(|v| v.as_u64()).unwrap_or(0),
     };
 
-    accounts.insert(address.to_string(), account);
+    accounts.insert(address.to_string(), account.clone());
     println!("✅ Compte restauré : {} → SLU zk-print : {}", address, account.slu_zk_address);
     Ok(true)
 }
