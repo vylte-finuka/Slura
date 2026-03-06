@@ -3,7 +3,7 @@ use ethers::utils::keccak256;
 use tokio::sync::{Mutex, mpsc, broadcast}; // Ajoute broadcast
 use rand::Rng;
 use serde_json::json;
-use alloy_primitives::Keccak256;
+use alloy_primitives::{B256, Keccak256};
 
 // Ensure the correct module path for TimestampRelease
 use vuc_events::timestamp_release::TimestampRelease;
@@ -34,6 +34,7 @@ use vuc_types::{committee::EpochId, supported_protocol_versions::SupportedProtoc
 use vuc_events::time_warp::TimeWarp;
 use vuc_tx::slura_merkle::build_state_trie;
 use uvm_runtime::interpreter::execute_program;
+use vuc_platform::operator::crypto_perf::generate_slu_zk_address;
 use uvm_runtime::interpreter::InterpreterArgs;
 use vuc_platform::{slurachain_rpc_service::slurachainRpcService, consensus::lurosonie_manager::LurosonieManager};
 use vuc_storage::storing_access::RocksDBManagerImpl;
@@ -193,7 +194,7 @@ impl EnginePlatform {
                         // ✅ ÉTAPE 3: PERSISTANCE DES COMPTES (maintenant aucun guard n'est actif)
                         for (address, account) in accounts_data.iter() {
                             let account_data = serde_json::json!({
-                                "address": account.address,
+                                "address": account.eth_address,
                                 "balance": account.balance,
                                 "nonce": account.nonce,
                                 "contract_state": hex::encode(&account.contract_state),
@@ -213,6 +214,14 @@ impl EnginePlatform {
                                     eprintln!("⚠️ Échec sauvegarde compte {}: {}", address, e);
                                 } else {
                                     println!("✅ Compte persisté: {}", address);
+                                    // ← AJOUT ICI pour voir l’identité SLU zk associée
+if let Some(slu_zk) = account.resources.get("slu_zk_address") {
+    if let Some(s) = slu_zk.as_str() {
+        if !s.is_empty() && s != address {
+            println!("   └─ Identité SLU zk-print : {}", s);
+        }
+    }
+}
                                 }
                             }
                         }
@@ -354,7 +363,8 @@ pub fn extract_runtime_from_creation_bytecode(full: &[u8]) -> Result<Vec<u8>, St
             let mut accounts = vm.state.accounts.write().await;
             
             let account = vuc_tx::slurachain_vm::AccountState {
-                address: address.to_string(),
+                eth_address: address.to_string(),
+                slu_zk_address: address.to_string(),
                 balance: account_data.get("balance").and_then(|v| v.as_u64()).unwrap_or(0) as u128,
                 nonce: account_data.get("nonce").and_then(|v| v.as_u64()).unwrap_or(0),
                 contract_state: account_data.get("contract_state")
@@ -592,275 +602,268 @@ pub async fn get_account_balance(&self, address: &str) -> Result<U256, String> {
     ))
 }
 
-           pub async fn get_block_by_hash(&self, block_hash: &str, include_txs: bool) -> Result<serde_json::Value, String> {
-            println!("🔎 Recherche du bloc avec hash: {}", block_hash);
-            let all_hashes = self.rpc_service.lurosonie_manager.get_all_block_hashes().await;
-            println!("📦 Hashes connus: {:?}", all_hashes);
+  pub async fn get_block_by_hash(&self, block_hash: &str, include_txs: bool) -> Result<serde_json::Value, String> {
+    println!("🔎 Recherche du bloc avec hash: {}", block_hash);
+    let all_hashes = self.rpc_service.lurosonie_manager.get_all_block_hashes().await;
+    println!("📦 Hashes connus: {} entrées", all_hashes.len());
+
+    // ─── 1. Recherche principale du bloc ───
+    let mut block_opt = self.rpc_service.lurosonie_manager.get_block_by_hash(block_hash).await;
+
+    // ─── 2. Si pas trouvé → recherche par transaction (fallback très utile) ───
+    if block_opt.is_none() {
+        println!("🔍 Hash non trouvé comme bloc → recherche par transaction...");
         
-            // ✅ CORRECTION : Cherche d'abord par hash de bloc
-            let mut block_opt = self.rpc_service.lurosonie_manager.get_block_by_hash(block_hash).await;
-            
-            // ✅ AMÉLIORATION : Si pas trouvé par hash de bloc, cherche par hash de transaction
-            if block_opt.is_none() {
-                println!("🔍 Hash non trouvé comme bloc, recherche par transaction...");
+        let tx_hash_normalized = self.normalize_tx_hash(block_hash);
+        let tx_hash_variants = vec![
+            block_hash.to_string(),
+            tx_hash_normalized.clone(),
+            block_hash.to_lowercase(),
+            block_hash.to_uppercase(),
+            format!("0x{}", block_hash.trim_start_matches("0x").to_lowercase()),
+        ];
+        
+        println!("🔍 Variantes de hash recherchées : {:?}", tx_hash_variants);
+        
+        let block_height = self.rpc_service.lurosonie_manager.get_block_height().await;
+        println!("🔍 Scan de {} blocs (0 à {})...", block_height + 1, block_height);
+        
+        'block_scan: for i in 0..=block_height {
+            if let Some(block_data) = self.rpc_service.lurosonie_manager.get_block_by_number(i).await {
+                let tx_count = block_data.transactions.len();
+                println!("   → Bloc #{} : {} transactions", i, tx_count);
                 
-                // Normalise le hash avec toutes les variantes possibles
-                let tx_hash_normalized = self.normalize_tx_hash(block_hash);
-                let tx_hash_variants = vec![
-                    block_hash.to_string(),
-                    tx_hash_normalized.clone(),
-                    block_hash.to_lowercase(),
-                    block_hash.to_uppercase(),
-                    format!("0x{}", block_hash.trim_start_matches("0x").to_lowercase()),
-                ];
-                
-                println!("🔍 Variantes de recherche: {:?}", tx_hash_variants);
-                
-                // Cherche dans TOUS les blocs pour trouver cette transaction
-                let block_height = self.rpc_service.lurosonie_manager.get_block_height().await;
-                println!("🔍 Cherche dans {} blocs (0 à {})...", block_height + 1, block_height);
-                
-                for i in 0..=block_height {
-                    if let Some(block_data) = self.rpc_service.lurosonie_manager.get_block_by_number(i).await {
-                        println!("🔍 Bloc #{} contient {} transactions", i, block_data.transactions.len());
-                        
-                        // Affiche toutes les transactions de ce bloc pour debug
-                        for (tx_idx, tx) in block_data.transactions.iter().enumerate() {
-                            println!("   TX {}: {}", tx_idx, tx.hash);
+                // Debug léger : on log seulement si match potentiel
+                let tx_found = block_data.transactions.iter().any(|tx| {
+                    tx_hash_variants.iter().any(|variant| {
+                        let matches = variant == &tx.hash || 
+                                      variant.eq_ignore_ascii_case(&tx.hash) ||
+                                      tx.hash.eq_ignore_ascii_case(variant);
+                        if matches {
+                            println!("      ✓ MATCH TX trouvée dans bloc #{} : {} == {}", i, variant, tx.hash);
                         }
-                        
-                        // Vérifie si ce bloc contient la transaction recherchée
-                        let tx_found = block_data.transactions.iter().any(|tx| {
-                            // Compare avec toutes les variantes
-                            tx_hash_variants.iter().any(|variant| {
-                                let matches = variant == &tx.hash || 
-                                            variant.eq_ignore_ascii_case(&tx.hash) ||
-                                            tx.hash.eq_ignore_ascii_case(variant);
-                                if matches {
-                                    println!("✅ MATCH trouvé: '{}' == '{}'", variant, tx.hash);
-                                }
-                                matches
-                            })
-                        });
-                        
-                        if tx_found {
-                            println!("✅ Transaction {} trouvée dans le bloc #{}", block_hash, i);
-                            block_opt = Some(block_data);
-                            break;
-                        }
-                    } else {
-                        println!("❌ Bloc #{} non trouvé dans Lurosonie", i);
-                    }
-                }
-                
-                // ✅ FALLBACK : Cherche aussi dans les receipts
-                if block_opt.is_none() {
-                    println!("🔍 Cherche dans les receipts stockés...");
-                    let receipts = self.tx_receipts.read().await;
-                    println!("🔍 Receipts disponibles: {:?}", receipts.keys().collect::<Vec<_>>());
-                    
-                    for variant in &tx_hash_variants {
-                        if let Some(receipt) = receipts.get(variant) {
-                            if let Some(block_num_hex) = receipt.get("blockNumber").and_then(|v| v.as_str()) {
-                                let block_num = u64::from_str_radix(block_num_hex.trim_start_matches("0x"), 16).unwrap_or(1);
-                                println!("🔍 Transaction trouvée dans receipt, bloc #{}", block_num);
-                                block_opt = self.rpc_service.lurosonie_manager.get_block_by_number(block_num).await;
-                                break;
-                            }
-                        }
-                    }
-                }
-        
-                // ✅ DERNIÈRE CHANCE : Force la recherche dans le mempool/pending
-                if block_opt.is_none() {
-                    println!("🔍 Dernier recours: vérifie dans pending/mempool...");
-                    let has_pending = self.rpc_service.lurosonie_manager.has_transaction_in_mempool(&tx_hash_normalized).await;
-                    if has_pending {
-                        println!("✅ Transaction trouvée dans mempool, utilise le dernier bloc");
-                        block_opt = self.rpc_service.lurosonie_manager.get_block_by_number(block_height).await;
-                    }
-                }
-            }
-            
-            if let Some(block_data) = block_opt {
-                let block_number = block_data.block.block_number;
-                let miner = block_data.validator.clone();
-                let miner_eth = if miner.starts_with("0x") { miner } else { self.convert_uip10_to_ethereum(&miner) };
-        
-                // Hash du bloc calculé (le VRAI hash du bloc)
-                let block_serialized = serde_json::to_string(&serde_json::json!({
-                    "block": block_data.block,
-                    "relay_power": block_data.relay_power,
-                    "delegated_stake": block_data.delegated_stake,
-                    "validator": block_data.validator
-                })).unwrap_or_default();
-                use sha3::{Sha3_256, Digest};
-                let mut hasher = Sha3_256::new();
-                hasher.update(block_serialized.as_bytes());
-                let block_hash_real = format!("0x{:x}", hasher.finalize());
-        
-                // Parent hash
-                let parent_hash = if block_number > 0 {
-                    self.rpc_service.lurosonie_manager.get_block_by_number(block_number - 1).await
-                        .map(|bd| {
-                            let block_serialized = serde_json::to_string(&serde_json::json!({
-                                "block": bd.block,
-                                "relay_power": bd.relay_power,
-                                "delegated_stake": bd.delegated_stake,
-                                "validator": bd.validator
-                            })).unwrap_or_default();
-                            let mut hasher = Sha3_256::new();
-                            hasher.update(block_serialized.as_bytes());
-                            format!("0x{:x}", hasher.finalize())
-                        })
-                        .unwrap_or_else(|| "0x0000000000000000000000000000000000000000000000000000000000000000".to_string())
-                } else {
-                    "0x0000000000000000000000000000000000000000000000000000000000000000".to_string()
-                };
-        
-                // Reste du code identique...
-                let nonce = format!("0x{:016x}", rand::random::<u64>());
-                let accounts = {
-                    let vm = self.vm.read().await;
-                    let accounts = vm.state.accounts.read().await;
-                    accounts.clone()
-                };
-                let hashed_state = vuc_tx::slura_merkle::build_state_trie(&accounts);
-                let mut trie_accounts: Vec<(alloy_primitives::B256, reth_trie::TrieAccount)> = hashed_state.accounts
-                    .iter()
-                    .filter_map(|(k, v)| {
-                        v.clone().map(|acc| {
-                            let trie_account = reth_trie::TrieAccount {
-                                nonce: acc.nonce,
-                                balance: acc.balance,
-                                storage_root: Default::default(),
-                                code_hash: Default::default(),
-                            };
-                            (k.clone(), trie_account)
-                        })
+                        matches
                     })
-                    .collect();
-                trie_accounts.sort_by(|a, b| a.0.cmp(&b.0));
-                let state_root = reth_trie::root::state_root(trie_accounts.into_iter());
-                let state_root_hex = format!("0x{}", hex::encode(state_root));
-        
-                let tx_hashes: Vec<String> = block_data.transactions.iter().map(|tx| tx.hash.clone()).collect();
-                let transactions_root = {
-                    use sha3::Keccak256;
-                    let mut hasher = Keccak256::new();
-                    for txh in &tx_hashes {
-                        hasher.update(txh.as_bytes());
-                    }
-                    format!("0x{:x}", hasher.finalize())
-                };
-        
-                let receipts_root = {
-                    use sha3::Keccak256;
-                    let mut hasher = Keccak256::new();
-                    for (_, result) in &block_data.execution_results {
-                        hasher.update(serde_json::to_string(result).unwrap_or_default().as_bytes());
-                    }
-                    format!("0x{:x}", hasher.finalize())
-                };
-        
-                // ✅ CORRECTION : retourne les VRAIES transactions avec index correct
-                let transactions_list = if include_txs {
-                    block_data.transactions.iter().enumerate().map(|(idx, tx)| serde_json::json!({
-                        "hash": tx.hash,
-                        "nonce": format!("0x{:x}", tx.nonce_tx),
-                        "from": tx.from_op,
-                        "to": tx.receiver_op,
-                        "value": format!("0x{:x}", tx.value_tx.parse::<u128>().unwrap_or(0)),
-                        "gas": "0x5208",
-                        "gasPrice": "0x3b9aca00",
-                        "input": "0x",
-                        "blockHash": block_hash_real.clone(),
-                        "blockNumber": format!("0x{:x}", block_number),
-                        "transactionIndex": format!("0x{:x}", idx)
-                    })).collect::<Vec<serde_json::Value>>()
-                } else {
-                    tx_hashes.into_iter().map(|hash| serde_json::Value::String(hash)).collect::<Vec<serde_json::Value>>()
-                };
-        
-                Ok(serde_json::json!({
-                    "number": format!("0x{:x}", block_number),
-                    "hash": block_hash_real,
-                    "mixHash": block_hash_real,
-                    "parentHash": parent_hash,
-                    "nonce": nonce,
-                    "sha3Uncles": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
-                    "logsBloom": "0x".to_string() + &"00".repeat(512),
-                    "transactionsRoot": transactions_root,
-                    "stateRoot": state_root_hex,
-                    "receiptsRoot": receipts_root,
-                    "miner": miner_eth,
-                    "difficulty": "0x1",
-                    "totalDifficulty": "0x1",
-                    "gasLimit": "0x47e7c4",
-                    "gasUsed": "0x0",
-                    "size": "0x334",
-                    "extraData": "",
-                    "timestamp": format!("0x{:x}", block_data.block.timestamp.timestamp()),
-                    "uncles": [],
-                    "transactions": transactions_list,
-                    "baseFeePerGas": "0x7",
-                    "withdrawalsRoot": receipts_root,
-                    "withdrawals": [],
-                    "blobGasUsed": "0x0",
-                    "excessBlobGas": "0x0",
-                    "parent_beacon_block_root": parent_hash,
-                }))
-            } else {
-                println!("❌ ÉCHEC TOTAL: Aucun bloc trouvé pour le hash : {}", block_hash);
-                
-                // ✅ DERNIER FALLBACK : Génère un bloc avec juste cette transaction
-                println!("🆘 Génération d'un bloc générique contenant cette transaction");
-                let (current_block, current_block_hash) = self.get_latest_block_info().await;
-                
-                let fake_tx = serde_json::json!({
-                    "hash": block_hash,
-                    "nonce": "0x0",
-                    "from": self.validator_address,
-                    "to": "0x0000000000000000000000000000000000000000",
-                    "value": "0x0",
-                    "gas": "0x5208",
-                    "gasPrice": "0x3b9aca00",
-                    "input": "0x",
-                    "blockHash": current_block_hash.clone(),
-                    "blockNumber": format!("0x{:x}", current_block),
-                    "transactionIndex": "0x0"
                 });
                 
-                Ok(serde_json::json!({
-                    "number": format!("0x{:x}", current_block),
-                    "hash": current_block_hash,
-                    "mixHash": current_block_hash,
-                    "parentHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
-                    "nonce": "0x0000000000000000",
-                    "sha3Uncles": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
-                    "logsBloom": "0x".to_string() + &"00".repeat(512),
-                    "transactionsRoot": current_block_hash,
-                    "stateRoot": current_block_hash,
-                    "receiptsRoot": current_block_hash,
-                    "miner": self.validator_address,
-                    "difficulty": "0x1",
-                    "totalDifficulty": "0x1",
-                    "gasLimit": "0x47e7c4",
-                    "gasUsed": "0x0",
-                    "size": "0x334",
-                    "extraData": "",
-                    "timestamp": format!("0x{:x}", chrono::Utc::now().timestamp()),
-                    "uncles": [],
-                    "transactions": if include_txs { vec![fake_tx] } else { vec![serde_json::Value::String(block_hash.to_string())] },
-                    "baseFeePerGas": "0x7",
-                    "withdrawalsRoot": current_block_hash,
-                    "withdrawals": [],
-                    "blobGasUsed": "0x0",
-                    "excessBlobGas": "0x0",
-                    "ParentBeaconBlockRoot": "0x0000000000000000000000000000000000000000000000000000000000000000",
-                }))
+                if tx_found {
+                    println!("✅ Transaction {} localisée dans bloc #{}", block_hash, i);
+                    block_opt = Some(block_data);
+                    break 'block_scan;
+                }
             }
         }
+
+        // ─── 3. Fallback receipts ───
+        if block_opt.is_none() {
+            println!("🔍 Recherche dans les receipts persistés...");
+            let receipts = self.tx_receipts.read().await;
+            println!("   → {} receipts en mémoire", receipts.len());
+            
+            for variant in &tx_hash_variants {
+                if let Some(receipt) = receipts.get(variant) {
+                    if let Some(block_num_hex) = receipt.get("blockNumber").and_then(|v| v.as_str()) {
+                        if let Ok(block_num) = u64::from_str_radix(block_num_hex.trim_start_matches("0x"), 16) {
+                            println!("   ✓ Receipt trouvé pour tx {}, bloc #{}", variant, block_num);
+                            block_opt = self.rpc_service.lurosonie_manager.get_block_by_number(block_num).await;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // ─── 4. Dernier recours : mempool + bloc courant ───
+        if block_opt.is_none() {
+            println!("🔍 Dernier recours : vérification mempool...");
+            let has_pending = self.rpc_service.lurosonie_manager.has_transaction_in_mempool(&tx_hash_normalized).await;
+            if has_pending {
+                println!("   ✓ Tx trouvée en pending → on retourne le bloc le plus récent");
+                let height = self.rpc_service.lurosonie_manager.get_block_height().await;
+                block_opt = self.rpc_service.lurosonie_manager.get_block_by_number(height).await;
+            }
+        }
+    }
+
+    // ─── Construction de la réponse ───
+    if let Some(block_data) = block_opt {
+        let block_number = block_data.block.block_number;
+        let miner = block_data.validator.clone();
+        let miner_eth = if miner.starts_with("0x") { miner } else { self.convert_uip10_to_ethereum(&miner) };
+
+        // Hash réel du bloc (déterministe)
+        let block_serialized = serde_json::to_string(&serde_json::json!({
+            "block": block_data.block,
+            "relay_power": block_data.relay_power,
+            "delegated_stake": block_data.delegated_stake,
+            "validator": block_data.validator,
+            "timestamp": block_data.block.timestamp.timestamp()
+        })).unwrap_or_default();
+        
+        let mut hasher = sha3::Sha3_256::new();
+        hasher.update(block_serialized.as_bytes());
+        let block_hash_real = format!("0x{:x}", hasher.finalize());
+
+        // Parent hash
+        let parent_hash = if block_number > 0 {
+            self.rpc_service.lurosonie_manager.get_block_by_number(block_number - 1).await
+                .map(|bd| {
+                    let ser = serde_json::to_string(&serde_json::json!({
+                        "block": bd.block,
+                        "relay_power": bd.relay_power,
+                        "delegated_stake": bd.delegated_stake,
+                        "validator": bd.validator,
+                        "timestamp": bd.block.timestamp.timestamp()
+                    })).unwrap_or_default();
+                    let mut h = sha3::Sha3_256::new();
+                    h.update(ser.as_bytes());
+                    format!("0x{:x}", h.finalize())
+                })
+                .unwrap_or_else(|| B256::ZERO.to_string())
+        } else {
+            B256::ZERO.to_string()
+        };
+
+        // ─── STATE TRIE ÉTENDU ───
+        let accounts = {
+            let vm = self.vm.read().await;
+            let acc = vm.state.accounts.read().await;
+            acc.clone()
+        };
+
+        // Utilise la nouvelle fonction étendue
+        let (post_state, standard_root, zk_root) = vuc_tx::slura_merkle::build_extended_state_trie(&accounts);
+        
+        let state_root_hex = format!("0x{}", hex::encode(standard_root));
+        let zk_identity_root_hex = format!("0x{}", hex::encode(zk_root));
+
+        println!("🔒 Roots calculés pour bloc #{} :", block_number);
+        println!("   • stateRoot (EVM)     : {}", state_root_hex);
+        println!("   • zkIdentityRoot     : {}", zk_identity_root_hex);
+
+        // Transactions root
+        let tx_hashes: Vec<String> = block_data.transactions.iter().map(|tx| tx.hash.clone()).collect();
+        let mut tx_hasher = Keccak256::new();
+        for h in &tx_hashes {
+            tx_hasher.update(h.as_bytes());
+        }
+        let transactions_root = format!("0x{:x}", tx_hasher.finalize());
+
+        // Receipts root
+        let mut receipts_hasher = Keccak256::new();
+        for (_, result) in &block_data.execution_results {
+            receipts_hasher.update(serde_json::to_string(result).unwrap_or_default().as_bytes());
+        }
+        let receipts_root = format!("0x{:x}", receipts_hasher.finalize());
+
+        // Liste des transactions (si demandé)
+        let transactions_list = if include_txs {
+            block_data.transactions.iter().enumerate().map(|(idx, tx)| {
+                serde_json::json!({
+                    "hash": tx.hash,
+                    "nonce": format!("0x{:x}", tx.nonce_tx),
+                    "from": tx.from_op,
+                    "to": tx.receiver_op,
+                    "value": format!("0x{:x}", tx.value_tx.parse::<u128>().unwrap_or(0)),
+                    "gas": "0x5208",
+                    "gasPrice": "0x3b9aca00",
+                    "maxFeePerGas": "0x3b9aca00",
+                    "maxPriorityFeePerGas": "0x3b9aca00",
+                    "input": "0x",
+                    "blockHash": block_hash_real.clone(),
+                    "blockNumber": format!("0x{:x}", block_number),
+                    "transactionIndex": format!("0x{:x}", idx),
+                    "type": "0x2"
+                })
+            }).collect::<Vec<_>>()
+        } else {
+            tx_hashes.into_iter().map(serde_json::Value::String).collect()
+        };
+
+        // Réponse JSON enrichie
+        Ok(serde_json::json!({
+            "number": format!("0x{:x}", block_number),
+            "hash": block_hash_real,
+            "mixHash": block_hash_real,
+            "parentHash": parent_hash,
+            "nonce": format!("0x{:016x}", rand::random::<u64>()),
+            "sha3Uncles": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
+            "logsBloom": "0x".to_string() + &"00".repeat(512),
+            "transactionsRoot": transactions_root,
+            "stateRoot": state_root_hex,
+            "receiptsRoot": receipts_root,
+            "miner": miner_eth,
+            "difficulty": "0x1",
+            "totalDifficulty": "0x1",
+            "gasLimit": "0x47e7c4",
+            "gasUsed": "0x0",
+            "size": "0x334",
+            "extraData": zk_identity_root_hex,  // ← on met le zk root ici (compatible EVM)
+            "timestamp": format!("0x{:x}", block_data.block.timestamp.timestamp()),
+            "uncles": [],
+            "transactions": transactions_list,
+            "baseFeePerGas": "0x7",
+            "withdrawalsRoot": receipts_root,
+            "withdrawals": [],
+            "blobGasUsed": "0x0",
+            "excessBlobGas": "0x0",
+            "parentBeaconBlockRoot": parent_hash,
+            // Champ optionnel visible pour outils custom / explorateur Slurachain
+            "zkIdentityRoot": zk_identity_root_hex
+        }))
+    } else {
+        // ─── FALLBACK : bloc générique ───
+        println!("❌ Aucun bloc trouvé pour hash {}, génération fallback", block_hash);
+        let (current_block, current_block_hash) = self.get_latest_block_info().await;
+
+        let fake_tx = serde_json::json!({
+            "hash": block_hash,
+            "nonce": "0x0",
+            "from": self.validator_address,
+            "to": "0x0000000000000000000000000000000000000000",
+            "value": "0x0",
+            "gas": "0x5208",
+            "gasPrice": "0x3b9aca00",
+            "maxFeePerGas": "0x3b9aca00",
+            "maxPriorityFeePerGas": "0x3b9aca00",
+            "input": "0x",
+            "blockHash": current_block_hash.clone(),
+            "blockNumber": format!("0x{:x}", current_block),
+            "transactionIndex": "0x0",
+            "type": "0x2"
+        });
+
+        Ok(serde_json::json!({
+            "number": format!("0x{:x}", current_block),
+            "hash": current_block_hash.clone(),
+            "mixHash": current_block_hash.clone(),
+            "parentHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "nonce": "0x0000000000000000",
+            "sha3Uncles": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
+            "logsBloom": "0x".to_string() + &"00".repeat(512),
+            "transactionsRoot": current_block_hash.clone(),
+            "stateRoot": current_block_hash.clone(),
+            "receiptsRoot": current_block_hash.clone(),
+            "miner": self.validator_address,
+            "difficulty": "0x1",
+            "totalDifficulty": "0x1",
+            "gasLimit": "0x47e7c4",
+            "gasUsed": "0x0",
+            "size": "0x334",
+            "extraData": "0x",
+            "timestamp": format!("0x{:x}", chrono::Utc::now().timestamp()),
+            "uncles": [],
+            "transactions": if include_txs { vec![fake_tx] } else { vec![serde_json::Value::String(block_hash.to_string())] },
+            "baseFeePerGas": "0x7",
+            "withdrawalsRoot": current_block_hash.clone(),
+            "withdrawals": [],
+            "blobGasUsed": "0x0",
+            "excessBlobGas": "0x0",
+            "parentBeaconBlockRoot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "zkIdentityRoot": "0x0000000000000000000000000000000000000000000000000000000000000000"  // fallback
+        }))
+    }
+}
 
     /// ✅ AJOUT: Méthode manquante get_ledger_info
     pub async fn get_ledger_info(&self) -> Result<serde_json::Value, String> {
@@ -956,86 +959,209 @@ pub async fn get_transaction_count(&self, address: &str) -> Result<u64, String> 
     Ok(tx_count)
 }
 
-    pub async fn get_block_by_number(&self, block_tag: &str, include_txs: bool) -> Result<serde_json::Value, String> {
-        let current_block = self.get_current_block_number().await;
-        let block_number = match block_tag {
-            "latest" | "pending" => current_block,
-            "earliest" => 0,
-            _ => {
-                if block_tag.starts_with("0x") {
-                    u64::from_str_radix(&block_tag[2..], 16).unwrap_or(current_block)
-                } else {
-                    block_tag.parse().unwrap_or(current_block)
-                }
-            }
-        };
+   pub async fn get_block_by_number(&self, block_tag: &str, include_txs: bool) -> Result<serde_json::Value, String> {
+    let current_block = self.get_current_block_number().await;
     
-        let block_data_opt = self.rpc_service.lurosonie_manager.get_block_by_number(block_number).await;
-        if let Some(block_data) = block_data_opt {
-            // Adresse du mineur réelle
-            let miner = block_data.validator.clone();
-            let miner_eth = if miner.starts_with("0x") { miner } else { self.convert_uip10_to_ethereum(&miner) };
-
-            // Hash du bloc calculé
-            use sha3::{Digest, Keccak256};
-            let block_serialized = serde_json::to_string(&block_data).unwrap_or_default();
-            let mut hasher = Keccak256::new();
-            hasher.update(block_serialized.as_bytes());
-            let block_hash = format!("0x{:x}", hasher.finalize());
-
-            // Parent hash
-            let parent_hash = self.rpc_service.lurosonie_manager.get_block_by_number(block_number.saturating_sub(1)).await
-                .map(|bd| {
-                    let block_serialized = serde_json::to_string(&bd).unwrap_or_default();
-                    let mut hasher = Keccak256::new();
-                    hasher.update(block_serialized.as_bytes());
-                    format!("0x{:x}", hasher.finalize())
-                })
-                .unwrap_or_else(|| "0x0000000000000000000000000000000000000000000000000000000000000000".to_string());
-
-            // Nonce aléatoire
-            let nonce = format!("0x{:016x}", rand::random::<u64>());
-
-            // Roots (à calculer selon ton VM/état)
-            let state_root = block_hash.clone();
-            let transactions_root = block_hash.clone();
-            let receipts_root = block_hash.clone();
-
-            Ok(serde_json::json!({
-                "number": format!("0x{:x}", block_number),
-                "hash": block_hash,
-                "mixHash": block_hash,
-                "parentHash": parent_hash,
-                "nonce": nonce,
-                "sha3Uncles": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
-                "logsBloom": "0x".to_string() + &"0".repeat(512),
-                "transactionsRoot": transactions_root,
-                "stateRoot": state_root,
-                "receiptsRoot": receipts_root,
-                "miner": miner_eth,
-                "difficulty": "0x1",
-                "totalDifficulty": "0x1",
-                "gasLimit": "0x47e7c4",
-                "gasUsed": "0x0",
-                "size": "0x334",
-                "extraData": "0x",
-                "nonce": "0x0000000000000000",
-                "logs_bloom": "0x".to_string() + &"0".repeat(512),
-                "transactions_root": block_hash.clone(),
-                "state_root": block_hash.clone(),
-                "receipts_root": block_hash.clone(),
-                "sha3_uncles": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
-                "mix_hash": block_hash.clone(),
-                "base_fee_per_gas": "0x7",
-                "withdrawals_root": block_hash.clone(),
-                "blob_gas_used": "0x0",
-                "excess_blob_gas": "0x0",
-                "parent_beacon_block_root": block_hash.clone(),
-            }))
-        } else {
-            Ok(serde_json::json!({}))
+    // ─── Résolution du numéro de bloc ───
+    let block_number = match block_tag.trim().to_lowercase().as_str() {
+        "latest" | "pending" => current_block,
+        "earliest" | "0x0" => 0,
+        _ if block_tag.starts_with("0x") => {
+            u64::from_str_radix(&block_tag[2..], 16).unwrap_or(current_block)
         }
+        _ => block_tag.parse::<u64>().unwrap_or(current_block),
+    };
+
+    println!("🔎 Demande de bloc #{} (tag: '{}')", block_number, block_tag);
+
+    // ─── Récupération du bloc ───
+    let block_data_opt = self.rpc_service.lurosonie_manager.get_block_by_number(block_number).await;
+
+    if let Some(block_data) = block_data_opt {
+        let miner = block_data.validator.clone();
+        let miner_eth = if miner.starts_with("0x") {
+            miner
+        } else {
+            self.convert_uip10_to_ethereum(&miner)
+        };
+
+        // ─── Hash réel du bloc (déterministe) ───
+        let block_serialized = serde_json::to_string(&serde_json::json!({
+            "block": block_data.block,
+            "relay_power": block_data.relay_power,
+            "delegated_stake": block_data.delegated_stake,
+            "validator": block_data.validator,
+            "timestamp": block_data.block.timestamp.timestamp()
+        })).unwrap_or_default();
+
+        let mut hasher = sha3::Keccak256::new();
+        hasher.update(block_serialized.as_bytes());
+        let block_hash = format!("0x{:x}", hasher.finalize());
+
+        // ─── Parent hash ───
+        let parent_hash = if block_number > 0 {
+            self.rpc_service.lurosonie_manager.get_block_by_number(block_number - 1).await
+                .map(|bd| {
+                    let ser = serde_json::to_string(&serde_json::json!({
+                        "block": bd.block,
+                        "relay_power": bd.relay_power,
+                        "delegated_stake": bd.delegated_stake,
+                        "validator": bd.validator,
+                        "timestamp": bd.block.timestamp.timestamp()
+                    })).unwrap_or_default();
+                    let mut h = sha3::Keccak256::new();
+                    h.update(ser.as_bytes());
+                    format!("0x{:x}", h.finalize())
+                })
+                .unwrap_or_else(|| "0x0000000000000000000000000000000000000000000000000000000000000000".to_string())
+        } else {
+            "0x0000000000000000000000000000000000000000000000000000000000000000".to_string()
+        };
+
+        // ─── Nonce aléatoire ───
+        let nonce = format!("0x{:016x}", rand::random::<u64>());
+
+        // ─── STATE TRIE ÉTENDU ───
+        let accounts = {
+            let vm = self.vm.read().await;
+            let acc = vm.state.accounts.read().await;
+            acc.clone()
+        };
+
+        let (post_state, standard_root, zk_root) = vuc_tx::slura_merkle::build_extended_state_trie(&accounts);
+        
+        let state_root_hex = format!("0x{}", hex::encode(standard_root));
+        let zk_identity_root_hex = format!("0x{}", hex::encode(zk_root));
+
+        println!("🔒 Roots pour bloc #{} :", block_number);
+        println!("   • stateRoot (EVM)     : {}", state_root_hex);
+        println!("   • zkIdentityRoot     : {}", zk_identity_root_hex);
+
+        // ─── Transactions root ───
+        let tx_hashes: Vec<String> = block_data.transactions.iter().map(|tx| tx.hash.clone()).collect();
+        let mut tx_hasher = sha3::Keccak256::new();
+        for h in &tx_hashes {
+            tx_hasher.update(h.as_bytes());
+        }
+        let transactions_root = format!("0x{:x}", tx_hasher.finalize());
+
+        // ─── Receipts root ───
+        let mut receipts_hasher = sha3::Keccak256::new();
+        for (_, result) in &block_data.execution_results {
+            receipts_hasher.update(serde_json::to_string(result).unwrap_or_default().as_bytes());
+        }
+        let receipts_root = format!("0x{:x}", receipts_hasher.finalize());
+
+        // ─── Liste des transactions (si demandé) ───
+        let transactions_list = if include_txs {
+            block_data.transactions.iter().enumerate().map(|(idx, tx)| {
+                serde_json::json!({
+                    "hash": tx.hash,
+                    "nonce": format!("0x{:x}", tx.nonce_tx),
+                    "from": tx.from_op,
+                    "to": tx.receiver_op,
+                    "value": format!("0x{:x}", tx.value_tx.parse::<u128>().unwrap_or(0)),
+                    "gas": "0x5208",
+                    "gasPrice": "0x3b9aca00",
+                    "maxFeePerGas": "0x3b9aca00",
+                    "maxPriorityFeePerGas": "0x3b9aca00",
+                    "input": "0x",
+                    "blockHash": block_hash.clone(),
+                    "blockNumber": format!("0x{:x}", block_number),
+                    "transactionIndex": format!("0x{:x}", idx),
+                    "type": "0x2"
+                })
+            }).collect::<Vec<_>>()
+        } else {
+            tx_hashes.into_iter().map(serde_json::Value::String).collect()
+        };
+
+        // ─── Réponse JSON finale ───
+        Ok(serde_json::json!({
+            "number": format!("0x{:x}", block_number),
+            "hash": block_hash,
+            "mixHash": block_hash,
+            "parentHash": parent_hash,
+            "nonce": nonce,
+            "sha3Uncles": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
+            "logsBloom": "0x".to_string() + &"00".repeat(512),
+            "transactionsRoot": transactions_root,
+            "stateRoot": state_root_hex,
+            "receiptsRoot": receipts_root,
+            "miner": miner_eth,
+            "difficulty": "0x1",
+            "totalDifficulty": "0x1",
+            "gasLimit": "0x47e7c4",
+            "gasUsed": "0x0",
+            "size": "0x334",
+            "extraData": zk_identity_root_hex.clone(),  // ← zk root dans extraData (standard EVM)
+            "timestamp": format!("0x{:x}", block_data.block.timestamp.timestamp()),
+            "uncles": serde_json::json!([]),
+            "transactions": transactions_list,
+            "baseFeePerGas": "0x7",
+            "withdrawalsRoot": receipts_root,
+            "withdrawals": serde_json::json!([]),
+            "blobGasUsed": "0x0",
+            "excessBlobGas": "0x0",
+            "parentBeaconBlockRoot": parent_hash,
+            // Champ explicite pour explorateur Slurachain / outils custom
+            "zkIdentityRoot": zk_identity_root_hex
+        }))
+    } else {
+        // ─── Bloc non trouvé → fallback minimal ───
+        println!("❌ Bloc #{} non trouvé → génération fallback", block_number);
+        
+        let current_block_hash = self.rpc_service.lurosonie_manager.get_last_block_hash().await
+            .unwrap_or_else(|| format!("0x{:064x}", block_number));
+
+        let fake_tx = serde_json::json!({
+            "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "nonce": "0x0",
+            "from": self.validator_address,
+            "to": "0x0000000000000000000000000000000000000000",
+            "value": "0x0",
+            "gas": "0x5208",
+            "gasPrice": "0x3b9aca00",
+            "maxFeePerGas": "0x3b9aca00",
+            "maxPriorityFeePerGas": "0x3b9aca00",
+            "input": "0x",
+            "blockHash": current_block_hash.clone(),
+            "blockNumber": format!("0x{:x}", block_number),
+            "transactionIndex": "0x0",
+            "type": "0x2"
+        });
+
+        Ok(serde_json::json!({
+            "number": format!("0x{:x}", block_number),
+            "hash": current_block_hash.clone(),
+            "mixHash": current_block_hash.clone(),
+            "parentHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "nonce": "0x0000000000000000",
+            "sha3Uncles": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
+            "logsBloom": "0x".to_string() + &"00".repeat(512),
+            "transactionsRoot": current_block_hash.clone(),
+            "stateRoot": current_block_hash.clone(),
+            "receiptsRoot": current_block_hash.clone(),
+            "miner": self.validator_address,
+            "difficulty": "0x1",
+            "totalDifficulty": "0x1",
+            "gasLimit": "0x47e7c4",
+            "gasUsed": "0x0",
+            "size": "0x334",
+            "extraData": "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "timestamp": format!("0x{:x}", chrono::Utc::now().timestamp()),
+            "uncles": serde_json::json!([]),
+            "transactions": if include_txs { vec![fake_tx] } else { vec![serde_json::Value::String("0x".to_string())] },
+            "baseFeePerGas": "0x7",
+            "withdrawalsRoot": current_block_hash.clone(),
+            "withdrawals": serde_json::json!([]),
+            "blobGasUsed": "0x0",
+            "excessBlobGas": "0x0",
+            "parentBeaconBlockRoot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "zkIdentityRoot": "0x0000000000000000000000000000000000000000000000000000000000000000"
+        }))
     }
+}
 
     /// Recharge tous les receipts persistés depuis RocksDB dans tx_receipts (mémoire)
 pub async fn load_persisted_receipts(&self) -> Result<u32, String> {
@@ -1148,7 +1274,8 @@ pub async fn load_persisted_contracts(&self) -> Result<u32, String> {
             let mut acc = accounts
                 .entry(address.clone())
                 .or_insert_with(|| vuc_tx::slurachain_vm::AccountState {
-                    address: address.clone(),
+                        eth_address: address.clone(),
+                    slu_zk_address: address.clone(),
                     balance: 0,
                     contract_state: vec![],
                     resources: BTreeMap::new(),
@@ -1234,7 +1361,8 @@ pub async fn load_persisted_contracts(&self) -> Result<u32, String> {
             let bytecode = hex::decode(bytecode_hex).unwrap_or_default();
             
             vuc_tx::slurachain_vm::AccountState {
-                address: contract_address.to_string(),
+                     eth_address: contract_address.to_string(),
+                    slu_zk_address: contract_address.to_string(),
                 balance: 0,
                 contract_state: bytecode,
                 resources: BTreeMap::new(),
@@ -1359,7 +1487,8 @@ pub async fn verify_contract_deployment(&self, contract_address: &str) -> Result
             let mut accounts = vm.state.accounts.write().await;
             if !accounts.contains_key(&vez_addr) {
                 let initial_account = vuc_tx::slurachain_vm::AccountState {
-                    address: vez_addr.clone(),
+                         eth_address: vez_addr.to_string(),
+                    slu_zk_address: vez_addr.to_string(),
                     balance: 0u128,
                     contract_state: creation_bytecode.clone(),
                     resources: {
@@ -1420,6 +1549,7 @@ pub async fn verify_contract_deployment(&self, contract_address: &str) -> Result
 
 pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<String, String> {
     use sha3::{Digest, Keccak256};
+    use ethers::types::U256;
 
     println!("➡️ [send_transaction] Transaction reçue : {:?}", tx_params);
 
@@ -1433,15 +1563,15 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         .unwrap_or("")
         .to_lowercase();
 
-    // 🔥 EXCEPTION SPÉCIFIQUE POUR L'INITIALISATION VEZ
+    // Exception spéciale pour l'initialisation VEZ (mint initial)
     let is_vez_initialization = to_addr == "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" &&
         tx_params.get("data").and_then(|v| v.as_str()).unwrap_or("")
             .starts_with("0x40c10f1900000000000000000000000053ae54b11251d5003e9aa51422405bc35a2ef32d");
 
-    // 🔥 STRATÉGIE NONCE TOUJOURS UNIQUE
+    // Récupération du nonce actuel (depuis receipts ou état)
     let current_account_nonce = self.get_transaction_count(&from_addr).await.unwrap_or(0);
 
-    // ✅ FORCE NONCE TOUJOURS CROISSANT
+    // Force le nonce à être croissant (priorité au fourni si supérieur)
     let final_nonce = tx_params.get("nonce")
         .and_then(|v| {
             if v.is_string() {
@@ -1460,12 +1590,13 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         .map(|provided_nonce| std::cmp::max(provided_nonce, current_account_nonce))
         .unwrap_or(current_account_nonce);
 
-    // 🔥 DÉTECTION DU TYPE DE TRANSACTION
+    // Détection déploiement (to absent ou vide)
     let is_deployment = to_addr.is_empty() ||
                        to_addr == "0x" ||
                        tx_params.get("to").is_none() ||
                        tx_params.get("to") == Some(&serde_json::Value::Null);
 
+    // Valeur envoyée (u128)
     let value = tx_params.get("value")
         .and_then(|v| {
             if v.is_string() {
@@ -1489,9 +1620,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    // ========================================================
-    // PRÉPARATION CALDATA GÉNÉRIQUE (pour tx normales)
-    // ========================================================
+    // Décodage calldata
     let calldata_bytes = if !data.is_empty() && data.starts_with("0x") {
         hex::decode(&data[2..]).unwrap_or_default()
     } else if !data.is_empty() {
@@ -1500,15 +1629,9 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         vec![]
     };
 
-    // ========================================================
-    // PRÉPARATION SPÉCIFIQUE POUR DÉPLOIEMENT
-    // ========================================================
+    // Bytecode de création (uniquement pour déploiement)
     let creation_bytecode = if is_deployment && !data.is_empty() {
-        if data.starts_with("0x") {
-            hex::decode(&data[2..]).unwrap_or_default()
-        } else {
-            hex::decode(data).unwrap_or_default()
-        }
+        calldata_bytes.clone()
     } else {
         vec![]
     };
@@ -1517,11 +1640,10 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         return Err("Bytecode de déploiement vide".to_string());
     }
 
-    // Calldata pour le constructeur : VIDE par défaut
+    // Calldata constructeur (vide par défaut)
     let constructor_calldata: Vec<u8> = vec![];
 
-    // GÉNÉRATION TX HASH UNIQUE ET INDÉTERMINISTE
-    let mut contract_address = String::new();
+    // Génération hash transaction unique
     let mut tx_hasher = Keccak256::new();
     tx_hasher.update(from_addr.as_bytes());
     tx_hasher.update(&final_nonce.to_be_bytes());
@@ -1535,21 +1657,25 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     let tx_hash = format!("0x{:x}", tx_hasher.finalize());
     let normalized_hash = self.normalize_tx_hash(&tx_hash);
 
-    // DÉPLOIEMENT
+    let mut contract_address = String::new();       // ← adresse Ethereum (racine EVM)
+    let mut slu_zk_contract_addr = String::new();   // ← adresse SLU zk-print longue
+
     if is_deployment {
         let use_create2 = tx_params.get("create2").and_then(|v| v.as_bool()).unwrap_or(false);
         let target_address = tx_params.get("target_address")
             .and_then(|v| v.as_str())
             .map(|s| s.to_lowercase());
 
+        // 1. Génération adresse Ethereum classique (racine EVM)
         contract_address = if use_create2 {
             if let Some(addr) = target_address {
-                println!("⚡ [CREATE2] Déploiement via execute_module à l'adresse forcée: {}", addr);
+                println!("⚡ [CREATE2] Déploiement à l'adresse forcée : {}", addr);
                 addr
             } else {
-                return Err("CREATE2 demandé mais aucune 'target_address' fournie".to_string());
+                return Err("CREATE2 demandé mais target_address manquant".to_string());
             }
         } else {
+            // CREATE déterministe + random si collision
             let mut addr_hasher = Keccak256::new();
             addr_hasher.update(from_addr.as_bytes());
             addr_hasher.update(&final_nonce.to_be_bytes());
@@ -1584,22 +1710,37 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
             }
         };
 
+        // 2. Génération adresse SLU zk-print (en supplément - format exact demandé)
+        slu_zk_contract_addr = generate_slu_zk_address(
+            &format!("contract:{}", contract_address),  // sel différenciateur
+            10,   // longueur du hash_id (premier segment)
+            32    // longueur du hash_zk_print (second segment)
+        );
+
+        println!("📦 Déploiement contrat → deux adresses générées :");
+        println!("   • Ethereum racine (EVM) : {}", contract_address);
+        println!("   • SLU zk-print (quantique) : {}", slu_zk_contract_addr);
+
         let mut vm = self.vm.write().await;
 
-        // 1. Pré-création / mise à jour du compte AVEC le bytecode DÈS MAINTENANT
+        // 3. Pré-création / mise à jour du compte contrat avec LES DEUX adresses
         {
             let mut accounts = vm.state.accounts.write().await;
-            
+
             let mut account = accounts
                 .entry(contract_address.clone())
                 .or_insert_with(|| vuc_tx::slurachain_vm::AccountState {
-                    address: contract_address.clone(),
+                    eth_address: contract_address.clone(),
+                    slu_zk_address: slu_zk_contract_addr.clone(),
                     balance: value,
                     contract_state: vec![],
                     resources: {
                         let mut r = BTreeMap::new();
                         r.insert("constructor_pending".to_string(), serde_json::Value::Bool(true));
                         r.insert("deployed_by".to_string(), serde_json::Value::String(from_addr.clone()));
+                        r.insert("eth_address".to_string(), serde_json::Value::String(contract_address.clone()));
+                        r.insert("slu_zk_address".to_string(), serde_json::Value::String(slu_zk_contract_addr.clone()));
+                        r.insert("deployment_tx".to_string(), serde_json::Value::String(normalized_hash.clone()));
                         r
                     },
                     state_version: 1,
@@ -1611,9 +1752,11 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
                     gas_used: 0,
                 });
 
-            // ÉCRITURE CRITIQUE : on met le bytecode dans contract_state AVANT l'exécution
+            // Mise à jour critique : bytecode + flags + deux adresses
             account.contract_state = creation_bytecode.clone();
             account.is_contract = true;
+            account.eth_address = contract_address.clone();
+            account.slu_zk_address = slu_zk_contract_addr.clone();
 
             println!(
                 "   → Creation bytecode inscrit dans contract_state ({} bytes) pour {}",
@@ -1622,16 +1765,14 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
             );
         }
 
-        // 2. Persistance IMMÉDIATE du bytecode brut (avant exécution)
+        // 4. Persistance IMMÉDIATE du bytecode brut + métadonnées (les deux adresses)
         if let Some(storage_manager) = &vm.storage_manager {
-            println!("💾 [PERSISTANCE AVANT EXÉCUTION] Sauvegarde bytecode BRUT");
+            println!("💾 [PERSISTANCE AVANT EXÉCUTION] Sauvegarde bytecode BRUT + métadonnées");
 
             let account_prefix = format!("account:{}", contract_address);
             let contract_state_key = format!("{}:contract_state", account_prefix);
 
-            if creation_bytecode.is_empty() {
-                eprintln!("⚠️ Bytecode creation vide → rien à persister");
-            } else {
+            if !creation_bytecode.is_empty() {
                 if let Err(e) = storage_manager.write(&contract_state_key, &creation_bytecode) {
                     eprintln!("❌ Échec écriture bytecode brut dans {} : {}", contract_state_key, e);
                 } else {
@@ -1643,10 +1784,11 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
                 }
             }
 
-            // Métadonnées légères dans la clé principale
+            // Métadonnées enrichies avec les deux adresses
             let account_key = account_prefix;
             let account_json = serde_json::json!({
-                "address": contract_address,
+                "eth_address": contract_address,
+                "slu_zk_address": slu_zk_contract_addr,
                 "balance": value,
                 "nonce": 0,
                 "is_contract": true,
@@ -1659,16 +1801,15 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
                 if let Err(e) = storage_manager.write(&account_key, &bytes) {
                     eprintln!("❌ Échec persistance métadonnées compte {} : {}", account_key, e);
                 } else {
-                    println!("   → Métadonnées légères persistées dans {}", account_key);
+                    println!("   → Métadonnées enrichies (avec deux adresses) persistées dans {}", account_key);
                 }
             }
         }
 
-        //convert vec to &str
-        let constructor = std::str::from_utf8(&creation_bytecode).unwrap_or("");
-
-        // 3. Exécution du déploiement (maintenant le bytecode est dans l'état)
+        // 5. Exécution du constructeur (bytecode déjà dans l'état)
         println!("🚀 Déploiement via execute_module (raw_creation) → {}", contract_address);
+
+        let constructor = std::str::from_utf8(&creation_bytecode).unwrap_or("");
 
         let deploy_result = vm.execute_module(
             &contract_address,
@@ -1678,130 +1819,123 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
             Some(&constructor_calldata),
         ).await;
 
-let runtime_bytecode = match deploy_result {
-    Ok(value) => {
-        let mut candidate: Option<Vec<u8>> = None;
+        let runtime_bytecode = match deploy_result {
+            Ok(value) => {
+                let mut candidate: Option<Vec<u8>> = None;
 
-        // 1. Recherche exhaustive dans l'objet retourné
-        if let Some(obj) = value.as_object() {
-            // Clés les plus courantes en priorité
-            let priority = ["returnData", "return", "result", "data", "output", "value", "runtime", "code", "bytecode"];
-            for key in priority {
-                if let Some(v) = obj.get(key) {
-                    if let Some(s) = v.as_str() {
-                        if s.starts_with("0x") {
-                            if let Ok(bytes) = hex::decode(&s[2..]) {
-                                if bytes.len() > 32 && bytes.starts_with(&[0x60, 0x80, 0x60, 0x40]) {
-                                    candidate = Some(bytes);
-                                    break;
+                // Recherche exhaustive (logique originale conservée)
+                if let Some(obj) = value.as_object() {
+                    let priority = ["returnData", "return", "result", "data", "output", "value", "runtime", "code", "bytecode"];
+                    for key in priority {
+                        if let Some(v) = obj.get(key) {
+                            if let Some(s) = v.as_str() {
+                                if s.starts_with("0x") {
+                                    if let Ok(bytes) = hex::decode(&s[2..]) {
+                                        if bytes.len() > 32 && bytes.starts_with(&[0x60, 0x80, 0x60, 0x40]) {
+                                            candidate = Some(bytes);
+                                            break;
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
-                }
-            }
-
-            // Si rien → scan toutes les clés restantes
-            if candidate.is_none() {
-                for (_, val) in obj {
-                    if let Some(s) = val.as_str() {
-                        if s.starts_with("0x") {
-                            if let Ok(bytes) = hex::decode(&s[2..]) {
-                                if bytes.len() > 32 {
-                                    candidate = Some(bytes);
-                                    break;
+                    if candidate.is_none() {
+                        for (_, val) in obj {
+                            if let Some(s) = val.as_str() {
+                                if s.starts_with("0x") {
+                                    if let Ok(bytes) = hex::decode(&s[2..]) {
+                                        if bytes.len() > 32 {
+                                            candidate = Some(bytes);
+                                            break;
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
-                }
-            }
-        }
-
-        // 2. Cas retour direct string hex (très fréquent)
-        else if let Some(s) = value.as_str() {
-            if s.starts_with("0x") {
-                if let Ok(bytes) = hex::decode(&s[2..]) {
-                    if bytes.len() > 32 {
-                        candidate = Some(bytes);
+                } else if let Some(s) = value.as_str() {
+                    if s.starts_with("0x") {
+                        if let Ok(bytes) = hex::decode(&s[2..]) {
+                            if bytes.len() > 32 {
+                                candidate = Some(bytes);
+                            }
+                        }
                     }
                 }
+
+                let mut runtime = candidate.unwrap_or_else(|| creation_bytecode.clone());
+
+                // Nettoyage metadata CBOR/IPFS/solc (logique originale)
+                let markers: &[&[u8]] = &[
+                    b"a2646970667358221220",
+                    b"a165627a7a72305820",
+                    b"64736f6c634300",
+                ];
+
+                for marker in markers {
+                    if let Some(pos) = runtime.windows(marker.len()).rposition(|w| w == *marker) {
+                        runtime.truncate(pos);
+                        println!("→ Metadata supprimée à offset {} (marker: {:02x?})", pos, marker);
+                    }
+                }
+
+                runtime
+            }
+            Err(e) => return Err(format!("Échec exécution constructor : {}", e)),
+        };
+
+        println!("→ Runtime extrait et validé : {} bytes", runtime_bytecode.len());
+
+        // Mise à jour module
+        if !vm.modules.contains_key(&contract_address) {
+            let module = vuc_tx::slurachain_vm::Module {
+                name: "deployed".to_string(),
+                address: contract_address.clone(),
+                bytecode: runtime_bytecode.clone(),
+                elf_buffer: vec![],
+                context: uvm_runtime::UbfContext::new(),
+                stack_usage: None,
+                functions: hashbrown::HashMap::new(),
+                gas_estimates: hashbrown::HashMap::new(),
+                storage_layout: hashbrown::HashMap::new(),
+                events: vec![],
+                constructor_params: vec![],
+            };
+            vm.modules.insert(contract_address.clone(), module);
+        } else if let Some(m) = vm.modules.get_mut(&contract_address) {
+            m.bytecode = runtime_bytecode.clone();
+        }
+
+        // Mise à jour compte final (runtime au lieu de creation)
+        {
+            let mut accounts = vm.state.accounts.write().await;
+            if let Some(acc) = accounts.get_mut(&contract_address) {
+                acc.is_contract = true;
+                acc.nonce = 1;
+                acc.contract_state = runtime_bytecode.clone();
+                acc.eth_address = contract_address.clone();
+                acc.slu_zk_address = slu_zk_contract_addr.clone();
             }
         }
 
-        // 3. Dernier recours : on force l'extraction intelligente du creation si rien
-        let mut runtime = candidate.unwrap_or_else(|| creation_bytecode.clone());
+        // Persistance runtime
+        if let Some(storage_manager) = &vm.storage_manager {
+            let key = format!("account:{}:contract_state", contract_address);
+            let _ = storage_manager.write(&key, &runtime_bytecode);
+        }
 
-// Nettoyage metadata (IPFS, Swarm, solc) - toujours appliqué
-let markers: &[&[u8]] = &[
-    b"a2646970667358221220",     // 20 bytes - IPFS
-    b"a165627a7a72305820",       // 18 bytes - Swarm ancien
-    b"64736f6c634300",           // 12 bytes - solc version prefix
-];
-
-for marker in markers {
-    if let Some(pos) = runtime.windows(marker.len()).rposition(|window: &[u8]| window == *marker) {
-        runtime.truncate(pos);
-        println!("→ Metadata supprimée à offset {} (marker: {:02x?})", pos, marker);
-    }
-}
-
-        runtime
-    }
-
-    Err(e) => return Err(format!("Échec exécution constructor : {}", e)),
-};
-
-// ────────────────────────────────────────────────
-// Suite normale (mise à jour module + compte + persistance)
-println!("→ Runtime extrait et validé : {} bytes", runtime_bytecode.len());
-
-// Mise à jour du module
-if !vm.modules.contains_key(&contract_address) {
-    let module = vuc_tx::slurachain_vm::Module {
-        name: "deployed".to_string(),
-        address: contract_address.clone(),
-        bytecode: runtime_bytecode.clone(),
-        elf_buffer: vec![],
-        context: uvm_runtime::UbfContext::new(),
-        stack_usage: None,
-        functions: hashbrown::HashMap::new(),
-        gas_estimates: hashbrown::HashMap::new(),
-        storage_layout: hashbrown::HashMap::new(),
-        events: vec![],
-        constructor_params: vec![],
-    };
-    vm.modules.insert(contract_address.clone(), module);
-} else if let Some(m) = vm.modules.get_mut(&contract_address) {
-    m.bytecode = runtime_bytecode.clone();
-}
-
-// Mise à jour compte
-{
-    let mut accounts = vm.state.accounts.write().await;
-    if let Some(acc) = accounts.get_mut(&contract_address) {
-        acc.is_contract = true;
-        acc.nonce = 1;
-        acc.contract_state = runtime_bytecode.clone();
-    }
-}
-
-// Persistance runtime
-if let Some(storage_manager) = &vm.storage_manager {
-    let key = format!("account:{}:contract_state", contract_address);
-    let _ = storage_manager.write(&key, &runtime_bytecode);
-}
-
-// Détection auto fonctions
-let _ = vm.auto_detect_contract_functions(&contract_address, &runtime_bytecode);
+        // Détection auto des fonctions
+        let _ = vm.auto_detect_contract_functions(&contract_address, &runtime_bytecode);
 
         println!("✅ DÉPLOIEMENT + PERSISTANCE RÉUSSIE");
-        println!("   • Adresse: {}", contract_address);
-        println!("   • Bytecode clé: account:{}:contract_state", contract_address);
-        println!("   • Déployeur: {}", from_addr);
-        println!("   • TX Hash: {}", normalized_hash);
+        println!("   • Adresse Ethereum (racine) : {}", contract_address);
+        println!("   • Adresse SLU zk-print      : {}", slu_zk_contract_addr);
+        println!("   • Bytecode clé              : account:{}:contract_state", contract_address);
+        println!("   • Déployeur                 : {}", from_addr);
+        println!("   • TX Hash                   : {}", normalized_hash);
     } else {
-        // --- TRANSACTIONS NORMALES ---
+        // ─── TRANSACTIONS NORMALES (appel de fonction) ───
         let contract_addr = Some(to_addr.clone());
 
         let function_name = if data.len() >= 10 {
@@ -1839,20 +1973,20 @@ let _ = vm.auto_detect_contract_functions(&contract_address, &runtime_bytecode);
         }
     }
 
-    // MISE À JOUR NONCE
+    // ─── MISE À JOUR NONCE EXPÉDITEUR ───
     {
         let vm = self.vm.write().await;
         let mut accounts = vm.state.accounts.write().await;
 
         if let Some(account) = accounts.get_mut(&from_addr) {
             account.nonce = std::cmp::max(account.nonce, final_nonce + 1);
-            println!("📝 Nonce mis à jour: compte existant {} -> nonce={}", from_addr, account.nonce);
+            println!("📝 Nonce mis à jour: compte {} → nonce={}", from_addr, account.nonce);
         } else {
             println!("ℹ️ Compte {} n'existe pas - aucune création automatique", from_addr);
         }
     }
 
-    // Construction du TxRequest
+    // ─── CONSTRUCTION TxRequest + mempool ───
     let contract_addr_for_tx = if is_deployment { None } else { Some(to_addr.clone()) };
     let receiver_op = if is_deployment { contract_address.clone() } else { to_addr.clone() };
 
@@ -1894,29 +2028,43 @@ let _ = vm.auto_detect_contract_functions(&contract_address, &runtime_bytecode);
     let _ = self.block_finalized_tx.send(vec![tx_request.hash.clone()]);
 
     let (current_block_number, current_block_hash) = self.get_latest_block_info().await;
-
+let is_sluzk_enabled = tx_params
+    .get("sluzk")
+    .and_then(|v| v.as_bool())
+    .unwrap_or(false);
+    // ─── RECEIPT ENRICHI AVEC LES DEUX ADRESSES ───
     let mut receipts = self.tx_receipts.write().await;
-    let receipt = serde_json::json!({
-        "blockHash": current_block_hash,
-        "blockNumber": format!("0x{:x}", current_block_number),
-        "contractAddress": if is_deployment && !contract_address.is_empty() {
-            serde_json::Value::String(contract_address.clone())
+let receipt = serde_json::json!({
+    "blockHash": current_block_hash,
+    "blockNumber": format!("0x{:x}", current_block_number),
+    
+    // UN SEUL CHAMP : contractAddress
+    "contractAddress": if is_deployment {
+        if is_sluzk_enabled && !slu_zk_contract_addr.is_empty() {
+            // sluzk = true → on met l'adresse SLU zk-print
+            serde_json::Value::String(slu_zk_contract_addr.clone())
         } else {
-            serde_json::Value::Null
-        },
-        "cumulativeGasUsed": if is_vez_initialization { "0x0" } else { "0x5208" },
-        "effectiveGasPrice": if is_vez_initialization { "0x0" } else { "0x3b9aca00" },
-        "from": from_addr,
-        "gasUsed": if is_vez_initialization { "0x0" } else { "0x5208" },
-        "logs": [],
-        "logsBloom": "0x".to_string() + &"00".repeat(256),
-        "status": "0x1",
-        "to": if is_deployment { serde_json::Value::Null } else { serde_json::Value::String(to_addr) },
-        "transactionHash": normalized_hash.clone(),
-        "transactionIndex": "0x0",
-        "type": "0x2",
-        "nonce": format!("0x{:x}", final_nonce),
-        "value": format!("0x{:x}", value),
+            // sluzk = false ou non demandé → adresse Ethereum normale
+            serde_json::Value::String(contract_address.clone())
+        }
+    } else {
+        // Pas un déploiement → null (même pour compte zk)
+        serde_json::Value::Null
+    },
+
+    "cumulativeGasUsed": if is_vez_initialization { "0x0" } else { "0x5208" },
+    "effectiveGasPrice": if is_vez_initialization { "0x0" } else { "0x3b9aca00" },
+    "from": from_addr,
+    "gasUsed": if is_vez_initialization { "0x0" } else { "0x5208" },
+    "logs": [],
+    "logsBloom": "0x".to_string() + &"00".repeat(256),
+    "status": "0x1",
+    "to": if is_deployment { serde_json::Value::Null } else { serde_json::Value::String(to_addr) },
+    "transactionHash": normalized_hash.clone(),
+    "transactionIndex": "0x0",
+    "type": "0x2",
+    "nonce": format!("0x{:x}", final_nonce),
+    "value": format!("0x{:x}", value),
         "deploymentTimestamp": chrono::Utc::now().timestamp_nanos(),
         "isUniqueDeployment": is_deployment,
         "isPersisted": is_deployment,
@@ -1939,6 +2087,7 @@ let _ = vm.auto_detect_contract_functions(&contract_address, &runtime_bytecode);
     let tx_hash_padded = pad_hash_64(&normalized_hash);
     receipts.insert(tx_hash_padded.clone(), receipt.clone());
 
+    // Persistance receipt
     if let Some(storage_manager) = &self.vm.read().await.storage_manager {
         let receipt_key = format!("receipt:{}", normalized_hash);
         if let Ok(receipt_bytes) = serde_json::to_vec(&receipt) {
@@ -1961,11 +2110,14 @@ let _ = vm.auto_detect_contract_functions(&contract_address, &runtime_bytecode);
         println!("⚠️ Storage manager non disponible pour persistance des receipts");
     }
 
+    // Logs finaux
     if is_deployment {
         if tx_params.get("create2").and_then(|v| v.as_bool()).unwrap_or(false) {
-            println!("✅ CREATE2 via execute_module (raw) → Adresse: {}  Hash: {}", contract_address, normalized_hash);
+            println!("✅ CREATE2 via execute_module (raw) → Adresse Ethereum: {} | SLU zk: {} | Hash: {}",
+                     contract_address, slu_zk_contract_addr, normalized_hash);
         } else {
-            println!("✅ Déploiement via execute_module (raw) → Adresse: {}  Hash: {}", contract_address, normalized_hash);
+            println!("✅ Déploiement via execute_module (raw) → Adresse Ethereum: {} | SLU zk: {} | Hash: {}",
+                     contract_address, slu_zk_contract_addr, normalized_hash);
         }
     } else {
         println!("✅ Transaction acceptée → hash={} nonce={}", normalized_hash, final_nonce);
@@ -3802,58 +3954,99 @@ fn resolve_bootnode(s: &str) -> Option<SocketAddr> {
     }
 }
 
-/// Génère une clé privée secp256k1 et l'associe à l'adresse système aléatoire
+/// Génère une clé privée secp256k1 et l'associe au compte validateur système
+/// Crée DEUX adresses :
+/// - eth_address : adresse Ethereum classique (racine EVM)
+/// - slu_zk_address : adresse longue zk-print résistante quantique (*slu*#*...*#*...#)
 pub fn assign_private_key_to_system_account(vm: &mut SlurachainVm) -> Result<String, anyhow::Error> {
     use k256::ecdsa::SigningKey;
     use sha3::{Digest, Keccak256};
     use hex;
 
-    // Charge la clé privée depuis .env
-    let validator_privkey = std::env::var("PRIMARY_VALIDATOR_PRIVKEY")?;
-    let mut privkey = validator_privkey.clone();
+    println!("🔐 [VALIDATEUR] Début génération compte système validateur...");
+
+    // ─── 1. Chargement de la clé privée depuis l'environnement ───
+    let validator_privkey = std::env::var("PRIMARY_VALIDATOR_PRIVKEY")
+        .map_err(|_| anyhow::anyhow!("PRIMARY_VALIDATOR_PRIVKEY manquant dans .env"))?;
+
+    let mut privkey = validator_privkey.trim().to_string();
+    if privkey.starts_with("0x") {
+        privkey = privkey[2..].to_string();
+    }
     if privkey.len() % 2 != 0 {
-        privkey = format!("0{}", privkey);
+        return Err(anyhow::anyhow!("Clé privée hex invalide (longueur impaire)"));
     }
 
-    // Calcul de l'adresse Ethereum à partir de la clé privée
-    let priv_bytes = hex::decode(&privkey).map_err(|e| anyhow::anyhow!("Invalid privkey hex: {}", e))?;
-    use k256::elliptic_curve::generic_array;
+    println!("   → Clé privée chargée depuis .env (longueur hex: {} chars)", privkey.len());
+
+    // ─── 2. Calcul de l'adresse Ethereum classique (racine EVM) ───
+    let priv_bytes = hex::decode(&privkey)
+        .map_err(|e| anyhow::anyhow!("Clé privée hex invalide : {}", e))?;
+
+    use k256::elliptic_curve::generic_array::GenericArray;
     use typenum::U32;
-    let priv_bytes_array = generic_array::GenericArray::<u8, U32>::clone_from_slice(&priv_bytes);
-    let signing_key = k256::ecdsa::SigningKey::from_bytes(&priv_bytes_array).map_err(|e| anyhow::anyhow!("Invalid privkey: {}", e))?;
+
+    let priv_bytes_array = GenericArray::<u8, U32>::clone_from_slice(&priv_bytes);
+    let signing_key = SigningKey::from_bytes(&priv_bytes_array)
+        .map_err(|e| anyhow::anyhow!("Clé privée secp256k1 invalide : {}", e))?;
+
     let verifying_key = signing_key.verifying_key();
     let pubkey = verifying_key.to_encoded_point(false);
     let pubkey_bytes = pubkey.as_bytes();
-    // Ethereum address = Keccak256(pubkey[1..])[12..]
-    let mut hasher = Keccak256::new();
-   
-    hasher.update(&pubkey_bytes[1..]);
-    let hash = hasher.finalize();
-    let eth_address = format!("0x{}", hex::encode(&hash[12..]));
 
-    // Enregistre la clé privée dans le champ resources du compte validateur
-    let mut accounts = futures::executor::block_on(vm.state.accounts.write());
-    accounts.insert(
-        eth_address.clone().to_lowercase(),
-        vuc_tx::slurachain_vm::AccountState {
-            address: eth_address.clone().to_lowercase(),
-            balance: 30_000_000_000_000_000_000_000_000u128,
-            contract_state: vec![],
-            resources: {
-                let mut r = std::collections::BTreeMap::new();
-                r.insert("private_key".to_string(), serde_json::Value::String(privkey.clone()));
-                r.insert("account_type".to_string(), serde_json::Value::String("validator".to_string()));
-                r
-            },
-            state_version: 0,
-            last_block_number: 0,
-            nonce: 0,
-            code_hash: String::new(),
-            storage_root: String::new(),
-            is_contract: false,
-            gas_used: 0,
-        }
+    let mut hasher = Keccak256::new();
+    hasher.update(&pubkey_bytes[1..]); // sans le préfixe 04
+    let hash = hasher.finalize();
+    let eth_address = format!("0x{}", hex::encode(&hash[12..])).to_lowercase();
+
+    println!("   → Adresse Ethereum classique générée : {}", eth_address);
+
+    // ─── 3. Génération de l'adresse SLU zk-print (format exact demandé) ───
+    let slu_zk_address = generate_slu_zk_address(
+        "validator_system_account", // sel spécifique pour le validateur
+        10,                         // longueur du hash_id (premier segment)
+        32                          // longueur du hash_zk_print (second segment)
     );
+
+    // ─── LOG PRINCIPAL : AFFICHAGE CLAIR DE L'ADRESSE SLU ZK-PRINT ───
+    println!("\n╔════════════════════════════════════════════════════════════════════╗");
+    println!("║                  ADRESSE SLU ZK-PRINT DU VALIDATEUR               ║");
+    println!("╠════════════════════════════════════════════════════════════════════╣");
+    println!("║ Ethereum racine (EVM) : {}", eth_address);
+    println!("║ SLU zk-print (quantique) : {}", slu_zk_address);
+    println!("╚════════════════════════════════════════════════════════════════════╝\n");
+
+    // ─── 4. Insertion dans l'état VM ───
+    let mut accounts = futures::executor::block_on(vm.state.accounts.write());
+
+    let account = vuc_tx::slurachain_vm::AccountState {
+        eth_address: eth_address.clone(),
+        slu_zk_address: slu_zk_address.clone(),
+        balance: 30_000_000_000_000_000_000_000_000u128,
+        contract_state: vec![],
+        resources: {
+            let mut r = std::collections::BTreeMap::new();
+            r.insert("private_key".to_string(), serde_json::Value::String(privkey.clone()));
+            r.insert("account_type".to_string(), serde_json::Value::String("validator".to_string()));
+            r.insert("eth_address".to_string(), serde_json::Value::String(eth_address.clone()));
+            r.insert("slu_zk_address".to_string(), serde_json::Value::String(slu_zk_address.clone()));
+            r.insert("created_at".to_string(), serde_json::Value::Number(chrono::Utc::now().timestamp().into()));
+            r.insert("is_system_account".to_string(), serde_json::Value::Bool(true));
+            r
+        },
+        state_version: 0,
+        last_block_number: 0,
+        nonce: 0,
+        code_hash: String::new(),
+        storage_root: String::new(),
+        is_contract: false,
+        gas_used: 0,
+    };
+
+    accounts.insert(eth_address.clone(), account);
+
+    println!("   → Compte validateur système enregistré avec succès (deux adresses stockées)");
+
     Ok(privkey)
 }
 
@@ -3884,7 +4077,8 @@ mod tests {
             vm_guard.state.accounts.write().await.insert(
                 validator_address.clone(),
                 vuc_tx::slurachain_vm::AccountState {
-                    address: validator_address.clone(),
+                    eth_address: validator_address.clone(),
+                    slu_zk_address: validator_address.clone(),
                     balance: 1_000_000_000_000_000_000_000u128,
                     contract_state: vec![],
                     resources: std::collections::BTreeMap::new(),
@@ -4575,7 +4769,8 @@ if let Some(cidr) = &allowed_network {
                                                                     updated += 1;
                                                                 } else {
                                                                     let new_acc = vuc_tx::slurachain_vm::AccountState {
-                                                                        address: addr.clone(),
+                                                                        eth_address: addr.clone(),
+                                                                        slu_zk_address: addr.clone(),
                                                                         balance: delta.get("balance").and_then(|v| v.as_u64()).unwrap_or(0) as u128,
                                                                         nonce: delta.get("nonce").and_then(|v| v.as_u64()).unwrap_or(0),
                                                                         contract_state: vec![],
@@ -4691,7 +4886,7 @@ tokio::spawn({
             let mut discovery_interval = tokio::time::interval(Duration::from_secs(30));
             let mut sync_interval = tokio::time::interval(Duration::from_secs(20));
 
-            // ─── PREMIER DISCOVERY ACTIF AU DÉMARRAGE (comme Geth boot) ───
+            // ─── PREMIER DISCOVERY ACTIF AU DÉMARRAGE ───
             info!("🚀 Premier scan de découverte P2P au démarrage...");
             let discovery_msg = "slu#find_node".to_string();
 
@@ -4933,7 +5128,8 @@ let already_exists = if let manager = storage.as_ref() {
                 let mut accounts = vm.state.accounts.write().await;
                 if !accounts.contains_key(&vez_addr) {
                     let initial_account = vuc_tx::slurachain_vm::AccountState {
-                        address: vez_addr.clone(),
+                        eth_address: vez_addr.clone(),
+                        slu_zk_address: vez_addr.clone(),
                         balance: 0u128,
                         contract_state: creation_bytecode.clone(),
                         resources: {
@@ -5216,7 +5412,8 @@ async fn create_initial_accounts_with_vez(vm: &mut SlurachainVm, validator_addre
     for (account_eth, initial_balance) in initial_accounts {
         let account = AccountState {
 
-            address: account_eth.to_string(),
+            eth_address: account_eth.to_string(),
+            slu_zk_address: account_eth.to_string(),
             balance: initial_balance as u128,
             contract_state: vec![],
             resources: {

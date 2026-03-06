@@ -1,147 +1,169 @@
 #![allow(dead_code)]
 
-use merkletree::merkle::MerkleTree;
-use merkletree::store::VecStore;
-use merkletree::hash::Algorithm;
-use sha2::{Digest, Sha256};
-use reth_trie::{TrieAccount, HashedPostState};
-use alloy_primitives::{keccak256, Address};
-use std::collections::BTreeMap;
-use reth_primitives_traits::Account;
+use alloy_primitives::{keccak256, B256, U256 as AlloyU256};
+use reth_trie::{HashedPostState, TrieAccount};
+use reth_primitives_traits::Account as RethAccount;
+use std::collections::{BTreeMap, HashMap};
+use sha3::{Digest, Keccak256}; // ← IMPORTANT : importer Digest
 use hex;
 use crate::slurachain_vm::AccountState;
 
-pub type MerkleHash = [u8; 32];
+/// Hash Keccak-256 (32 bytes)
+pub type MerkleHash = B256;
 
-/// Algorithme SHA-256 pour MerkleTree (compatible 0.23.0)
-#[derive(Clone, Default)]
-pub struct Sha256Algorithm(Sha256);
-
-impl std::hash::Hasher for Sha256Algorithm {
-    fn write(&mut self, bytes: &[u8]) { self.0.update(bytes); }
-    fn finish(&self) -> u64 { 0 }
+/// Hash Keccak d'une string
+fn keccak_str(s: &str) -> B256 {
+    keccak256(s.as_bytes())
 }
 
-impl Algorithm<MerkleHash> for Sha256Algorithm {
-    fn leaf(&mut self, leaf: MerkleHash) -> MerkleHash {
-        let mut hasher = Sha256::new();
-        hasher.update(&leaf);
-        let result = hasher.finalize();
-        let mut hash = [0u8; 32];
-        hash.copy_from_slice(&result);
-        hash
-    }
-
-    fn node(&mut self, left: MerkleHash, right: MerkleHash, _height: usize) -> MerkleHash {
-        let mut hasher = Sha256::new();
-        hasher.update(&left);
-        hasher.update(&right);
-        let result = hasher.finalize();
-        let mut hash = [0u8; 32];
-        hash.copy_from_slice(&result);
-        hash
-    }
-
-    fn hash(&mut self) -> MerkleHash {
-        let mut hasher = Sha256::new();
-        hasher.update(&self.0.clone().finalize());
-        let result = hasher.finalize();
-        let mut hash = [0u8; 32];
-        hash.copy_from_slice(&result);
-        hash
-    }
+/// Convertit une adresse hex en B256 (padding left)
+fn addr_to_b256(addr: &str) -> B256 {
+    let clean = addr.trim_start_matches("0x").to_lowercase();
+    let bytes = hex::decode(&clean).unwrap_or_default();
+    
+    let offset = 32usize.saturating_sub(bytes.len());
+    let mut arr = [0u8; 32];
+    arr[offset..].copy_from_slice(&bytes);
+    B256::from(arr)
 }
 
-/// Merkle Tree SHA-256 à partir de données brutes
-pub fn build_merkle_tree(leaves: Vec<Vec<u8>>) -> MerkleTree<MerkleHash, Sha256Algorithm, VecStore<MerkleHash>> {
-    let leaf_hashes: Vec<MerkleHash> = leaves
+/// Structure intermédiaire pour le calcul zk-aware
+#[derive(Clone, Debug)]
+pub struct ExtendedTrieAccount {
+    pub evm_account: RethAccount,
+    pub slu_zk_hash: B256,
+    pub metadata_hash: B256,
+    pub storage_root_hash: B256,
+    pub state_version: u64,
+}
+
+/// Construit un state trie étendu (EVM + zk extensions)
+pub fn build_extended_state_trie(
+    accounts: &BTreeMap<String, AccountState>,
+) -> (HashedPostState, B256, B256) {
+    // 1. Comptes pour le trie standard EVM
+    let mut hashed_accounts: Vec<(B256, Option<RethAccount>)> = Vec::new();
+    let mut extended_accounts: HashMap<B256, ExtendedTrieAccount> = HashMap::new();
+
+    for (addr_str, account) in accounts.iter() {
+        let addr = addr_to_b256(addr_str);
+
+        // Compte EVM standard
+        let evm_account = RethAccount {
+            nonce: account.nonce,
+            balance: AlloyU256::from(account.balance),
+            bytecode_hash: if account.code_hash.is_empty() || account.code_hash == "0x" {
+                None
+            } else {
+                hex::decode(&account.code_hash.trim_start_matches("0x"))
+                    .ok()
+                    .filter(|v| v.len() == 32)
+                    .map(|v| B256::from_slice(&v))
+            },
+        };
+
+        // Hash SLU zk-print
+        let slu_zk_hash = if account.slu_zk_address.is_empty() {
+            B256::ZERO
+        } else {
+            keccak_str(&account.slu_zk_address)
+        };
+
+        // Hash métadonnées (triées pour déterminisme)
+        let mut metadata_buf = Vec::new();
+        let mut sorted_resources: Vec<(&String, &serde_json::Value)> = account.resources.iter().collect();
+        sorted_resources.sort_by_key(|&(k, _)| k);
+        for (k, v) in sorted_resources {
+            metadata_buf.extend_from_slice(k.as_bytes());
+            if let Ok(json) = serde_json::to_vec(v) {
+                metadata_buf.extend_from_slice(&json);
+            }
+        }
+        let metadata_hash = keccak256(&metadata_buf);
+
+        // Storage root hash
+        let storage_root_hash = if account.storage_root.is_empty() {
+            B256::ZERO
+        } else {
+            keccak_str(&account.storage_root)
+        };
+
+        let extended = ExtendedTrieAccount {
+            evm_account,
+            slu_zk_hash,
+            metadata_hash,
+            storage_root_hash,
+            state_version: account.state_version,
+        };
+
+        extended_accounts.insert(addr, extended);
+
+        // Pour le trie EVM standard : inclure le compte (ou None si supprimé)
+        hashed_accounts.push((addr, Some(evm_account)));
+    }
+
+    // Tri obligatoire
+    hashed_accounts.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // Construction HashedPostState
+    let mut post_state = HashedPostState::default();
+    post_state = post_state.with_accounts(
+        hashed_accounts.iter().cloned().map(|(addr, acc_opt)| (addr, acc_opt))
+    );
+
+    // Calcul du state root standard (EVM)
+    // Correction E0277 : mapper explicitement Option<RethAccount> → TrieAccount
+// Calcul du state root standard (EVM)
+let standard_root = reth_trie::root::state_root(
+    hashed_accounts
         .into_iter()
-        .map(|data| {
-            let mut hasher = Sha256::new();
-            hasher.update(&data);
-            let result = hasher.finalize();
-            let mut hash = [0u8; 32];
-            hash.copy_from_slice(&result);
-            hash
-        })
-        .collect();
-
-    MerkleTree::new(leaf_hashes).expect("REASON")
-}
-
-/// Racine du Merkle Tree
-pub fn get_merkle_root(tree: &MerkleTree<MerkleHash, Sha256Algorithm, VecStore<MerkleHash>>) -> MerkleHash {
-    tree.root()
-}
-
-/// Conversion VM -> TrieAccount (adaptée à alloy_trie/reth_trie)
-fn to_trie_account(account: &AccountState) -> Account {
-    Account {
-        nonce: account.nonce,
-        balance: alloy_primitives::U256::from(account.balance),
-        bytecode_hash: hex::decode(&account.code_hash)
-            .ok()
-            .and_then(|v| {
-                if v.len() == 32 {
-                    let mut arr = [0u8; 32];
-                    arr.copy_from_slice(&v);
-                    Some(arr.into())
-                } else {
-                    None
+        .filter_map(|(addr, acc_opt)| {
+            acc_opt.map(|acc| {
+                TrieAccount {
+                    nonce: acc.nonce,
+                    balance: acc.balance,
+                    storage_root: B256::ZERO, // ← ou ton vrai storage_root si disponible
+                    code_hash: acc.bytecode_hash.unwrap_or(B256::ZERO),
                 }
-            }),
+            }).map(|trie_acc| (addr, trie_acc))
+        })
+);
+
+    // 2. Second root zk-aware (Merkle simple sur les extensions)
+    let mut zk_leaves = Vec::new();
+
+    for (addr, ext) in extended_accounts.iter() {
+        let mut leaf_buf = Vec::new();
+        leaf_buf.extend_from_slice(&addr.to_vec());
+        leaf_buf.extend_from_slice(&ext.slu_zk_hash.0);
+        leaf_buf.extend_from_slice(&ext.metadata_hash.0);
+        leaf_buf.extend_from_slice(&ext.storage_root_hash.0);
+        leaf_buf.extend_from_slice(&ext.state_version.to_be_bytes());
+
+        let leaf_hash = keccak256(&leaf_buf);
+        zk_leaves.push(leaf_hash);
     }
+
+    zk_leaves.sort();
+
+    // Correction E0599 : Keccak256::default() au lieu de ::new()
+    let mut hasher = Keccak256::default();
+    for leaf in zk_leaves {
+        hasher.update(&leaf);
+    }
+    let zk_root = B256::from_slice(&hasher.finalize());
+
+    // Logs
+    println!("build_extended_state_trie:");
+    println!("  → Comptes traités ................ : {}", accounts.len());
+    println!("  → Standard EVM state root ......... : 0x{}", hex::encode(standard_root));
+    println!("  → ZK-aware extended root .......... : 0x{}", hex::encode(zk_root));
+
+    (post_state, standard_root, zk_root)
 }
 
-/// Construit un Patricia Merkle Trie Ethereum-style à partir de l'état VM
+/// Version simplifiée (compatibilité)
 pub fn build_state_trie(accounts: &BTreeMap<String, AccountState>) -> HashedPostState {
-    // Collecte les comptes, convertit l'adresse en B256
-    let mut hashed_accounts_vec: Vec<(alloy_primitives::B256, reth_primitives_traits::account::Account)> = accounts
-        .iter()
-        .map(|(addr, account)| {
-            // Conversion de l'adresse en B256
-            let address_bytes = hex::decode(addr.trim_start_matches("0x")).expect("hex decode");
-            let mut address_arr = [0u8; 32];
-            let len = address_bytes.len().min(32);
-            address_arr[32 - len..].copy_from_slice(&address_bytes[..len]);
-            let address = alloy_primitives::B256::from(address_arr);
-
-            let bytecode_hash = hex::decode(&account.code_hash)
-                .ok()
-                .and_then(|v| {
-                    if v.len() == 32 {
-                        let mut arr = [0u8; 32];
-                        arr.copy_from_slice(&v);
-                        Some(arr.into())
-                    } else {
-                        None
-                    }
-                });
-
-            let account_obj = reth_primitives_traits::account::Account {
-                nonce: account.nonce,
-                balance: alloy_primitives::U256::from(account.balance),
-                bytecode_hash,
-            };
-            (address, account_obj)
-        })
-        .collect();
-
-    // Trie par l'adresse hashée (B256) pour respecter l'ordre du Patricia trie
-    hashed_accounts_vec.sort_by(|a, b| a.0.cmp(&b.0));
-
-    // Retire les doublons éventuels (clé unique)
-    hashed_accounts_vec.dedup_by(|a, b| a.0 == b.0);
-
-    // DEBUG : Affiche les clés pour vérifier l'ordre
-    for (addr, _) in &hashed_accounts_vec {
-        println!("Trie key: 0x{}", hex::encode(addr));
-    }
-
-    // Convertit en iterator avec Option<Account>
-    let hashed_accounts = hashed_accounts_vec
-        .into_iter()
-        .map(|(addr, account)| (addr, Some(account)));
-
-    reth_trie::HashedPostState::default().with_accounts(hashed_accounts)
+    let (post_state, _, _) = build_extended_state_trie(accounts);
+    post_state
 }

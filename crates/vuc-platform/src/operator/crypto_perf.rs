@@ -1,90 +1,97 @@
-use std::collections::BTreeMap;
-use fastcrypto::ed25519::Ed25519KeyPair;
 use hex;
- use sha3::Sha3_256;
-use fastcrypto::traits::KeyPair;
-use rand::{Rng, distributions::Alphanumeric};
-use vuc_tx::slurachain_vm::{AccountState, SlurachainVm};
-use k256::ecdsa::{SigningKey, VerifyingKey};
-use k256::elliptic_curve::SecretKey;
+use rand::{Rng};
 use sha3::{Digest, Keccak256};
+use k256::ecdsa::{SigningKey, VerifyingKey};
+use chrono::Utc;
+use k256::elliptic_curve::generic_array::GenericArray;
+use serde_json::json;
+use std::collections::BTreeMap;
+use vuc_tx::slurachain_vm::{AccountState, SlurachainVm};
+use anyhow::Context;
 
-/// Génère une adresse UIP-10 flexible avec des branches dynamiques
-pub fn generate_uip10_address(contract_info: &str, num_branches: usize) -> String {
-    // 1. Branche principale : hash du contrat Rust (nom/module/etc)
-    let mut hasher = Sha3_256::new();
-    hasher.update(contract_info.as_bytes());
-    let branch = &hex::encode(&hasher.finalize_reset())[0..7];
-
-    // 2. Génère des branches dynamiques séparées par #
+/// Génère une adresse au format EXACT demandé :
+/// *slu*#*{hash_id}*#*{hash_zk_print}#
+pub fn generate_slu_zk_address(
+    contract_info: &str,
+    id_length: usize,          // ex: 10 hex chars pour hash_id
+    zk_print_length: usize,    // ex: 32 hex chars pour zk_print
+) -> String {
     let mut rng = rand::thread_rng();
-    let mut parts = vec![format!("*{}*", branch)];
-    for _ in 0..num_branches {
-        let len = rng.gen_range(5..=12);
-        let part: String = (0..len).map(|_| rng.sample(Alphanumeric) as char).collect();
-        parts.push(format!("#{}", part));
-    }
 
-    // 3. Clé de validité : hash de contrôle sur la concaténation précédente
-    let mut hasher = Sha3_256::new();
-    let pre_checksum = parts.join("");
-    hasher.update(pre_checksum.as_bytes());
-    let checksum = &hex::encode(&hasher.finalize())[0..3]; // 3 caractères
+    // ─── hash_id (court) ───
+    let mut hasher_id = Keccak256::new();
+    hasher_id.update(contract_info.as_bytes());
+    hasher_id.update(b"slu-id-v1");
+    hasher_id.update(&rng.gen::<[u8; 8]>());
+    let hash_id = hex::encode(&hasher_id.finalize()[..id_length.min(32)]);
 
-    // 4. Format final
-    format!("{}#{}", pre_checksum, checksum)
+    // ─── hash_zk_print (long) ───
+    let mut hasher_zk = Keccak256::new();
+    hasher_zk.update(&hash_id);
+    hasher_zk.update(contract_info.as_bytes());
+    hasher_zk.update(b"slu-zk-print-v1-2026");
+    hasher_zk.update(&rng.gen::<[u8; 16]>());
+    let hash_zk_print = hex::encode(&hasher_zk.finalize()[..zk_print_length.min(32)]);
+
+    // ─── Assemblage EXACT du format ───
+    format!("*slu*#*{}*#*{}#", hash_id, hash_zk_print)
 }
 
-// Exemple d'utilisation
-pub async fn generate_and_create_account(vm: &mut SlurachainVm, _contract_info: &str) -> Result<(String, String), anyhow::Error> {
-    // 1. Génère une clé privée secp256k1
+/// Génère l'adresse + clé privée + insertion VM
+pub async fn generate_and_create_account(
+    vm: &mut SlurachainVm,
+    contract_info: &str,   // ex: "acc" ou nom du contrat
+) -> Result<(String, String), anyhow::Error> {   // retourne (eth_address, slu_zk_address)
+    // 1. Clé privée secp256k1 → adresse Ethereum classique
     let signing_key = SigningKey::random(&mut rand::thread_rng());
-    let secret_key = signing_key.to_bytes();
-    let privkey_hex = hex::encode(secret_key);
+    let secret_bytes = signing_key.to_bytes();
+    let privkey_hex = format!("0x{}", hex::encode(secret_bytes));
 
-    // 2. Calcule la clé publique
     let verifying_key = VerifyingKey::from(&signing_key);
-    let encoded_point = verifying_key.to_encoded_point(false);
-    let pubkey_bytes = encoded_point.as_bytes(); // non compressé
+    let pubkey = verifying_key.to_encoded_point(false);
+    let pubkey_bytes = pubkey.as_bytes();
 
-    // 3. Calcule l'adresse Ethereum
     let mut hasher = Keccak256::new();
-    hasher.update(&pubkey_bytes[1..]); // ignore le premier octet (format EC)
-    let hash = hasher.finalize();
-    let eth_address = format!("0x{}", hex::encode(&hash[12..])); // derniers 20 octets
+    hasher.update(&pubkey_bytes[1..]);
+    let eth_hash = hasher.finalize();
+    let eth_address = format!("0x{}", hex::encode(&eth_hash[12..]));
 
-    // 4. Ajoute le compte dans la VM
-    {
-        let mut state_guard = vm.state.accounts.write();
-        state_guard.await.insert(
-            eth_address.clone(),
-            AccountState {
-                address: eth_address.clone(),
-                balance: 0,
-                resources: BTreeMap::new(),
-                contract_state: Vec::new(),
-                state_version: 0,
-                last_block_number: 0,
-                nonce: 0,
-                code_hash: String::new(),
-                storage_root: String::new(),
-                is_contract: false,
-                gas_used: 0,
-            },
-        );
-    }
+    // 2. Génération de l'adresse zk-print longue (format exact demandé)
+    let slu_zk_addr = generate_slu_zk_address(contract_info, 10, 32);
 
-    // Initialisation du contrat VEZ si nécessaire
-    let vezcur_address = vm.address_map.get("vezcur")
-        .ok_or_else(|| anyhow::anyhow!("Adresse du module vezcur non trouvée"))?
-        .clone();
+    // 3. Insertion dans la VM avec LES DEUX adresses
+    let mut accounts = vm.state.accounts.write().await;
 
-    let vez_contract = vm.state.accounts.read().await.get(&vezcur_address).cloned();
-    let already_initialized = vez_contract
-        .and_then(|acc| acc.resources.get("initialized").cloned())
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let mut resources = BTreeMap::new();
+    resources.insert("eth_address".to_string(), json!(eth_address));
+    resources.insert("slu_zk_address".to_string(), json!(slu_zk_addr));
+    resources.insert("privkey_hash".to_string(), json!(hex::encode(Keccak256::digest(privkey_hex.as_bytes()))));
+    resources.insert("address_type".to_string(), json!("user+zk-print"));
+    resources.insert("created_at".to_string(), json!(Utc::now().timestamp()));
 
-    // Return the Ethereum address and private key hex as a tuple
-    Ok((eth_address, privkey_hex))
+    let account = AccountState {
+        eth_address: eth_address.clone(),
+        slu_zk_address: slu_zk_addr.clone(),
+        balance: 0,
+        nonce: 0,
+        contract_state: vec![],
+        resources,
+        state_version: 1,
+        last_block_number: 0,
+        code_hash: String::new(),
+        storage_root: String::new(),
+        is_contract: false,
+        gas_used: 0,
+    };
+
+    accounts.insert(eth_address.clone(), account.clone());
+    
+    // Optionnel : index secondaire par slu_zk_address si tu veux lookup rapide
+    // accounts.insert(slu_zk_addr.clone(), account);  // ← à activer si besoin
+
+    println!("Compte créé avec deux adresses :");
+    println!("  • Ethereum racine : {}", eth_address);
+    println!("  • SLU zk-print     : {}", slu_zk_addr);
+
+    Ok((eth_address, slu_zk_addr))
 }

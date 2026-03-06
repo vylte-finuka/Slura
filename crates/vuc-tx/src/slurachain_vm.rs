@@ -610,7 +610,11 @@ pub struct EventDefinition {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AccountState {
-    pub address: String,
+    // ─── Adresse principale "racine" (Ethereum-compatible) ───
+    pub eth_address: String,                  // ex: "0x742d35Cc6634C0532925a3b844Bc454e4438f44e"
+
+    // ─── Adresse zk-print longue (résistante quantique) ───
+    pub slu_zk_address: String,
     pub balance: u128,
     pub contract_state: Vec<u8>,
     pub resources: BTreeMap<String, serde_json::Value>,
@@ -978,7 +982,8 @@ impl SlurachainVm {
             accounts
                 .entry(contract_address.to_string())
                 .or_insert_with(|| AccountState {
-                    address: contract_address.to_string(),
+                    eth_address: contract_address.to_string(),
+                    slu_zk_address: contract_address.to_string(),
                     balance: 0,
                     contract_state: vec![],
                     resources: BTreeMap::new(),
