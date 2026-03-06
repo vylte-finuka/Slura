@@ -358,36 +358,46 @@ pub fn extract_runtime_from_creation_bytecode(full: &[u8]) -> Result<Vec<u8>, St
 }
         
         /// ✅ NOUVEAU: Restauration d'un compte
-        async fn restore_account_from_data(&self, address: &str, account_data: &serde_json::Value) -> Result<bool, String> {
-            let mut vm = self.vm.write().await;
-            let mut accounts = vm.state.accounts.write().await;
-            
-            let account = vuc_tx::slurachain_vm::AccountState {
-                eth_address: address.to_string(),
-                slu_zk_address: address.to_string(),
-                balance: account_data.get("balance").and_then(|v| v.as_u64()).unwrap_or(0) as u128,
-                nonce: account_data.get("nonce").and_then(|v| v.as_u64()).unwrap_or(0),
-                contract_state: account_data.get("contract_state")
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| hex::decode(s).ok())
-                    .unwrap_or_default(),
-                resources: account_data.get("resources")
-                    .and_then(|v| v.as_object())
-                    .cloned()
-                    .map(|map| map.into_iter().collect())
-                    .unwrap_or_default(),
-                state_version: account_data.get("state_version").and_then(|v| v.as_u64()).unwrap_or(1),
-                last_block_number: account_data.get("last_block_number").and_then(|v| v.as_u64()).unwrap_or(0),
-                code_hash: account_data.get("code_hash").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                storage_root: account_data.get("storage_root").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                is_contract: account_data.get("is_contract").and_then(|v| v.as_bool()).unwrap_or(false),
-                gas_used: account_data.get("gas_used").and_then(|v| v.as_u64()).unwrap_or(0),
-            };
-            
-            accounts.insert(address.to_string(), account);
-            Ok(true)
-        }
-        
+        /// ✅ RESTAURATION CORRIGÉE – Récupère la vraie adresse SLU zk-print
+async fn restore_account_from_data(&self, address: &str, account_data: &serde_json::Value) -> Result<bool, String> {
+    let mut vm = self.vm.write().await;
+    let mut accounts = vm.state.accounts.write().await;
+
+    // Récupération de l'adresse SLU zk-print sauvegardée (priorité)
+    let slu_zk_address = account_data
+        .get("resources")
+        .and_then(|r| r.get("slu_zk_address"))
+        .and_then(|v| v.as_str())
+        .unwrap_or(address)           // fallback sur Ethereum si pas trouvé
+        .to_string();
+
+    let account = vuc_tx::slurachain_vm::AccountState {
+        eth_address: address.to_string(),
+        slu_zk_address,               // ← CORRIGÉ : on garde la vraie SLU zk
+        balance: account_data.get("balance").and_then(|v| v.as_u64()).unwrap_or(0) as u128,
+        nonce: account_data.get("nonce").and_then(|v| v.as_u64()).unwrap_or(0),
+        contract_state: account_data.get("contract_state")
+            .and_then(|v| v.as_str())
+            .and_then(|s| hex::decode(s).ok())
+            .unwrap_or_default(),
+        resources: account_data.get("resources")
+            .and_then(|v| v.as_object())
+            .cloned()
+            .map(|map| map.into_iter().collect())
+            .unwrap_or_default(),
+        state_version: account_data.get("state_version").and_then(|v| v.as_u64()).unwrap_or(1),
+        last_block_number: account_data.get("last_block_number").and_then(|v| v.as_u64()).unwrap_or(0),
+        code_hash: account_data.get("code_hash").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        storage_root: account_data.get("storage_root").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        is_contract: account_data.get("is_contract").and_then(|v| v.as_bool()).unwrap_or(false),
+        gas_used: account_data.get("gas_used").and_then(|v| v.as_u64()).unwrap_or(0),
+    };
+
+    accounts.insert(address.to_string(), account);
+    println!("✅ Compte restauré : {} → SLU zk-print : {}", address, account.slu_zk_address);
+    Ok(true)
+}
+    
         /// ✅ NOUVEAU: Restauration d'un module
         async fn restore_module_from_data(&self, address: &str, module_data: &serde_json::Value) -> Result<bool, String> {
             let mut vm = self.vm.write().await;
@@ -1217,6 +1227,7 @@ pub async fn load_persisted_receipts(&self) -> Result<u32, String> {
 }
 
 /// Restaure TOUS les contrats qui ont un bytecode dans account:<addr>:contract_state
+/// Restaure TOUS les contrats + leurs adresses SLU zk-print depuis RocksDB
 pub async fn load_persisted_contracts(&self) -> Result<u32, String> {
     let mut loaded = 0u32;
 
@@ -1230,7 +1241,7 @@ pub async fn load_persisted_contracts(&self) -> Result<u32, String> {
         return Ok(0);
     };
 
-    println!("🔄 Scan RocksDB → recherche de TOUS les bytecode dans :contract_state");
+    println!("🔄 Scan RocksDB → restauration complète des contrats + SLU zk-print");
 
     let prefix = "account:".to_string();
     let entries = manager.scan_prefix(&prefix)
@@ -1239,101 +1250,104 @@ pub async fn load_persisted_contracts(&self) -> Result<u32, String> {
     println!("→ {} clés trouvées avec préfixe 'account:'", entries.len());
 
     for (key, value) in entries {
-        // On cherche uniquement les sous-clés qui finissent par :contract_state
-        if !key.ends_with(":contract_state") {
+        // On ne traite que les clés "account:0x..." (pas les :contract_state)
+        if !key.starts_with("account:") || key.contains(":contract_state") {
             continue;
         }
 
-        // Extrait l'adresse à partir de la clé
-        // Exemple: account:0xabc...:contract_state → on garde 0xabc...
-        let addr_part = key
-            .strip_prefix("account:")
-            .and_then(|s| s.strip_suffix(":contract_state"))
-            .unwrap_or("");
-
-        if addr_part.is_empty() || addr_part.len() != 42 || !addr_part.starts_with("0x") {
-            println!("→ Clé ignorée (adresse invalide) : {}", key);
+        let address = key.strip_prefix("account:").unwrap_or("").to_string();
+        if address.len() != 42 || !address.starts_with("0x") {
             continue;
         }
 
-        let address = addr_part.to_string();
-        println!("→ Bytecode potentiel trouvé pour adresse : {}", address);
+        println!("→ Restauration compte : {}", address);
 
-        if value.is_empty() {
-            println!("   → Bytecode vide → ignoré");
-            continue;
-        }
+        // 1. Lecture du JSON complet du compte (pour récupérer slu_zk_address)
+        let account_json: serde_json::Value = match serde_json::from_slice(&value) {
+            Ok(json) => json,
+            Err(_) => {
+                println!("   ⚠️ JSON invalide pour {}", address);
+                continue;
+            }
+        };
 
-        println!("   → Bytecode chargé : {} bytes", value.len());
+        // 2. Récupération de l'adresse SLU zk-print sauvegardée (CRITIQUE)
+        let slu_zk_address = account_json
+            .get("resources")
+            .and_then(|r| r.get("slu_zk_address"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(&address)           // fallback sur Ethereum si absent
+            .to_string();
 
-        // 1. Mise à jour AccountState
+        // 3. Lecture du bytecode (clé séparée)
+        let bytecode_key = format!("account:{}:contract_state", address);
+        let bytecode = match manager.read(&bytecode_key) {
+            Ok(data) => data,
+            Err(_) => {
+                println!("   ⚠️ Pas de bytecode pour {}", address);
+                continue;
+            }
+        };
+
+        // 4. Restauration AccountState avec la VRAIE adresse SLU zk
         {
             let mut vm = self.vm.write().await;
             let mut accounts = vm.state.accounts.write().await;
 
-            let mut acc = accounts
-                .entry(address.clone())
-                .or_insert_with(|| vuc_tx::slurachain_vm::AccountState {
-                        eth_address: address.clone(),
-                    slu_zk_address: address.clone(),
-                    balance: 0,
-                    contract_state: vec![],
-                    resources: BTreeMap::new(),
-                    state_version: 1,
-                    last_block_number: 0,
-                    nonce: 0,
-                    code_hash: "".to_string(),
-                    storage_root: format!("storage_{}", address),
-                    is_contract: true,
-                    gas_used: 0,
-                });
+            let account = vuc_tx::slurachain_vm::AccountState {
+                eth_address: address.clone(),
+                slu_zk_address: slu_zk_address.clone(),   // ← CORRIGÉ
+                balance: account_json.get("balance").and_then(|v| v.as_u64()).unwrap_or(0) as u128,
+                nonce: account_json.get("nonce").and_then(|v| v.as_u64()).unwrap_or(0),
+                contract_state: bytecode.clone(),
+                resources: account_json.get("resources")
+                    .and_then(|v| v.as_object())
+                    .cloned()
+                    .map(|map| map.into_iter().collect())
+                    .unwrap_or_default(),
+                state_version: account_json.get("state_version").and_then(|v| v.as_u64()).unwrap_or(1),
+                last_block_number: account_json.get("last_block_number").and_then(|v| v.as_u64()).unwrap_or(0),
+                code_hash: account_json.get("code_hash").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                storage_root: account_json.get("storage_root").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                is_contract: true,
+                gas_used: account_json.get("gas_used").and_then(|v| v.as_u64()).unwrap_or(0),
+            };
 
-            acc.contract_state = value.clone();
-            acc.is_contract = true;
-
-            let hash = keccak256(&value);
-            acc.code_hash = format!("0x{}", hex::encode(hash));
+            accounts.insert(address.clone(), account);
         }
 
-        // 2. Mise à jour Module + détection auto des fonctions
+        // 5. Restauration Module
         {
             let mut vm = self.vm.write().await;
 
-            if !vm.modules.contains_key(&address) {
-                let module = vuc_tx::slurachain_vm::Module {
-                    name: "restored".to_string(),
-                    address: address.clone(),
-                    bytecode: value.clone(),
-                    elf_buffer: vec![],
-                    context: uvm_runtime::UbfContext::new(),
-                    stack_usage: None,
-                    functions: hashbrown::HashMap::new(),
-                    gas_estimates: hashbrown::HashMap::new(),
-                    storage_layout: hashbrown::HashMap::new(),
-                    events: vec![],
-                    constructor_params: vec![],
-                };
-                vm.modules.insert(address.clone(), module);
-            } else if let Some(m) = vm.modules.get_mut(&address) {
-                m.bytecode = value.clone();
-            }
+            let module = vuc_tx::slurachain_vm::Module {
+                name: "restored".to_string(),
+                address: address.clone(),
+                bytecode: bytecode.clone(),
+                elf_buffer: vec![],
+                context: uvm_runtime::UbfContext::new(),
+                stack_usage: None,
+                functions: hashbrown::HashMap::new(),
+                gas_estimates: hashbrown::HashMap::new(),
+                storage_layout: hashbrown::HashMap::new(),
+                events: vec![],
+                constructor_params: vec![],
+            };
 
-            if let Err(e) = vm.auto_detect_contract_functions(&address, &value) {
-                println!("⚠️ Échec détection fonctions pour {} : {}", address, e);
-            } else {
-                println!("   → Fonctions auto-détectées pour {}", address);
-            }
+            vm.modules.insert(address.clone(), module);
+
+            let _ = vm.auto_detect_contract_functions(&address, &bytecode);
         }
 
         loaded += 1;
-        println!("✅ Contrat restauré : {} ({} bytes)", address, value.len());
+        println!("✅ Contrat restauré : {} ({} bytes) → SLU zk-print : {}", 
+                 address, bytecode.len(), slu_zk_address);
     }
 
     if loaded == 0 {
-        println!("ℹ️ Aucun bytecode trouvé dans une clé :contract_state");
-        println!("   → Vérifie que send_transaction écrit bien dans account:<adresse>:contract_state");
+        println!("ℹ️ Aucun contrat trouvé dans RocksDB");
     } else {
-        println!("🟢 Restauration terminée : {} contrats chargés depuis RocksDB", loaded);
+        println!("🟢 {} contrats + leurs identités SLU zk-print restaurés avec succès", loaded);
     }
 
     Ok(loaded)
