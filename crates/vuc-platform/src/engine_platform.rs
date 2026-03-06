@@ -5076,40 +5076,29 @@ tokio::spawn({
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
         loop {
-            let vez_addr = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_string();
-            let account_key = format!("account:{}", vez_addr);
+            let vez_eth_address = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_string();
+            let account_key = format!("account:{}", vez_eth_address);
 
-            // Correction appliquée ici
-let already_exists = if let manager = storage.as_ref() {
-    // manager est maintenant &RocksDBManagerImpl
-    match manager.read(&account_key) {
-        Ok(_data) => {
-            println!("🪙 VEZ déjà présent dans RocksDB (clé: {}) → déploiement annulé", account_key);
-            true
-        }
-        Ok(none) => {
-            println!("🔍 Clé {} absente dans RocksDB → déploiement autorisé", account_key);
-            false
-        }
-        Err(e) => {
-            println!("⚠️ Erreur lecture RocksDB pour VEZ : {} → on tente déploiement", e);
-            false
-        }
-    }
-} else {
-    println!("⚠️ Pas de storage manager disponible → on tente déploiement");
-    false
-};
+            let already_exists = if let Some(manager) = storage.as_ref() {
+                match manager.read(&account_key) {
+                    Ok(_) => {
+                        println!("🪙 VEZ déjà présent dans RocksDB → déploiement annulé");
+                        true
+                    }
+                    Err(_) => false,
+                }
+            } else {
+                false
+            };
 
             if already_exists {
                 println!("✅ VEZ existe déjà → fin du spawn");
                 break;
             }
 
-            println!("🪙 VEZ absent → lancement déploiement unique");
+            println!("🪙 VEZ absent → déploiement CREATE2 fixe + SLU zk-print fixe");
 
             let bytecode_hex = include_str!("../../../vez_bytecode.hex").trim();
-
             let creation_bytecode = if bytecode_hex.starts_with("0x") {
                 hex::decode(&bytecode_hex[2..]).unwrap_or_default()
             } else {
@@ -5121,34 +5110,59 @@ let already_exists = if let manager = storage.as_ref() {
                 break;
             }
 
-            println!("📦 VEZ Creation bytecode chargé → {} bytes", creation_bytecode.len());
+            // ─── CREATE2 avec salt fixe (adresse Ethereum toujours la même) ───
+            let fixed_salt = keccak256(b"SLURACHAIN_VEZ_CREATE2_FIXED_SALT_V1_2026");
 
-            // Pré-insertion minimale du compte
+            let create2_address = {
+                let mut hasher = Keccak256::new();
+                hasher.update(&[0xff]);
+                hasher.update(validator_address_generated.as_bytes());
+                hasher.update(&fixed_salt);
+                hasher.update(&keccak256(&creation_bytecode));
+                let hash = hasher.finalize();
+                format!("0x{}", hex::encode(&hash[12..32]))
+            };
+
+            println!("⚡ Adresse CREATE2 fixe pour VEZ : {}", create2_address);
+
+            // ─── Adresse SLU zk-print fixe et déterministe (toujours la même) ───
+            let slu_zk_address = generate_slu_zk_address(
+                "VEZ_CREATE2_FIXED_IDENTITY_2026",  // sel fixe → toujours la même adresse SLU
+                10,
+                32
+            );
+
+            println!("🔑 Adresse SLU zk-print fixe pour VEZ : {}", slu_zk_address);
+
+            // Pré-insertion du compte avec LES DEUX adresses
             {
                 let mut vm = engine_clone.vm.write().await;
                 let mut accounts = vm.state.accounts.write().await;
-                if !accounts.contains_key(&vez_addr) {
+
+                if !accounts.contains_key(&create2_address) {
                     let initial_account = vuc_tx::slurachain_vm::AccountState {
-                        eth_address: vez_addr.clone(),
-                        slu_zk_address: vez_addr.clone(),
+                        eth_address: create2_address.clone(),
+                        slu_zk_address: slu_zk_address.clone(),
                         balance: 0u128,
                         contract_state: creation_bytecode.clone(),
                         resources: {
                             let mut r = BTreeMap::new();
                             r.insert("constructor_pending".to_string(), serde_json::Value::Bool(true));
                             r.insert("deployed_by".to_string(), serde_json::Value::String(validator_address_generated.clone()));
+                            r.insert("slu_zk_address".to_string(), serde_json::Value::String(slu_zk_address.clone()));
+                            r.insert("is_sluzk".to_string(), serde_json::Value::Bool(true));
                             r
                         },
                         state_version: 1,
                         last_block_number: 0,
                         nonce: 0,
                         code_hash: "".to_string(),
-                        storage_root: format!("storage_{}", vez_addr),
+                        storage_root: format!("storage_{}", create2_address),
                         is_contract: true,
                         gas_used: 0,
                     };
-                    accounts.insert(vez_addr.clone(), initial_account);
-                    println!("   → Compte pré-créé avec creation bytecode");
+                    accounts.insert(create2_address.clone(), initial_account);
+                    println!("   → Compte pré-créé CREATE2 + SLU zk fixe");
                 }
             }
 
@@ -5158,28 +5172,16 @@ let already_exists = if let manager = storage.as_ref() {
                 "data": format!("0x{}", hex::encode(&creation_bytecode)),
                 "value": "0x0",
                 "create2": true,
-                "target_address": vez_addr,
+                "target_address": create2_address,
+                "sluzk": true   // ← active l'usage de l'adresse SLU dans contractAddress
             });
 
             match engine_clone.send_transaction(deploy_vez_tx).await {
                 Ok(tx_hash) => {
-                    println!("✅ VEZ déployé avec succès à {} (tx: {})", vez_addr, tx_hash);
-                    
-                    // Vérification post-déploiement
-                    {
-                        let vm = engine_clone.vm.read().await;
-                        let accounts = vm.state.accounts.read().await;
-                        if let Some(acc) = accounts.get(&vez_addr) {
-                            println!("   → Bytecode final dans compte : {} bytes", acc.contract_state.len());
-                        }
-                        if let Some(module) = vm.modules.get(&vez_addr) {
-                            println!("   → Bytecode dans module : {} bytes", module.bytecode.len());
-                        }
-                    }
+                    println!("✅ VEZ déployé CREATE2 fixe à {}", create2_address);
+                    println!("   → SLU zk-print : {}", slu_zk_address);
 
-                    // Force persistance
                     let _ = engine_clone.persist_all_state().await;
-
                     break;
                 }
                 Err(e) => {
