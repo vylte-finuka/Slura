@@ -5079,7 +5079,7 @@ tokio::spawn({
             let vez_eth_address = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_string();
             let account_key = format!("account:{}", vez_eth_address);
 
-            let already_exists = if let Some(manager) = storage.as_ref() {
+            let already_exists = if let (manager) = storage.as_ref() {
                 match manager.read(&account_key) {
                     Ok(_) => {
                         println!("🪙 VEZ déjà présent dans RocksDB (clé: {}) → déploiement annulé", account_key);
