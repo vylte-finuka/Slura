@@ -608,7 +608,7 @@ pub struct EventDefinition {
     pub data_params: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct AccountState {
     // ─── Adresse principale "racine" (Ethereum-compatible) ───
     pub eth_address: String,                  // ex: "0x742d35Cc6634C0532925a3b844Bc454e4438f44e"

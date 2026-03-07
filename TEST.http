@@ -1,8 +1,14 @@
 curl -X POST -H "Content-Type: application/json" \
   --data '{
     "jsonrpc":"2.0",
-    "method":"eth_getCode",
-    "params":["0x6a134fdf518a5c007a547dce576f4b50ef304e06", "latest"],
+    "method":"eth_call",
+    "params":[
+      {
+        "to": "*slu*#*bdaa2ec6f99e7ee5cf72*#*477d49b7e765de200cb8b57a2cfa0dd7eabf6596759a57805c3eb9d3ed3bb69f#",
+        "data": "0x70a082310000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "latest"
+    ],
     "id":1
   }' \
   http://localhost:8082

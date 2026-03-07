@@ -8,6 +8,7 @@ use alloy_primitives::{B256, Keccak256};
 // Ensure the correct module path for TimestampRelease
 use vuc_events::timestamp_release::TimestampRelease;
 use vuc_platform::slurachain_rpc_service::TxRequest;
+use vuc_tx::slurachain_vm::Module;
 use std::net::{SocketAddr,ToSocketAddrs};
 use local_ip_address::{local_ip, Error as LocalIpError};
 use std::sync::{Arc, RwLock};
@@ -1230,79 +1231,148 @@ pub async fn load_persisted_receipts(&self) -> Result<u32, String> {
 /// Restaure TOUS les contrats + leurs adresses SLU zk-print depuis RocksDB
 pub async fn load_persisted_contracts(&self) -> Result<u32, String> {
     let mut loaded = 0u32;
+
     let storage_manager = {
         let vm = self.vm.read().await;
         vm.storage_manager.clone()
     };
 
     let Some(manager) = storage_manager else {
-        println!("⚠️ Pas de storage manager");
+        println!("⚠️ Pas de storage manager → restauration annulée");
         return Ok(0);
     };
 
-    let entries = manager.scan_prefix("account:").map_err(|e| e.to_string())?;
+    println!("🔄 Restauration dual-key (Ethereum + SLU zk-print) depuis RocksDB...");
+
+    let entries = manager
+        .scan_prefix("account:")
+        .map_err(|e| format!("Échec scan 'account:': {}", e))?;
 
     for (key, value) in entries {
+        // Filtre : on ne prend que les clés principales "account:0x..."
         if !key.starts_with("account:") || key.contains(":contract_state") {
             continue;
         }
 
-        let eth_address = key.strip_prefix("account:").unwrap_or("").to_string();
-        if eth_address.len() != 42 || !eth_address.starts_with("0x") {
-            continue;
-        }
-
-        let account_json: serde_json::Value = match serde_json::from_slice(&value) {
-            Ok(j) => j,
-            Err(_) => continue,
+        let eth_address = match key.strip_prefix("account:") {
+            Some(addr) if addr.starts_with("0x") && addr.len() == 42 => addr.to_string(),
+            _ => continue,
         };
 
+        // Désérialisation métadonnées
+        let account_json: serde_json::Value = match serde_json::from_slice(&value) {
+            Ok(j) => j,
+            Err(e) => {
+                println!("⚠️ JSON invalide pour {} → ignoré ({})", eth_address, e);
+                continue;
+            }
+        };
+
+        // SLU zk-print : on la récupère ou on la génère si absente (symétrie)
         let slu_zk_address = account_json
             .get("resources")
             .and_then(|r| r.get("slu_zk_address"))
             .and_then(|v| v.as_str())
-            .unwrap_or(&eth_address)
-            .to_string();
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                // Fallback : on peut générer ou conserver eth si vraiment absent
+                println!("ℹ️ Pas de slu_zk_address stockée → fallback sur eth pour {}", eth_address);
+                eth_address.clone()
+            });
 
-        let bytecode = manager.read(&format!("account:{}:contract_state", eth_address))
+        // Chargement bytecode des DEUX adresses (symétrique)
+        let bytecode_eth = manager
+            .read(&format!("account:{}:contract_state", eth_address))
             .unwrap_or_default();
 
+        let bytecode_slu = manager
+            .read(&format!("account:{}:contract_state", slu_zk_address))
+            .unwrap_or_default();
+
+        // Choix du bytecode : on prend celui qui existe (aucune priorité arbitraire)
+        let bytecode = match (!bytecode_eth.is_empty(), !bytecode_slu.is_empty()) {
+            (true, false)  => bytecode_eth,
+            (false, true)  => bytecode_slu,
+            (true, true)   => {
+                // Les deux existent → on vérifie s'ils sont identiques
+                if bytecode_eth == bytecode_slu {
+                    bytecode_eth
+                } else {
+                    println!("⚠️ Bytecode différent eth vs slu pour {} → on garde eth par cohérence historique", eth_address);
+                    bytecode_eth
+                }
+            }
+            (false, false) => vec![],
+        };
+
+        // Construction compte (symétrique)
         let account = vuc_tx::slurachain_vm::AccountState {
             eth_address: eth_address.clone(),
             slu_zk_address: slu_zk_address.clone(),
             balance: account_json.get("balance").and_then(|v| v.as_u64()).unwrap_or(0) as u128,
             nonce: account_json.get("nonce").and_then(|v| v.as_u64()).unwrap_or(0),
             contract_state: bytecode.clone(),
-            resources: account_json.get("resources")
+            resources: account_json
+                .get("resources")
                 .and_then(|v| v.as_object())
                 .cloned()
                 .map(|m| m.into_iter().collect())
                 .unwrap_or_default(),
-            ..Default::default()
+            state_version: 1,
+            last_block_number: 0,
+            code_hash: account_json.get("code_hash").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            storage_root: account_json.get("storage_root").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            is_contract: account_json.get("is_contract").and_then(|v| v.as_bool()).unwrap_or(false),
+            gas_used: 0,
         };
 
-        // 🔥 INSERTION NATIF DUAL-KEY (comme zkEVM)
+        // Insertion SYMÉTRIQUE dans accounts
         {
             let mut vm = self.vm.write().await;
             let mut accounts = vm.state.accounts.write().await;
-            accounts.insert(eth_address.clone(), account.clone());     // clé Ethereum
-            accounts.insert(slu_zk_address.clone(), account.clone());  // clé SLU zk-print (native)
+            accounts.insert(eth_address.clone(), account.clone());
+            if eth_address != slu_zk_address {
+                accounts.insert(slu_zk_address.clone(), account.clone());
+            }
         }
 
-        // Module aussi en dual-key
-        {
-            let mut vm = self.vm.write().await;
-            let module = /* ton Module struct avec bytecode */;
-            vm.modules.insert(eth_address.clone(), module.clone());
+        // Module : un seul objet partagé, inséré sous les DEUX clés
+        if !bytecode.is_empty() || account.is_contract {
+            let module = vuc_tx::slurachain_vm::Module {
+                name:               "restored_contract".to_string(),
+                address:            eth_address.clone(),  // convention : on stocke eth comme adresse principale
+                bytecode:           bytecode.clone(),
+                elf_buffer:         vec![],
+                context:            uvm_runtime::UbfContext::new(),
+                stack_usage:        None,
+                functions:          hashbrown::HashMap::new(),
+                gas_estimates:      hashbrown::HashMap::new(),
+                storage_layout:     hashbrown::HashMap::new(),
+                events:             vec![],
+                constructor_params: vec![],
+            };
+
+            {
+                let mut vm = self.vm.write().await;
+
+   vm.modules.insert(eth_address.clone(), module.clone());
             vm.modules.insert(slu_zk_address.clone(), module);
+            }
+
+            println!(
+                "📦 Module partagé inséré sous les deux clés → eth: {} | slu: {} | bytecode: {} bytes",
+                eth_address, slu_zk_address, bytecode.len()
+            );
         }
 
         loaded += 1;
-        println!("✅ Compte restauré NATIF → Ethereum: {} | SLU zk-print: {}", 
-                 eth_address, slu_zk_address);
+        println!(
+            "✅ Dual-key restauré → eth: {} | slu_zk: {} | contract: {} | bytecode: {} bytes",
+            eth_address, slu_zk_address, account.is_contract, bytecode.len()
+        );
     }
 
-    println!("🟢 {} comptes restaurés en mode dual-key natif", loaded);
+    println!("🟢 Restauration terminée : {} entrées dual-key chargées", loaded);
     Ok(loaded)
 }
     
