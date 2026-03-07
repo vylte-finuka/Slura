@@ -2850,21 +2850,6 @@ module.register_async_method("wallet_switchEthereumChain", move |params, _meta, 
     }
 }).expect("Failed to register wallet_switchEthereumChain method");
 
-// Endpoint wallet_watchAsset (MetaMask/Remix UX)
-let engine_platform_clone = self.clone();
-module.register_async_method("wallet_watchAsset", move |params, _meta, _| {
-    let engine_platform = engine_platform_clone.clone();
-    async move {
-        let params_array: Vec<serde_json::Value> = params.parse().unwrap_or_default();
-        println!("➡️ wallet_watchAsset appelé avec params: {:?}", params_array);
-
-        // Réponse standard attendue par MetaMask (aucune erreur)
-        Ok::<_, jsonrpsee_types::error::ErrorObject>(serde_json::json!({
-            "result": true
-        }))
-    }
-}).expect("Failed to register wallet_watchAsset method");
-
 // Endpoint eth_getTransactionByHash
         let engine_platform_clone = self.clone();
 module.register_async_method("eth_getTransactionByHash", move |params, _meta, _| {
@@ -5331,7 +5316,6 @@ println!("   • wallet_getCallsStatus");
 println!("   • wallet_sendCalls");
 println!("   • wallet_addEthereumChain");
 println!("   • wallet_switchEthereumChain");
-println!("   • wallet_watchAsset");
 
 // ─── Network & Debug ───
 println!("\nNetwork / Debug / Custom:");
