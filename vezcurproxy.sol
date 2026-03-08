@@ -51,28 +51,22 @@ contract VEZproxy is ERC20, Ownable, UUPSUpgradeable {
     event ObtainRequested(address indexed user, uint256 amount, string proof);
 
     ///====≈====≈=== CONSTRUCTOR – mint initial via la logique mint()
-    constructor(
-        address _priceFeed,
-        address _custodian,
-        address _initialOwner,
-        address _initialMe
-    ) ERC20("Vyft Enhancing ZER", "VEZ") Ownable(_initialOwner) {
-        priceFeed      = EACAggregatorProxy(_priceFeed);
-        custodian      = _custodian;
-        me             = _initialMe;
-<<<<<<< HEAD
-        complet_quant  = 888_000_000;
-=======
-        complet_quant  = 888_000_000 * 10**18;
->>>>>>> c33d5dca50728ea7f7856d339b04ad833a6fe66f
+constructor() 
+    ERC20("Vyft Enhancing ZER", "VEZ") 
+    Ownable(0x53Ae54b11251D5003e9aA51422405bC35A2eF32D) 
+{
+    priceFeed = EACAggregatorProxy(0xCcCCccccCCCCcCCCCCCcCcCccCcCCCcCcccccccC);
+    custodian = 0x53Ae54b11251D5003e9aA51422405bC35A2eF32D;
+    me        = 0x53Ae54b11251D5003e9aA51422405bC35A2eF32D;
 
-        // IMPORTANT : mint initial via la fonction mint() (coherent avec custodian)
-        // On suppose que _custodian ou _initialOwner est autorisé
-        mint(me, complet_quant);  // ← appel à mint au lieu de _mint direct
+    complet_quant = 888_000_000 * 10**18;
 
-        blacklister = _initialOwner;
-        _paused = false;
-    }
+    // Mint initial via mint() (appelé par owner = 0x53Ae...)
+    _mint(me, complet_quant);
+
+    blacklister = owner();
+    _paused = false;
+}
 
     ///====≈====≈=== MINT – Automatisé par custodian (y compris initial)
     function mint(address to, uint256 amount) public {
@@ -81,11 +75,7 @@ contract VEZproxy is ERC20, Ownable, UUPSUpgradeable {
 
         require(amount > 0 && amount <= MAX_MINT_PER_TX, "Invalid mint amount");
 
-<<<<<<< HEAD
         int256 price = priceFeed.latestRoundData();
-=======
-        (, int256 price,,,) = priceFeed.latestRoundData();
->>>>>>> c33d5dca50728ea7f7856d339b04ad833a6fe66f
         require(price > 0, "Oracle price invalid");
 
         _mint(to, amount);
@@ -223,11 +213,7 @@ contract reservVEZ {
     function updateReserves(uint256 _supplySolde, string calldata _lienIpfs) external {
         require(msg.sender == VEZIssuer, "Only VEZIssuer");
 
-<<<<<<< HEAD
         int256 price = priceFeed.latestRoundData();
-=======
-        (, int256 price,,,) = priceFeed.latestRoundData();
->>>>>>> c33d5dca50728ea7f7856d339b04ad833a6fe66f
         require(price > 0, "Oracle price invalid");
 
         supplySolde = _supplySolde;
@@ -237,7 +223,6 @@ contract reservVEZ {
         emit ReservesUpdated(_supplySolde, _lienIpfs, block.timestamp);
     }
 
-<<<<<<< HEAD
 function getReserves() external view returns (
     uint256 onChainSupply,
     uint256 _supplySolde,  // Renamed parameter
@@ -249,19 +234,6 @@ function getReserves() external view returns (
     int256 price = priceFeed.latestRoundData();
     return (onChainSupply, supplySolde, lienIpfs, lastUpdate, price);
 }
-=======
-    function getReserves() external view returns (
-        uint256 onChainSupply,
-        uint256 supplySolde,
-        string memory lienIpfs,
-        uint256 lastUpdated,
-        int256 eurUsdPrice
-    ) {
-        onChainSupply = IERC20(VEZasset).totalSupply();
-        (, int256 price,,,) = priceFeed.latestRoundData();
-        return (onChainSupply, supplySolde, lienIpfs, lastUpdate, price);
-    }
->>>>>>> c33d5dca50728ea7f7856d339b04ad833a6fe66f
 }
 
 ///====≈====≈===
@@ -336,8 +308,4 @@ contract VEZcustodian is Ownable, ReentrancyGuard {
 interface VEZproxyInterface {
     function mint(address to, uint256 amount) external;
     function balanceOf(address account) external view returns (uint256);
-<<<<<<< HEAD
 }
-=======
-}
->>>>>>> c33d5dca50728ea7f7856d339b04ad833a6fe66f
