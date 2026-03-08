@@ -2153,10 +2153,18 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
             serde_json::Value::Null
         },
 
-        "cumulativeGasUsed": if is_vez_initialization { "0x0" } else { format!("0x{:x}", estimated_gas) },
+        "cumulativeGasUsed": if is_vez_initialization { 
+    "0x0".to_string() 
+} else { 
+    format!("0x{:x}", estimated_gas) 
+},
         "effectiveGasPrice": format!("0x{:x}", gas_price),
         "from": from_addr,
-        "gasUsed": if is_vez_initialization { "0x0" } else { format!("0x{:x}", estimated_gas) },
+        "gasUsed": if is_vez_initialization { 
+    "0x0".to_string() 
+} else { 
+    format!("0x{:x}", estimated_gas) 
+},
         "logs": [],
         "logsBloom": "0x".to_string() + &"00".repeat(256),
         "status": "0x1",
@@ -2181,7 +2189,11 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         "addressEntropy": if is_deployment { rand::random::<u64>() } else { 0 },
         "uniquenessGuaranteed": is_deployment,
         "isVezInitialization": is_vez_initialization,
-        "transactionCost": if is_vez_initialization { "0x0" } else { format!("0x{:x}", gas_cost_wei) },
+        "transactionCost": if is_vez_initialization { 
+    "0x0".to_string() 
+} else { 
+    format!("0x{:x}", gas_cost_wei) 
+},
         "disburseFees": if !is_vez_initialization && gas_cost_wei > 0 {
             serde_json::json!({
                 "disburseCalled": true,
