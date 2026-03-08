@@ -1600,15 +1600,19 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         .unwrap_or("")
         .to_lowercase();
 
-    // Exception spéciale pour l'initialisation VEZ (mint initial)
+    // Exception spéciale pour l'initialisation VEZ (mint initial) → pas de frais
     let is_vez_initialization = to_addr == "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" &&
         tx_params.get("data").and_then(|v| v.as_str()).unwrap_or("")
             .starts_with("0x40c10f1900000000000000000000000053ae54b11251d5003e9aa51422405bc35a2ef32d");
 
-    // Récupération du nonce actuel (depuis receipts ou état)
+    if is_vez_initialization {
+        println!("🆓 Transaction d'initialisation VEZ détectée → aucun disburse de frais");
+    }
+
+    // Récupération du nonce actuel
     let current_account_nonce = self.get_transaction_count(&from_addr).await.unwrap_or(0);
 
-    // Force le nonce à être croissant (priorité au fourni si supérieur)
+    // Nonce final (priorité au fourni s'il est plus grand)
     let final_nonce = tx_params.get("nonce")
         .and_then(|v| {
             if v.is_string() {
@@ -1627,7 +1631,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         .map(|provided_nonce| std::cmp::max(provided_nonce, current_account_nonce))
         .unwrap_or(current_account_nonce);
 
-    // Détection déploiement (to absent ou vide)
+    // Détection déploiement
     let is_deployment = to_addr.is_empty() ||
                        to_addr == "0x" ||
                        tx_params.get("to").is_none() ||
@@ -1657,7 +1661,6 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    // Décodage calldata
     let calldata_bytes = if !data.is_empty() && data.starts_with("0x") {
         hex::decode(&data[2..]).unwrap_or_default()
     } else if !data.is_empty() {
@@ -1694,8 +1697,74 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     let tx_hash = format!("0x{:x}", tx_hasher.finalize());
     let normalized_hash = self.normalize_tx_hash(&tx_hash);
 
-    let mut contract_address = String::new();       // ← adresse Ethereum (racine EVM)
-    let mut slu_zk_contract_addr = String::new();   // ← adresse SLU zk-print longue
+    let mut contract_address = String::new();       // adresse Ethereum (racine EVM)
+    let mut slu_zk_contract_addr = String::new();   // adresse SLU zk-print longue
+
+    // ────────────────────────────────────────────────────────────────
+    // CALCUL DYNAMIQUE DES FRAIS DE GAS (avant tout traitement)
+    // ────────────────────────────────────────────────────────────────
+    let gas_price = self.get_gas_price().await; // 1 Gwei par défaut ou dynamique
+
+    let estimated_gas = if is_deployment {
+        // Déploiement : base + bytecode + constructor
+        21000u64 + 32000u64 + (calldata_bytes.len() as u64 * 200) // ~200 gas par byte
+    } else if calldata_bytes.len() > 0 {
+        // Appel de fonction : base + calldata
+        21000u64 + 21000u64 + (calldata_bytes.len() as u64 * 16) // 16 gas par byte
+    } else {
+        // Transfert simple
+        21000u64
+    };
+
+    let gas_cost_wei = estimated_gas as u128 * gas_price as u128;
+
+    println!("💰 Calcul frais dynamiques :");
+    println!("   • Gas estimé          : {} units", estimated_gas);
+    println!("   • Gas price           : {} wei ({} Gwei)", gas_price, gas_price / 1_000_000_000);
+    println!("   • Coût total          : {} wei VEZ (~{:.8} VEZ)", gas_cost_wei, gas_cost_wei as f64 / 1e18);
+    println!("   • Type de tx          : {}", if is_deployment { "déploiement" } else { "appel/transfert" });
+
+    // ────────────────────────────────────────────────────────────────
+    // PAIEMENT OBLIGATOIRE DES FRAIS VIA DISBURSE (AVANT EXÉCUTION)
+    // ────────────────────────────────────────────────────────────────
+    let vez_addr = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_string();
+
+    let disburse_success = if !is_vez_initialization && gas_cost_wei > 0 {
+        println!("🪙 Paiement des frais via disburse({}) depuis {}...", gas_cost_wei, from_addr);
+
+        let disburse_args = vec![serde_json::Value::Number(serde_json::Number::from(gas_cost_wei))];
+
+        let disburse_result = {
+            let mut vm_sim = self.vm.write().await;
+            vm_sim.execute_module(
+                &vez_addr,
+                "disburse",
+                disburse_args,
+                Some(&from_addr),
+                None
+            ).await
+        };
+
+        match disburse_result {
+            Ok(_) => {
+                println!("✅ DISBURSE FRAIS RÉUSSI ! {} wei VEZ envoyés → burn 10% ({})", 
+                         gas_cost_wei, gas_cost_wei * 10 / 100);
+                true
+            }
+            Err(e) => {
+                println!("❌ ÉCHEC DISBURSE FRAIS : {}", e);
+                println!("   → Transaction rejetée (solde insuffisant ou revert dans disburse)");
+                return Err(format!("Impossible de payer les frais via disburse : {}", e));
+            }
+        }
+    } else {
+        println!("ℹ️ Aucun disburse nécessaire (init VEZ ou gas_cost=0)");
+        true
+    };
+
+    if !disburse_success {
+        return Err("Paiement des frais refusé".to_string());
+    }
 
     if is_deployment {
         let use_create2 = tx_params.get("create2").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -1747,11 +1816,11 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
             }
         };
 
-        // 2. Génération adresse SLU zk-print (en supplément - format exact demandé)
+        // 2. Génération adresse SLU zk-print
         slu_zk_contract_addr = generate_slu_zk_address(
-            &format!("contract:{}", contract_address),  // sel différenciateur
-            10,   // longueur du hash_id (premier segment)
-            32    // longueur du hash_zk_print (second segment)
+            &format!("contract:{}", contract_address),
+            10,
+            32
         );
 
         println!("📦 Déploiement contrat → deux adresses générées :");
@@ -1789,7 +1858,6 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
                     gas_used: 0,
                 });
 
-            // Mise à jour critique : bytecode + flags + deux adresses
             account.contract_state = creation_bytecode.clone();
             account.is_contract = true;
             account.eth_address = contract_address.clone();
@@ -1821,7 +1889,6 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
                 }
             }
 
-            // Métadonnées enrichies avec les deux adresses
             let account_key = account_prefix;
             let account_json = serde_json::json!({
                 "eth_address": contract_address,
@@ -1843,7 +1910,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
             }
         }
 
-        // 5. Exécution du constructeur (bytecode déjà dans l'état)
+        // 5. Exécution du constructeur
         println!("🚀 Déploiement via execute_module (raw_creation) → {}", contract_address);
 
         let constructor = std::str::from_utf8(&creation_bytecode).unwrap_or("");
@@ -1860,7 +1927,6 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
             Ok(value) => {
                 let mut candidate: Option<Vec<u8>> = None;
 
-                // Recherche exhaustive (logique originale conservée)
                 if let Some(obj) = value.as_object() {
                     let priority = ["returnData", "return", "result", "data", "output", "value", "runtime", "code", "bytecode"];
                     for key in priority {
@@ -1903,7 +1969,6 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
 
                 let mut runtime = candidate.unwrap_or_else(|| creation_bytecode.clone());
 
-                // Nettoyage metadata CBOR/IPFS/solc (logique originale)
                 let markers: &[&[u8]] = &[
                     b"a2646970667358221220",
                     b"a165627a7a72305820",
@@ -2065,43 +2130,42 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     let _ = self.block_finalized_tx.send(vec![tx_request.hash.clone()]);
 
     let (current_block_number, current_block_hash) = self.get_latest_block_info().await;
-let is_sluzk_enabled = tx_params
-    .get("sluzk")
-    .and_then(|v| v.as_bool())
-    .unwrap_or(false);
-    // ─── RECEIPT ENRICHI AVEC LES DEUX ADRESSES ───
-    let mut receipts = self.tx_receipts.write().await;
-let receipt = serde_json::json!({
-    "blockHash": current_block_hash,
-    "blockNumber": format!("0x{:x}", current_block_number),
-    
-    // UN SEUL CHAMP : contractAddress
-    "contractAddress": if is_deployment {
-        if is_sluzk_enabled && !slu_zk_contract_addr.is_empty() {
-            // sluzk = true → on met l'adresse SLU zk-print
-            serde_json::Value::String(slu_zk_contract_addr.clone())
-        } else {
-            // sluzk = false ou non demandé → adresse Ethereum normale
-            serde_json::Value::String(contract_address.clone())
-        }
-    } else {
-        // Pas un déploiement → null (même pour compte zk)
-        serde_json::Value::Null
-    },
 
-    "cumulativeGasUsed": if is_vez_initialization { "0x0" } else { "0x5208" },
-    "effectiveGasPrice": if is_vez_initialization { "0x0" } else { "0x3b9aca00" },
-    "from": from_addr,
-    "gasUsed": if is_vez_initialization { "0x0" } else { "0x5208" },
-    "logs": [],
-    "logsBloom": "0x".to_string() + &"00".repeat(256),
-    "status": "0x1",
-    "to": if is_deployment { serde_json::Value::Null } else { serde_json::Value::String(to_addr) },
-    "transactionHash": normalized_hash.clone(),
-    "transactionIndex": "0x0",
-    "type": "0x2",
-    "nonce": format!("0x{:x}", final_nonce),
-    "value": format!("0x{:x}", value),
+    let is_sluzk_enabled = tx_params
+        .get("sluzk")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    // ─── RECEIPT ENRICHI AVEC LES DEUX ADRESSES + LOG DISBURSE ───
+    let mut receipts = self.tx_receipts.write().await;
+    let receipt = serde_json::json!({
+        "blockHash": current_block_hash,
+        "blockNumber": format!("0x{:x}", current_block_number),
+        
+        // UN SEUL CHAMP : contractAddress
+        "contractAddress": if is_deployment {
+            if is_sluzk_enabled && !slu_zk_contract_addr.is_empty() {
+                serde_json::Value::String(slu_zk_contract_addr.clone())
+            } else {
+                serde_json::Value::String(contract_address.clone())
+            }
+        } else {
+            serde_json::Value::Null
+        },
+
+        "cumulativeGasUsed": if is_vez_initialization { "0x0" } else { format!("0x{:x}", estimated_gas) },
+        "effectiveGasPrice": format!("0x{:x}", gas_price),
+        "from": from_addr,
+        "gasUsed": if is_vez_initialization { "0x0" } else { format!("0x{:x}", estimated_gas) },
+        "logs": [],
+        "logsBloom": "0x".to_string() + &"00".repeat(256),
+        "status": "0x1",
+        "to": if is_deployment { serde_json::Value::Null } else { serde_json::Value::String(to_addr) },
+        "transactionHash": normalized_hash.clone(),
+        "transactionIndex": "0x0",
+        "type": "0x2",
+        "nonce": format!("0x{:x}", final_nonce),
+        "value": format!("0x{:x}", value),
         "deploymentTimestamp": chrono::Utc::now().timestamp_nanos(),
         "isUniqueDeployment": is_deployment,
         "isPersisted": is_deployment,
@@ -2117,14 +2181,30 @@ let receipt = serde_json::json!({
         "addressEntropy": if is_deployment { rand::random::<u64>() } else { 0 },
         "uniquenessGuaranteed": is_deployment,
         "isVezInitialization": is_vez_initialization,
-        "transactionCost": if is_vez_initialization { "0x0" } else { "0x5208" }
+        "transactionCost": if is_vez_initialization { "0x0" } else { format!("0x{:x}", gas_cost_wei) },
+        "disburseFees": if !is_vez_initialization && gas_cost_wei > 0 {
+            serde_json::json!({
+                "disburseCalled": true,
+                "amountDisbursed": gas_cost_wei,
+                "burned": gas_cost_wei * 10 / 100,
+                "remainingDistributed": gas_cost_wei * 90 / 100,
+                "paidVia": "disburse",
+                "success": true,
+                "note": "Frais de transaction payés en VEZ via disburse avant exécution"
+            })
+        } else {
+            serde_json::json!({
+                "disburseCalled": false,
+                "note": "Aucun disburse (init VEZ ou gas_cost=0)"
+            })
+        }
     });
 
     receipts.insert(normalized_hash.clone(), receipt.clone());
     let tx_hash_padded = pad_hash_64(&normalized_hash);
     receipts.insert(tx_hash_padded.clone(), receipt.clone());
 
-    // Persistance receipt
+    // Persistance receipt dans RocksDB
     if let Some(storage_manager) = &self.vm.read().await.storage_manager {
         let receipt_key = format!("receipt:{}", normalized_hash);
         if let Ok(receipt_bytes) = serde_json::to_vec(&receipt) {
