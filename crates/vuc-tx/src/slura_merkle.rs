@@ -4,7 +4,7 @@ use alloy_primitives::{keccak256, B256, U256 as AlloyU256};
 use reth_trie::{HashedPostState, TrieAccount};
 use reth_primitives_traits::Account as RethAccount;
 use std::collections::{BTreeMap, HashMap};
-use sha3::{Digest, Keccak256}; // ← IMPORTANT : importer Digest
+use sha3::{Digest, Keccak256};
 use hex;
 use crate::slurachain_vm::AccountState;
 
@@ -27,6 +27,17 @@ fn addr_to_b256(addr: &str) -> B256 {
     B256::from(arr)
 }
 
+/// Racine canonique d'un trie vide (keccak256(rlp.encode(b"")) = keccak256(0x80))
+fn empty_trie_root() -> B256 {
+    let empty_rlp = [0x80u8];
+    keccak256(&empty_rlp)
+}
+
+/// Hash canonique du bytecode vide (keccak256(b""))
+fn empty_code_hash() -> B256 {
+    keccak256(&[])
+}
+
 /// Structure intermédiaire pour le calcul zk-aware
 #[derive(Clone, Debug)]
 pub struct ExtendedTrieAccount {
@@ -41,9 +52,11 @@ pub struct ExtendedTrieAccount {
 pub fn build_extended_state_trie(
     accounts: &BTreeMap<String, AccountState>,
 ) -> (HashedPostState, B256, B256) {
-    // 1. Comptes pour le trie standard EVM
     let mut hashed_accounts: Vec<(B256, Option<RethAccount>)> = Vec::new();
     let mut extended_accounts: HashMap<B256, ExtendedTrieAccount> = HashMap::new();
+
+    let empty_root = empty_trie_root();       // calculé une fois
+    let empty_code = empty_code_hash();       // calculé une fois
 
     for (addr_str, account) in accounts.iter() {
         let addr = addr_to_b256(addr_str);
@@ -52,24 +65,25 @@ pub fn build_extended_state_trie(
         let evm_account = RethAccount {
             nonce: account.nonce,
             balance: AlloyU256::from(account.balance),
-            bytecode_hash: if account.code_hash.is_empty() || account.code_hash == "0x" {
-                None
+            bytecode_hash: if account.code_hash.trim().is_empty() || account.code_hash.trim() == "0x" {
+                Some(empty_code)  // jamais None, toujours une valeur valide
             } else {
-                hex::decode(&account.code_hash.trim_start_matches("0x"))
+                hex::decode(account.code_hash.trim_start_matches("0x"))
                     .ok()
                     .filter(|v| v.len() == 32)
                     .map(|v| B256::from_slice(&v))
+                    .or(Some(empty_code))  // fallback si invalide
             },
         };
 
-        // Hash SLU zk-print
-        let slu_zk_hash = if account.slu_zk_address.is_empty() {
-            B256::ZERO
+        // SLU zk hash — jamais ZERO
+        let slu_zk_hash = if account.slu_zk_address.trim().is_empty() {
+            empty_root
         } else {
             keccak_str(&account.slu_zk_address)
         };
 
-        // Hash métadonnées (triées pour déterminisme)
+        // Metadata hash — toujours calculé (vide → hash vide valide)
         let mut metadata_buf = Vec::new();
         let mut sorted_resources: Vec<(&String, &serde_json::Value)> = account.resources.iter().collect();
         sorted_resources.sort_by_key(|&(k, _)| k);
@@ -81,9 +95,9 @@ pub fn build_extended_state_trie(
         }
         let metadata_hash = keccak256(&metadata_buf);
 
-        // Storage root hash
-        let storage_root_hash = if account.storage_root.is_empty() {
-            B256::ZERO
+        // Storage root hash — jamais ZERO
+        let storage_root_hash = if account.storage_root.trim().is_empty() {
+            empty_root
         } else {
             keccak_str(&account.storage_root)
         };
@@ -98,36 +112,36 @@ pub fn build_extended_state_trie(
 
         extended_accounts.insert(addr, extended);
 
-        // Pour le trie EVM standard : inclure le compte (ou None si supprimé)
         hashed_accounts.push((addr, Some(evm_account)));
     }
 
     // Tri obligatoire
     hashed_accounts.sort_by(|a, b| a.0.cmp(&b.0));
 
-    // Construction HashedPostState
+    // HashedPostState
     let mut post_state = HashedPostState::default();
     post_state = post_state.with_accounts(
         hashed_accounts.iter().cloned().map(|(addr, acc_opt)| (addr, acc_opt))
     );
 
-    // Calcul du state root standard (EVM)
-    // Correction E0277 : mapper explicitement Option<RethAccount> → TrieAccount
-// Calcul du state root standard (EVM)
-let standard_root = reth_trie::root::state_root(
-    hashed_accounts
+    // Calcul du state root standard (EVM) – TOUJOURS avec racines réelles
+    let trie_entries = hashed_accounts
         .into_iter()
         .filter_map(|(addr, acc_opt)| {
             acc_opt.map(|acc| {
-                TrieAccount {
-                    nonce: acc.nonce,
-                    balance: acc.balance,
-                    storage_root: B256::ZERO, // ← ou ton vrai storage_root si disponible
-                    code_hash: acc.bytecode_hash.unwrap_or(B256::ZERO),
-                }
-            }).map(|trie_acc| (addr, trie_acc))
-        })
-);
+                (
+                    addr,
+                    TrieAccount {
+                        nonce: acc.nonce,
+                        balance: acc.balance,
+                        storage_root: empty_trie_root(),           // toujours la vraie racine vide
+                        code_hash: acc.bytecode_hash.unwrap_or_else(empty_code_hash),  // toujours vrai hash vide
+                    },
+                )
+            })
+        });
+
+    let standard_root = reth_trie::root::state_root(trie_entries);
 
     // 2. Second root zk-aware (Merkle simple sur les extensions)
     let mut zk_leaves = Vec::new();
@@ -146,7 +160,6 @@ let standard_root = reth_trie::root::state_root(
 
     zk_leaves.sort();
 
-    // Correction E0599 : Keccak256::default() au lieu de ::new()
     let mut hasher = Keccak256::default();
     for leaf in zk_leaves {
         hasher.update(&leaf);
