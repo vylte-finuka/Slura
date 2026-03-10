@@ -16,25 +16,43 @@ fn keccak_str(s: &str) -> B256 {
     keccak256(s.as_bytes())
 }
 
-/// Convertit une adresse hex en B256 (padding left) — VERSION ROBUSTE
+/// Convertit une adresse SLU ou hex en B256 (padding left)
 fn addr_to_b256(addr: &str) -> B256 {
-    let clean = addr.trim_start_matches("0x");
+    let trimmed = addr.trim();
 
-    // Une adresse Ethereum valide = 20 bytes = 40 hex chars
-    if clean.len() != 40 {
-        panic!("Adresse invalide (longueur incorrecte) : {}", addr);
+    // Format SLU : *slu*#*short*#*hex64#
+    if trimmed.starts_with("*slu*#") {
+        let parts: Vec<&str> = trimmed.split('#').collect();
+
+        if parts.len() < 4 {
+            panic!("Adresse SLU invalide (format incorrect) : {}", addr);
+        }
+
+        // Le dernier segment utile est le hash hex 64 chars
+        let hex_part = parts[3].trim_matches('*');
+
+        if hex_part.len() != 64 {
+            panic!("Adresse SLU invalide (hash doit faire 64 hex chars) : {}", addr);
+        }
+
+        let bytes = hex::decode(hex_part)
+            .unwrap_or_else(|_| panic!("Adresse SLU invalide (hex incorrect) : {}", addr));
+
+        return B256::from_slice(&bytes);
     }
+
+    // Sinon : adresse hex classique
+    let clean = trimmed.trim_start_matches("0x");
 
     let bytes = hex::decode(clean)
         .unwrap_or_else(|_| panic!("Adresse hex invalide : {}", addr));
 
-    if bytes.len() != 20 {
-        panic!("Adresse invalide (doit faire 20 bytes) : {}", addr);
+    if bytes.len() > 32 {
+        panic!("Adresse hex trop longue (>32 bytes) : {}", addr);
     }
 
-    // Padding left vers 32 bytes
     let mut arr = [0u8; 32];
-    arr[12..].copy_from_slice(&bytes);
+    arr[32 - bytes.len()..].copy_from_slice(&bytes);
     B256::from(arr)
 }
 
