@@ -16,14 +16,25 @@ fn keccak_str(s: &str) -> B256 {
     keccak256(s.as_bytes())
 }
 
-/// Convertit une adresse hex en B256 (padding left)
+/// Convertit une adresse hex en B256 (padding left) — VERSION ROBUSTE
 fn addr_to_b256(addr: &str) -> B256 {
-    let clean = addr.trim_start_matches("0x").to_lowercase();
-    let bytes = hex::decode(&clean).unwrap_or_default();
-    
-    let offset = 32usize.saturating_sub(bytes.len());
+    let clean = addr.trim_start_matches("0x");
+
+    // Une adresse Ethereum valide = 20 bytes = 40 hex chars
+    if clean.len() != 40 {
+        panic!("Adresse invalide (longueur incorrecte) : {}", addr);
+    }
+
+    let bytes = hex::decode(clean)
+        .unwrap_or_else(|_| panic!("Adresse hex invalide : {}", addr));
+
+    if bytes.len() != 20 {
+        panic!("Adresse invalide (doit faire 20 bytes) : {}", addr);
+    }
+
+    // Padding left vers 32 bytes
     let mut arr = [0u8; 32];
-    arr[offset..].copy_from_slice(&bytes);
+    arr[12..].copy_from_slice(&bytes);
     B256::from(arr)
 }
 
@@ -55,8 +66,8 @@ pub fn build_extended_state_trie(
     let mut hashed_accounts: Vec<(B256, Option<RethAccount>)> = Vec::new();
     let mut extended_accounts: HashMap<B256, ExtendedTrieAccount> = HashMap::new();
 
-    let empty_root = empty_trie_root();       // calculé une fois
-    let empty_code = empty_code_hash();       // calculé une fois
+    let empty_root = empty_trie_root();
+    let empty_code = empty_code_hash();
 
     for (addr_str, account) in accounts.iter() {
         let addr = addr_to_b256(addr_str);
@@ -65,37 +76,42 @@ pub fn build_extended_state_trie(
         let evm_account = RethAccount {
             nonce: account.nonce,
             balance: AlloyU256::from(account.balance),
-            bytecode_hash: if account.code_hash.trim().is_empty() || account.code_hash.trim() == "0x" {
-                Some(empty_code)  // jamais None, toujours une valeur valide
+            bytecode_hash: if account.code_hash.trim().is_empty()
+                || account.code_hash.trim() == "0x"
+            {
+                Some(empty_code)
             } else {
                 hex::decode(account.code_hash.trim_start_matches("0x"))
                     .ok()
                     .filter(|v| v.len() == 32)
                     .map(|v| B256::from_slice(&v))
-                    .or(Some(empty_code))  // fallback si invalide
+                    .or(Some(empty_code))
             },
         };
 
-        // SLU zk hash — jamais ZERO
+        // SLU zk hash
         let slu_zk_hash = if account.slu_zk_address.trim().is_empty() {
             empty_root
         } else {
             keccak_str(&account.slu_zk_address)
         };
 
-        // Metadata hash — toujours calculé (vide → hash vide valide)
+        // Metadata hash
         let mut metadata_buf = Vec::new();
-        let mut sorted_resources: Vec<(&String, &serde_json::Value)> = account.resources.iter().collect();
+        let mut sorted_resources: Vec<(&String, &serde_json::Value)> =
+            account.resources.iter().collect();
         sorted_resources.sort_by_key(|&(k, _)| k);
+
         for (k, v) in sorted_resources {
             metadata_buf.extend_from_slice(k.as_bytes());
             if let Ok(json) = serde_json::to_vec(v) {
                 metadata_buf.extend_from_slice(&json);
             }
         }
+
         let metadata_hash = keccak256(&metadata_buf);
 
-        // Storage root hash — jamais ZERO
+        // Storage root hash
         let storage_root_hash = if account.storage_root.trim().is_empty() {
             empty_root
         } else {
@@ -111,7 +127,6 @@ pub fn build_extended_state_trie(
         };
 
         extended_accounts.insert(addr, extended);
-
         hashed_accounts.push((addr, Some(evm_account)));
     }
 
@@ -121,29 +136,27 @@ pub fn build_extended_state_trie(
     // HashedPostState
     let mut post_state = HashedPostState::default();
     post_state = post_state.with_accounts(
-        hashed_accounts.iter().cloned().map(|(addr, acc_opt)| (addr, acc_opt))
+        hashed_accounts.iter().cloned().map(|(addr, acc_opt)| (addr, acc_opt)),
     );
 
-    // Calcul du state root standard (EVM) – TOUJOURS avec racines réelles
-    let trie_entries = hashed_accounts
-        .into_iter()
-        .filter_map(|(addr, acc_opt)| {
-            acc_opt.map(|acc| {
-                (
-                    addr,
-                    TrieAccount {
-                        nonce: acc.nonce,
-                        balance: acc.balance,
-                        storage_root: empty_trie_root(),           // toujours la vraie racine vide
-                        code_hash: acc.bytecode_hash.unwrap_or_else(empty_code_hash),  // toujours vrai hash vide
-                    },
-                )
-            })
-        });
+    // Calcul du state root standard (EVM)
+    let trie_entries = hashed_accounts.into_iter().filter_map(|(addr, acc_opt)| {
+        acc_opt.map(|acc| {
+            (
+                addr,
+                TrieAccount {
+                    nonce: acc.nonce,
+                    balance: acc.balance,
+                    storage_root: empty_trie_root(),
+                    code_hash: acc.bytecode_hash.unwrap_or_else(empty_code_hash),
+                },
+            )
+        })
+    });
 
     let standard_root = reth_trie::root::state_root(trie_entries);
 
-    // 2. Second root zk-aware (Merkle simple sur les extensions)
+    // Calcul du root zk-aware
     let mut zk_leaves = Vec::new();
 
     for (addr, ext) in extended_accounts.iter() {
