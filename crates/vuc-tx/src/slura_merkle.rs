@@ -28,14 +28,21 @@ fn addr_to_b256(addr: &str) -> B256 {
             panic!("Adresse SLU invalide (format incorrect) : {}", addr);
         }
 
-        // Le dernier segment utile est le hash hex 64 chars
-        let hex_part = parts[3].trim_matches('*');
+        // Le dernier segment utile est parts[3]
+        let mut hex_part = parts[3].to_string();
+
+        // Nettoyage complet : retire * et # en début/fin
+        hex_part = hex_part.trim_matches('*').trim_matches('#').to_string();
 
         if hex_part.len() != 64 {
-            panic!("Adresse SLU invalide (hash doit faire 64 hex chars) : {}", addr);
+            panic!(
+                "Adresse SLU invalide (hash doit faire 64 hex chars, reçu {}) : {}",
+                hex_part.len(),
+                addr
+            );
         }
 
-        let bytes = hex::decode(hex_part)
+        let bytes = hex::decode(&hex_part)
             .unwrap_or_else(|_| panic!("Adresse SLU invalide (hex incorrect) : {}", addr));
 
         return B256::from_slice(&bytes);
