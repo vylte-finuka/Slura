@@ -9,6 +9,9 @@ use alloy_primitives::{B256, Keccak256};
 use vuc_events::timestamp_release::TimestampRelease;
 use vuc_platform::slurachain_rpc_service::TxRequest;
 use vuc_tx::slurachain_vm::Module;
+use http::header::HeaderValue;
+use http::Response;
+use tower::ServiceBuilder;
 use std::net::{SocketAddr,ToSocketAddrs};
 use local_ip_address::{local_ip, Error as LocalIpError};
 use std::sync::{Arc, RwLock};
@@ -41,7 +44,7 @@ use vuc_platform::{slurachain_rpc_service::slurachainRpcService, consensus::luro
 use vuc_storage::storing_access::RocksDBManagerImpl;
 use vuc_storage::storing_access::RocksDBManager;
 use reth_trie::{root::state_root, TrieAccount};
-use jsonrpsee_server::{RpcModule, ServerBuilder};
+use jsonrpsee_server::{RpcModule, ServerBuilder, HttpBody};
 use vuc_tx::slurachain_vm::SlurachainVm;
 use uvm_runtime::lib::BTreeMap;
 use vuc_tx::slurachain_vm::Signer;
@@ -2459,22 +2462,32 @@ pub async fn eth_call(&self, call_object: serde_json::Value) -> Result<String, S
         Ok(ethereum_accounts)
     }
 
-        pub async fn start_server(&self) {
-            
-        let socket_addr: SocketAddr = format!("{}:{}", "0.0.0.0", self.rpc_service.port)
-            .parse()
-            .expect("Invalid socket address");
+      pub async fn start_server(&self) {
+    let socket_addr: SocketAddr = format!("{}:{}", "0.0.0.0", self.rpc_service.port)
+        .parse()
+        .expect("Invalid socket address");
 
-        println!("Starting server on {}", socket_addr);
+    println!("Starting server on {}", socket_addr);
 
-        let server = ServerBuilder::default()
-            .build(socket_addr)
-            .await
-            .unwrap_or_else(|e| panic!("Failed to build server: {}", e));
+    // Middleware minimal : ajoute Access-Control-Allow-Origin: * à TOUTES les réponses
+    let middleware = ServiceBuilder::new().map_response(|mut resp: Response<HttpBody>| {
+        resp.headers_mut().insert(
+            "access-control-allow-origin",
+            HeaderValue::from_static("*"),
+        );
+        resp
+    });
 
-        println!("Server successfully built on {}", socket_addr);
+    let server = ServerBuilder::default()
+        .set_http_middleware(middleware)
+        .build(socket_addr)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to build server: {}", e));
 
-        let mut module = RpcModule::new(());
+    println!("Server successfully built on {}", socket_addr);
+
+    let mut module = RpcModule::new(());
+
         
                 // Dans start_server(), ajouter cet endpoint :
         let engine_platform_clone = self.clone();
