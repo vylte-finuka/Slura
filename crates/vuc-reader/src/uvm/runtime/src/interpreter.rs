@@ -1671,6 +1671,14 @@ pub fn execute_program(
                 consume_gas_amount(&mut execution_context, 100)?; // Assume warm
             }
 
+            //___ 0x3d RETURNDATASIZE - Taille des données de retour
+0x3d => {
+    let return_data_size = primitive_types::U256::from(execution_context.return_data.len());
+    evm_stack.push(return_data_size.into());
+    reg[0] = return_data_size.into();
+    println!("📏 [RETURNDATASIZE] → {} bytes", return_data_size);
+},
+
             //___ 0x40 BLOCKHASH
             0x40 => {
                 if evm_stack.is_empty() {
