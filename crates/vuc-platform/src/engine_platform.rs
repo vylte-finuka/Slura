@@ -1,5 +1,7 @@
 use ethers::types::U256;
 use ethers::utils::keccak256;
+use jsonrpsee::Methods;
+use jsonrpsee_server::Server;
 use tokio::sync::{Mutex, mpsc, broadcast}; // Ajoute broadcast
 use rand::Rng;
 use serde_json::json;
@@ -9,8 +11,8 @@ use alloy_primitives::{B256, Keccak256};
 use vuc_events::timestamp_release::TimestampRelease;
 use vuc_platform::slurachain_rpc_service::TxRequest;
 use vuc_tx::slurachain_vm::Module;
-use http::header::HeaderValue;
-use http::Response;
+use hyper::Method;
+use jsonrpsee_server::ServerBuilder;
 use tower::ServiceBuilder;
 use std::net::{SocketAddr,ToSocketAddrs};
 use local_ip_address::{local_ip, Error as LocalIpError};
@@ -44,7 +46,8 @@ use vuc_platform::{slurachain_rpc_service::slurachainRpcService, consensus::luro
 use vuc_storage::storing_access::RocksDBManagerImpl;
 use vuc_storage::storing_access::RocksDBManager;
 use reth_trie::{root::state_root, TrieAccount};
-use jsonrpsee_server::{RpcModule, ServerBuilder, HttpBody};
+use jsonrpsee_server::{RpcModule, HttpBody};
+use tower_http::cors::{Any, CorsLayer};
 use vuc_tx::slurachain_vm::SlurachainVm;
 use uvm_runtime::lib::BTreeMap;
 use vuc_tx::slurachain_vm::Signer;
@@ -2462,23 +2465,24 @@ pub async fn eth_call(&self, call_object: serde_json::Value) -> Result<String, S
         Ok(ethereum_accounts)
     }
 
-      pub async fn start_server(&self) {
+    pub async fn start_server(&self) {
     let socket_addr: SocketAddr = format!("{}:{}", "0.0.0.0", self.rpc_service.port)
         .parse()
         .expect("Invalid socket address");
 
     println!("Starting server on {}", socket_addr);
 
-    // Middleware minimal : ajoute Access-Control-Allow-Origin: * à TOUTES les réponses
-    let middleware = ServiceBuilder::new().map_response(|mut resp: Response<HttpBody>| {
-        resp.headers_mut().insert(
-            "access-control-allow-origin",
-            HeaderValue::from_static("*"),
-        );
-        resp
-    });
+    // --- EXACTEMENT comme l’exemple Parity ---
+    	let cors = CorsLayer::new()
+		// Allow `POST` when accessing the resource
+		.allow_methods([Method::POST])
+		// Allow requests from any origin
+		.allow_origin(Any)
+		.allow_headers([hyper::header::CONTENT_TYPE]);
+	let middleware = tower::ServiceBuilder::new().layer(cors);
 
-    let server = ServerBuilder::default()
+    // --- EXACTEMENT comme l’exemple Parity ---
+    let server = Server::builder()
         .set_http_middleware(middleware)
         .build(socket_addr)
         .await
@@ -2487,7 +2491,6 @@ pub async fn eth_call(&self, call_object: serde_json::Value) -> Result<String, S
     println!("Server successfully built on {}", socket_addr);
 
     let mut module = RpcModule::new(());
-
         
                 // Dans start_server(), ajouter cet endpoint :
         let engine_platform_clone = self.clone();
@@ -3914,7 +3917,7 @@ module.register_async_method("eth_feeHistory", move |params, _meta, _| {
         println!("Registered endpoint: build_acc");
 
         // Démarrer le serveur
-        let server_handle = server.start(module.clone()).clone();
+        let server_handle = server.start(module.clone());
         println!("Server started successfully: {:?}", server_handle);
         println!("🌐 Slurachain ready for Remix deployment!");
         println!("🔗 Chain ID: 0x{:x} ({})", self.rpc_service.port, self.rpc_service.port);

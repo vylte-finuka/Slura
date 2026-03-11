@@ -53,8 +53,10 @@ tiny-keccak = "2.0.2"
 num_cpus = "1.17.0"
 jsonrpsee-http-client = "0.26.0"
 primitive-types = { workspace = true }
-http = "1.4.0"
-tower = "0.5.3"
+jsonrpsee = { version = "0.26", features = ["server", "http-client", "ws-client", "macros", "client-ws-transport-tls"] }
+tower = "0.5"
+hyper = "1.5"
+tower-http = { version = "0.6", features = ["cors", "compression-full", "sensitive-headers", "trace", "timeout"] }
 
 [[bin]]
 name = "vuc-platform"
