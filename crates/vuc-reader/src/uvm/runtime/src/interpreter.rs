@@ -8,7 +8,9 @@ use crate::lib::*;
 use crate::stack::StackUsage;
 use core::ops::Range;
 use hashbrown::HashSet;
-use std::sync::{atomic::{AtomicU64, Ordering}, LazyLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::LazyLock;
+
 use primitive_types::U256 as u256;
 use serde_json::Value as JsonValue;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -25,6 +27,13 @@ pub struct BlockInfo {
     pub blob_hash: [u8; 32],   // EIP-4844 (vrai hash)
     pub prev_randao: [u8; 32], // EIP-4399 (added for compatibility)
 }
+
+static SS7_CALL_COUNT: LazyLock<AtomicU64> = LazyLock::new(|| AtomicU64::new(0));
+
+static SS7_BY_TYPE: LazyLock<[AtomicU64; 256]> = LazyLock::new(|| {
+    let mut arr: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
+    arr
+});
 
 /// ✅ NOUVEAU: Décodage de tout le storage final en map slot -> heuristique décodée
 fn decode_storage_map(storage: &HashMap<String, Vec<u8>>) -> serde_json::Map<String, JsonValue> {
@@ -223,6 +232,10 @@ pub struct UvmExecutionContext {
     pub free_memory_pointer: usize,
     pub call_stack: Vec<CallFrame>,
     pub in_internal_call: bool,
+
+    // ──────────────────────────────── AJOUT PRODUCTION ────────────────────────────────
+    pub ss7_pending_response: Option<Vec<u8>>, // réponse SS7 simulée ou reçue via oracle
+                                               // ────────────────────────────────────────────────────────────────────────────────
 }
 
 #[derive(Clone, Debug)]
@@ -240,75 +253,6 @@ pub struct CallFrame {
     pub gas_limit: u256,
     pub input_data: Vec<u8>,
     pub return_pc: Option<usize>, // Added field for return program counter
-}
-
-// ------------------------------------------------------------------------
-// Déclarations statiques correctes
-// ------------------------------------------------------------------------
-static SS7_CALL_COUNT: LazyLock<AtomicU64> = LazyLock::new(|| AtomicU64::new(0));
-
-// Pour le tableau : LazyLock + initialisation paresseuse
-static SS7_BY_TYPE: LazyLock<[AtomicU64; 256]> = LazyLock::new(|| {
-    let mut arr: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
-    arr
-});
-
-// ------------------------------------------------------------------------
-// Dans le helper ss7_metadata_process
-// ------------------------------------------------------------------------
-fn ss7_metadata_process(
-    msg_type: u64,
-    caller_hash: u64,
-    called_hash: u64,
-    timestamp: u64,
-    extra: u64,
-) -> u64 {
-    // Validation rapide
-    if msg_type > 255 || timestamp == 0 {
-        return 1;
-    }
-
-    // Accès correct au LazyLock
-    SS7_CALL_COUNT.fetch_add(1, Ordering::Relaxed);
-
-    let msg_idx = msg_type as usize;
-    if msg_idx < 256 {
-        // Déréférence LazyLock pour accéder au tableau
-        SS7_BY_TYPE[msg_idx].fetch_add(1, Ordering::Relaxed);
-    }
-
-    // Log avec load correct
-    println!(
-        "[0xef SS7] type={} caller_h={:016x} called_h={:016x} ts={} extra={} total={} type_count={}",
-        msg_type,
-        caller_hash,
-        called_hash,
-        timestamp,
-        extra,
-        SS7_CALL_COUNT.load(Ordering::Relaxed),
-        if msg_idx < 256 {
-            SS7_BY_TYPE[msg_idx].load(Ordering::Relaxed)
-        } else {
-            0
-        }
-    );
-
-    0  // succès
-}
-
-// ------------------------------------------------------------------------
-// Enregistrement (dans l'init des helpers)
-// ------------------------------------------------------------------------
-pub fn register_ss7_helpers(
-    helpers: &mut std::collections::HashMap<
-        u64,
-        Box<dyn Fn(u64, u64, u64, u64, u64) -> u64 + Send + Sync>,
-    >,
-) {
-    helpers.insert(
-        0x460,
-        Box::new(ss7_metadata_process as fn(u64, u64, u64, u64, u64) -> u64),
-    );
 }
 
 /// Multiplication modulaire sécurisée pour MULMOD EVM
@@ -851,6 +795,73 @@ fn encode_uip10_address_to_u64(addr: &str) -> u64 {
     }
 }
 
+// ====================================================================
+// PRODUCTION VERSION - SS7 Metadata + Payload Processor
+// Opcode 0xef (ou 0xec selon ta préférence)
+// ====================================================================
+
+fn ss7_metadata_process(
+    msg_type: u64,
+    caller_hash: u64,
+    called_hash: u64,
+    call_ts: u64,
+    extra: u64,
+    payload_ptr: u64,
+    payload_len: u64,
+) -> u64 {
+    if msg_type > 255 || call_ts == 0 || call_ts > 1_800_000_000_000 {
+        return 1;
+    }
+    if payload_len > 8192 {
+        return 2;
+    }
+
+    SS7_CALL_COUNT.fetch_add(1, Ordering::Relaxed);
+    let msg_idx = msg_type as usize;
+    if msg_idx < 256 {
+        SS7_BY_TYPE[msg_idx].fetch_add(1, Ordering::Relaxed);
+    }
+
+        let mut global_mem = vec![0u8; 0x10000];
+
+
+    // Extraction sécurisée du payload (dans le scope où global_mem existe)
+    let payload = if payload_ptr > 0 && payload_len > 0 {
+        let start = payload_ptr as usize;
+        let end = (start + payload_len as usize).min(global_mem.len());
+        &global_mem[start..end]
+    } else {
+        &[]
+    };
+
+    // Parsing voix SS7 (IAM / ACM / ANM / REL)
+    if !payload.is_empty() {
+        match payload[0] {
+            0x01 | 0x02 => println!("[SS7 VOIX PROD] IAM détecté → appel entrant"),
+            0x03 => println!("[SS7 VOIX PROD] ACM reçu → sonnerie"),
+            0x04 => println!("[SS7 VOIX PROD] ANM reçu → APPEL CONNECTÉ"),
+            0x05 => println!("[SS7 VOIX PROD] REL reçu → appel terminé"),
+            _ => println!("[SS7 VOIX PROD] Type inconnu : 0x{:02x}", payload[0]),
+        }
+    }
+
+    let payload_hex = if payload.len() > 64 {
+        hex::encode(&payload[..64]) + "..."
+    } else {
+        hex::encode(payload)
+    };
+
+    println!(
+        "[0xef SS7 VOIX PROD] type={} caller={:016x} called={:016x} ts={} extra={} payload_len={} total={} payload=0x{}",
+        msg_type, caller_hash, called_hash, call_ts, extra,
+        payload.len(),
+        SS7_CALL_COUNT.load(Ordering::Relaxed),
+        payload_hex
+    );
+
+    0 // SUCCESS
+}
+
 /// ✅ Encodage d'adresse vers u64
 fn encode_address_to_u64(addr: &str) -> u64 {
     use std::collections::hash_map::DefaultHasher;
@@ -1047,6 +1058,7 @@ pub fn execute_program(
         free_memory_pointer: 0x80, // Solidity >= 0.8
         call_stack: vec![],
         in_internal_call: false,
+        ss7_pending_response: None, // ← AJOUT,
     };
 
     // ✅ CORRECTION: Initialisation automatique du propriétaire
@@ -2179,6 +2191,55 @@ pub fn execute_program(
                 )?;
             }
 
+            0xec => {
+                if evm_stack.len() < 3 {
+                    return Ok(halt_json_ebpf("Stack underflow on SS7_SEND"));
+                }
+
+                let msg_type = evm_stack.pop().unwrap().low_u64();
+                let payload_ptr = evm_stack.pop().unwrap().low_u64();
+                let payload_len = evm_stack.pop().unwrap().low_u64();
+
+                // Récupère le payload depuis la mémoire VM
+                let payload = if payload_len > 0 && payload_ptr > 0 && payload_len < 8192 {
+                    let mem_slice = &global_mem
+                        [payload_ptr as usize..(payload_ptr as usize + payload_len as usize)];
+                    mem_slice.to_vec()
+                } else {
+                    vec![]
+                };
+
+                // Simulation très basique : on génère une réponse automatique selon msg_type
+                let simulated_response = match msg_type {
+                    0 => {
+                        // IAM → simule ACM + ANM après "quelques ms"
+                        let mut resp = vec![0x01, 0x00]; // exemple MTP3 routing label bidon
+                        resp.extend_from_slice(b"ACM"); // Address Complete
+                        resp
+                    }
+                    1 => {
+                        // SRI → simule réponse avec IMSI fictif
+                        let mut resp = vec![0x02, 0x00];
+                        resp.extend_from_slice();
+                        resp
+                    }
+                    _ => vec![0xff], // erreur
+                };
+
+                // Stocke la réponse simulée pour le prochain 0xef
+                execution_context.ss7_pending_response = Some(simulated_response.clone());
+
+                println!(
+                    "[0xec SS7_SEND] type={} payload_len={} → simulated response len={}",
+                    msg_type,
+                    payload_len,
+                    simulated_response.len()
+                );
+
+                evm_stack.push(0.into()); // succès
+                consume_gas_amount(&mut execution_context, 1200)?;
+            }
+
             //___ 0xee FFI_CALL_SLUIP450 - ENVOI TCP/UDP VIA SLU-IP
             0xee => {
                 // FFI_CALL_SLUIP450: args from EVM stack
@@ -2208,35 +2269,42 @@ pub fn execute_program(
                 consume_gas_amount(&mut execution_context, 100)?;
             }
 
-            // ___ 0xef FFI_CALL_SS7_METADATA_460 - TRAITEMENT MÉTADONNÉES SS7 (depuis Chainlink/off-chain)
-            0xef => {
-                if evm_stack.len() < 5 {
-                    return Ok(halt_json_ebpf("Stack underflow SS7 metadata"));
-                }
+            //___ 0xef FFI_CALL_PHONE_EMULATOR451 - APPEL TÉLÉPHONIQUE STANDARD VIA ÉMULATEUR
+    0xef => {
+    if evm_stack.len() < 7 {
+        return Ok(halt_json_ebpf("Stack underflow SS7 voice"));
+    }
 
-                let msg_type = evm_stack.pop().unwrap();
-                let caller_hash = evm_stack.pop().unwrap();
-                let called_hash = evm_stack.pop().unwrap();
-                let timestamp = evm_stack.pop().unwrap();
-                let extra = evm_stack.pop().unwrap();
+    let msg_type     = evm_stack.pop().unwrap();
+    let caller_hash  = evm_stack.pop().unwrap();
+    let called_hash  = evm_stack.pop().unwrap();
+    let call_ts      = evm_stack.pop().unwrap();
+    let extra        = evm_stack.pop().unwrap();
+    let payload_ptr  = evm_stack.pop().unwrap();
+    let payload_len  = evm_stack.pop().unwrap();
 
-                let res = helpers
-                    .get(&0x460)
-                    .map(|f| {
-                        f(
-                            msg_type.low_u64(),
-                            caller_hash.low_u64(),
-                            called_hash.low_u64(),
-                            timestamp.low_u64(),
-                            extra.low_u64(),
-                        )
-                    })
-                    .unwrap_or(1u64); // 1 = helper absent
+    let payload_slice = if payload_len.low_u64() > 0 && payload_ptr.low_u64() > 0 {
+        let start = payload_ptr.low_u64() as usize;
+        let end = (start + payload_len.low_u64() as usize).min(global_mem.len());
+        &global_mem[start..end]
+    } else {
+        &[]
+    };
 
-                evm_stack.push(res.into());
+    let res = helpers
+        .get(&0x460)
+        .map(|f| f(
+            msg_type.low_u64(),
+            caller_hash.low_u64(),
+            called_hash.low_u64(),
+            call_ts.low_u64(),
+            extra.low_u64(),
+        ))
+        .unwrap_or(1u64);
 
-                consume_gas_amount(&mut execution_context, 350)?;
-            }
+    evm_stack.push(res.into());
+    consume_gas_amount(&mut execution_context, 450)?;
+}
 
             // 0xf1 CALL
             0xf1 => {
