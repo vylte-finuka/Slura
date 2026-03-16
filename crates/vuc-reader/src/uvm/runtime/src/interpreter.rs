@@ -164,7 +164,7 @@ pub struct UvmWorldState {
     pub code: HashMap<String, Vec<u8>>,                     // contract_addr -> code
     pub block_info: BlockInfo,
     pub transient_storage: HashMap<[u8; 32], [u8; 32]>, // clé 32 bytes → valeur 32 bytes
-    pub chain_id: u256, // Added field for chain ID
+    pub chain_id: u256,                                 // Added field for chain ID
 }
 
 #[derive(Clone, Debug)]
@@ -196,7 +196,7 @@ impl Default for UvmWorldState {
                 blob_hash: [0u8; 32],
                 prev_randao: [0u8; 32],
             },
-            
+
             transient_storage: HashMap::new(),
             chain_id: u256::from(45056u64),
         }
@@ -1672,15 +1672,15 @@ pub fn execute_program(
             }
 
             // ___ 0x3d RETURNDATASIZE - Taille des données de retour
-0x3d => {
-    // Taille actuelle du return_data dans le contexte UVM
-    let size = u256::from(execution_context.return_data.len());
+            0x3d => {
+                // Taille actuelle du return_data dans le contexte UVM
+                let size = u256::from(execution_context.return_data.len());
 
-    // Push sur la stack (comportement EVM standard)
-    evm_stack.push(size);
+                // Push sur la stack (comportement EVM standard)
+                evm_stack.push(size);
 
-    println!("📏 [RETURNDATASIZE] → {} bytes", size);
-}
+                println!("📏 [RETURNDATASIZE] → {} bytes", size);
+            }
 
             //___ 0x40 BLOCKHASH
             0x40 => {
@@ -1966,7 +1966,6 @@ pub fn execute_program(
                 let target = as_usize_saturated(target_u256);
 
                 if !cond.is_zero() {
-             
                     bytecode_pc = target;
                     skip_advance = true;
                     println!("↪️ [JUMPI] condition vraie → 0x{:04x}", target);
@@ -2139,6 +2138,38 @@ pub fn execute_program(
                 consume_gas_amount(&mut execution_context, 100)?;
             }
 
+            //___ 0xef FFI_CALL_PHONE_EMULATOR451 - APPEL TÉLÉPHONIQUE STANDARD VIA ÉMULATEUR
+       0xef => {
+    if evm_stack.len() < 5 {  // ← change de <4 à <5
+        return Ok(halt_json_ebpf("Stack underflow on FFI_CALL_PHONE_EMULATOR"));
+    }
+    let phone_ptr  = evm_stack.pop().unwrap();
+    let msg_ptr    = evm_stack.pop().unwrap();
+    let duration   = evm_stack.pop().unwrap();
+    let emu_type   = evm_stack.pop().unwrap();
+    let extra      = evm_stack.pop().unwrap();  // ← 5ème argument ajouté
+
+    let res = helpers
+        .get(&0x451)
+        .map(|f| {
+            f(
+                phone_ptr.low_u64(),
+                msg_ptr.low_u64(),
+                duration.low_u64(),
+                emu_type.low_u64(),
+                extra.low_u64(),               // ← maintenant 5 arguments
+            )
+        })
+        .unwrap_or(0);
+
+                evm_stack.push(res.into());
+                println!(
+                    "📞 [PHONE EMULATOR 451] Appel standard vers {} → result={}",
+                    phone_ptr, res
+                );
+                consume_gas_amount(&mut execution_context, 800)?;
+            }
+
             // 0xf1 CALL
             0xf1 => {
                 // CALL - Similaire à CALLCODE mais exécute dans le contexte du contract appelé
@@ -2165,7 +2196,11 @@ pub fn execute_program(
                 let return_data = vec![0u8; out_size.low_u64() as usize]; // Empty return data
 
                 // Write return data to memory
-                if !resize_memory_ebpf(&mut global_mem, out_offset.low_u64() as usize, out_size.low_u64() as usize) {
+                if !resize_memory_ebpf(
+                    &mut global_mem,
+                    out_offset.low_u64() as usize,
+                    out_size.low_u64() as usize,
+                ) {
                     return Ok(halt_json_ebpf("Memory resize failed on CALL"));
                 }
                 for i in 0..(out_size.low_u64() as usize) {
@@ -2175,7 +2210,11 @@ pub fn execute_program(
                 }
 
                 // Push success status onto stack
-                evm_stack.push(if call_success { u256::one() } else { u256::zero() });
+                evm_stack.push(if call_success {
+                    u256::one()
+                } else {
+                    u256::zero()
+                });
 
                 consume_gas_amount(&mut execution_context, 700)?; // Simplified gas cost
             }
@@ -2206,7 +2245,11 @@ pub fn execute_program(
                 let return_data = vec![0u8; out_size.low_u64() as usize]; // Empty return data
 
                 // Write return data to memory
-                if !resize_memory_ebpf(&mut global_mem, out_offset.low_u64() as usize, out_size.low_u64() as usize) {
+                if !resize_memory_ebpf(
+                    &mut global_mem,
+                    out_offset.low_u64() as usize,
+                    out_size.low_u64() as usize,
+                ) {
                     return Ok(halt_json_ebpf("Memory resize failed on CALLCODE"));
                 }
                 for i in 0..(out_size.low_u64() as usize) {
@@ -2216,7 +2259,11 @@ pub fn execute_program(
                 }
 
                 // Push success status onto stack
-                evm_stack.push(if call_success { u256::one() } else { u256::zero() });
+                evm_stack.push(if call_success {
+                    u256::one()
+                } else {
+                    u256::zero()
+                });
 
                 consume_gas_amount(&mut execution_context, 700)?; // Simplified gas cost
             }
@@ -2285,14 +2332,18 @@ pub fn execute_program(
                 // Écriture dans transient storage
                 if value_u256.is_zero() {
                     // TSTORE 0 = delete (comme SSTORE)
-                    execution_context.world_state.transient_storage.remove(&key_bytes);
+                    execution_context
+                        .world_state
+                        .transient_storage
+                        .remove(&key_bytes);
                     println!(
                         "🗑️ [TSTORE] transient[0x{}] ← DELETE",
                         hex::encode(&key_bytes)
                     );
                 } else {
                     execution_context
-                        .world_state.transient_storage
+                        .world_state
+                        .transient_storage
                         .insert(key_bytes, value_bytes);
                     println!(
                         "💾 [TSTORE] transient[0x{}] ← 0x{:064x}",
@@ -2329,7 +2380,11 @@ pub fn execute_program(
                 let return_data = vec![0u8; out_size.low_u64() as usize]; // Empty return data
 
                 // Write return data to memory
-                if !resize_memory_ebpf(&mut global_mem, out_offset.low_u64() as usize, out_size.low_u64() as usize) {
+                if !resize_memory_ebpf(
+                    &mut global_mem,
+                    out_offset.low_u64() as usize,
+                    out_size.low_u64() as usize,
+                ) {
                     return Ok(halt_json_ebpf("Memory resize failed on DELEGATECALL"));
                 }
                 for i in 0..(out_size.low_u64() as usize) {
@@ -2339,7 +2394,11 @@ pub fn execute_program(
                 }
 
                 // Push success status onto stack
-                evm_stack.push(if call_success { u256::one() } else { u256::zero() });
+                evm_stack.push(if call_success {
+                    u256::one()
+                } else {
+                    u256::zero()
+                });
 
                 consume_gas_amount(&mut execution_context, 700)?; // Simplified gas cost
             }
@@ -2368,7 +2427,11 @@ pub fn execute_program(
                 let return_data = vec![0u8; out_size.low_u64() as usize]; // Empty return data
 
                 // Write return data to memory
-                if !resize_memory_ebpf(&mut global_mem, out_offset.low_u64() as usize, out_size.low_u64() as usize) {
+                if !resize_memory_ebpf(
+                    &mut global_mem,
+                    out_offset.low_u64() as usize,
+                    out_size.low_u64() as usize,
+                ) {
                     return Ok(halt_json_ebpf("Memory resize failed on STATICCALL"));
                 }
                 for i in 0..(out_size.low_u64() as usize) {
@@ -2378,11 +2441,14 @@ pub fn execute_program(
                 }
 
                 // Push success status onto stack
-                evm_stack.push(if call_success { u256::one() } else { u256::zero() });
+                evm_stack.push(if call_success {
+                    u256::one()
+                } else {
+                    u256::zero()
+                });
 
                 consume_gas_amount(&mut execution_context, 700)?; // Simplified gas cost
             }
-              
 
             //___ 0xfd REVERT
             0xfd => {
@@ -2439,7 +2505,7 @@ pub fn execute_program(
             return Ok(halt_json_ebpf("Stack overflow"));
         }
     }
-Ok(().into())
+    Ok(().into())
 }
 
 fn add_storage_written_to_result(
