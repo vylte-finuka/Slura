@@ -8,6 +8,7 @@ use crate::lib::*;
 use crate::stack::StackUsage;
 use core::ops::Range;
 use hashbrown::HashSet;
+use std::sync::{atomic::{AtomicU64, Ordering}, LazyLock};
 use primitive_types::U256 as u256;
 use serde_json::Value as JsonValue;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -239,6 +240,75 @@ pub struct CallFrame {
     pub gas_limit: u256,
     pub input_data: Vec<u8>,
     pub return_pc: Option<usize>, // Added field for return program counter
+}
+
+// ------------------------------------------------------------------------
+// Déclarations statiques correctes
+// ------------------------------------------------------------------------
+static SS7_CALL_COUNT: LazyLock<AtomicU64> = LazyLock::new(|| AtomicU64::new(0));
+
+// Pour le tableau : LazyLock + initialisation paresseuse
+static SS7_BY_TYPE: LazyLock<[AtomicU64; 256]> = LazyLock::new(|| {
+    let mut arr: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
+    arr
+});
+
+// ------------------------------------------------------------------------
+// Dans le helper ss7_metadata_process
+// ------------------------------------------------------------------------
+fn ss7_metadata_process(
+    msg_type: u64,
+    caller_hash: u64,
+    called_hash: u64,
+    timestamp: u64,
+    extra: u64,
+) -> u64 {
+    // Validation rapide
+    if msg_type > 255 || timestamp == 0 {
+        return 1;
+    }
+
+    // Accès correct au LazyLock
+    SS7_CALL_COUNT.fetch_add(1, Ordering::Relaxed);
+
+    let msg_idx = msg_type as usize;
+    if msg_idx < 256 {
+        // Déréférence LazyLock pour accéder au tableau
+        SS7_BY_TYPE[msg_idx].fetch_add(1, Ordering::Relaxed);
+    }
+
+    // Log avec load correct
+    println!(
+        "[0xef SS7] type={} caller_h={:016x} called_h={:016x} ts={} extra={} total={} type_count={}",
+        msg_type,
+        caller_hash,
+        called_hash,
+        timestamp,
+        extra,
+        SS7_CALL_COUNT.load(Ordering::Relaxed),
+        if msg_idx < 256 {
+            SS7_BY_TYPE[msg_idx].load(Ordering::Relaxed)
+        } else {
+            0
+        }
+    );
+
+    0  // succès
+}
+
+// ------------------------------------------------------------------------
+// Enregistrement (dans l'init des helpers)
+// ------------------------------------------------------------------------
+pub fn register_ss7_helpers(
+    helpers: &mut std::collections::HashMap<
+        u64,
+        Box<dyn Fn(u64, u64, u64, u64, u64) -> u64 + Send + Sync>,
+    >,
+) {
+    helpers.insert(
+        0x460,
+        Box::new(ss7_metadata_process as fn(u64, u64, u64, u64, u64) -> u64),
+    );
 }
 
 /// Multiplication modulaire sécurisée pour MULMOD EVM
@@ -2138,36 +2208,34 @@ pub fn execute_program(
                 consume_gas_amount(&mut execution_context, 100)?;
             }
 
-            //___ 0xef FFI_CALL_PHONE_EMULATOR451 - APPEL TÉLÉPHONIQUE STANDARD VIA ÉMULATEUR
-       0xef => {
-    if evm_stack.len() < 5 {  // ← change de <4 à <5
-        return Ok(halt_json_ebpf("Stack underflow on FFI_CALL_PHONE_EMULATOR"));
-    }
-    let phone_ptr  = evm_stack.pop().unwrap();
-    let msg_ptr    = evm_stack.pop().unwrap();
-    let duration   = evm_stack.pop().unwrap();
-    let emu_type   = evm_stack.pop().unwrap();
-    let extra      = evm_stack.pop().unwrap();  // ← 5ème argument ajouté
+            // ___ 0xef FFI_CALL_SS7_METADATA_460 - TRAITEMENT MÉTADONNÉES SS7 (depuis Chainlink/off-chain)
+            0xef => {
+                if evm_stack.len() < 5 {
+                    return Ok(halt_json_ebpf("Stack underflow SS7 metadata"));
+                }
 
-    let res = helpers
-        .get(&0x451)
-        .map(|f| {
-            f(
-                phone_ptr.low_u64(),
-                msg_ptr.low_u64(),
-                duration.low_u64(),
-                emu_type.low_u64(),
-                extra.low_u64(),               // ← maintenant 5 arguments
-            )
-        })
-        .unwrap_or(0);
+                let msg_type = evm_stack.pop().unwrap();
+                let caller_hash = evm_stack.pop().unwrap();
+                let called_hash = evm_stack.pop().unwrap();
+                let timestamp = evm_stack.pop().unwrap();
+                let extra = evm_stack.pop().unwrap();
+
+                let res = helpers
+                    .get(&0x460)
+                    .map(|f| {
+                        f(
+                            msg_type.low_u64(),
+                            caller_hash.low_u64(),
+                            called_hash.low_u64(),
+                            timestamp.low_u64(),
+                            extra.low_u64(),
+                        )
+                    })
+                    .unwrap_or(1u64); // 1 = helper absent
 
                 evm_stack.push(res.into());
-                println!(
-                    "📞 [PHONE EMULATOR 451] Appel standard vers {} → result={}",
-                    phone_ptr, res
-                );
-                consume_gas_amount(&mut execution_context, 800)?;
+
+                consume_gas_amount(&mut execution_context, 350)?;
             }
 
             // 0xf1 CALL

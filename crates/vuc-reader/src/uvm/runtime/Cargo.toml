@@ -33,7 +33,7 @@ combine = { version = "4.6", default-features = false }
 # Optional Dependencies when using the standard library
 libc = { version = "0.2", optional = true }
 time = { version = "0.2", optional = true }
-
+anyhow.workspace = true
 # Optional Dependencies for the CraneLift JIT
 cranelift-codegen = { version = "0.99", optional = true }
 cranelift-frontend = { version = "0.99", optional = true }
