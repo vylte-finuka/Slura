@@ -611,7 +611,7 @@ pub struct EventDefinition {
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct AccountState {
     // ─── Adresse principale "racine" (Ethereum-compatible) ───
-    pub eth_address: String,                  // ex: "0x742d35Cc6634C0532925a3b844Bc454e4438f44e"
+    pub eth_address: String, // ex: "0x742d35Cc6634C0532925a3b844Bc454e4438f44e"
 
     // ─── Adresse zk-print longue (résistante quantique) ───
     pub slu_zk_address: String,
@@ -769,7 +769,7 @@ impl Default for NativeTokenParams {
 pub struct SimpleInterpreter {
     pub helpers: HashMap<u32, fn(u64, u64, u64, u64, u64) -> u64>,
     pub allowed_memory: HashSet<std::ops::Range<u64>>,
-    pub uvm_helpers: HashMap<u32, fn(u64, u64, u64, u64, u64) -> u64>,
+    pub uvm_helpers: HashMap<u32, Box<UvmHelper>>,
     pub last_storage: Option<HashMap<String, Vec<u8>>>,
 }
 
@@ -794,11 +794,11 @@ impl SimpleInterpreter {
         &mut self,
         selector: u32,
         function_name: &str,
-        helper: fn(u64, u64, u64, u64, u64) -> u64,
+        helper: impl Fn(u64, u64, u64, u64, u64, u64, u64) -> u64 + Send + Sync + 'static,
     ) {
-        self.uvm_helpers.insert(selector, helper);
+        self.uvm_helpers.insert(selector, Box::new(helper));
         println!(
-            "📋 Helper générique ajouté pour {} (0x{:08x})",
+            "📋 Helper ajouté pour {} (0x{:08x})",
             function_name, selector
         );
     }
@@ -824,12 +824,14 @@ pub struct SlurachainVm {
     pub debug_mode: bool,
     pub helpers: HashMap<u32, fn(u64, u64, u64, u64, u64) -> u64>,
     pub allowed_memory: HashSet<std::ops::Range<u64>>,
-    pub uvm_helpers: HashMap<u32, fn(u64, u64, u64, u64, u64) -> u64>,
+    pub uvm_helpers: Arc<tokio::sync::Mutex<HashMap<u32, Box<UvmHelper>>>>,
     pub last_storage: Option<HashMap<String, Vec<u8>>>,
     pub parallel_engine: Option<Arc<OptimisticParallelEngine>>,
     // ✅ AJOUT: Verrou global anti-reentrancy
     pub global_execution_lock: Arc<Mutex<()>>,
 }
+
+pub type UvmHelper = dyn Fn(u64, u64, u64, u64, u64, u64, u64) -> u64 + Send + Sync + 'static;
 
 // Manual implementation of Clone for SlurachainVm to handle Arc and Option<Arc<dyn RocksDBManager>>
 impl Clone for SlurachainVm {
@@ -866,7 +868,7 @@ impl SlurachainVm {
             debug_mode: true,
             helpers: HashMap::new(),
             allowed_memory: HashSet::new(),
-            uvm_helpers: HashMap::new(),
+            uvm_helpers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             last_storage: None,
             parallel_engine: None,
             global_execution_lock: Arc::new(Mutex::new(())), // ✅ Init du lock
@@ -1524,127 +1526,135 @@ impl SlurachainVm {
         Ok(())
     }
 
-/// ✅ DÉTECTION DYNAMIQUE CORRIGÉE: Recherche réelle du dispatcher EVM
-/// EXCEPTION: si selector == 0 → traite comme appel sans selector (fallback / déploiement direct)
-fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<usize> {
-    let len = bytecode.len();
-    println!(
-        "🔍 [DYNAMIC SEARCH] Recherche sélecteur 0x{:08x} dans {} bytes",
-        selector, len
-    );
-
-    if len < 10 {
-        return None;
-    }
-
-    // ────────────────────────────────────────────────
-    // EXCEPTION SPÉCIALE : selector == 0 → appel sans fonction explicite (fallback / déploiement brut)
-    // ────────────────────────────────────────────────
-    if selector == 0 {
+    /// ✅ DÉTECTION DYNAMIQUE CORRIGÉE: Recherche réelle du dispatcher EVM
+    /// EXCEPTION: si selector == 0 → traite comme appel sans selector (fallback / déploiement direct)
+    fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<usize> {
+        let len = bytecode.len();
         println!(
+            "🔍 [DYNAMIC SEARCH] Recherche sélecteur 0x{:08x} dans {} bytes",
+            selector, len
+        );
+
+        if len < 10 {
+            return None;
+        }
+
+        // ────────────────────────────────────────────────
+        // EXCEPTION SPÉCIALE : selector == 0 → appel sans fonction explicite (fallback / déploiement brut)
+        // ────────────────────────────────────────────────
+        if selector == 0 {
+            println!(
             "⚡ [EXCEPTION OFFSET] selector 0x00000000 → appel sans fonction explicite (fallback/direct execution)"
         );
-        // Retourne un offset "fallback" spécial
-        // Typiquement 0 (début du bytecode) ou l'offset de ton fallback si tu en as un défini
-        return Some(0);  // ← ou un offset fixe comme 0x0421 si tu sais où commence ton fallback
-    }
+            // Retourne un offset "fallback" spécial
+            // Typiquement 0 (début du bytecode) ou l'offset de ton fallback si tu en as un défini
+            return Some(0); // ← ou un offset fixe comme 0x0421 si tu sais où commence ton fallback
+        }
 
-    let selector_bytes = selector.to_be_bytes();
+        let selector_bytes = selector.to_be_bytes();
 
-    // ────────────────────────────────────────────────
-    // CAS NORMAL : recherche stricte dans le dispatcher
-    // ────────────────────────────────────────────────
-    let dispatcher_start = 0x0000;
-    if dispatcher_start >= len {
+        // ────────────────────────────────────────────────
+        // CAS NORMAL : recherche stricte dans le dispatcher
+        // ────────────────────────────────────────────────
+        let dispatcher_start = 0x0000;
+        if dispatcher_start >= len {
+            println!(
+                "❌ [NO DISPATCHER] Dispatcher start 0x{:04x} dépasse bytecode length",
+                dispatcher_start
+            );
+            return None;
+        }
+
         println!(
-            "❌ [NO DISPATCHER] Dispatcher start 0x{:04x} dépasse bytecode length",
+            "🔍 [DISPATCHER] Analyse dispatcher à partir de 0x{:04x}",
             dispatcher_start
         );
-        return None;
-    }
 
-    println!(
-        "🔍 [DISPATCHER] Analyse dispatcher à partir de 0x{:04x}",
-        dispatcher_start
-    );
+        // Recherche dans le dispatcher pour notre sélecteur
+        for pos in dispatcher_start..len.saturating_sub(4) {
+            if &bytecode[pos..pos + 4] == selector_bytes {
+                println!(
+                    "🎯 [SELECTOR FOUND] 0x{:08x} trouvé à position 0x{:04x}",
+                    selector, pos
+                );
 
-    // Recherche dans le dispatcher pour notre sélecteur
-    for pos in dispatcher_start..len.saturating_sub(4) {
-        if &bytecode[pos..pos + 4] == selector_bytes {
-            println!(
-                "🎯 [SELECTOR FOUND] 0x{:08x} trouvé à position 0x{:04x}",
-                selector, pos
-            );
+                // Stratégie A: Pattern classique EQ + PUSH2 + JUMPI
+                for scan_offset in 4..20 {
+                    if pos + scan_offset + 3 < len {
+                        let check_pos = pos + scan_offset;
 
-            // Stratégie A: Pattern classique EQ + PUSH2 + JUMPI
-            for scan_offset in 4..20 {
-                if pos + scan_offset + 3 < len {
-                    let check_pos = pos + scan_offset;
-
-                    if bytecode[check_pos] == 0x14 && // EQ
+                        if bytecode[check_pos] == 0x14 && // EQ
                        check_pos + 1 < len && bytecode[check_pos + 1] == 0x61 && // PUSH2
-                       check_pos + 4 < len && bytecode[check_pos + 4] == 0x57   // JUMPI
-                    {
-                        let offset = ((bytecode[check_pos + 2] as usize) << 8)
-                            | (bytecode[check_pos + 3] as usize);
+                       check_pos + 4 < len && bytecode[check_pos + 4] == 0x57
+                        // JUMPI
+                        {
+                            let offset = ((bytecode[check_pos + 2] as usize) << 8)
+                                | (bytecode[check_pos + 3] as usize);
 
-                        if offset < len && offset > dispatcher_start {
-                            println!(
-                                "✅ [EQ PATTERN] 0x{:08x} → offset 0x{:04x}",
-                                selector, offset
-                            );
-                            return Some(offset);
+                            if offset < len && offset > dispatcher_start {
+                                println!(
+                                    "✅ [EQ PATTERN] 0x{:08x} → offset 0x{:04x}",
+                                    selector, offset
+                                );
+                                return Some(offset);
+                            }
                         }
                     }
                 }
-            }
 
-            // Stratégie B: Pattern comparaison hiérarchique (DUP1 + PUSH4 + GT/LT/EQ)
-            for back_scan in 1..30 {
-                if pos >= back_scan {
-                    let scan_pos = pos - back_scan;
-                    if scan_pos + 10 < len &&
+                // Stratégie B: Pattern comparaison hiérarchique (DUP1 + PUSH4 + GT/LT/EQ)
+                for back_scan in 1..30 {
+                    if pos >= back_scan {
+                        let scan_pos = pos - back_scan;
+                        if scan_pos + 10 < len &&
                        bytecode[scan_pos] == 0x80 && // DUP1
-                       bytecode[scan_pos + 1] == 0x63 // PUSH4
-                    {
-                        if scan_pos + 6 <= len {
-                            let cmp_selector = u32::from_be_bytes([
-                                bytecode[scan_pos + 2],
-                                bytecode[scan_pos + 3],
-                                bytecode[scan_pos + 4],
-                                bytecode[scan_pos + 5],
-                            ]);
+                       bytecode[scan_pos + 1] == 0x63
+                        // PUSH4
+                        {
+                            if scan_pos + 6 <= len {
+                                let cmp_selector = u32::from_be_bytes([
+                                    bytecode[scan_pos + 2],
+                                    bytecode[scan_pos + 3],
+                                    bytecode[scan_pos + 4],
+                                    bytecode[scan_pos + 5],
+                                ]);
 
-                            println!(
-                                "🔍 [HIERARCHICAL] Comparaison: notre 0x{:08x} vs 0x{:08x}",
-                                selector, cmp_selector
-                            );
+                                println!(
+                                    "🔍 [HIERARCHICAL] Comparaison: notre 0x{:08x} vs 0x{:08x}",
+                                    selector, cmp_selector
+                                );
 
-                            for op_scan in 6..16 {
-                                if scan_pos + op_scan < len {
-                                    let op_code = bytecode[scan_pos + op_scan];
-                                    let should_take_branch = match op_code {
-                                        0x11 => selector > cmp_selector,  // GT
-                                        0x10 => selector < cmp_selector,  // LT
-                                        0x14 => selector == cmp_selector, // EQ
-                                        _ => false,
-                                    };
+                                for op_scan in 6..16 {
+                                    if scan_pos + op_scan < len {
+                                        let op_code = bytecode[scan_pos + op_scan];
+                                        let should_take_branch = match op_code {
+                                            0x11 => selector > cmp_selector,  // GT
+                                            0x10 => selector < cmp_selector,  // LT
+                                            0x14 => selector == cmp_selector, // EQ
+                                            _ => false,
+                                        };
 
-                                    if should_take_branch {
-                                        for jump_scan in (op_scan + 1)..(op_scan + 10) {
-                                            if scan_pos + jump_scan + 3 < len &&
+                                        if should_take_branch {
+                                            for jump_scan in (op_scan + 1)..(op_scan + 10) {
+                                                if scan_pos + jump_scan + 3 < len &&
                                                bytecode[scan_pos + jump_scan] == 0x61 && // PUSH2
-                                               bytecode[scan_pos + jump_scan + 3] == 0x57 // JUMPI
-                                            {
-                                                let offset = ((bytecode[scan_pos + jump_scan + 1] as usize) << 8)
-                                                    | (bytecode[scan_pos + jump_scan + 2] as usize);
+                                               bytecode[scan_pos + jump_scan + 3] == 0x57
+                                                // JUMPI
+                                                {
+                                                    let offset = ((bytecode
+                                                        [scan_pos + jump_scan + 1]
+                                                        as usize)
+                                                        << 8)
+                                                        | (bytecode[scan_pos + jump_scan + 2]
+                                                            as usize);
 
-                                                if offset < len && offset > dispatcher_start {
-                                                    println!(
+                                                    if offset < len && offset > dispatcher_start {
+                                                        println!(
                                                         "✅ [HIERARCHICAL] 0x{:08x} → offset 0x{:04x} (op: 0x{:02x})",
                                                         selector, offset, op_code
                                                     );
-                                                    return Some(offset);
+                                                        return Some(offset);
+                                                    }
                                                 }
                                             }
                                         }
@@ -1654,49 +1664,50 @@ fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<us
                         }
                     }
                 }
-            }
 
-            // Stratégie C: Recherche de JUMPDEST proche comme fallback
-            for jump_scan in 10..100 {
-                if pos + jump_scan < len && bytecode[pos + jump_scan] == 0x5B { // JUMPDEST
-                    let mut valid = true;
-                    for check_back in 1..33 {
-                        if pos + jump_scan >= check_back {
-                            let check_pos = pos + jump_scan - check_back;
-                            if check_pos < len {
-                                match bytecode[check_pos] {
-                                    0x60..=0x7F => { // PUSH1-PUSH32
-                                        let push_size = (bytecode[check_pos] - 0x5F) as usize;
-                                        if check_pos + push_size >= pos + jump_scan {
-                                            valid = false;
-                                            break;
+                // Stratégie C: Recherche de JUMPDEST proche comme fallback
+                for jump_scan in 10..100 {
+                    if pos + jump_scan < len && bytecode[pos + jump_scan] == 0x5B {
+                        // JUMPDEST
+                        let mut valid = true;
+                        for check_back in 1..33 {
+                            if pos + jump_scan >= check_back {
+                                let check_pos = pos + jump_scan - check_back;
+                                if check_pos < len {
+                                    match bytecode[check_pos] {
+                                        0x60..=0x7F => {
+                                            // PUSH1-PUSH32
+                                            let push_size = (bytecode[check_pos] - 0x5F) as usize;
+                                            if check_pos + push_size >= pos + jump_scan {
+                                                valid = false;
+                                                break;
+                                            }
                                         }
+                                        _ => {}
                                     }
-                                    _ => {}
                                 }
                             }
                         }
-                    }
 
-                    if valid {
-                        let offset = pos + jump_scan;
-                        println!(
-                            "🔄 [JUMPDEST FALLBACK] 0x{:08x} → offset 0x{:04x}",
-                            selector, offset
-                        );
-                        return Some(offset);
+                        if valid {
+                            let offset = pos + jump_scan;
+                            println!(
+                                "🔄 [JUMPDEST FALLBACK] 0x{:08x} → offset 0x{:04x}",
+                                selector, offset
+                            );
+                            return Some(offset);
+                        }
                     }
                 }
             }
         }
-    }
 
-    println!(
-        "❌ [NOT FOUND] Sélecteur 0x{:08x} non résolu dynamiquement",
-        selector
-    );
-    None
-}
+        println!(
+            "❌ [NOT FOUND] Sélecteur 0x{:08x} non résolu dynamiquement",
+            selector
+        );
+        None
+    }
 
     /// ✅ VERSION 100% EVM-COMPLIANT – Slot ERC-1967 implementation écrit comme Solidity le fait
     async fn persist_contract_state_immediate(
@@ -1992,7 +2003,10 @@ fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<us
                 "🔍 [IMPL OFFSET SEARCH] Recherche offset pour {} dans bytecode d'implémentation",
                 function_name
             );
-            let impl_resolved_offset = Self::find_function_offset_in_bytecode(&impl_real_bytecode, impl_function_meta.selector);
+            let impl_resolved_offset = Self::find_function_offset_in_bytecode(
+                &impl_real_bytecode,
+                impl_function_meta.selector,
+            );
 
             let converted_storage = self
                 .build_dynamic_storage_from_contract_state(vyid)?
@@ -2019,12 +2033,15 @@ fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<us
             let result = {
                 let _guard = self.global_execution_lock.lock().await;
                 let mut interpreter = self.interpreter.lock().await;
+
+                let mut helpers_guard = self.uvm_helpers.lock().await; // ← NOUVEAU
+
                 uvm_runtime::interpreter::execute_program(
                     Some(&real_bytecode),
                     stack_usage,
                     &mem,
                     &calldata_bytes,
-                    &mut self.uvm_helpers,
+                    &mut *helpers_guard, // ← CORRECTION
                     &self.allowed_memory,
                     return_type,
                     &exports,
@@ -2102,12 +2119,15 @@ fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<us
         let result = {
             let _guard = self.global_execution_lock.lock().await;
             let mut interpreter = self.interpreter.lock().await;
+
+            let mut helpers_guard = self.uvm_helpers.lock().await; // ← NOUVEAU
+
             uvm_runtime::interpreter::execute_program(
                 Some(&real_bytecode),
                 stack_usage,
                 &mem,
                 &calldata_bytes,
-                &mut self.uvm_helpers,
+                &mut *helpers_guard, // ← CORRECTION
                 &self.allowed_memory,
                 return_type,
                 &exports,
@@ -2483,94 +2503,94 @@ fn find_function_offset_in_bytecode(bytecode: &[u8], selector: u32) -> Option<us
             && addr != "0x0000000000000000000000000000000000000040"
     }
 
-/// ✅ FONCTION MÉTADATA STRICTE: Refuse de créer des métadonnées si la fonction n'existe pas
-/// EXCEPTION: si function_name est vide → traite comme appel sans selector (fallback / déploiement direct)
-fn find_or_create_function_metadata(
-    &mut self,
-    contract_address: &str,
-    function_name: &str,
-    selector: u32,
-    _args: &[NerenaValue],
-) -> Result<FunctionMetadata, String> {
-
-    // ────────────────────────────────────────────────
-    // EXCEPTION SPÉCIALE : function_name vide → appel sans selector (déploiement brut, fallback, direct bytecode)
-    // ────────────────────────────────────────────────
-    if function_name.is_empty() {
-        println!(
+    /// ✅ FONCTION MÉTADATA STRICTE: Refuse de créer des métadonnées si la fonction n'existe pas
+    /// EXCEPTION: si function_name est vide → traite comme appel sans selector (fallback / déploiement direct)
+    fn find_or_create_function_metadata(
+        &mut self,
+        contract_address: &str,
+        function_name: &str,
+        selector: u32,
+        _args: &[NerenaValue],
+    ) -> Result<FunctionMetadata, String> {
+        // ────────────────────────────────────────────────
+        // EXCEPTION SPÉCIALE : function_name vide → appel sans selector (déploiement brut, fallback, direct bytecode)
+        // ────────────────────────────────────────────────
+        if function_name.is_empty() {
+            println!(
             "⚡ [EXCEPTION META] function_name vide → appel sans selector (fallback/direct execution) pour {}",
             contract_address
         );
 
-        // Retourne une metadata "fallback" spéciale
-        return Ok(FunctionMetadata {
-            name: "*fallback*".to_string(),
-            offset: 0,                     // ou l'offset de ton fallback si tu en as un
-            args_count: _args.len(),
-            arg_types: vec![],             // ou inféré des args
-            return_type: "unknown".to_string(),
-            gas_limit: 1_000_000,          // valeur haute pour sécurité
-            payable: true,                 // souvent payable en fallback
-            mutability: "nonpayable".to_string(),
-            selector: 0,                   // pas de selector
-            modifiers: vec![],
-        });
-    }
-
-    // ────────────────────────────────────────────────
-    // CAS NORMAL : recherche stricte dans les fonctions détectées
-    // ────────────────────────────────────────────────
-    if let Some(module) = self.modules.get(contract_address) {
-        // Recherche par nom exact
-        if let Some(meta) = module.functions.get(function_name) {
-            println!(
-                "✅ [META FOUND] Fonction trouvée par nom: {}",
-                function_name
-            );
-            return Ok(meta.clone());
+            // Retourne une metadata "fallback" spéciale
+            return Ok(FunctionMetadata {
+                name: "*fallback*".to_string(),
+                offset: 0, // ou l'offset de ton fallback si tu en as un
+                args_count: _args.len(),
+                arg_types: vec![], // ou inféré des args
+                return_type: "unknown".to_string(),
+                gas_limit: 1_000_000, // valeur haute pour sécurité
+                payable: true,        // souvent payable en fallback
+                mutability: "nonpayable".to_string(),
+                selector: 0, // pas de selector
+                modifiers: vec![],
+            });
         }
 
-        // Recherche par selector dans les fonctions function_XXXXXXXX
-        for (fname, meta) in &module.functions {
-            if meta.selector == selector && fname.starts_with("function_") {
+        // ────────────────────────────────────────────────
+        // CAS NORMAL : recherche stricte dans les fonctions détectées
+        // ────────────────────────────────────────────────
+        if let Some(module) = self.modules.get(contract_address) {
+            // Recherche par nom exact
+            if let Some(meta) = module.functions.get(function_name) {
                 println!(
-                    "✅ [META FOUND] Fonction trouvée par sélecteur: {} (0x{:08x})",
-                    fname, selector
+                    "✅ [META FOUND] Fonction trouvée par nom: {}",
+                    function_name
                 );
                 return Ok(meta.clone());
             }
+
+            // Recherche par selector dans les fonctions function_XXXXXXXX
+            for (fname, meta) in &module.functions {
+                if meta.selector == selector && fname.starts_with("function_") {
+                    println!(
+                        "✅ [META FOUND] Fonction trouvée par sélecteur: {} (0x{:08x})",
+                        fname, selector
+                    );
+                    return Ok(meta.clone());
+                }
+            }
+
+            // Recherche par nom function_XXXXXXXX si l'appel utilise le nom classique
+            let expected_function_name = format!("function_{:08x}", selector);
+            if let Some(meta) = module.functions.get(&expected_function_name) {
+                println!(
+                    "✅ [META MAPPED] Appel '{}' mappé sur fonction détectée '{}'",
+                    function_name, expected_function_name
+                );
+                return Ok(meta.clone());
+            }
+
+            // UTILISE LA FONCTION EXISTANTE create_function_metadata EN DERNIER RECOURS
+            // Mais seulement si on trouve l'offset dans le bytecode
+            if let Some(offset) = Self::find_function_offset_in_bytecode(&module.bytecode, selector)
+            {
+                println!(
+                    "✅ [META CREATE] Création métadata pour {} trouvé à offset 0x{:04x}",
+                    function_name, offset
+                );
+                return Ok(self.create_function_metadata(selector, offset));
+            }
         }
 
-        // Recherche par nom function_XXXXXXXX si l'appel utilise le nom classique
-        let expected_function_name = format!("function_{:08x}", selector);
-        if let Some(meta) = module.functions.get(&expected_function_name) {
-            println!(
-                "✅ [META MAPPED] Appel '{}' mappé sur fonction détectée '{}'",
-                function_name, expected_function_name
-            );
-            return Ok(meta.clone());
-        }
-
-        // UTILISE LA FONCTION EXISTANTE create_function_metadata EN DERNIER RECOURS
-        // Mais seulement si on trouve l'offset dans le bytecode
-        if let Some(offset) = Self::find_function_offset_in_bytecode(&module.bytecode, selector) {
-            println!(
-                "✅ [META CREATE] Création métadata pour {} trouvé à offset 0x{:04x}",
-                function_name, offset
-            );
-            return Ok(self.create_function_metadata(selector, offset));
-        }
-    }
-
-    // ────────────────────────────────────────────────
-    // ÉCHEC STRICT - Aucune fonction trouvée (pour les appels normaux)
-    // ────────────────────────────────────────────────
-    Err(format!(
-        "Fonction '{}' (sélecteur 0x{:08x}) NON TROUVÉE dans le dispatcher du contrat {}. \
+        // ────────────────────────────────────────────────
+        // ÉCHEC STRICT - Aucune fonction trouvée (pour les appels normaux)
+        // ────────────────────────────────────────────────
+        Err(format!(
+            "Fonction '{}' (sélecteur 0x{:08x}) NON TROUVÉE dans le dispatcher du contrat {}. \
          Vérifiez que le contrat contient cette fonction.",
-        function_name, selector, contract_address
-    ))
-}
+            function_name, selector, contract_address
+        ))
+    }
 
     pub fn new_with_cluster(cluster: &str) -> Self {
         let mut vm = SlurachainVm::new();

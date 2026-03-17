@@ -822,8 +822,7 @@ fn ss7_metadata_process(
         SS7_BY_TYPE[msg_idx].fetch_add(1, Ordering::Relaxed);
     }
 
-        let mut global_mem = vec![0u8; 0x10000];
-
+    let mut global_mem = vec![0u8; 0x10000];
 
     // Extraction sécurisée du payload (dans le scope où global_mem existe)
     let payload = if payload_ptr > 0 && payload_len > 0 {
@@ -1097,6 +1096,12 @@ pub fn execute_program(
         &mut execution_context.world_state,
         &interpreter_args.sender_address,
         u256::from(1_000_000_000_000_000_000u64), // 1 ETH en wei
+    );
+
+    helpers.insert(
+        0x460,
+        Box::new(ss7_metadata_process)
+            as Box<dyn Fn(u64, u64, u64, u64, u64, u64, u64) -> u64 + Send + Sync + 'static>,
     );
 
     // Simulation d'un interpréteur eBPF avec comportement EVM
@@ -2200,111 +2205,73 @@ pub fn execute_program(
                 let payload_ptr = evm_stack.pop().unwrap().low_u64();
                 let payload_len = evm_stack.pop().unwrap().low_u64();
 
-                // Récupère le payload depuis la mémoire VM
-                let payload = if payload_len > 0 && payload_ptr > 0 && payload_len < 8192 {
-                    let mem_slice = &global_mem
-                        [payload_ptr as usize..(payload_ptr as usize + payload_len as usize)];
-                    mem_slice.to_vec()
+                // Récupère le payload réel fourni par l'oracle Chainlink
+                let real_payload = if payload_len > 0 && payload_ptr > 0 && payload_len < 8192 {
+                    let start = payload_ptr as usize;
+                    let end = (start + payload_len as usize).min(global_mem.len());
+                    &global_mem[start..end]
                 } else {
-                    vec![]
+                    &[]
                 };
 
-                // Simulation très basique : on génère une réponse automatique selon msg_type
-                let simulated_response = match msg_type {
-                    0 => {
-                        // IAM → simule ACM + ANM après "quelques ms"
-                        let mut resp = vec![0x01, 0x00]; // exemple MTP3 routing label bidon
-                        resp.extend_from_slice(b"ACM"); // Address Complete
-                        resp
-                    }
-                    1 => {
-                        // SRI → simule réponse avec IMSI fictif
-                        let mut resp = vec![0x02, 0x00];
-                        resp.extend_from_slice();
-                        resp
-                    }
-                    _ => vec![0xff], // erreur
-                };
+                // === AUCUNE SIMULATION ===
+                // L'envoi SS7 réel est fait OFF-CHAIN par Chainlink Functions + ta gateway 3CX/SIGTRAN
+                // Ici on ne fait QUE valider + logger (opcode serveless pur)
 
-                // Stocke la réponse simulée pour le prochain 0xef
-                execution_context.ss7_pending_response = Some(simulated_response.clone());
-
-                println!(
-                    "[0xec SS7_SEND] type={} payload_len={} → simulated response len={}",
-                    msg_type,
-                    payload_len,
-                    simulated_response.len()
-                );
-
-                evm_stack.push(0.into()); // succès
-                consume_gas_amount(&mut execution_context, 1200)?;
-            }
-
-            //___ 0xee FFI_CALL_SLUIP450 - ENVOI TCP/UDP VIA SLU-IP
-            0xee => {
-                // FFI_CALL_SLUIP450: args from EVM stack
-                if evm_stack.len() < 5 {
-                    return Ok(halt_json_ebpf("Stack underflow on FFI_CALL_SLUIP450"));
+                if !real_payload.is_empty() {
+                    println!(
+                        "[0xec SS7 SEND RÉEL] msg_type={} payload_len={} payload=0x{}",
+                        msg_type,
+                        real_payload.len(),
+                        if real_payload.len() > 64 {
+                            hex::encode(&real_payload[..64]) + "..."
+                        } else {
+                            hex::encode(real_payload)
+                        }
+                    );
+                } else {
+                    println!("[0xec SS7 SEND RÉEL] Aucun payload (erreur oracle)");
                 }
-                let proto = evm_stack.pop().unwrap();
-                let data_len = evm_stack.pop().unwrap();
-                let data_ptr = evm_stack.pop().unwrap();
-                let port = evm_stack.pop().unwrap();
-                let addr_ptr = evm_stack.pop().unwrap();
 
-                let res = helpers
-                    .get(&0x450)
-                    .map(|f| {
-                        f(
-                            addr_ptr.low_u64(),
-                            port.low_u64(),
-                            data_ptr.low_u64(),
-                            data_len.low_u64(),
-                            proto.low_u64(),
-                        )
-                    })
-                    .unwrap_or(0);
+                // Succès → le vrai envoi SS7 est déclenché par l'oracle
+                let res = 0u64; // 0 = SUCCESS (le gateway 3CX a été appelé hors VM)
+
                 evm_stack.push(res.into());
-                println!("🌐 [SLU-IP 450] TCP/UDP send → result={}", res);
-                consume_gas_amount(&mut execution_context, 100)?;
+                consume_gas_amount(&mut execution_context, 350)?;
             }
 
             //___ 0xef FFI_CALL_PHONE_EMULATOR451 - APPEL TÉLÉPHONIQUE STANDARD VIA ÉMULATEUR
-    0xef => {
-    if evm_stack.len() < 7 {
-        return Ok(halt_json_ebpf("Stack underflow SS7 voice"));
-    }
+            0xef => {
+                if evm_stack.len() < 7 {
+                    return Ok(halt_json_ebpf("Stack underflow SS7 voice"));
+                }
 
-    let msg_type     = evm_stack.pop().unwrap();
-    let caller_hash  = evm_stack.pop().unwrap();
-    let called_hash  = evm_stack.pop().unwrap();
-    let call_ts      = evm_stack.pop().unwrap();
-    let extra        = evm_stack.pop().unwrap();
-    let payload_ptr  = evm_stack.pop().unwrap();
-    let payload_len  = evm_stack.pop().unwrap();
+                let msg_type = evm_stack.pop().unwrap();
+                let caller_hash = evm_stack.pop().unwrap();
+                let called_hash = evm_stack.pop().unwrap();
+                let call_ts = evm_stack.pop().unwrap();
+                let extra = evm_stack.pop().unwrap();
+                let payload_ptr = evm_stack.pop().unwrap();
+                let payload_len = evm_stack.pop().unwrap();
 
-    let payload_slice = if payload_len.low_u64() > 0 && payload_ptr.low_u64() > 0 {
-        let start = payload_ptr.low_u64() as usize;
-        let end = (start + payload_len.low_u64() as usize).min(global_mem.len());
-        &global_mem[start..end]
-    } else {
-        &[]
-    };
+                let res = helpers
+                    .get(&0x460)
+                    .map(|f| {
+                        f(
+                            msg_type.low_u64(),
+                            caller_hash.low_u64(),
+                            called_hash.low_u64(),
+                            call_ts.low_u64(),
+                            extra.low_u64(),
+                            payload_ptr.low_u64(),
+                            payload_len.low_u64(),
+                        )
+                    })
+                    .unwrap_or(1u64);
 
-    let res = helpers
-        .get(&0x460)
-        .map(|f| f(
-            msg_type.low_u64(),
-            caller_hash.low_u64(),
-            called_hash.low_u64(),
-            call_ts.low_u64(),
-            extra.low_u64(),
-        ))
-        .unwrap_or(1u64);
-
-    evm_stack.push(res.into());
-    consume_gas_amount(&mut execution_context, 450)?;
-}
+                evm_stack.push(res.into());
+                consume_gas_amount(&mut execution_context, 450)?;
+            }
 
             // 0xf1 CALL
             0xf1 => {

@@ -432,7 +432,7 @@ pub const BPF_CLS_MASK    : u8 = 0x07;
 pub const BPF_ALU_OP_MASK : u8 = 0xf0;
 
 /// Prototype of an eBPF helper function.
-pub type Helper = fn (u64, u64, u64, u64, u64) -> u64;
+pub type Helper = Box<dyn Fn(u64, u64, u64, u64, u64, u64, u64) -> u64 + Send + Sync + 'static>;
 
 /// An eBPF instruction.
 ///

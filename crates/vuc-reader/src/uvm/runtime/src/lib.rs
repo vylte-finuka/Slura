@@ -127,7 +127,7 @@ pub mod lib {
 pub type Verifier = fn(prog: &[u8]) -> Result<(), Error>;
 
 /// eBPF helper function.
-pub type Helper = fn(u64, u64, u64, u64, u64) -> u64;
+pub type Helper = Box<dyn Fn(u64, u64, u64, u64, u64, u64, u64) -> u64 + std::marker::Send + Sync + 'static>;
 
 /// eBPF stack usage calculator function.
 pub type StackUsageCalculator = fn(prog: &[u8], pc: usize, data: &mut dyn Any) -> u16;
@@ -1227,7 +1227,7 @@ impl<'a> EbpfVmFixedMbuff<'a> {
     pub fn register_helper(
         &mut self,
         key: u32,
-        function: fn(u64, u64, u64, u64, u64) -> u64,
+        function: Box<dyn Fn(u64, u64, u64, u64, u64, u64, u64) -> u64 + std::marker::Send + Sync + 'static>,
     ) -> Result<(), Error> {
         self.parent.register_helper(key, function)
     }
@@ -1784,7 +1784,7 @@ impl<'a> EbpfVmRaw<'a> {
     pub fn register_helper(
         &mut self,
         key: u32,
-        function: fn(u64, u64, u64, u64, u64) -> u64,
+        function: Box<dyn Fn(u64, u64, u64, u64, u64, u64, u64) -> u64 + std::marker::Send + Sync + 'static>,
     ) -> Result<(), Error> {
         self.parent.register_helper(key, function)
     }
@@ -2247,7 +2247,7 @@ impl<'a> EbpfVmNoData<'a> {
     pub fn register_helper(
         &mut self,
         key: u32,
-        function: fn(u64, u64, u64, u64, u64) -> u64,
+        function: Box<dyn Fn(u64, u64, u64, u64, u64, u64, u64) -> u64 + std::marker::Send + Sync + 'static>,
     ) -> Result<(), Error> {
         self.parent.register_helper(key, function)
     }
