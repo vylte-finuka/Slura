@@ -10,7 +10,7 @@ use core::ops::Range;
 use hashbrown::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::LazyLock;
-
+use tracing::{info, warn};
 use primitive_types::U256 as u256;
 use serde_json::Value as JsonValue;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -801,30 +801,34 @@ fn encode_uip10_address_to_u64(addr: &str) -> u64 {
 // ====================================================================
 
 fn ss7_metadata_process(
-    msg_type: u64,
-    caller_hash: u64,
-    called_hash: u64,
-    call_ts: u64,
-    extra: u64,
-    payload_ptr: u64,
-    payload_len: u64,
+    msg_type:     u64,
+    caller_hash:  u64,
+    called_hash:  u64,
+    call_ts:      u64,
+    extra:        u64,
+    payload_ptr:  u64,
+    payload_len:  u64,
 ) -> u64 {
-    if msg_type > 255 || call_ts == 0 || call_ts > 1_800_000_000_000 {
+    // 1. Validation
+    if msg_type > 255 || call_ts == 0 || call_ts > 2_000_000_000_000 {
+        warn!("[SS7 invalid params] msg_type={} ts={}", msg_type, call_ts);
         return 1;
     }
     if payload_len > 8192 {
+        warn!("[SS7 payload too large] {} bytes", payload_len);
         return 2;
     }
 
+    // 2. Compteurs
     SS7_CALL_COUNT.fetch_add(1, Ordering::Relaxed);
-    let msg_idx = msg_type as usize;
-    if msg_idx < 256 {
-        SS7_BY_TYPE[msg_idx].fetch_add(1, Ordering::Relaxed);
+    let idx = msg_type as usize;
+    if idx < SS7_BY_TYPE.len() {
+        SS7_BY_TYPE[idx].fetch_add(1, Ordering::Relaxed);
     }
 
+    // 3. Extraction payload (simulation – dans la vraie VM, passer &mem)
+    // Pour l'instant on simule comme avant
     let mut global_mem = vec![0u8; 0x10000];
-
-    // Extraction sécurisée du payload (dans le scope où global_mem existe)
     let payload = if payload_ptr > 0 && payload_len > 0 {
         let start = payload_ptr as usize;
         let end = (start + payload_len as usize).min(global_mem.len());
@@ -833,32 +837,53 @@ fn ss7_metadata_process(
         &[]
     };
 
-    // Parsing voix SS7 (IAM / ACM / ANM / REL)
-    if !payload.is_empty() {
-        match payload[0] {
-            0x01 | 0x02 => println!("[SS7 VOIX PROD] IAM détecté → appel entrant"),
-            0x03 => println!("[SS7 VOIX PROD] ACM reçu → sonnerie"),
-            0x04 => println!("[SS7 VOIX PROD] ANM reçu → APPEL CONNECTÉ"),
-            0x05 => println!("[SS7 VOIX PROD] REL reçu → appel terminé"),
-            _ => println!("[SS7 VOIX PROD] Type inconnu : 0x{:02x}", payload[0]),
-        }
-    }
-
-    let payload_hex = if payload.len() > 64 {
-        hex::encode(&payload[..64]) + "..."
-    } else {
-        hex::encode(payload)
+    // 4. Détection message
+    let msg_name = match payload.first().copied() {
+        Some(0x01) | Some(0x02) => "IAM",
+        Some(0x03) => "ACM",
+        Some(0x04) => "ANM",
+        Some(0x05) => "REL",
+        _ => "UNKNOWN",
     };
 
-    println!(
-        "[0xef SS7 VOIX PROD] type={} caller={:016x} called={:016x} ts={} extra={} payload_len={} total={} payload=0x{}",
-        msg_type, caller_hash, called_hash, call_ts, extra,
-        payload.len(),
-        SS7_CALL_COUNT.load(Ordering::Relaxed),
-        payload_hex
+    let preview = if payload.len() > 64 {
+        format!("0x{}...", hex::encode(&payload[..64]))
+    } else if !payload.is_empty() {
+        format!("0x{}", hex::encode(payload))
+    } else {
+        "empty".to_string()
+    };
+
+    info!(
+        "[SS7 → Chainlink] type={} caller={:016x} called={:016x} ts={} payload={} → {}",
+        msg_type, caller_hash, called_hash, call_ts, preview, msg_name
     );
 
-    0 // SUCCESS
+    // 5. Préparation payload Chainlink
+    let request_id = format!("ss7_{:016x}_{:02x}", call_ts, msg_type);
+
+    let chainlink_payload = serde_json::json!({
+        "source":       "yul_verbatim_0xef",
+        "msg_type":     msg_type,
+        "caller_hash":  format!("{:016x}", caller_hash),
+        "called_hash":  format!("{:016x}", called_hash),
+        "timestamp":    call_ts,
+        "extra":        extra,
+        "payload_hex":  if payload.len() <= 4096 { hex::encode(payload) } else { hex::encode(&payload[..4096]) + "..." },
+        "request_id":   request_id,
+        // IMPORTANT : à remplacer dynamiquement ou via config
+        "callback_selector": "0xabcdef12"   // ← ton vrai selector
+    });
+
+    // 6. Log (production-friendly)
+    if let Ok(pretty) = serde_json::to_string_pretty(&chainlink_payload) {
+        info!("[Chainlink job prepared] request_id={} payload:\n{}", request_id, pretty);
+    } else {
+        warn!("[Chainlink json error] request_id={}", request_id);
+    }
+
+    // 7. Succès → l'adapter Chainlink du runtime doit maintenant créer la requête on-chain
+    0u64
 }
 
 /// ✅ Encodage d'adresse vers u64
