@@ -910,41 +910,46 @@ impl JitCompiler {
                     self.emit_jcc(mem, 0x8e, target_pc);
                 }
 
-                ebpf::CALL       => {
-                    match insn.src {
-                        0x0 => {
-                            // For JIT, helpers in use MUST be registered at compile time. They can be
-                            // updated later, but not created after compiling (we need the address of the
-                            // helper function in the JIT-compiled program).
-                            if let Some(helper) = helpers.get(&(insn.imm as u32)) {
-                                // We reserve RCX for shifts
-                                self.emit_mov(mem, R9, RCX);
-                                self.emit_call(mem, *helper as usize);
-                            } else {
-                                Err(Error::new(
-                                    ErrorKind::Other,
-                                    format!(
-                                        "[JIT] Error: unknown helper function (id: {:#x})",
-                                        insn.imm as u32
-                                    )
-                                ))?;
-                            };
-                        }
-                        0x1 => {
-                            let target_pc = insn_ptr as isize + insn.imm as isize + 1;
-                            self.emit_local_call(mem, target_pc);
-                        }
-                        _ => {
-                            Err(Error::new(
-                                ErrorKind::Other,
-                                format!(
-                                    "[JIT] Error: unexpected call type #{:?} (insn #{insn_ptr:?})",
-                                    insn.src
-                                )
-                            ))?;
-                        }
-                    }
-                }
+        ebpf::CALL => {
+    match insn.src {
+        0x0 => {
+            if let Some(helper) = helpers.get(&(insn.imm as u32)) {
+                // helper : &Box<dyn Fn(u64,u64,u64,u64,u64,u64,u64) -> u64 + ...>
+
+                let dyn_fn: &dyn Fn(u64, u64, u64, u64, u64, u64, u64) -> u64 = &**helper;
+
+                // Extraction de l'adresse de base du bloc exécutable
+                let target_addr: usize = dyn_fn as *const dyn Fn(u64, u64, u64, u64, u64, u64, u64) -> u64 as *const () as usize;
+
+                self.emit_mov(mem, R9, RCX);
+                self.emit_call(mem, target_addr);
+            } else {
+                return Err(Error::new(
+                    ErrorKind::Other,
+                    format!(
+                        "[JIT] Error: unknown helper function (id: {:#x})",
+                        insn.imm as u32
+                    ),
+                ));
+            }
+        }
+
+        0x1 => {
+            let target_pc = insn_ptr as isize + insn.imm as isize + 1;
+            self.emit_local_call(mem, target_pc);
+        }
+
+        _ => {
+            return Err(Error::new(
+                ErrorKind::Other,
+                format!(
+                    "[JIT] Error: unexpected call type {:#x} (insn #{insn_ptr:?})",
+                    insn.src
+                ),
+            ));
+        }
+    }
+}
                 ebpf::TAIL_CALL  => { unimplemented!() },
                 ebpf::EXIT       => {
                     self.emit1(mem, 0xc3); // ret
