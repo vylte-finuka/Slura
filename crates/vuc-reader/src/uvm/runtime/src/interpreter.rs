@@ -801,7 +801,7 @@ fn encode_uip10_address_to_u64(addr: &str) -> u64 {
 // Opcode 0xef (ou 0xec selon ta préférence)
 // ====================================================================
 
-fn ss7_metadata_process(
+pub fn ss7_metadata_process(
     msg_type:     u64,
     caller_hash:  u64,
     called_hash:  u64,
@@ -812,11 +812,11 @@ fn ss7_metadata_process(
 ) -> u64 {
     // Validation
     if msg_type > 255 || call_ts == 0 || call_ts > 2_000_000_000_000 {
-        warn!("[SS7 invalid params] msg_type={} ts={}", msg_type, call_ts);
+        warn!("[SS7 invalid params]");
         return 1;
     }
     if payload_len > 8192 {
-        warn!("[SS7 payload too large] {} bytes", payload_len);
+        warn!("[SS7 payload too large]");
         return 2;
     }
 
@@ -827,13 +827,12 @@ fn ss7_metadata_process(
         SS7_BY_TYPE[idx].fetch_add(1, Ordering::Relaxed);
     }
 
-    // Extraction payload réel depuis mémoire VM
+    // Extraction payload depuis mémoire VM
     let payload = unsafe {
         let ptr = payload_ptr as *const u8;
         std::slice::from_raw_parts(ptr, payload_len as usize)
     };
 
-    // Détection message SS7
     let msg_name = match payload.first().copied() {
         Some(0x01) | Some(0x02) => "IAM",
         Some(0x03) => "ACM",
@@ -844,15 +843,13 @@ fn ss7_metadata_process(
         _ => "UNKNOWN",
     };
 
-    // Payload transit complet
     let payload_hex = hex::encode(payload);
-    let payload_hash = format!("{:064x}", sha3::Keccak256::digest(payload));
+    let payload_hash = format!("{:064x}", Keccak256::digest(payload));
 
-    // Call ID unique
     let call_id = format!("ss7_{:016x}_{:02x}_{:016x}", call_ts, msg_type, caller_hash);
 
-    // JSON transit complet (prêt pour oracle ou fournisseur PSTN)
-    let ss7_transit_json = serde_json::json!({
+    // JSON complet à transmettre (payload démodulé inclus)
+    let ss7_json = json!({
         "call_id": call_id,
         "msg_type": msg_type,
         "msg_name": msg_name,
@@ -860,23 +857,31 @@ fn ss7_metadata_process(
         "called_hash": format!("{:016x}", called_hash),
         "timestamp": call_ts,
         "extra": extra,
-        "payload_hex": payload_hex,          // ← TRANSIT COMPLET
-        "payload_hash": payload_hash,        // Pour vérification décentralisée
+        "payload_hex": payload_hex,
+        "payload_hash": payload_hash,
         "payload_len": payload_len,
         "source": "unity_vm_0xef",
         "request_id": call_id
     });
 
-    // Log parsable (runtime le capte)
-    if let Ok(pretty) = serde_json::to_string(&ss7_transit_json) {
-        info!("[UVM SS7 TRANSIT] {}", pretty);
-    } else {
-        warn!("[UVM SS7 transit json error]");
-        return 3;
+    // Écriture du JSON dans la zone mémoire réservée
+    let json_str = serde_json::to_string(&ss7_json).unwrap_or_default();
+    let json_bytes = json_str.as_bytes();
+
+    unsafe {
+        let len = json_bytes.len().min(8192);
+        JSON_BUFFER[0..len].copy_from_slice(&json_bytes[0..len]);
     }
 
-    // Retour statut simple (0 = OK, payload transité via log)
-    0u64
+    // Retour : (longueur << 32) | pointeur vers le JSON
+    let json_ptr = unsafe { JSON_BUFFER.as_ptr() as u64 };
+    let json_len = json_str.len() as u64;
+
+    let return_value = (json_len << 32) | json_ptr;
+
+    info!("[UVM SS7 TRANSIT] JSON complet transmis. call_id={}", call_id);
+
+    return_value
 }
 
 /// ✅ Encodage d'adresse vers u64
