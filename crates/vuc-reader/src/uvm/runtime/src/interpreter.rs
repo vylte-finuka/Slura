@@ -7,6 +7,7 @@ use crate::ebpf;
 use crate::lib::*;
 use crate::stack::StackUsage;
 use core::ops::Range;
+use sha3::Keccak256;
 use hashbrown::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::LazyLock;
