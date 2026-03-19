@@ -809,7 +809,7 @@ fn ss7_metadata_process(
     payload_ptr:  u64,
     payload_len:  u64,
 ) -> u64 {
-    // 1. Validation
+    // Validation
     if msg_type > 255 || call_ts == 0 || call_ts > 2_000_000_000_000 {
         warn!("[SS7 invalid params] msg_type={} ts={}", msg_type, call_ts);
         return 1;
@@ -819,70 +819,62 @@ fn ss7_metadata_process(
         return 2;
     }
 
-    // 2. Compteurs
+    // Compteurs
     SS7_CALL_COUNT.fetch_add(1, Ordering::Relaxed);
     let idx = msg_type as usize;
     if idx < SS7_BY_TYPE.len() {
         SS7_BY_TYPE[idx].fetch_add(1, Ordering::Relaxed);
     }
 
-    // 3. Extraction payload (simulation – dans la vraie VM, passer &mem)
-    // Pour l'instant on simule comme avant
-    let mut global_mem = vec![0u8; 0x10000];
-    let payload = if payload_ptr > 0 && payload_len > 0 {
-        let start = payload_ptr as usize;
-        let end = (start + payload_len as usize).min(global_mem.len());
-        &global_mem[start..end]
-    } else {
-        &[]
+    // Extraction payload réel depuis mémoire VM
+    let payload = unsafe {
+        let ptr = payload_ptr as *const u8;
+        std::slice::from_raw_parts(ptr, payload_len as usize)
     };
 
-    // 4. Détection message
+    // Détection message SS7
     let msg_name = match payload.first().copied() {
         Some(0x01) | Some(0x02) => "IAM",
         Some(0x03) => "ACM",
         Some(0x04) => "ANM",
         Some(0x05) => "REL",
+        Some(0x06) => "SMS-MO",
+        Some(0x07) => "SMS-MT",
         _ => "UNKNOWN",
     };
 
-    let preview = if payload.len() > 64 {
-        format!("0x{}...", hex::encode(&payload[..64]))
-    } else if !payload.is_empty() {
-        format!("0x{}", hex::encode(payload))
-    } else {
-        "empty".to_string()
-    };
+    // Payload transit complet
+    let payload_hex = hex::encode(payload);
+    let payload_hash = format!("{:064x}", Keccak256::digest(payload));
 
-    info!(
-        "[SS7 → Chainlink] type={} caller={:016x} called={:016x} ts={} payload={} → {}",
-        msg_type, caller_hash, called_hash, call_ts, preview, msg_name
-    );
+    // Call ID unique
+    let call_id = format!("ss7_{:016x}_{:02x}_{:016x}", call_ts, msg_type, caller_hash);
 
-    // 5. Préparation payload Chainlink
-    let request_id = format!("ss7_{:016x}_{:02x}", call_ts, msg_type);
-
-    let chainlink_payload = serde_json::json!({
-        "source":       "yul_verbatim_0xef",
-        "msg_type":     msg_type,
-        "caller_hash":  format!("{:016x}", caller_hash),
-        "called_hash":  format!("{:016x}", called_hash),
-        "timestamp":    call_ts,
-        "extra":        extra,
-        "payload_hex":  if payload.len() <= 4096 { hex::encode(payload) } else { hex::encode(&payload[..4096]) + "..." },
-        "request_id":   request_id,
-        // IMPORTANT : à remplacer dynamiquement ou via config
-        "callback_selector": "0xabcdef12"   // ← ton vrai selector
+    // JSON transit complet (prêt pour oracle ou fournisseur PSTN)
+    let ss7_transit_json = serde_json::json!({
+        "call_id": call_id,
+        "msg_type": msg_type,
+        "msg_name": msg_name,
+        "caller_hash": format!("{:016x}", caller_hash),
+        "called_hash": format!("{:016x}", called_hash),
+        "timestamp": call_ts,
+        "extra": extra,
+        "payload_hex": payload_hex,          // ← TRANSIT COMPLET
+        "payload_hash": payload_hash,        // Pour vérification décentralisée
+        "payload_len": payload_len,
+        "source": "unity_vm_0xef",
+        "request_id": call_id
     });
 
-    // 6. Log (production-friendly)
-    if let Ok(pretty) = serde_json::to_string_pretty(&chainlink_payload) {
-        info!("[Chainlink job prepared] request_id={} payload:\n{}", request_id, pretty);
+    // Log parsable (runtime le capte)
+    if let Ok(pretty) = serde_json::to_string(&ss7_transit_json) {
+        info!("[UVM SS7 TRANSIT] {}", pretty);
     } else {
-        warn!("[Chainlink json error] request_id={}", request_id);
+        warn!("[UVM SS7 transit json error]");
+        return 3;
     }
 
-    // 7. Succès → l'adapter Chainlink du runtime doit maintenant créer la requête on-chain
+    // Retour statut simple (0 = OK, payload transité via log)
     0u64
 }
 
