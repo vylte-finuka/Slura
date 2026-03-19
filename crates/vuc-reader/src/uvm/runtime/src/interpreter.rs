@@ -8,7 +8,7 @@ use crate::lib::*;
 use crate::stack::StackUsage;
 use core::ops::Range;
 use hashbrown::HashSet;
-use sha3::Digest;
+use sha3::{Digest, Keccak256};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::LazyLock;
 use tracing::{info, warn};
