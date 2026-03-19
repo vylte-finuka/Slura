@@ -7,8 +7,8 @@ use crate::ebpf;
 use crate::lib::*;
 use crate::stack::StackUsage;
 use core::ops::Range;
-use sha3::Keccak256;
 use hashbrown::HashSet;
+use sha3::Digest;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::LazyLock;
 use tracing::{info, warn};
@@ -846,7 +846,7 @@ fn ss7_metadata_process(
 
     // Payload transit complet
     let payload_hex = hex::encode(payload);
-    let payload_hash = format!("{:064x}", Keccak256::digest(payload));
+    let payload_hash = format!("{:064x}", sha3::Keccak256::digest(payload));
 
     // Call ID unique
     let call_id = format!("ss7_{:016x}_{:02x}_{:016x}", call_ts, msg_type, caller_hash);
