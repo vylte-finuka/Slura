@@ -796,6 +796,8 @@ fn encode_uip10_address_to_u64(addr: &str) -> u64 {
     }
 }
 
+static mut JSON_BUFFER: [u8; 8192] = [0; 8192];
+
 // ====================================================================
 // PRODUCTION VERSION - SS7 Metadata + Payload Processor
 // Opcode 0xef (ou 0xec selon ta préférence)
