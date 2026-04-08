@@ -2502,8 +2502,8 @@ pub fn execute_program(
                 return Ok(result);
             }
 
+            // === 0xf5 CREATE2 ===
             0xf5 => {
-                // CREATE2
                 if evm_stack.len() < 4 {
                     return Ok(halt_json_ebpf("Stack underflow on CREATE2"));
                 }
@@ -2511,7 +2511,7 @@ pub fn execute_program(
                 let value = evm_stack.pop().unwrap();
                 let offset = evm_stack.pop().unwrap();
                 let size = evm_stack.pop().unwrap();
-                let salt = evm_stack.pop().unwrap();
+                let salt = evm_stack.pop().unwrap(); // salt est un u256
 
                 let offset_usize = as_usize_or_fail(offset);
                 let size_usize = as_usize_or_fail(size);
@@ -2529,9 +2529,9 @@ pub fn execute_program(
                     salt
                 );
 
-                // Calcul d'adresse CREATE2 (simulation simple)
+                // === Calcul correct de l'adresse CREATE2 ===
                 let mut hasher = Keccak256::new();
-                hasher.update(&[0xff]);
+                hasher.update(&[0xff]); // prefix CREATE2
                 hasher.update(
                     execution_context
                         .world_state
@@ -2541,8 +2541,15 @@ pub fn execute_program(
                         .unwrap_or(&"".to_string())
                         .as_bytes(),
                 );
-                hasher.update(&salt.to_big_endian());
+
+                // Conversion correcte de salt (u256) en bytes
+                let mut salt_bytes = [0u8; 32];
+                salt.to_big_endian(&mut salt_bytes);
+                hasher.update(&salt_bytes);
+
+                // Hash du bytecode
                 hasher.update(&Keccak256::digest(&init_code));
+
                 let hash = hasher.finalize();
 
                 let new_address = format!("0x{}", hex::encode(&hash[12..32]));
@@ -2569,7 +2576,7 @@ pub fn execute_program(
                 evm_stack.push(encode_address_to_u256(&new_address));
 
                 println!("✅ [CREATE2] Nouveau contrat déployé à {}", new_address);
-                consume_gas_amount(&mut execution_context, 32000)?; // Gas CREATE2 approximatif
+                consume_gas_amount(&mut execution_context, 32000)?;
             }
 
             // ___ 0xf9 TSTORE (EIP-1153 Transient Storage Store)
