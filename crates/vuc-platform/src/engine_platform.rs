@@ -1608,7 +1608,8 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     let is_deployment = to_addr.is_empty() ||
                        to_addr == "0x" ||
                        tx_params.get("to").is_none() ||
-                       tx_params.get("to") == Some(&serde_json::Value::Null);
+                       tx_params.get("to") == Some(&serde_json::Value::Null) ||
+                       tx_params.get("to") == Some(&serde_json::Value::String("0x4af63f02".to_string()));
 
     // Valeur envoyée (u128)
     let value = tx_params.get("value")
