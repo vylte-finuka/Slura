@@ -2724,10 +2724,12 @@ pub fn execute_program(
                 let offset = evm_stack.pop().unwrap().low_u64() as usize;
                 let size = evm_stack.pop().unwrap().low_u64() as usize;
 
-                let mut revert_data = vec![0u8; size.min(1024)];
-                if offset + revert_data.len() <= global_mem.len() {
-                    revert_data.copy_from_slice(&global_mem[offset..offset + revert_data.len()]);
-                }
+                // Copie sécurisée des données de revert
+                let revert_data = if offset + size <= global_mem.len() {
+                    global_mem[offset..offset + size].to_vec()
+                } else {
+                    global_mem[offset..].to_vec()
+                };
 
                 println!(
                     "❌ [REVERT] offset={}, size={}, data=0x{}",
@@ -2736,7 +2738,6 @@ pub fn execute_program(
                     hex::encode(&revert_data)
                 );
 
-                // Création d'un vrai revert (pas un return)
                 let mut result = serde_json::Map::new();
                 result.insert(
                     "action".to_string(),
@@ -2752,7 +2753,6 @@ pub fn execute_program(
                     JsonValue::String("Execution reverted".to_string()),
                 );
 
-                // Ajouter les storage writes capturés (même en cas de revert)
                 add_storage_written_to_result(
                     &mut serde_json::Value::Object(result.clone()),
                     &temp_storage_writes,
