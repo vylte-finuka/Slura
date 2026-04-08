@@ -8,14 +8,14 @@ use crate::lib::*;
 use crate::stack::StackUsage;
 use core::ops::Range;
 use hashbrown::HashSet;
+use primitive_types::U256 as u256;
 use serde_json::json;
+use serde_json::Value as JsonValue;
 use sha3::{Digest, Keccak256};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::LazyLock;
 use tracing::{info, warn};
-use primitive_types::U256 as u256;
-use serde_json::Value as JsonValue;
-use std::hash::{DefaultHasher, Hash, Hasher};
 
 #[derive(Clone, Debug)]
 pub struct BlockInfo {
@@ -805,13 +805,13 @@ static mut JSON_BUFFER: [u8; 8192] = [0; 8192];
 // ====================================================================
 
 pub fn ss7_metadata_process(
-    msg_type:     u64,
-    caller_hash:  u64,
-    called_hash:  u64,
-    call_ts:      u64,
-    extra:        u64,
-    payload_ptr:  u64,
-    payload_len:  u64,
+    msg_type: u64,
+    caller_hash: u64,
+    called_hash: u64,
+    call_ts: u64,
+    extra: u64,
+    payload_ptr: u64,
+    payload_len: u64,
 ) -> u64 {
     // Validation
     if msg_type > 255 || call_ts == 0 || call_ts > 2_000_000_000_000 {
@@ -882,7 +882,10 @@ pub fn ss7_metadata_process(
 
     let return_value = (json_len << 32) | json_ptr;
 
-    info!("[UVM SS7 TRANSIT] JSON complet transmis. call_id={}", call_id);
+    info!(
+        "[UVM SS7 TRANSIT] JSON complet transmis. call_id={}",
+        call_id
+    );
 
     return_value
 }
@@ -2299,6 +2302,62 @@ pub fn execute_program(
                 consume_gas_amount(&mut execution_context, 450)?;
             }
 
+            0xf0 => {
+                // CREATE
+                if evm_stack.len() < 3 {
+                    return Ok(halt_json_ebpf("Stack underflow on CREATE"));
+                }
+
+                let value = evm_stack.pop().unwrap();
+                let offset = evm_stack.pop().unwrap();
+                let size = evm_stack.pop().unwrap();
+
+                let offset_usize = as_usize_or_fail(offset);
+                let size_usize = as_usize_or_fail(size);
+
+                if !resize_memory_ebpf(&mut global_mem, offset_usize, size_usize) {
+                    return Ok(halt_json_ebpf("Memory resize failed on CREATE"));
+                }
+
+                let init_code = memory_slice_len(&global_mem, offset_usize, size_usize).to_vec();
+
+                println!(
+                    "🛠️ [CREATE] value={}, init_code_len={}",
+                    value,
+                    init_code.len()
+                );
+
+                // Simulation simple de CREATE (adresse prédite)
+                let new_address = format!(
+                    "0x{:040x}",
+                    execution_context.world_state.accounts.len() + 100
+                );
+
+                // Enregistrer le nouveau contrat dans le world_state
+                execution_context
+                    .world_state
+                    .code
+                    .insert(new_address.clone(), init_code.clone());
+
+                let new_account = AccountState {
+                    balance: value,
+                    nonce: u256::one(),
+                    code: init_code,
+                    storage_root: String::new(),
+                    is_contract: true,
+                };
+
+                execution_context
+                    .world_state
+                    .accounts
+                    .insert(new_address.clone(), new_account);
+
+                evm_stack.push(encode_address_to_u256(&new_address));
+
+                println!("✅ [CREATE] Nouveau contrat déployé à {}", new_address);
+                consume_gas_amount(&mut execution_context, 32000)?; // Gas CREATE approximatif
+            }
+
             // 0xf1 CALL
             0xf1 => {
                 // CALL - Similaire à CALLCODE mais exécute dans le contexte du contract appelé
@@ -2443,6 +2502,76 @@ pub fn execute_program(
                 return Ok(result);
             }
 
+            0xf5 => {
+                // CREATE2
+                if evm_stack.len() < 4 {
+                    return Ok(halt_json_ebpf("Stack underflow on CREATE2"));
+                }
+
+                let value = evm_stack.pop().unwrap();
+                let offset = evm_stack.pop().unwrap();
+                let size = evm_stack.pop().unwrap();
+                let salt = evm_stack.pop().unwrap();
+
+                let offset_usize = as_usize_or_fail(offset);
+                let size_usize = as_usize_or_fail(size);
+
+                if !resize_memory_ebpf(&mut global_mem, offset_usize, size_usize) {
+                    return Ok(halt_json_ebpf("Memory resize failed on CREATE2"));
+                }
+
+                let init_code = memory_slice_len(&global_mem, offset_usize, size_usize).to_vec();
+
+                println!(
+                    "🛠️ [CREATE2] value={}, init_code_len={}, salt={:064x}",
+                    value,
+                    init_code.len(),
+                    salt
+                );
+
+                // Calcul d'adresse CREATE2 (simulation simple)
+                let mut hasher = Keccak256::new();
+                hasher.update(&[0xff]);
+                hasher.update(
+                    execution_context
+                        .world_state
+                        .accounts
+                        .keys()
+                        .next()
+                        .unwrap_or(&"".to_string())
+                        .as_bytes(),
+                );
+                hasher.update(&salt.to_big_endian());
+                hasher.update(&Keccak256::digest(&init_code));
+                let hash = hasher.finalize();
+
+                let new_address = format!("0x{}", hex::encode(&hash[12..32]));
+
+                // Enregistrer le contrat
+                execution_context
+                    .world_state
+                    .code
+                    .insert(new_address.clone(), init_code.clone());
+
+                let new_account = AccountState {
+                    balance: value,
+                    nonce: u256::one(),
+                    code: init_code,
+                    storage_root: String::new(),
+                    is_contract: true,
+                };
+
+                execution_context
+                    .world_state
+                    .accounts
+                    .insert(new_address.clone(), new_account);
+
+                evm_stack.push(encode_address_to_u256(&new_address));
+
+                println!("✅ [CREATE2] Nouveau contrat déployé à {}", new_address);
+                consume_gas_amount(&mut execution_context, 32000)?; // Gas CREATE2 approximatif
+            }
+
             // ___ 0xf9 TSTORE (EIP-1153 Transient Storage Store)
             0xf9 => {
                 if evm_stack.len() < 2 {
@@ -2582,32 +2711,69 @@ pub fn execute_program(
             //___ 0xfd REVERT
             0xfd => {
                 if evm_stack.len() < 2 {
-                    return Err(Error::new(ErrorKind::Other, "Underflow on REVERT"));
+                    return Ok(halt_json_ebpf("Stack underflow on REVERT"));
                 }
 
                 let offset = evm_stack.pop().unwrap().low_u64() as usize;
                 let size = evm_stack.pop().unwrap().low_u64() as usize;
 
-                println!("❌ [REVERT] offset=0x{:x}, size={}", offset, size);
-
                 let mut revert_data = vec![0u8; size.min(1024)];
                 if offset + revert_data.len() <= global_mem.len() {
-                    let src_slice = &global_mem[offset..offset + revert_data.len()];
-                    revert_data.copy_from_slice(src_slice);
+                    revert_data.copy_from_slice(&global_mem[offset..offset + revert_data.len()]);
                 }
 
-                let mut result = create_revert_action(revert_data);
+                println!(
+                    "❌ [REVERT] offset={}, size={}, data=0x{}",
+                    offset,
+                    size,
+                    hex::encode(&revert_data)
+                );
 
-                // Ajouter les writes capturés (même en cas d'erreur !)
-                add_storage_written_to_result(&mut result, &temp_storage_writes);
+                // Création d'un vrai revert (pas un return)
+                let mut result = serde_json::Map::new();
+                result.insert(
+                    "action".to_string(),
+                    JsonValue::String("revert".to_string()),
+                );
+                result.insert(
+                    "data".to_string(),
+                    decode_return_data_generic(&revert_data, revert_data.len()),
+                );
+                result.insert("success".to_string(), JsonValue::Bool(false));
+                result.insert(
+                    "error".to_string(),
+                    JsonValue::String("Execution reverted".to_string()),
+                );
 
-                return Ok(result);
+                // Ajouter les storage writes capturés (même en cas de revert)
+                add_storage_written_to_result(
+                    &mut serde_json::Value::Object(result.clone()),
+                    &temp_storage_writes,
+                );
+
+                return Ok(serde_json::Value::Object(result));
             }
 
             //___ 0xfe INVALID - Halt avec erreur spécifique eBPF
             0xfe => {
-                println!("💥 [INVALID] Invalid opcode 0xFE");
-                return Ok(halt_json_ebpf("Invalid FE opcode"));
+                println!("💥 [INVALID] Opcode 0xFE exécuté - Invalid opcode");
+
+                let mut result = serde_json::Map::new();
+                result.insert(
+                    "action".to_string(),
+                    JsonValue::String("revert".to_string()),
+                );
+                result.insert(
+                    "error".to_string(),
+                    JsonValue::String("Invalid opcode 0xFE".to_string()),
+                );
+                result.insert("success".to_string(), JsonValue::Bool(false));
+                result.insert(
+                    "instruction_result".to_string(),
+                    JsonValue::Number(IR_INVALID_JUMP.into()),
+                );
+
+                return Ok(serde_json::Value::Object(result));
             }
 
             _ => {
