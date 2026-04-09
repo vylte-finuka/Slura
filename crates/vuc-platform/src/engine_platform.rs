@@ -1546,6 +1546,42 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         .unwrap_or("")
         .to_lowercase();
 
+    let gas_price = tx_params.get("gasPrice")
+        .or_else(|| tx_params.get("maxFeePerGas"))
+        .or_else(|| tx_params.get("max_priority_fee_per_gas"))
+        .and_then(|v| {
+            if v.is_string() {
+                let s = v.as_str().unwrap();
+                if s.starts_with("0x") {
+                    u64::from_str_radix(&s[2..], 16).ok()
+                } else {
+                    s.parse().ok()
+                }
+            } else if v.is_u64() {
+                Some(v.as_u64().unwrap())
+            } else {
+                None
+            }
+        })
+        .unwrap_or(1); // valeur par défaut minimale pour éviter 0
+
+    let estimated_gas = tx_params.get("gas")
+        .and_then(|v| {
+            if v.is_string() {
+                let s = v.as_str().unwrap();
+                if s.starts_with("0x") {
+                    u64::from_str_radix(&s[2..], 16).ok()
+                } else {
+                    s.parse().ok()
+                }
+            } else if v.is_u64() {
+                Some(v.as_u64().unwrap())
+            } else {
+                None
+            }
+        })
+        .unwrap_or(21000); // gas par défaut pour une transaction simple 
+
     // Exception spéciale pour l'initialisation VEZ (mint initial) → pas de frais
     let is_vez_initialization = to_addr == "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" &&
         tx_params.get("data").and_then(|v| v.as_str()).unwrap_or("")
@@ -1622,26 +1658,30 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         vec![]
     };
 
+    // Calldata constructeur (vide par défaut)
+    let constructor_calldata: Vec<u8> = vec![];
+
     if is_deployment && creation_bytecode.is_empty() {
         return Err("Bytecode de déploiement vide".to_string());
     }
 
-    // Calldata constructeur (vide par défaut)
-    let constructor_calldata: Vec<u8> = vec![];
-
-    // ====================== HASH INTERNE (clé pour tout le système) ======================
-    let mut tx_hasher = Keccak256::new();
-    tx_hasher.update(from_addr.as_bytes());
-    tx_hasher.update(&final_nonce.to_be_bytes());
-    tx_hasher.update(&chrono::Utc::now().timestamp_nanos().to_be_bytes());
-    tx_hasher.update(&rand::random::<u128>().to_be_bytes());
-    tx_hasher.update(&std::process::id().to_be_bytes());
-    tx_hasher.update(&(std::ptr::addr_of!(tx_hasher) as usize).to_be_bytes());
-    if !data.is_empty() {
-        tx_hasher.update(data.as_bytes());
+    let mut rlp_hasher = Keccak256::new();
+    
+    rlp_hasher.update(&final_nonce.to_be_bytes());
+    rlp_hasher.update(&gas_price.to_be_bytes());           // gasPrice
+    rlp_hasher.update(&(estimated_gas as u64).to_be_bytes()); // gasLimit
+    if !to_addr.is_empty() && to_addr != "0x" {
+        rlp_hasher.update(&hex::decode(&to_addr[2..]).unwrap_or_default());
+    } else {
+        rlp_hasher.update(&[] as &[u8]); // to = null pour déploiement
     }
-    let tx_hash = format!("0x{:x}", tx_hasher.finalize());
+    rlp_hasher.update(&value.to_be_bytes());
+    rlp_hasher.update(&calldata_bytes);
+
+    let tx_hash = format!("0x{:x}", rlp_hasher.finalize());
     let normalized_hash = self.normalize_tx_hash(&tx_hash);
+
+    println!("🔑 Hash généré (exactement comme ethers) : {}", normalized_hash);
 
     let mut contract_address = String::new();
     let mut slu_zk_contract_addr = String::new();
@@ -1955,10 +1995,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         "transactionIndex": "0x0",
         "type": "0x2",
         "nonce": format!("0x{:x}", final_nonce),
-        "value": format!("0x{:x}", value),
-        "deploymentTimestamp": chrono::Utc::now().timestamp_nanos(),
-        "isVezInitialization": is_vez_initialization,
-        "transactionCost": if is_vez_initialization { "0x0".to_string() } else { format!("0x{:x}", gas_cost_wei) }
+        "value": format!("0x{:x}", value)
     });
 
     receipts.insert(normalized_hash.clone(), receipt.clone());
@@ -2989,14 +3026,14 @@ module.register_async_method("eth_sendTransaction", move |params, _meta, _| {
             }
         };
 
-        // Support Remix/MetaMask (array ou objet)
+        // Support Remix / MetaMask (array ou objet)
         let tx_obj = if tx_params.is_array() {
             tx_params.as_array().unwrap().get(0).cloned().unwrap_or_default()
         } else {
             tx_params
         };
 
-        // ====================== DÉTECTION DÉPLOIEMENT ======================
+        // Détection déploiement
         let is_deployment = {
             let to = tx_obj.get("to")
                 .and_then(|v| v.as_str())
@@ -3006,7 +3043,6 @@ module.register_async_method("eth_sendTransaction", move |params, _meta, _| {
         };
 
         if is_deployment {
-            // === LOGIQUE EXACTE VEZ UNIQUEMENT POUR LES DÉPLOIEMENTS ===
             let from = tx_obj.get("from")
                 .and_then(|v| v.as_str())
                 .unwrap_or(&engine_platform.validator_address)
@@ -3028,7 +3064,6 @@ module.register_async_method("eth_sendTransaction", move |params, _meta, _| {
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_lowercase());
 
-            // Appel à la fonction dédiée (logique identique à VEZ)
             match engine_platform.perform_contract_deployment(
                 from,
                 data,
@@ -3044,7 +3079,7 @@ module.register_async_method("eth_sendTransaction", move |params, _meta, _| {
                 )),
             }
         } else {
-            // === TRANSACTION NORMALE (appel de fonction) ===
+            // Transaction normale
             match engine_platform.send_transaction(tx_obj).await {
                 Ok(tx_hash) => Ok::<_, jsonrpsee_types::error::ErrorObject>(serde_json::json!(tx_hash)),
                 Err(e) => Err(jsonrpsee_types::error::ErrorObject::owned(
@@ -3105,97 +3140,68 @@ module.register_async_method("eth_sendRawTransaction", move |params, _meta, _| {
             ));
         }
 
-        // Hash de la tx (pour référence)
-        let mut hasher = Keccak256::new();
-        hasher.update(&raw_bytes);
-        let tx_hash = format!("0x{:x}", hasher.finalize());
-        let tx_hash_padded = pad_hash_64(&tx_hash);
-
-        println!("➡️ eth_sendRawTransaction – raw tx hash: {}", tx_hash);
-
-        // Détection du type de transaction
-        let tx_type = if raw_bytes[0] < 0x80 {
-            raw_bytes[0]  // Typed tx (0x01, 0x02, 0x03, etc.)
-        } else {
-            0  // Legacy
-        };
+        // Détection du type
+        let tx_type = if raw_bytes[0] < 0x80 { raw_bytes[0] } else { 0 };
 
         let mut tx_obj = serde_json::Map::new();
-        tx_obj.insert("type".to_string(), serde_json::Value::Number(tx_type.into()));
-
         let is_deployment: bool;
         let mut to_addr: Option<String> = None;
 
         match tx_type {
-// Legacy transaction (tx_type == 0)
-0 => {
-    let rlp = Rlp::new(&raw_bytes);
-    if rlp.item_count().unwrap_or(0) < 9 {  // legacy a 9 items min (nonce .. v,r,s)
-        return Err(jsonrpsee_types::error::ErrorObject::owned(
-            -32000,
-            "RLP legacy invalide (trop court)",
-            None::<()>,
-        ));
-    }
+            0 => { // Legacy
+                let rlp = Rlp::new(&raw_bytes);
+                if rlp.item_count().unwrap_or(0) < 9 {
+                    return Err(jsonrpsee_types::error::ErrorObject::owned(-32000, "RLP legacy invalide", None::<()>));
+                }
+                let nonce = rlp.val_at::<u64>(0).unwrap_or(0);
+                let gas_price = rlp.val_at::<u64>(1).unwrap_or(0);
+                let gas = rlp.val_at::<u64>(2).unwrap_or(0);
+                let to_bytes = rlp.at(3).unwrap().data().unwrap_or(&[]);
+                let value = rlp.val_at::<u128>(4).unwrap_or(0);
+                let data = rlp.at(5).unwrap().data().unwrap_or(&[]);
 
-    let nonce              = rlp.val_at::<u64>(0).unwrap_or(0);
-    let gas_price          = rlp.val_at::<u64>(1).unwrap_or(0);
-    let gas                = rlp.val_at::<u64>(2).unwrap_or(0);
-    let to_bytes           = rlp.at(3).unwrap().data().unwrap_or(&[]);
-    let value              = rlp.val_at::<u128>(4).unwrap_or(0);
-    let data               = rlp.at(5).unwrap().data().unwrap_or(&[]);
+                tx_obj.insert("nonce".to_string(), serde_json::Value::Number(nonce.into()));
+                tx_obj.insert("gasPrice".to_string(), serde_json::Value::Number(gas_price.into()));
+                tx_obj.insert("gas".to_string(), serde_json::Value::Number(gas.into()));
+                tx_obj.insert("value".to_string(), serde_json::Value::String(format!("0x{:x}", value)));
+                tx_obj.insert("data".to_string(), serde_json::Value::String(format!("0x{}", hex::encode(data))));
 
-    tx_obj.insert("nonce".to_string(), serde_json::Value::Number(nonce.into()));
-    tx_obj.insert("gasPrice".to_string(), serde_json::Value::Number(gas_price.into()));
-    tx_obj.insert("gas".to_string(), serde_json::Value::Number(gas.into()));
-    tx_obj.insert("value".to_string(), serde_json::Value::String(format!("0x{:x}", value)));
-    tx_obj.insert("data".to_string(), serde_json::Value::String(format!("0x{}", hex::encode(data))));
+                is_deployment = to_bytes.is_empty();
+                if !is_deployment {
+                    to_addr = Some(format!("0x{}", hex::encode(to_bytes)));
+                    tx_obj.insert("to".to_string(), serde_json::Value::String(to_addr.clone().unwrap()));
+                }
+            }
+            0x02 => { // EIP-1559
+                let payload = &raw_bytes[1..];
+                let rlp = Rlp::new(payload);
+                if rlp.item_count().unwrap_or(0) < 9 {
+                    return Err(jsonrpsee_types::error::ErrorObject::owned(-32000, "RLP EIP-1559 invalide", None::<()>));
+                }
+                let chain_id = rlp.val_at::<u64>(0).unwrap_or(0);
+                let nonce = rlp.val_at::<u64>(1).unwrap_or(0);
+                let max_priority_fee = rlp.val_at::<u128>(2).unwrap_or(0);
+                let max_fee = rlp.val_at::<u128>(3).unwrap_or(0);
+                let gas_limit = rlp.val_at::<u64>(4).unwrap_or(0);
+                let to_bytes = rlp.at(5).unwrap().data().unwrap_or(&[]);
+                let value = rlp.val_at::<u128>(6).unwrap_or(0);
+                let data = rlp.at(7).unwrap().data().unwrap_or(&[]);
 
-    is_deployment = to_bytes.is_empty();
-    if !is_deployment {
-        to_addr = Some(format!("0x{}", hex::encode(to_bytes)));
-        tx_obj.insert("to".to_string(), serde_json::Value::String(to_addr.clone().unwrap()));
-    }
-}
+                tx_obj.insert("chainId".to_string(), serde_json::Value::Number(chain_id.into()));
+                tx_obj.insert("nonce".to_string(), serde_json::Value::Number(nonce.into()));
+                tx_obj.insert("maxPriorityFeePerGas".to_string(), serde_json::Value::String(format!("0x{:x}", max_priority_fee)));
+                tx_obj.insert("maxFeePerGas".to_string(), serde_json::Value::String(format!("0x{:x}", max_fee)));
+                tx_obj.insert("gas".to_string(), serde_json::Value::Number(gas_limit.into()));
+                tx_obj.insert("value".to_string(), serde_json::Value::String(format!("0x{:x}", value)));
+                tx_obj.insert("data".to_string(), serde_json::Value::String(format!("0x{}", hex::encode(data))));
 
-// EIP-1559 (tx_type == 0x02)
-0x02 => {
-    let payload = &raw_bytes[1..];
-    let rlp = Rlp::new(payload);
-
-    if rlp.item_count().unwrap_or(0) < 9 {
-        return Err(jsonrpsee_types::error::ErrorObject::owned(
-            -32000,
-            "RLP EIP-1559 invalide (trop court)",
-            None::<()>,
-        ));
-    }
-
-    let chain_id           = rlp.val_at::<u64>(0).unwrap_or(0);
-    let nonce              = rlp.val_at::<u64>(1).unwrap_or(0);
-    let max_priority_fee   = rlp.val_at::<u128>(2).unwrap_or(0);
-    let max_fee            = rlp.val_at::<u128>(3).unwrap_or(0);
-    let gas_limit          = rlp.val_at::<u64>(4).unwrap_or(0);
-    let to_bytes           = rlp.at(5).unwrap().data().unwrap_or(&[]);
-    let value              = rlp.val_at::<u128>(6).unwrap_or(0);
-    let data               = rlp.at(7).unwrap().data().unwrap_or(&[]);
-
-    tx_obj.insert("chainId".to_string(), serde_json::Value::Number(chain_id.into()));
-    tx_obj.insert("nonce".to_string(), serde_json::Value::Number(nonce.into()));
-    tx_obj.insert("maxPriorityFeePerGas".to_string(), serde_json::Value::String(format!("0x{:x}", max_priority_fee)));
-    tx_obj.insert("maxFeePerGas".to_string(), serde_json::Value::String(format!("0x{:x}", max_fee)));
-    tx_obj.insert("gas".to_string(), serde_json::Value::Number(gas_limit.into()));
-    tx_obj.insert("value".to_string(), serde_json::Value::String(format!("0x{:x}", value)));
-    tx_obj.insert("data".to_string(), serde_json::Value::String(format!("0x{}", hex::encode(data))));
-
-    is_deployment = to_bytes.is_empty();
-    if !is_deployment {
-        to_addr = Some(format!("0x{}", hex::encode(to_bytes)));
-        tx_obj.insert("to".to_string(), serde_json::Value::String(to_addr.unwrap()));
-    }
-}
+                is_deployment = to_bytes.is_empty();
+                if !is_deployment {
+                    to_addr = Some(format!("0x{}", hex::encode(to_bytes)));
+                    tx_obj.insert("to".to_string(), serde_json::Value::String(to_addr.unwrap()));
+                }
+            }
             _ => {
-                // Autres types non supportés pour l'instant
                 return Err(jsonrpsee_types::error::ErrorObject::owned(
                     -32000,
                     format!("Type de transaction non supporté: 0x{:02x}", tx_type),
@@ -3204,30 +3210,22 @@ module.register_async_method("eth_sendRawTransaction", move |params, _meta, _| {
             }
         }
 
-        // Pour les déploiements, on force l'absence de "to"
         if is_deployment {
             tx_obj.remove("to");
-            println!("→ Détection déploiement (to absent)");
-        } else {
-            println!("→ Transaction appel (to: {:?})", tx_obj.get("to"));
         }
 
-        // Appel à send_transaction avec l'objet reconstruit
         let tx_val = serde_json::Value::Object(tx_obj);
 
         match engine_platform.send_transaction(tx_val).await {
             Ok(tx_hash_returned) => {
-                println!("✅ Transaction traitée → hash retourné: {}", tx_hash_returned);
+                println!("✅ eth_sendRawTransaction traité → hash: {}", tx_hash_returned);
                 Ok(serde_json::json!(tx_hash_returned))
             }
-            Err(e) => {
-                eprintln!("❌ Erreur dans send_transaction: {}", e);
-                Err(jsonrpsee_types::error::ErrorObject::owned(
-                    ErrorCode::ServerError(-32000).code(),
-                    "Échec traitement transaction",
-                    Some(format!("{}", e)),
-                ))
-            }
+            Err(e) => Err(jsonrpsee_types::error::ErrorObject::owned(
+                ErrorCode::ServerError(-32000).code(),
+                "Échec traitement raw transaction",
+                Some(format!("{}", e)),
+            )),
         }
     }
 }).expect("Failed to register eth_sendRawTransaction method");
