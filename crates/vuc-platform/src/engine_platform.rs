@@ -881,6 +881,81 @@ pub async fn get_account_balance(&self, address: &str) -> Result<U256, String> {
         }))
     }
 }
+	/// ✅ EXTRACTION GÉNÉRIQUE DES EMIT SOLIDITY (tous les events, tous les contrats)
+    pub fn extract_emits_from_0xf3_response(&self, vm_result: &serde_json::Value) -> Vec<serde_json::Value> {
+        let mut logs: Vec<serde_json::Value> = vec![];
+
+        // Priorité 1 : logs déjà fournis par le VM
+        if let Some(log_array) = vm_result.get("logs")
+            .or_else(|| vm_result.get("events"))
+            .or_else(|| vm_result.get("emitted"))
+            .and_then(|v| v.as_array())
+        {
+            logs = log_array.clone();
+            if !logs.is_empty() {
+                println!("✅ [EMIT GENERIC] {} log(s) déjà présents dans la réponse VM", logs.len());
+            }
+            return logs;
+        }
+
+        // Priorité 2 : extraction depuis le payload après le dernier 0xf3
+        let return_data = vm_result
+            .get("returnData")
+            .or_else(|| vm_result.get("return"))
+            .or_else(|| vm_result.get("result"))
+            .or_else(|| vm_result.get("data"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        if !return_data.starts_with("0x") || return_data.len() < 10 {
+            return logs;
+        }
+
+        let bytes = match hex::decode(&return_data[2..]) {
+            Ok(b) => b,
+            Err(_) => return logs,
+        };
+
+        if let Some(f3_pos) = bytes.windows(1).rposition(|w| w[0] == 0xf3) {
+            let mut after_return = &bytes[f3_pos + 1..];
+
+            if !after_return.is_empty() && after_return[0] == 0xfe {
+                after_return = &after_return[1..];
+            }
+
+            if after_return.len() > 64 {
+                println!("🔍 [EMIT GENERIC] Payload après 0xf3 détecté ({} bytes) → recherche topics", after_return.len());
+
+                let mut i = 0;
+                while i + 32 <= after_return.len() {
+                    let candidate = &after_return[i..i + 32];
+
+                    if candidate.iter().any(|&b| b != 0) {
+                        let log_entry = serde_json::json!({
+                            "address": "0x0000000000000000000000000000000000000000",
+                            "topics": [format!("0x{}", hex::encode(candidate))],
+                            "data": "0x",
+                            "logIndex": format!("0x{:x}", logs.len()),
+                            "transactionIndex": "0x0",
+                            "blockNumber": "0x1",
+                            "blockHash": "0x0"
+                        });
+
+                        logs.push(log_entry);
+                        i += 32;
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+        }
+
+        if !logs.is_empty() {
+            println!("✅ [EMIT GENERIC] {} log(s) extrait(s) depuis le payload après 0xf3", logs.len());
+        }
+
+        logs
+	}
 
     /// ✅ AJOUT: Méthode manquante get_ledger_info
     pub async fn get_ledger_info(&self) -> Result<serde_json::Value, String> {
@@ -1976,10 +2051,27 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         }
     }
 
-    // Construction receipt enrichie
+    // ─── EXTRACTION GÉNÉRIQUE DES EMIT SOLIDITY (tous les contrats) ───
+    let logs = if let Ok(result) = {
+        let mut vm_sim = self.vm.write().await;
+        vm_sim.execute_module(
+            &if is_deployment { &contract_address } else { &to_addr },
+            if is_deployment { "constructor" } else { "fallback" },
+            vec![],
+            Some(&from_addr),
+            Some(&calldata_bytes)
+        ).await
+    } {
+        self.extract_emits_from_0xf3_response(&result)
+    } else {
+        vec![]
+    };
+
+    let logs_bloom = self.compute_logs_bloom(&logs);
+
+    // Construction receipt
     let (current_block_number, current_block_hash) = self.get_latest_block_info().await;
 
-    let mut receipts = self.tx_receipts.write().await;
     let receipt = serde_json::json!({
         "blockHash": current_block_hash,
         "blockNumber": format!("0x{:x}", current_block_number),
@@ -1990,14 +2082,16 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         "status": "0x1",
         "gasUsed": format!("0x{:x}", estimated_gas),
         "effectiveGasPrice": format!("0x{:x}", gas_price),
-        "logs": [],
-        "logsBloom": "0x".to_owned() + &"00".repeat(256),
+        "logs": logs,
+        "logsBloom": logs_bloom,
         "transactionIndex": "0x0",
         "type": "0x2",
         "nonce": format!("0x{:x}", final_nonce),
-        "value": format!("0x{:x}", value)
+        "value": format!("0x{:x}", value),
+        "cumulativeGasUsed": format!("0x{:x}", estimated_gas),
+        "blobGasUsed": "0x0",
+        "blobGasPrice": "0x0"
     });
-
     receipts.insert(normalized_hash.clone(), receipt.clone());
 
     let tx_hash_padded = pad_hash_64(&normalized_hash);
