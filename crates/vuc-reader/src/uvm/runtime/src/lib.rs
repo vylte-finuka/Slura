@@ -34,9 +34,11 @@ extern crate cranelift_native;
 
 use crate::lib::*;
 use byteorder::{ByteOrder, LittleEndian};
-use hashbrown::HashMap as HashBrownMap;
 use core::ops::Range;
+use hashbrown::HashMap as HashBrownMap;
 use stack::{StackUsage, StackVerifier};
+use std::sync::Arc;
+use vuc_storage::storing_access::RocksDBManager;
 
 mod asm_parser;
 pub mod assembler;
@@ -72,6 +74,7 @@ pub mod lib {
     pub use self::core::mem::ManuallyDrop;
     pub use self::core::ptr;
     pub use hashbrown::{HashMap, HashSet};
+    pub use vuc_storage::storing_access::RocksDBManagerImpl;
 
     #[cfg(feature = "std")]
     pub use std::println;
@@ -127,7 +130,8 @@ pub mod lib {
 pub type Verifier = fn(prog: &[u8]) -> Result<(), Error>;
 
 /// eBPF helper function.
-pub type Helper = Box<dyn Fn(u64, u64, u64, u64, u64, u64, u64) -> u64 + std::marker::Send + Sync + 'static>;
+pub type Helper =
+    Box<dyn Fn(u64, u64, u64, u64, u64, u64, u64) -> u64 + std::marker::Send + Sync + 'static>;
 
 /// eBPF stack usage calculator function.
 pub type StackUsageCalculator = fn(prog: &[u8], pc: usize, data: &mut dyn Any) -> u16;
@@ -228,7 +232,7 @@ impl UbfContext {
     pub fn new_secure() -> Self {
         UbfContext {
             meta: Vec::new(),
-            permissions: 0xFF, // All permissions by default
+            permissions: 0xFF,                   // All permissions by default
             limits: [1000000, 1000000, 1000000], // Default limits
             signature: Vec::new(),
         }
@@ -288,7 +292,7 @@ impl Default for UbfContext {
 
 // ✅ AJOUT: Implémentation Debug pour UbfContext (utile pour le debugging)
 impl std::fmt::Debug for UbfContext {
-    fn fmt(& self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("UbfContext")
             .field("meta_len", &self.meta.len())
             .field("permissions", &format!("0x{:02x}", self.permissions))
@@ -502,55 +506,74 @@ impl<'a> EbpfVmMbuff<'a> {
     /// # #[cfg(feature = "std")]
     /// vm.register_helper(6, helpers::bpf_trace_printf).unwrap();
     /// ```
-    
+
     pub fn load_ubf_context(file: &[u8]) -> Result<UbfContext, String> {
-    let elf = goblin::elf::Elf::parse(file).map_err(|e| format!("Erreur parsing ELF: {}", e))?;
+        let elf =
+            goblin::elf::Elf::parse(file).map_err(|e| format!("Erreur parsing ELF: {}", e))?;
 
-    // Vérification de la section .ubf_meta
-    let meta_section = elf.section_headers.iter()
-        .find(|sh| match elf.shdr_strtab.get(sh.sh_name) {
-            Some(Ok(name)) => name == ".ubf_meta",
-            _ => false,
-        })
-        .ok_or("Section .ubf_meta non trouvée")?;
-    let meta = file[meta_section.sh_offset as usize..meta_section.sh_offset as usize + meta_section.sh_size as usize].to_vec();
+        // Vérification de la section .ubf_meta
+        let meta_section = elf
+            .section_headers
+            .iter()
+            .find(|sh| match elf.shdr_strtab.get(sh.sh_name) {
+                Some(Ok(name)) => name == ".ubf_meta",
+                _ => false,
+            })
+            .ok_or("Section .ubf_meta non trouvée")?;
+        let meta = file[meta_section.sh_offset as usize
+            ..meta_section.sh_offset as usize + meta_section.sh_size as usize]
+            .to_vec();
 
-    // Vérification de la section .ubf_perm
-    let perm_section = elf.section_headers.iter()
-        .find(|sh| match elf.shdr_strtab.get(sh.sh_name) {
-            Some(Ok(name)) => name == ".ubf_perm",
-            _ => false,
-        })
-        .ok_or("Section .ubf_perm non trouvée")?;
-    let permissions = file[perm_section.sh_offset as usize];
+        // Vérification de la section .ubf_perm
+        let perm_section = elf
+            .section_headers
+            .iter()
+            .find(|sh| match elf.shdr_strtab.get(sh.sh_name) {
+                Some(Ok(name)) => name == ".ubf_perm",
+                _ => false,
+            })
+            .ok_or("Section .ubf_perm non trouvée")?;
+        let permissions = file[perm_section.sh_offset as usize];
 
-    // Vérification de la section .ubf_limits
-    let limits_section = elf.section_headers.iter()
-        .find(|sh| match elf.shdr_strtab.get(sh.sh_name) {
-            Some(Ok(name)) => name == ".ubf_limits",
-            _ => false,
+        // Vérification de la section .ubf_limits
+        let limits_section = elf
+            .section_headers
+            .iter()
+            .find(|sh| match elf.shdr_strtab.get(sh.sh_name) {
+                Some(Ok(name)) => name == ".ubf_limits",
+                _ => false,
+            })
+            .ok_or("Section .ubf_limits non trouvée")?;
+        let limits_bytes =
+            &file[limits_section.sh_offset as usize..limits_section.sh_offset as usize + 12];
+        let mut limits = [0u32; 3];
+        for (i, chunk) in limits_bytes.chunks(4).enumerate() {
+            limits[i] = LittleEndian::read_u32(chunk);
+        }
+
+        // Vérification de la section .ubf_sign
+        let sign_section = elf
+            .section_headers
+            .iter()
+            .find(|sh| match elf.shdr_strtab.get(sh.sh_name) {
+                Some(Ok(name)) => name == ".ubf_sign",
+                _ => false,
+            })
+            .ok_or("Section .ubf_sign non trouvée")?;
+        let signature = file[sign_section.sh_offset as usize
+            ..sign_section.sh_offset as usize + sign_section.sh_size as usize]
+            .to_vec();
+
+        // TODO: Vérification cryptographique réelle de la signature ici
+        // if !verify_signature(&meta, &signature) { return Err("Signature invalide".to_string()); }
+
+        Ok(UbfContext {
+            meta,
+            permissions,
+            limits,
+            signature,
         })
-        .ok_or("Section .ubf_limits non trouvée")?;
-    let limits_bytes = &file[limits_section.sh_offset as usize..limits_section.sh_offset as usize + 12];
-    let mut limits = [0u32; 3];
-    for (i, chunk) in limits_bytes.chunks(4).enumerate() {
-        limits[i] = LittleEndian::read_u32(chunk);
     }
-
-    // Vérification de la section .ubf_sign
-    let sign_section = elf.section_headers.iter()
-        .find(|sh| match elf.shdr_strtab.get(sh.sh_name) {
-            Some(Ok(name)) => name == ".ubf_sign",
-            _ => false,
-        })
-        .ok_or("Section .ubf_sign non trouvée")?;
-    let signature = file[sign_section.sh_offset as usize..sign_section.sh_offset as usize + sign_section.sh_size as usize].to_vec();
-
-    // TODO: Vérification cryptographique réelle de la signature ici
-    // if !verify_signature(&meta, &signature) { return Err("Signature invalide".to_string()); }
-
-    Ok(UbfContext { meta, permissions, limits, signature })
-}
 
     pub fn register_helper(&mut self, key: u32, function: Helper) -> Result<(), Error> {
         self.helpers.insert(key, function);
@@ -629,66 +652,78 @@ impl<'a> EbpfVmMbuff<'a> {
     /// let res = vm.execute_program(mem, &mut mbuff).unwrap();
     /// assert_eq!(res, 0x2211);
     /// ```
-pub fn execute_ubf_program_secure(
-    &mut self,
-    ulbf_elf: &[u8],
-    mem: &[u8],
-    mbuff: &[u8],
-    stack_usage: Option<&StackUsage>,
-    interpreter_args: Option<&interpreter::InterpreterArgs>,
-    initial_storage: Option<hashbrown::HashMap<String, hashbrown::HashMap<String, Vec<u8>>>>, // <-- AJOUT
-) -> Result<serde_json::Value, Error> {
-    // 1. Parse ELF ulBF (utilise goblin ou équivalent)
-    let elf = goblin::elf::Elf::parse(ulbf_elf)
-        .map_err(|e| Error::new(ErrorKind::Other, format!("Erreur parsing ELF ulBF: {}", e)))?;
+    pub fn execute_ubf_program_secure(
+        &mut self,
+        ulbf_elf: &[u8],
+        mem: &[u8],
+        mbuff: &[u8],
+        stack_usage: Option<&StackUsage>,
+        interpreter_args: Option<&interpreter::InterpreterArgs>,
+        initial_storage: Option<hashbrown::HashMap<String, hashbrown::HashMap<String, Vec<u8>>>>, // <-- AJOUT
+    ) -> Result<serde_json::Value, Error> {
+        // 1. Parse ELF ulBF (utilise goblin ou équivalent)
+        let elf = goblin::elf::Elf::parse(ulbf_elf)
+            .map_err(|e| Error::new(ErrorKind::Other, format!("Erreur parsing ELF ulBF: {}", e)))?;
 
-    // 2. Récupère la section .text (bytecode ulBPF)
-    let text_section = elf.section_headers.iter()
-        .find(|sh| elf.shdr_strtab.get(sh.sh_name).expect("REASON").ok().map(|s| s == ".text").unwrap_or(false))
-        .ok_or_else(|| Error::new(ErrorKind::Other, "Section .text non trouvée dans ulBF"))?;
-    let prog = &ulbf_elf[text_section.sh_offset as usize
-        ..text_section.sh_offset as usize + text_section.sh_size as usize];
+        // 2. Récupère la section .text (bytecode ulBPF)
+        let text_section = elf
+            .section_headers
+            .iter()
+            .find(|sh| {
+                elf.shdr_strtab
+                    .get(sh.sh_name)
+                    .expect("REASON")
+                    .ok()
+                    .map(|s| s == ".text")
+                    .unwrap_or(false)
+            })
+            .ok_or_else(|| Error::new(ErrorKind::Other, "Section .text non trouvée dans ulBF"))?;
+        let prog = &ulbf_elf[text_section.sh_offset as usize
+            ..text_section.sh_offset as usize + text_section.sh_size as usize];
 
-    // ✅ MODIFICATION: Arguments dynamiques ou par défaut
-    let default_args = interpreter::InterpreterArgs {
-        function_name: "execute".to_string(),
-        contract_address: "*default*#contract#address#".to_string(),
-        sender_address: "*sender*#default#address#".to_string(),
-        args: vec![],
-        state_data: vec![0; 1024],
-        gas_limit: U256::from(1000000),
-        gas_price: U256::from(1),
-        value: U256::from(0),
-        call_depth: U256::from(0),
-        block_number: U256::from(1),
-        timestamp: U256::from(0),
-        caller: "*default*#caller#address#".to_string(),
-        origin: "*default*#origin#address#".to_string(),
-        beneficiary: "*default*#beneficiary#address#".to_string(),
-        function_offset: None,
-        base_fee: Some(U256::from(0u64)), // Option<u64>
-        blob_base_fee: Some(U256::from(0u64)), // Option<U256>
-        blob_hash: Some([0u8; 32]), // Option<[u8; 32]>
-    };
+        // ✅ MODIFICATION: Arguments dynamiques ou par défaut
+        let default_args = interpreter::InterpreterArgs {
+            function_name: "execute".to_string(),
+            contract_address: "*default*#contract#address#".to_string(),
+            sender_address: "*sender*#default#address#".to_string(),
+            args: vec![],
+            state_data: vec![0; 1024],
+            gas_limit: U256::from(1000000),
+            gas_price: U256::from(1),
+            value: U256::from(0),
+            call_depth: U256::from(0),
+            block_number: U256::from(1),
+            timestamp: U256::from(0),
+            caller: "*default*#caller#address#".to_string(),
+            origin: "*default*#origin#address#".to_string(),
+            beneficiary: "*default*#beneficiary#address#".to_string(),
+            function_offset: None,
+            base_fee: Some(U256::from(0u64)),      // Option<u64>
+            blob_base_fee: Some(U256::from(0u64)), // Option<U256>
+            blob_hash: Some([0u8; 32]),            // Option<[u8; 32]>
+        };
 
-    let args = interpreter_args.unwrap_or(&default_args);
+        let storage_manager: Option<Arc<dyn RocksDBManager>> = None; // <-- AJOUT: Gestionnaire de stockage (peut être passé en argument)
 
-    // ✅ CORRECTION: Appel avec la signature correcte selon interpreter.rs
-    let result = interpreter::execute_program(
-        Some(prog),
-        stack_usage.or(self.stack_usage.as_ref()),
-        mem,
-        mbuff,
-        &mut self.helpers,
-        &self.allowed_memory,
-        Some("json"),
-        &hashbrown::HashMap::new(),
-        args,
-        initial_storage,
-    )?;
+        let args = interpreter_args.unwrap_or(&default_args);
 
-    Ok(result)
-}
+        // ✅ CORRECTION: Appel avec la signature correcte selon interpreter.rs
+        let result = interpreter::execute_program(
+            Some(prog),
+            stack_usage.or(self.stack_usage.as_ref()),
+            mem,
+            mbuff,
+            &mut self.helpers,
+            &self.allowed_memory,
+            Some("json"),
+            &hashbrown::HashMap::new(),
+            args,
+            storage_manager,
+            initial_storage,
+        )?;
+
+        Ok(result)
+    }
     /// JIT-compile the loaded program. No argument required for this.
     ///
     /// If using helper functions, be sure to register them into the VM before calling this
@@ -1227,7 +1262,9 @@ impl<'a> EbpfVmFixedMbuff<'a> {
     pub fn register_helper(
         &mut self,
         key: u32,
-        function: Box<dyn Fn(u64, u64, u64, u64, u64, u64, u64) -> u64 + std::marker::Send + Sync + 'static>,
+        function: Box<
+            dyn Fn(u64, u64, u64, u64, u64, u64, u64) -> u64 + std::marker::Send + Sync + 'static,
+        >,
     ) -> Result<(), Error> {
         self.parent.register_helper(key, function)
     }
@@ -1321,8 +1358,18 @@ impl<'a> EbpfVmFixedMbuff<'a> {
         // If you want to use the loaded program as ELF, you need to pass it here.
         // For example, if self.parent.prog is Some(prog), use prog as ulbf_elf:
         match self.parent.prog {
-            Some(ulbf_elf) => self.parent.execute_ubf_program_secure(ulbf_elf, mem, &mut self.mbuff.buffer, None, None, initial_storage),
-            None => Err(Error::new(ErrorKind::Other, "No ELF buffer available for execution")),
+            Some(ulbf_elf) => self.parent.execute_ubf_program_secure(
+                ulbf_elf,
+                mem,
+                &mut self.mbuff.buffer,
+                None,
+                None,
+                initial_storage,
+            ),
+            None => Err(Error::new(
+                ErrorKind::Other,
+                "No ELF buffer available for execution",
+            )),
         }
     }
 
@@ -1360,7 +1407,12 @@ impl<'a> EbpfVmFixedMbuff<'a> {
         };
         #[cfg(feature = "std")]
         {
-            self.parent.jit = Some(jit::JitMemory::new(prog, &mut self.parent.helpers, true, true)?);
+            self.parent.jit = Some(jit::JitMemory::new(
+                prog,
+                &mut self.parent.helpers,
+                true,
+                true,
+            )?);
         }
         #[cfg(not(feature = "std"))]
         {
@@ -1784,7 +1836,9 @@ impl<'a> EbpfVmRaw<'a> {
     pub fn register_helper(
         &mut self,
         key: u32,
-        function: Box<dyn Fn(u64, u64, u64, u64, u64, u64, u64) -> u64 + std::marker::Send + Sync + 'static>,
+        function: Box<
+            dyn Fn(u64, u64, u64, u64, u64, u64, u64) -> u64 + std::marker::Send + Sync + 'static,
+        >,
     ) -> Result<(), Error> {
         self.parent.register_helper(key, function)
     }
@@ -1853,10 +1907,20 @@ impl<'a> EbpfVmRaw<'a> {
     ) -> Result<serde_json::Value, Error> {
         /// Allow clippy false positive for enum variant None
         #[allow(non_snake_case)]
-                match self.parent.prog {
-                    Some(ulbf_elf) => self.parent.execute_ubf_program_secure(ulbf_elf, mem, &[], None, None, initial_storage),
-                    None => Err(Error::new(ErrorKind::Other, "No ELF buffer available for execution")),
-                }
+        match self.parent.prog {
+            Some(ulbf_elf) => self.parent.execute_ubf_program_secure(
+                ulbf_elf,
+                mem,
+                &[],
+                None,
+                None,
+                initial_storage,
+            ),
+            None => Err(Error::new(
+                ErrorKind::Other,
+                "No ELF buffer available for execution",
+            )),
+        }
     }
 
     /// JIT-compile the loaded program. No argument required for this.
@@ -2247,7 +2311,9 @@ impl<'a> EbpfVmNoData<'a> {
     pub fn register_helper(
         &mut self,
         key: u32,
-        function: Box<dyn Fn(u64, u64, u64, u64, u64, u64, u64) -> u64 + std::marker::Send + Sync + 'static>,
+        function: Box<
+            dyn Fn(u64, u64, u64, u64, u64, u64, u64) -> u64 + std::marker::Send + Sync + 'static,
+        >,
     ) -> Result<(), Error> {
         self.parent.register_helper(key, function)
     }

@@ -40,6 +40,7 @@ cranelift-frontend = { version = "0.99", optional = true }
 cranelift-jit = { version = "0.99", optional = true }
 cranelift-native = { version = "0.99", optional = true }
 cranelift-module = { version = "0.99", optional = true }
+chrono.workspace = true
 hashbrown = { version = "0.15", features = ["serde"] }
 sha3.workspace = true
 hex.workspace = true
@@ -49,6 +50,7 @@ tracing.workspace = true
 primitive-types = { workspace = true }
 goblin = "0.10.4"
 tiny-keccak = "2.0.2"
+vuc-storage = { version = "0.1.0", path = "../../../../vuc-storage" }
 
 [dev-dependencies]
 libc = { version = "0.2" }

@@ -1608,8 +1608,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     let is_deployment = to_addr.is_empty() ||
                        to_addr == "0x" ||
                        tx_params.get("to").is_none() ||
-                       tx_params.get("to") == Some(&serde_json::Value::Null) ||
-                       tx_params.get("to") == Some(&serde_json::Value::String("0x4af63f02".to_string()));
+                       tx_params.get("to") == Some(&serde_json::Value::Null);
 
     // Valeur envoyée (u128)
     let value = tx_params.get("value")
@@ -3685,7 +3684,7 @@ module.register_async_method("eth_getCode", move |params, _meta, _| {
         use tokio::time::timeout;
         use std::time::Duration;
 
-        println!("➡️ eth_getCode appelé avec params: {:?}", params); // LOG
+        println!("➡️ eth_getCode appelé avec params: {:?}", params);
 
         let params_array: Vec<serde_json::Value> = match params.parse() {
             Ok(p) => p,
@@ -3697,38 +3696,88 @@ module.register_async_method("eth_getCode", move |params, _meta, _| {
                 ));
             }
         };
-        let address = params_array.get(0).and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
-        println!("➡️ eth_getCode address: {}", address); // LOG
 
-        // Timeout sur la lecture VM
-        let code_opt = match timeout(Duration::from_secs(20), async {
+        let address = params_array.get(0)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_lowercase()
+            .trim_start_matches("0x")
+            .to_string();
+
+        let full_address = format!("0x{}", address);
+        println!("➡️ eth_getCode address: {}", full_address);
+
+        // Timeout de sécurité
+        let code_opt = match timeout(Duration::from_secs(15), async {
             let vm = engine_platform.vm.read().await;
             let accounts = vm.state.accounts.read().await;
-            accounts.get(&address).map(|account| account.contract_state.clone())
+
+            // 1. Recherche directe dans la mémoire VM
+            if let Some(account) = accounts.get(&full_address) {
+                if !account.contract_state.is_empty() {
+                    return Some(account.contract_state.clone());
+                }
+            }
+            None
         }).await {
             Ok(result) => result,
             Err(_) => {
-                println!("⏰ Timeout eth_getCode pour address: {}", address);
+                println!("⏰ Timeout eth_getCode pour {}", full_address);
                 return Err(jsonrpsee_types::error::ErrorObject::owned(
                     ErrorCode::ServerError(-32002).code(),
-                    "Timeout VM (plus de 20 secondes)",
-                    Some("La VM est trop lente ou bloquée".to_string()),
+                    "Timeout VM",
+                    Some("La VM est trop lente".to_string()),
                 ));
             }
         };
 
+        // ====================== FALLBACK ROCKSDB (LE PLUS IMPORTANT) ======================
+        if code_opt.is_none() || code_opt.as_ref().map_or(true, |c| c.is_empty()) {
+            println!("🔍 [eth_getCode] Pas trouvé en mémoire → fallback RocksDB");
+
+            if let Some(storage_manager) = engine_platform.vm.read().await.storage_manager.clone() {
+                // Clé principale écrite par CREATE2
+                let contract_state_key = format!("account:{}:contract_state", full_address);
+                match storage_manager.read(&contract_state_key) {
+                    Ok(bytecode) if !bytecode.is_empty() => {
+                        println!("✅ [ROCKSDB] Bytecode trouvé pour {} ({} bytes)", full_address, bytecode.len());
+                        return Ok(serde_json::json!(format!("0x{}", hex::encode(&bytecode))));
+                    }
+                    _ => {}
+                }
+
+                // Fallback clé simple
+                let simple_key = format!("account:{}", full_address);
+                if let Ok(data) = storage_manager.read(&simple_key) {
+                    if let Ok(json_val) = serde_json::from_slice::<serde_json::Value>(&data) {
+                        if let Some(code) = json_val.get("contract_state")
+                            .or_else(|| json_val.get("bytecode"))
+                            .and_then(|v| v.as_str())
+                        {
+                            let clean_code = code.trim_start_matches("0x");
+                            if !clean_code.is_empty() {
+                                println!("✅ [ROCKSDB fallback] Bytecode trouvé via métadonnées");
+                                return Ok(serde_json::json!(format!("0x{}", clean_code)));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ====================== RÉSULTAT FINAL ======================
         let code_hex = match code_opt {
-            Some(ref code) if !code.is_empty() => {
-                println!("🟢 [eth_getCode] Bytecode trouvé pour {} : {} octets, hex: {}...", address, code.len(), hex::encode(&code[..std::cmp::min(16, code.len())]));
-                format!("0x{}", hex::encode(code))
-            },
+            Some(code) if !code.is_empty() => {
+                println!("🟢 [eth_getCode] Bytecode trouvé en mémoire pour {} : {} octets", full_address, code.len());
+                format!("0x{}", hex::encode(&code))
+            }
             _ => {
-                println!("🔴 [eth_getCode] Aucun bytecode pour {}", address);
+                println!("🔴 [eth_getCode] Aucun bytecode trouvé pour {}", full_address);
                 "0x".to_string()
             }
         };
 
-        println!("➡️ eth_getCode retourne: {}", code_hex); // LOG
+        println!("➡️ eth_getCode retourne: {}... (tronqué)", &code_hex[..std::cmp::min(100, code_hex.len())]);
 
         Ok::<_, jsonrpsee_types::error::ErrorObject>(serde_json::json!(code_hex))
     }

@@ -6,6 +6,7 @@
 use crate::ebpf;
 use crate::lib::*;
 use crate::stack::StackUsage;
+use chrono;
 use core::ops::Range;
 use hashbrown::HashSet;
 use primitive_types::U256 as u256;
@@ -14,8 +15,10 @@ use serde_json::Value as JsonValue;
 use sha3::{Digest, Keccak256};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::sync::LazyLock;
 use tracing::{info, warn};
+use vuc_storage::storing_access::RocksDBManager;
 
 #[derive(Clone, Debug)]
 pub struct BlockInfo {
@@ -234,6 +237,7 @@ pub struct UvmExecutionContext {
     pub free_memory_pointer: usize,
     pub call_stack: Vec<CallFrame>,
     pub in_internal_call: bool,
+    pub storage_manager: Option<Arc<dyn RocksDBManager>>,
 
     // ──────────────────────────────── AJOUT PRODUCTION ────────────────────────────────
     pub ss7_pending_response: Option<Vec<u8>>, // réponse SS7 simulée ou reçue via oracle
@@ -910,6 +914,7 @@ pub fn execute_program(
     ret_type: Option<&str>,
     exports: &HashMap<u32, usize>,
     interpreter_args: &InterpreterArgs,
+    storage_manager: Option<Arc<dyn RocksDBManager>>,
     initial_storage: Option<HashMap<String, HashMap<String, Vec<u8>>>>,
 ) -> Result<serde_json::Value, Error> {
     const U32MAX: u256 = u256([u32::MAX as u64, 0, 0, 0]);
@@ -1083,6 +1088,7 @@ pub fn execute_program(
         gas_remaining: interpreter_args.gas_limit,
         logs: vec![],
         return_data: vec![],
+        storage_manager,
         free_memory_pointer: 0x80, // Solidity >= 0.8
         call_stack: vec![],
         in_internal_call: false,
@@ -2303,50 +2309,70 @@ pub fn execute_program(
             }
 
             //___ 0xf0 CREATE - DÉPLOIEMENT DE CONTRAT
-           0xf0 => {
-    if evm_stack.len() < 3 {
-        return Ok(halt_json_ebpf("Stack underflow on CREATE"));
-    }
+            0xf0 => {
+                if evm_stack.len() < 3 {
+                    return Ok(halt_json_ebpf("Stack underflow on CREATE"));
+                }
 
-    let value = evm_stack.pop().unwrap();
-    let offset = evm_stack.pop().unwrap();
-    let size = evm_stack.pop().unwrap();
+                let value = evm_stack.pop().unwrap();
+                let offset = evm_stack.pop().unwrap();
+                let size = evm_stack.pop().unwrap();
 
-    let offset_usize = as_usize_or_fail(offset);
-    let size_usize = as_usize_or_fail(size);
+                let offset_usize = as_usize_or_fail(offset);
+                let size_usize = as_usize_or_fail(size);
 
-    if !resize_memory_ebpf(&mut global_mem, offset_usize, size_usize) {
-        return Ok(halt_json_ebpf("Memory resize failed on CREATE"));
-    }
+                if !resize_memory_ebpf(&mut global_mem, offset_usize, size_usize) {
+                    return Ok(halt_json_ebpf("Memory resize failed on CREATE"));
+                }
 
-    let init_code = memory_slice_len(&global_mem, offset_usize, size_usize).to_vec();
+                let init_code = memory_slice_len(&global_mem, offset_usize, size_usize).to_vec();
 
-    println!("🛠️ [CREATE] value={}, init_code_len={}", value, init_code.len());
+                println!(
+                    "🛠️ [CREATE] value={}, init_code_len={}",
+                    value,
+                    init_code.len()
+                );
 
-    // Adresse prédite (simulation simple mais cohérente)
-    let new_address = format!("0x{:040x}", execution_context.world_state.accounts.len() + 100);
+                // Adresse prédite (simulation simple mais cohérente)
+                let new_address = format!(
+                    "0x{:040x}",
+                    execution_context.world_state.accounts.len() + 100
+                );
 
-    // ✅ CAPTURE + PERSISTANCE RÉELLE DU BYTECODE
-    execution_context.world_state.code.insert(new_address.clone(), init_code.clone());
+                // ✅ CAPTURE + PERSISTANCE RÉELLE DU BYTECODE
+                execution_context
+                    .world_state
+                    .code
+                    .insert(new_address.clone(), init_code.clone());
 
-    let new_account = AccountState {
-        balance: value,
-        nonce: u256::one(),
-        code: init_code.clone(),           // bytecode complet
-        storage_root: String::new(),
-        is_contract: true,
-    };
+                let new_account = AccountState {
+                    balance: value,
+                    nonce: u256::one(),
+                    code: init_code.clone(), // bytecode complet
+                    storage_root: String::new(),
+                    is_contract: true,
+                };
 
-    execution_context.world_state.accounts.insert(new_address.clone(), new_account);
+                execution_context
+                    .world_state
+                    .accounts
+                    .insert(new_address.clone(), new_account);
 
-    // Persistance supplémentaire pour que eth_getCode le voie
-    println!("💾 [CREATE PERSIST] Contrat sauvegardé à {} ({} bytes)", new_address, init_code.len());
+                // Persistance supplémentaire pour que eth_getCode le voie
+                println!(
+                    "💾 [CREATE PERSIST] Contrat sauvegardé à {} ({} bytes)",
+                    new_address,
+                    init_code.len()
+                );
 
-    evm_stack.push(encode_address_to_u256(&new_address));
-    println!("✅ [CREATE] Nouveau contrat déployé et persistant à {}", new_address);
+                evm_stack.push(encode_address_to_u256(&new_address));
+                println!(
+                    "✅ [CREATE] Nouveau contrat déployé et persistant à {}",
+                    new_address
+                );
 
-    consume_gas_amount(&mut execution_context, 32000)?;
-}
+                consume_gas_amount(&mut execution_context, 32000)?;
+            }
 
             // 0xf1 CALL
             0xf1 => {
@@ -2492,59 +2518,106 @@ pub fn execute_program(
                 return Ok(result);
             }
 
-            //____ 0xf5 CREATE2
-           0xf5 => {
-    if evm_stack.len() < 4 {
-        return Ok(halt_json_ebpf("Stack underflow on CREATE2"));
-    }
+            //___ 0xf5 CREATE2
+            0xf5 => {
+                if evm_stack.len() < 4 {
+                    return Ok(halt_json_ebpf("Stack underflow on CREATE2"));
+                }
 
-    let value = evm_stack.pop().unwrap();
-    let offset = evm_stack.pop().unwrap();
-    let size = evm_stack.pop().unwrap();
-    let salt = evm_stack.pop().unwrap();
+                let value = evm_stack.pop().unwrap();
+                let offset = evm_stack.pop().unwrap();
+                let size = evm_stack.pop().unwrap();
+                let salt = evm_stack.pop().unwrap();
 
-    let offset_usize = as_usize_or_fail(offset);
-    let size_usize = as_usize_or_fail(size);
+                let offset_usize = as_usize_or_fail(offset);
+                let size_usize = as_usize_or_fail(size);
 
-    if !resize_memory_ebpf(&mut global_mem, offset_usize, size_usize) {
-        return Ok(halt_json_ebpf("Memory resize failed on CREATE2"));
-    }
+                if !resize_memory_ebpf(&mut global_mem, offset_usize, size_usize) {
+                    return Ok(halt_json_ebpf("Memory resize failed on CREATE2"));
+                }
 
-    let init_code = memory_slice_len(&global_mem, offset_usize, size_usize).to_vec();
+                let init_code = memory_slice_len(&global_mem, offset_usize, size_usize).to_vec();
 
-    println!("🛠️ [CREATE2] value={}, init_code_len={}, salt={:064x}", value, init_code.len(), salt);
+                println!(
+                    "🛠️ [CREATE2] value={}, init_code_len={}, salt={:064x}",
+                    value,
+                    init_code.len(),
+                    salt
+                );
 
-    // Calcul d'adresse CREATE2 (identique à EVM)
-    let mut hasher = Keccak256::new();
-    hasher.update(&[0xff]);
-    hasher.update(execution_context.world_state.accounts.keys().next().unwrap_or(&"".to_string()).as_bytes());
-    let mut salt_bytes = [0u8; 32];
-    salt.to_big_endian(&mut salt_bytes);
-    hasher.update(&salt_bytes);
-    hasher.update(&Keccak256::digest(&init_code));
-    let hash = hasher.finalize();
-    let new_address = format!("0x{}", hex::encode(&hash[12..32]));
+                // Calcul adresse CREATE2
+                let mut hasher = Keccak256::new();
+                hasher.update(&[0xff]);
+                let sender = interpreter_args.contract_address.clone();
+                hasher.update(sender.as_bytes());
 
-    // ✅ CAPTURE + PERSISTANCE RÉELLE
-    execution_context.world_state.code.insert(new_address.clone(), init_code.clone());
+                let mut salt_bytes = [0u8; 32];
+                salt.to_big_endian(&mut salt_bytes);
+                hasher.update(&salt_bytes);
+                hasher.update(&Keccak256::digest(&init_code));
 
-    let new_account = AccountState {
-        balance: value,
-        nonce: u256::one(),
-        code: init_code.clone(),
-        storage_root: String::new(),
-        is_contract: true,
-    };
+                let hash = hasher.finalize();
+                let new_address = format!("0x{}", hex::encode(&hash[12..32]));
 
-    execution_context.world_state.accounts.insert(new_address.clone(), new_account);
+                println!("✅ [CREATE2] Nouvelle adresse : {}", new_address);
 
-    println!("💾 [CREATE2 PERSIST] Contrat sauvegardé à {} ({} bytes)", new_address, init_code.len());
+                // ====================== PERSISTANCE ROCKSDB ======================
+                if let Some(storage_manager) = &execution_context.storage_manager {
+                    // Bytecode brut
+                    let contract_state_key = format!("account:{}:contract_state", new_address);
+                    if let Err(e) = storage_manager.write(&contract_state_key, &init_code) {
+                        eprintln!("❌ [CREATE2] Échec write bytecode : {}", e);
+                    } else {
+                        println!("💾 [ROCKSDB] Bytecode stocké → {}", contract_state_key);
+                    }
 
-    evm_stack.push(encode_address_to_u256(&new_address));
-    println!("✅ [CREATE2] Nouveau contrat déployé et persistant à {}", new_address);
+                    // Métadonnées compte
+                    let account_key = format!("account:{}", new_address);
+                    let account_json = serde_json::json!({
+                        "eth_address": new_address,
+                        "slu_zk_address": new_address,
+                        "balance": value.low_u64() as u128,
+                        "nonce": 1u64,
+                        "is_contract": true,
+                        "deployed_by": sender,
+                        "deployment_method": "create2",
+                        "saved_timestamp": chrono::Utc::now().timestamp()
+                    });
 
-    consume_gas_amount(&mut execution_context, 32000)?;
-}
+                    if let Ok(bytes) = serde_json::to_vec(&account_json) {
+                        let _ = storage_manager.write(&account_key, &bytes);
+                        println!("💾 [ROCKSDB] Métadonnées compte stockées → {}", account_key);
+                    }
+                } else {
+                    println!("⚠️ [CREATE2] Storage manager non disponible");
+                }
+                // ====================== FIN PERSISTANCE ======================
+
+                // Mise à jour mémoire
+                execution_context
+                    .world_state
+                    .code
+                    .insert(new_address.clone(), init_code.clone());
+
+                let new_account = AccountState {
+                    balance: value,
+                    nonce: u256::one(),
+                    code: init_code,
+                    storage_root: format!("storage_{}", new_address),
+                    is_contract: true,
+                };
+
+                execution_context
+                    .world_state
+                    .accounts
+                    .insert(new_address.clone(), new_account);
+
+                evm_stack.push(encode_address_to_u256(&new_address));
+
+                println!("✅ [CREATE2 PERSIST SUCCESS] Contrat à {}", new_address);
+
+                consume_gas_amount(&mut execution_context, 32000)?;
+            }
 
             // ___ 0xf9 TSTORE (EIP-1153 Transient Storage Store)
             0xf9 => {

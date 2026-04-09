@@ -2036,6 +2036,8 @@ impl SlurachainVm {
 
                 let mut helpers_guard = self.uvm_helpers.lock().await; // ← NOUVEAU
 
+                let storage_manager: Option<Arc<dyn RocksDBManager>> = None; // <-- AJOUT: Gestionnaire de stockage (peut être passé en argument)
+
                 uvm_runtime::interpreter::execute_program(
                     Some(&real_bytecode),
                     stack_usage,
@@ -2046,6 +2048,7 @@ impl SlurachainVm {
                     return_type,
                     &exports,
                     &interpreter_args,
+                    storage_manager,
                     Some(converted_storage),
                 )
                 .map_err(|e| e.to_string())
@@ -2132,6 +2135,7 @@ impl SlurachainVm {
                 return_type,
                 &exports,
                 &interpreter_args,
+                self.storage_manager.clone(),
                 Some(converted_storage),
             )
             .map_err(|e| e.to_string())
