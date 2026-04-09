@@ -1699,7 +1699,6 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     let mut vm = self.vm.write().await;
 
     let execution_result = if is_deployment {
-        // ... (ton code de déploiement reste inchangé) ...
         let use_create2 = tx_params.get("create2").and_then(|v| v.as_bool()).unwrap_or(false);
         let target_address = tx_params.get("target_address")
             .and_then(|v| v.as_str())
@@ -1713,7 +1712,6 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
                 return Err("CREATE2 demandé mais target_address manquant".to_string());
             }
         } else {
-            // ... ton code de génération d'adresse ...
             let mut addr_hasher = Keccak256::new();
             addr_hasher.update(from_addr.as_bytes());
             addr_hasher.update(&final_nonce.to_be_bytes());
@@ -1758,8 +1756,46 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         println!("   • Ethereum racine (EVM) : {}", contract_address);
         println!("   • SLU zk-print (quantique) : {}", slu_zk_contract_addr);
 
-        // ... reste de ton code de déploiement (insertion compte, persistance, execute_module) ...
-        // (je ne l'ai pas modifié car il n'y avait pas d'erreur ici)
+        {
+            let mut accounts = vm.state.accounts.write().await;
+
+            let mut account = accounts
+                .entry(contract_address.clone())
+                .or_insert_with(|| vuc_tx::slurachain_vm::AccountState {
+                    eth_address: contract_address.clone(),
+                    slu_zk_address: slu_zk_contract_addr.clone(),
+                    balance: value,
+                    contract_state: vec![],
+                    resources: {
+                        let mut r = BTreeMap::new();
+                        r.insert("constructor_pending".to_string(), serde_json::Value::Bool(true));
+                        r.insert("deployed_by".to_string(), serde_json::Value::String(from_addr.clone()));
+                        r.insert("eth_address".to_string(), serde_json::Value::String(contract_address.clone()));
+                        r.insert("slu_zk_address".to_string(), serde_json::Value::String(slu_zk_contract_addr.clone()));
+                        r.insert("deployment_tx".to_string(), serde_json::Value::String(normalized_hash.clone()));
+                        r
+                    },
+                    state_version: 1,
+                    last_block_number: 0,
+                    nonce: 0,
+                    code_hash: "".to_string(),
+                    storage_root: format!("storage_{}", contract_address),
+                    is_contract: true,
+                    gas_used: 0,
+                });
+
+            account.contract_state = creation_bytecode.clone();
+            account.is_contract = true;
+            account.eth_address = contract_address.clone();
+            account.slu_zk_address = slu_zk_contract_addr.clone();
+        }
+
+        if let Some(storage_manager) = &vm.storage_manager {
+            let contract_state_key = format!("account:{}:contract_state", contract_address);
+            let _ = storage_manager.write(&contract_state_key, &creation_bytecode);
+        }
+
+        println!("🚀 Exécution constructeur via execute_module → {}", contract_address);
 
         vm.execute_module(
             &contract_address,
@@ -1834,7 +1870,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         }
     }
 
-    // Logs du disburse (frais VEZ) - CORRIGÉ
+    // Logs du disburse (frais VEZ) - VERSION CORRIGÉE
     if !is_vez_initialization && gas_cost_wei > 0 {
         let from_addr_topic = format!(
             "0x{:0>64}",
@@ -1878,7 +1914,6 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         "value": format!("0x{:x}", value)
     });
 
-    // ====================== SAUVEGARDE ======================
     let mut receipts = self.tx_receipts.write().await;
     receipts.insert(normalized_hash.clone(), receipt.clone());
 
@@ -1901,7 +1936,6 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         println!("⚠️ Storage manager non disponible pour persistance des receipts");
     }
 
-    // Mise à jour nonce
     {
         let mut accounts = vm.state.accounts.write().await;
         if let Some(account) = accounts.get_mut(&from_addr) {
