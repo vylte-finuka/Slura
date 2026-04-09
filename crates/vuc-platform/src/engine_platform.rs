@@ -1647,6 +1647,13 @@ pub async fn verify_contract_deployment(&self, contract_address: &str) -> Result
             bloom[byte_pos / 8] |= 1 << (byte_pos % 8);
         }
 	}
+		
+    fn bloom_bits_from_hash(&self, bloom: &mut [u8; 256], hash: &[u8; 32]) {
+        for i in 0..3 {
+            let byte_pos = ((hash[i * 2] as usize) << 8 | hash[i * 2 + 1] as usize) % 2048;
+            bloom[byte_pos / 8] |= 1 << (byte_pos % 8);
+        }
+	}
 
 pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<String, String> {
     use sha3::{Digest, Keccak256};
@@ -2134,10 +2141,20 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         "blobGasUsed": "0x0",
         "blobGasPrice": "0x0"
     });
-    receipt.insert(normalized_hash.clone(), receipt.clone());
+    // Insertion du receipt dans la map en mémoire (tx_receipts)
+    {
+        let mut receipts = self.tx_receipts.write().await;
+        receipts.insert(normalized_hash.clone(), receipt.clone());
+        receipts.insert(tx_hash_padded.clone(), receipt.clone());
+	}
 
     let tx_hash_padded = pad_hash_64(&normalized_hash);
-    receipt.insert(tx_hash_padded.clone(), receipt.clone());
+    // Insertion du receipt dans la map en mémoire (tx_receipts)
+    {
+        let mut receipts = self.tx_receipts.write().await;
+        receipts.insert(normalized_hash.clone(), receipt.clone());
+        receipts.insert(tx_hash_padded.clone(), receipt.clone());
+	}
 
     // Persistance receipt dans RocksDB
     if let Some(storage_manager) = &self.vm.read().await.storage_manager {
