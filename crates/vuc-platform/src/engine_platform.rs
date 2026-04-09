@@ -1532,6 +1532,7 @@ pub async fn verify_contract_deployment(&self, contract_address: &str) -> Result
 
 pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<String, String> {
     use sha3::{Digest, Keccak256};
+    use ethers::types::U256;
 
     println!("➡️ [send_transaction] Transaction reçue : {:?}", tx_params);
 
@@ -1724,8 +1725,8 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
             let mut proposed = format!("0x{}", hex::encode(&addr_hash[12..32]).to_lowercase());
 
             {
-                let vm_read = self.vm.read().await;
-                let accounts = vm_read.state.accounts.read().await;
+                let vm = self.vm.read().await;
+                let accounts = vm.state.accounts.read().await;
                 let mut attempts: i32 = 0;
                 let mut final_addr = proposed.clone();
 
@@ -1755,6 +1756,8 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         println!("📦 Déploiement contrat → deux adresses générées :");
         println!("   • Ethereum racine (EVM) : {}", contract_address);
         println!("   • SLU zk-print (quantique) : {}", slu_zk_contract_addr);
+
+        let mut vm = self.vm.write().await;
 
         {
             let mut accounts = vm.state.accounts.write().await;
@@ -1797,30 +1800,119 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
 
         println!("🚀 Exécution constructeur via execute_module → {}", contract_address);
 
-        vm.execute_module(
+        let constructor = std::str::from_utf8(&creation_bytecode).unwrap_or("");
+
+        let deploy_result = vm.execute_module(
             &contract_address,
-            std::str::from_utf8(&creation_bytecode).unwrap_or("constructor"),
+            constructor,
             vec![],
             Some(&from_addr),
             Some(&constructor_calldata),
-        ).await
-    } else {
-        println!("→ Transaction normale (appel de fonction) sur {}", to_addr);
+        ).await;
 
-        let fn_name = if calldata_bytes.len() >= 4 {
-            format!("function_{:08x}", u32::from_be_bytes(calldata_bytes[0..4].try_into().unwrap_or([0; 4])))
-        } else {
-            "fallback".to_string()
+        let runtime_bytecode = match deploy_result {
+            Ok(value) => {
+                let mut candidate: Option<Vec<u8>> = None;
+
+                if let Some(obj) = value.as_object() {
+                    let priority = ["returnData", "return", "result", "data", "output", "value", "runtime", "code", "bytecode"];
+                    for key in priority {
+                        if let Some(v) = obj.get(key) {
+                            if let Some(s) = v.as_str() {
+                                if s.starts_with("0x") {
+                                    if let Ok(bytes) = hex::decode(&s[2..]) {
+                                        if bytes.len() > 32 && bytes.starts_with(&[0x60, 0x80, 0x60, 0x40]) {
+                                            candidate = Some(bytes);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if candidate.is_none() {
+                        for (_, val) in obj {
+                            if let Some(s) = val.as_str() {
+                                if s.starts_with("0x") {
+                                    if let Ok(bytes) = hex::decode(&s[2..]) {
+                                        if bytes.len() > 32 {
+                                            candidate = Some(bytes);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else if let Some(s) = value.as_str() {
+                    if s.starts_with("0x") {
+                        if let Ok(bytes) = hex::decode(&s[2..]) {
+                            if bytes.len() > 32 {
+                                candidate = Some(bytes);
+                            }
+                        }
+                    }
+                }
+
+                let mut runtime = candidate.unwrap_or_else(|| creation_bytecode.clone());
+
+                let markers: &[&[u8]] = &[b"a2646970667358221220", b"a165627a7a72305820", b"64736f6c634300"];
+
+                for marker in markers {
+                    if let Some(pos) = runtime.windows(marker.len()).rposition(|w| w == *marker) {
+                        runtime.truncate(pos);
+                    }
+                }
+
+                runtime
+            }
+            Err(e) => return Err(format!("Échec exécution constructor : {}", e)),
         };
 
-        vm.execute_module(
-            &to_addr,
-            &fn_name,
-            vec![],
-            Some(&from_addr),
-            Some(&calldata_bytes),
-        ).await
-    };
+        if !vm.modules.contains_key(&contract_address) {
+            let module = vuc_tx::slurachain_vm::Module {
+                name: "deployed".to_string(),
+                address: contract_address.clone(),
+                bytecode: runtime_bytecode.clone(),
+                elf_buffer: vec![],
+                context: uvm_runtime::UbfContext::new(),
+                stack_usage: None,
+                functions: hashbrown::HashMap::new(),
+                gas_estimates: hashbrown::HashMap::new(),
+                storage_layout: hashbrown::HashMap::new(),
+                events: vec![],
+                constructor_params: vec![],
+            };
+            vm.modules.insert(contract_address.clone(), module);
+        } else if let Some(m) = vm.modules.get_mut(&contract_address) {
+            m.bytecode = runtime_bytecode.clone();
+        }
+
+        {
+            let mut accounts = vm.state.accounts.write().await;
+            if let Some(acc) = accounts.get_mut(&contract_address) {
+                acc.is_contract = true;
+                acc.nonce = 1;
+                acc.contract_state = runtime_bytecode.clone();
+                acc.eth_address = contract_address.clone();
+                acc.slu_zk_address = slu_zk_contract_addr.clone();
+            }
+        }
+
+        if let Some(storage_manager) = &vm.storage_manager {
+            let key = format!("account:{}:contract_state", contract_address);
+            let _ = storage_manager.write(&key, &runtime_bytecode);
+        }
+
+        let _ = vm.auto_detect_contract_functions(&contract_address, &runtime_bytecode);
+
+        println!("✅ DÉPLOIEMENT + PERSISTANCE RÉUSSIE");
+        println!("   • Adresse Ethereum (racine) : {}", contract_address);
+        println!("   • Adresse SLU zk-print      : {}", slu_zk_contract_addr);
+        println!("   • TX Hash                   : {}", normalized_hash);
+    } else {
+        println!("→ Transaction normale (appel de fonction) sur {}", to_addr);
+    }
 
     // ====================== PAIEMENT DES FRAIS VIA DISBURSE ======================
     let disburse_success = if !is_vez_initialization && gas_cost_wei > 0 {
@@ -1828,13 +1920,16 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
 
         let disburse_args = vec![serde_json::Value::Number(serde_json::Number::from(gas_cost_wei))];
 
-        let disburse_result = vm.execute_module(
-            "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-            "function_1c61f62b",
-            disburse_args,
-            Some(&from_addr),
-            None
-        ).await;
+        let disburse_result = {
+            let mut vm_sim = self.vm.write().await;
+            vm_sim.execute_module(
+                &vez_addr,
+                "function_1c61f62b",
+                disburse_args,
+                Some(&from_addr),
+                None
+            ).await
+        };
 
         match disburse_result {
             Ok(_) => {
@@ -1870,7 +1965,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         }
     }
 
-    // Logs du disburse (frais VEZ) - VERSION CORRIGÉE
+    // Logs du disburse (frais VEZ)
     if !is_vez_initialization && gas_cost_wei > 0 {
         let from_addr_topic = format!(
             "0x{:0>64}",
@@ -1896,12 +1991,13 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     // ====================== CONSTRUCTION DU RECEIPT ======================
     let (current_block_number, current_block_hash) = self.get_latest_block_info().await;
 
+    let mut receipts = self.tx_receipts.write().await;
     let receipt = serde_json::json!({
         "blockHash": current_block_hash,
         "blockNumber": format!("0x{:x}", current_block_number),
         "contractAddress": if is_deployment { serde_json::Value::String(contract_address.clone()) } else { serde_json::Value::Null },
-        "from": from_addr.clone(),
-        "to": if is_deployment { serde_json::Value::Null } else { serde_json::Value::String(to_addr.clone()) },
+        "from": from_addr,
+        "to": if is_deployment { serde_json::Value::Null } else { serde_json::Value::String(to_addr) },
         "transactionHash": normalized_hash.clone(),
         "status": "0x1",
         "gasUsed": format!("0x{:x}", estimated_gas),
@@ -1914,13 +2010,12 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         "value": format!("0x{:x}", value)
     });
 
-    let mut receipts = self.tx_receipts.write().await;
     receipts.insert(normalized_hash.clone(), receipt.clone());
 
     let tx_hash_padded = pad_hash_64(&normalized_hash);
     receipts.insert(tx_hash_padded.clone(), receipt.clone());
 
-    if let Some(storage_manager) = &vm.storage_manager {
+    if let Some(storage_manager) = &self.vm.read().await.storage_manager {
         let receipt_key = format!("receipt:{}", normalized_hash);
         if let Ok(receipt_bytes) = serde_json::to_vec(&receipt) {
             let _ = storage_manager.write(&receipt_key, &receipt_bytes);
@@ -5513,4 +5608,4 @@ fn pad_hash_64(hex: &str) -> String {
     // Enlève le préfixe "0x" si présent
     let hex = hex.strip_prefix("0x").unwrap_or(hex);
     format!("0x{:0>64}", hex)
-                        }
+}
