@@ -882,6 +882,7 @@ pub async fn get_account_balance(&self, address: &str) -> Result<U256, String> {
     }
 }
 	/// ✅ EXTRACTION GÉNÉRIQUE DES EMIT SOLIDITY (tous les events, tous les contrats)
+    /// Extraction générique des emit Solidity après 0xf3 (RETURN)
     pub fn extract_emits_from_0xf3_response(&self, vm_result: &serde_json::Value) -> Vec<serde_json::Value> {
         let mut logs: Vec<serde_json::Value> = vec![];
 
@@ -893,7 +894,7 @@ pub async fn get_account_balance(&self, address: &str) -> Result<U256, String> {
         {
             logs = log_array.clone();
             if !logs.is_empty() {
-                println!("✅ [EMIT GENERIC] {} log(s) déjà présents dans la réponse VM", logs.len());
+                println!("✅ [EMIT] {} log(s) déjà présents dans la réponse VM", logs.len());
             }
             return logs;
         }
@@ -924,7 +925,7 @@ pub async fn get_account_balance(&self, address: &str) -> Result<U256, String> {
             }
 
             if after_return.len() > 64 {
-                println!("🔍 [EMIT GENERIC] Payload après 0xf3 détecté ({} bytes) → recherche topics", after_return.len());
+                println!("🔍 [EMIT] Payload après 0xf3 détecté ({} bytes)", after_return.len());
 
                 let mut i = 0;
                 while i + 32 <= after_return.len() {
@@ -951,12 +952,12 @@ pub async fn get_account_balance(&self, address: &str) -> Result<U256, String> {
         }
 
         if !logs.is_empty() {
-            println!("✅ [EMIT GENERIC] {} log(s) extrait(s) depuis le payload après 0xf3", logs.len());
+            println!("✅ [EMIT] {} log(s) extrait(s) après 0xf3", logs.len());
         }
 
         logs
 	}
-
+	
     /// ✅ AJOUT: Méthode manquante get_ledger_info
     pub async fn get_ledger_info(&self) -> Result<serde_json::Value, String> {
         let vm = self.vm.read().await;
@@ -2051,11 +2052,11 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         }
     }
 
-    // ─── EXTRACTION GÉNÉRIQUE DES EMIT SOLIDITY (tous les contrats) ───
+    /// ─── EXTRACTION GÉNÉRIQUE DES EMIT SOLIDITY ───
     let logs = if let Ok(result) = {
         let mut vm_sim = self.vm.write().await;
         vm_sim.execute_module(
-            &if is_deployment { &contract_address } else { &to_addr },
+            if is_deployment { &contract_address } else { &to_addr },
             if is_deployment { "constructor" } else { "fallback" },
             vec![],
             Some(&from_addr),
@@ -2069,7 +2070,6 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
 
     let logs_bloom = self.compute_logs_bloom(&logs);
 
-    // Construction receipt
     let (current_block_number, current_block_hash) = self.get_latest_block_info().await;
 
     let receipt = serde_json::json!({
