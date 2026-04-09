@@ -1563,7 +1563,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
                 None
             }
         })
-        .unwrap_or(1);
+        .unwrap_or(1); // valeur par défaut minimale pour éviter 0
 
     let estimated_gas = tx_params.get("gas")
         .and_then(|v| {
@@ -1580,8 +1580,9 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
                 None
             }
         })
-        .unwrap_or(21000);
+        .unwrap_or(21000); // gas par défaut pour une transaction simple 
 
+    // Exception spéciale pour l'initialisation VEZ (mint initial) → pas de frais
     let is_vez_initialization = to_addr == "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" &&
         tx_params.get("data").and_then(|v| v.as_str()).unwrap_or("")
             .starts_with("0x40c10f1900000000000000000000000053ae54b11251d5003e9aa51422405bc35a2ef32d");
@@ -1590,8 +1591,10 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         println!("🆓 Transaction d'initialisation VEZ détectée → aucun disburse de frais");
     }
 
+    // Récupération du nonce actuel
     let current_account_nonce = self.get_transaction_count(&from_addr).await.unwrap_or(0);
 
+    // Nonce final (priorité au fourni s'il est plus grand)
     let final_nonce = tx_params.get("nonce")
         .and_then(|v| {
             if v.is_string() {
@@ -1610,11 +1613,13 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         .map(|provided_nonce| std::cmp::max(provided_nonce, current_account_nonce))
         .unwrap_or(current_account_nonce);
 
+    // Détection déploiement
     let is_deployment = to_addr.is_empty() ||
                        to_addr == "0x" ||
                        tx_params.get("to").is_none() ||
                        tx_params.get("to") == Some(&serde_json::Value::Null);
 
+    // Valeur envoyée (u128)
     let value = tx_params.get("value")
         .and_then(|v| {
             if v.is_string() {
@@ -1646,12 +1651,14 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         vec![]
     };
 
+    // Bytecode de création (uniquement pour déploiement)
     let creation_bytecode = if is_deployment && !data.is_empty() {
         calldata_bytes.clone()
     } else {
         vec![]
     };
 
+    // Calldata constructeur (vide par défaut)
     let constructor_calldata: Vec<u8> = vec![];
 
     if is_deployment && creation_bytecode.is_empty() {
@@ -1659,13 +1666,14 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     }
 
     let mut rlp_hasher = Keccak256::new();
+    
     rlp_hasher.update(&final_nonce.to_be_bytes());
-    rlp_hasher.update(&gas_price.to_be_bytes());
-    rlp_hasher.update(&(estimated_gas as u64).to_be_bytes());
+    rlp_hasher.update(&gas_price.to_be_bytes());           // gasPrice
+    rlp_hasher.update(&(estimated_gas as u64).to_be_bytes()); // gasLimit
     if !to_addr.is_empty() && to_addr != "0x" {
         rlp_hasher.update(&hex::decode(&to_addr[2..]).unwrap_or_default());
     } else {
-        rlp_hasher.update(&[] as &[u8]);
+        rlp_hasher.update(&[] as &[u8]); // to = null pour déploiement
     }
     rlp_hasher.update(&value.to_be_bytes());
     rlp_hasher.update(&calldata_bytes);
@@ -1678,6 +1686,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     let mut contract_address = String::new();
     let mut slu_zk_contract_addr = String::new();
 
+    // CALCUL DYNAMIQUE DES FRAIS DE GAS
     let gas_price = self.get_gas_price().await;
 
     let estimated_gas = if is_deployment {
@@ -1696,10 +1705,46 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     println!("   • Coût total          : {} wei VEZ (~{:.8} VEZ)", gas_cost_wei, gas_cost_wei as f64 / 1e18);
     println!("   • Type de tx          : {}", if is_deployment { "déploiement" } else { "appel/transfert" });
 
-    // ====================== EXÉCUTION DU CONTRAT ======================
-    let mut vm = self.vm.write().await;
+    // PAIEMENT DES FRAIS VIA DISBURSE
+    let vez_addr = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_string();
 
-    let execution_result = if is_deployment {
+    let disburse_success = if !is_vez_initialization && gas_cost_wei > 0 {
+        println!("🪙 Paiement des frais via disburse({}) depuis {}...", gas_cost_wei, from_addr);
+
+        let disburse_args = vec![serde_json::Value::Number(serde_json::Number::from(gas_cost_wei))];
+
+        let disburse_result = {
+            let mut vm_sim = self.vm.write().await;
+            vm_sim.execute_module(
+                &vez_addr,
+                "function_1c61f62b",
+                disburse_args,
+                Some(&from_addr),
+                None
+            ).await
+        };
+
+        match disburse_result {
+            Ok(_) => {
+                println!("✅ DISBURSE FRAIS RÉUSSI ! {} wei VEZ envoyés → burn 10% ({})", 
+                         gas_cost_wei, gas_cost_wei * 10 / 100);
+                true
+            }
+            Err(e) => {
+                println!("❌ ÉCHEC DISBURSE FRAIS : {}", e);
+                return Err(format!("Impossible de payer les frais via disburse : {}", e));
+            }
+        }
+    } else {
+        println!("ℹ️ Aucun disburse nécessaire (init VEZ ou gas_cost=0)");
+        true
+    };
+
+    if !disburse_success {
+        return Err("Paiement des frais refusé".to_string());
+    }
+
+    if is_deployment {
         let use_create2 = tx_params.get("create2").and_then(|v| v.as_bool()).unwrap_or(false);
         let target_address = tx_params.get("target_address")
             .and_then(|v| v.as_str())
@@ -1793,11 +1838,13 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
             account.slu_zk_address = slu_zk_contract_addr.clone();
         }
 
+        // Persistance immédiate du bytecode brut
         if let Some(storage_manager) = &vm.storage_manager {
             let contract_state_key = format!("account:{}:contract_state", contract_address);
             let _ = storage_manager.write(&contract_state_key, &creation_bytecode);
         }
 
+        // Exécution du constructeur
         println!("🚀 Exécution constructeur via execute_module → {}", contract_address);
 
         let constructor = std::str::from_utf8(&creation_bytecode).unwrap_or("");
@@ -1869,7 +1916,8 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
             Err(e) => return Err(format!("Échec exécution constructor : {}", e)),
         };
 
-        if !vm.modules.contains_key(&contract_address) {
+        // Mise à jour module
+     if !vm.modules.contains_key(&contract_address) {
             let module = vuc_tx::slurachain_vm::Module {
                 name: "deployed".to_string(),
                 address: contract_address.clone(),
@@ -1888,6 +1936,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
             m.bytecode = runtime_bytecode.clone();
         }
 
+        // Mise à jour compte final (runtime au lieu de creation)
         {
             let mut accounts = vm.state.accounts.write().await;
             if let Some(acc) = accounts.get_mut(&contract_address) {
@@ -1899,6 +1948,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
             }
         }
 
+        // Persistance runtime
         if let Some(storage_manager) = &vm.storage_manager {
             let key = format!("account:{}:contract_state", contract_address);
             let _ = storage_manager.write(&key, &runtime_bytecode);
@@ -1912,83 +1962,21 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         println!("   • TX Hash                   : {}", normalized_hash);
     } else {
         println!("→ Transaction normale (appel de fonction) sur {}", to_addr);
+        // Ton code pour les appels normaux peut être ajouté ici si nécessaire
     }
 
-    // ====================== PAIEMENT DES FRAIS VIA DISBURSE ======================
-    let disburse_success = if !is_vez_initialization && gas_cost_wei > 0 {
-        println!("🪙 Paiement des frais via disburse({}) depuis {}...", gas_cost_wei, from_addr);
+    // Mise à jour nonce expéditeur
+    {
+        let vm = self.vm.write().await;
+        let mut accounts = vm.state.accounts.write().await;
 
-        let disburse_args = vec![serde_json::Value::Number(serde_json::Number::from(gas_cost_wei))];
-
-        let disburse_result = {
-            let mut vm_sim = self.vm.write().await;
-            vm_sim.execute_module(
-                &vez_addr,
-                "function_1c61f62b",
-                disburse_args,
-                Some(&from_addr),
-                None
-            ).await
-        };
-
-        match disburse_result {
-            Ok(_) => {
-                println!("✅ DISBURSE FRAIS RÉUSSI ! {} wei VEZ envoyés → burn 10% ({})", 
-                         gas_cost_wei, gas_cost_wei * 10 / 100);
-                true
-            }
-            Err(e) => {
-                println!("❌ ÉCHEC DISBURSE FRAIS : {}", e);
-                return Err(format!("Impossible de payer les frais via disburse : {}", e));
-            }
-        }
-    } else {
-        println!("ℹ️ Aucun disburse nécessaire (init VEZ ou gas_cost=0)");
-        true
-    };
-
-    if !disburse_success {
-        return Err("Paiement des frais refusé".to_string());
-    }
-
-    // ====================== RÉCUPÉRATION & FUSION DES LOGS ======================
-    let mut all_logs: Vec<serde_json::Value> = vec![];
-
-    if let Ok(result) = &execution_result {
-        if let Some(obj) = result.as_object() {
-            if let Some(logs) = obj.get("logs") {
-                if let Some(arr) = logs.as_array() {
-                    all_logs.extend_from_slice(arr);
-                    println!("📝 {} logs émis par le contrat", arr.len());
-                }
-            }
+        if let Some(account) = accounts.get_mut(&from_addr) {
+            account.nonce = std::cmp::max(account.nonce, final_nonce + 1);
+            println!("📝 Nonce mis à jour: compte {} → nonce={}", from_addr, account.nonce);
         }
     }
 
-    // Logs du disburse (frais VEZ)
-    if !is_vez_initialization && gas_cost_wei > 0 {
-        let from_addr_topic = format!(
-            "0x{:0>64}",
-            from_addr.trim_start_matches("0x").to_lowercase()
-        );
-
-        let disburse_log = serde_json::json!({
-            "address": "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-            "topics": [
-                "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
-                from_addr_topic,
-                "0x0000000000000000000000000000000000000000000000000000000000000000"
-            ],
-            "data": format!("0x{:064x}", gas_cost_wei),
-            "logIndex": format!("0x{:x}", all_logs.len())
-        });
-        all_logs.push(disburse_log);
-        println!("💸 Log disburse VEZ ajouté ({} wei)", gas_cost_wei);
-    }
-
-    println!("📊 Total logs dans le receipt : {}", all_logs.len());
-
-    // ====================== CONSTRUCTION DU RECEIPT ======================
+    // Construction receipt enrichie
     let (current_block_number, current_block_hash) = self.get_latest_block_info().await;
 
     let mut receipts = self.tx_receipts.write().await;
@@ -2002,7 +1990,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         "status": "0x1",
         "gasUsed": format!("0x{:x}", estimated_gas),
         "effectiveGasPrice": format!("0x{:x}", gas_price),
-        "logs": all_logs,
+        "logs": [],
         "logsBloom": "0x".to_owned() + &"00".repeat(256),
         "transactionIndex": "0x0",
         "type": "0x2",
@@ -2015,6 +2003,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     let tx_hash_padded = pad_hash_64(&normalized_hash);
     receipts.insert(tx_hash_padded.clone(), receipt.clone());
 
+    // Persistance receipt dans RocksDB
     if let Some(storage_manager) = &self.vm.read().await.storage_manager {
         let receipt_key = format!("receipt:{}", normalized_hash);
         if let Ok(receipt_bytes) = serde_json::to_vec(&receipt) {
@@ -2031,14 +2020,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         println!("⚠️ Storage manager non disponible pour persistance des receipts");
     }
 
-    {
-        let mut accounts = vm.state.accounts.write().await;
-        if let Some(account) = accounts.get_mut(&from_addr) {
-            account.nonce = std::cmp::max(account.nonce, final_nonce + 1);
-            println!("📝 Nonce mis à jour: compte {} → nonce={}", from_addr, account.nonce);
-        }
-    }
-
+    // Logs finaux
     if is_deployment {
         if tx_params.get("create2").and_then(|v| v.as_bool()).unwrap_or(false) {
             println!("✅ CREATE2 via execute_module (raw) → Adresse Ethereum: {} | SLU zk: {} | Hash: {}",
@@ -2054,8 +2036,6 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     if is_vez_initialization {
         println!("🆓 INITIALISATION VEZ GRATUITE → Hash: {}", normalized_hash);
     }
-
-    println!("✅ send_transaction terminée avec {} logs au total", all_logs.len());
 
     Ok(tx_hash_padded)
 }
