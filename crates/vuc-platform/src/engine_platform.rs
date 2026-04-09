@@ -1606,6 +1606,48 @@ pub async fn verify_contract_deployment(&self, contract_address: &str) -> Result
         }
     }
 
+/// Calcul du logsBloom Ethereum (2048 bits)
+    pub fn compute_logs_bloom(&self, logs: &[serde_json::Value]) -> String {
+        use sha3::{Digest, Keccak256};
+
+        let mut bloom = [0u8; 256];
+
+        for log in logs {
+            // Address
+            if let Some(addr) = log.get("address").and_then(|v| v.as_str()) {
+                if let Ok(addr_bytes) = hex::decode(addr.trim_start_matches("0x")) {
+                    if addr_bytes.len() == 20 {
+                        let hash = Keccak256::digest(&addr_bytes);
+                        self.bloom_bits_from_hash(&mut bloom, &hash.into());
+                    }
+                }
+            }
+
+            // Topics
+            if let Some(topics) = log.get("topics").and_then(|v| v.as_array()) {
+                for topic in topics {
+                    if let Some(t) = topic.as_str() {
+                        if let Ok(topic_bytes) = hex::decode(t.trim_start_matches("0x")) {
+                            if topic_bytes.len() == 32 {
+                                let hash = Keccak256::digest(&topic_bytes);
+                                self.bloom_bits_from_hash(&mut bloom, &hash.into());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        format!("0x{}", hex::encode(bloom))
+    }
+
+    fn bloom_bits_from_hash(&self, bloom: &mut [u8; 256], hash: &[u8; 32]) {
+        for i in 0..3 {
+            let byte_pos = ((hash[i * 2] as usize) << 8 | hash[i * 2 + 1] as usize) % 2048;
+            bloom[byte_pos / 8] |= 1 << (byte_pos % 8);
+        }
+	}
+
 pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<String, String> {
     use sha3::{Digest, Keccak256};
     use ethers::types::U256;
@@ -2092,10 +2134,10 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         "blobGasUsed": "0x0",
         "blobGasPrice": "0x0"
     });
-    receipts.insert(normalized_hash.clone(), receipt.clone());
+    receipt.insert(normalized_hash.clone(), receipt.clone());
 
     let tx_hash_padded = pad_hash_64(&normalized_hash);
-    receipts.insert(tx_hash_padded.clone(), receipt.clone());
+    receipt.insert(tx_hash_padded.clone(), receipt.clone());
 
     // Persistance receipt dans RocksDB
     if let Some(storage_manager) = &self.vm.read().await.storage_manager {
