@@ -2083,6 +2083,21 @@ impl SlurachainVm {
             return result;
         }
 
+        let resolved_offset =
+            Self::find_function_offset_in_bytecode(&real_bytecode, function_meta.selector);
+
+        let interpreter_args = self
+            .prepare_generic_execution_args(
+                vyid,
+                function_name,
+                args.clone(),
+                sender,
+                calldata,
+                &function_meta,
+                resolved_offset.expect("REASON"),
+            )
+            .await?;
+
         // ────────────────────────────────────────────────
         // EXÉCUTION RÉELLE DU BYTECODE
         // ────────────────────────────────────────────────
@@ -2102,22 +2117,7 @@ impl SlurachainVm {
             let _guard = self.global_execution_lock.lock().await;
             let mut interpreter = self.interpreter.lock().await;
             let mut helpers_guard = self.uvm_helpers.lock().await;
-
-            let function_meta =
-            self.find_or_create_function_metadata(vyid, function_name, selector, &args)?;
             
-        let interpreter_args = self
-            .prepare_generic_execution_args(
-                vyid,
-                function_name,
-                args.clone(),
-                sender,
-                calldata,
-                &function_meta,
-                resolved_offset.expect("REASON"),
-            )
-            .await?;
-
         let converted_storage = self
             .build_dynamic_storage_from_contract_state(vyid)?
             .unwrap_or_else(|| HashMap::new());
@@ -2144,6 +2144,9 @@ impl SlurachainVm {
         let final_result = match result {
             Ok(mut val) => {
                 println!("✅ Exécution terminée → post-processing (logs + persistance)");
+                
+  let function_meta =
+            self.find_or_create_function_metadata(vyid, function_name, selector, &args)?;              
 
                 // 1. Traitement des logs emit
                 if let Err(e) = self.process_execution_result_generically(vyid, &val, &function_meta).await {
