@@ -1826,41 +1826,74 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     // PAIEMENT DES FRAIS VIA DISBURSE
     let vez_addr = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_string();
 
-    let disburse_success = if !is_vez_initialization && gas_cost_wei > 0 {
-        println!("🪙 Paiement des frais via disburse({}) depuis {}...", gas_cost_wei, from_addr);
+// ────────────────────────────────────────────────────────────────
+// PAIEMENT DES FRAIS VIA DISBURSE (version corrigée)
+// ────────────────────────────────────────────────────────────────
+let disburse_success = if !is_vez_initialization && gas_cost_wei > 0 {
+    println!("🪙 Paiement des frais via disburse({}) depuis {}...", gas_cost_wei, from_addr);
 
-        let disburse_args = vec![serde_json::Value::Number(serde_json::Number::from(gas_cost_wei))];
+    // Construction du calldata ABI complet pour disburse(uint256 amount, address disburser)
+    // Selector de disburse = 0x1c61f62b
+    let selector = hex::decode("1c61f62b").unwrap();
 
-        let disburse_result = {
-            let mut vm_sim = self.vm.write().await;
-            vm_sim.execute_module(
-                &vez_addr,
-                "function_1c61f62b",
-                disburse_args,
-                Some(&from_addr),
-                None
-            ).await
-        };
+    let mut calldata = Vec::with_capacity(68);
+    calldata.extend_from_slice(&selector);
 
-        match disburse_result {
-            Ok(_) => {
-                println!("✅ DISBURSE FRAIS RÉUSSI ! {} wei VEZ envoyés → burn 10% ({})", 
-                         gas_cost_wei, gas_cost_wei * 10 / 100);
-                true
+    // amount (uint256) – padded à 32 bytes
+    let mut amount_padded = [0u8; 32];
+    U256::from(gas_cost_wei).to_big_endian(&mut amount_padded);
+    calldata.extend_from_slice(&amount_padded);
+
+    // disburser (address) – padded à 32 bytes
+    let mut addr_padded = [0u8; 32];
+    let from_bytes = hex::decode(from_addr.trim_start_matches("0x")).unwrap_or_default();
+    addr_padded[12..].copy_from_slice(&from_bytes);
+    calldata.extend_from_slice(&addr_padded);
+
+    println!("🟢 [DEBUG] Calldata disburse généré : 0x{}", hex::encode(&calldata));
+
+    let disburse_result = {
+        let mut vm_sim = self.vm.write().await;
+        vm_sim.execute_module(
+            &vez_addr,
+            "function_1c61f62b",                    // ← Utilise le nom réel si possible
+            vec![],                        // args décodés vides (on passe calldata brut)
+            Some(&from_addr),
+            Some(&calldata)                // ← CALDATA BRUT ICI (important !)
+        ).await
+    };
+
+    match disburse_result {
+        Ok(_) => {
+            println!("✅ DISBURSE FRAIS RÉUSSI ! {} wei VEZ brûlés (10% burn + reste)", gas_cost_wei);
+            true
+        }
+        Err(e) => {
+            // Log plus détaillé pour debug
+            println!("❌ ÉCHEC DISBURSE : {}", e);
+            
+            // Vérification rapide du solde avant d’échouer complètement
+            if let Ok(balance) = self.get_account_balance(&from_addr).await {
+                println!("   Solde actuel de {} : {} VEZ", from_addr, balance);
             }
-            Err(e) => {
-                println!("❌ ÉCHEC DISBURSE FRAIS : {}", e);
+            
+            // Option : fallback tolérant en dev (à enlever en prod)
+            if cfg!(debug_assertions) {
+                println!("⚠️ Mode debug → on continue malgré échec disburse (tolérance dev)");
+                true
+            } else {
                 return Err(format!("Impossible de payer les frais via disburse : {}", e));
             }
         }
-    } else {
-        println!("ℹ️ Aucun disburse nécessaire (init VEZ ou gas_cost=0)");
-        true
-    };
-
-    if !disburse_success {
-        return Err("Paiement des frais refusé".to_string());
     }
+} else {
+    println!("ℹ️ Aucun disburse nécessaire (init VEZ ou gas=0)");
+    true
+};
+
+if !disburse_success {
+    return Err("Paiement des frais refusé".to_string());
+}
 
     if is_deployment {
         let use_create2 = tx_params.get("create2").and_then(|v| v.as_bool()).unwrap_or(false);
