@@ -2083,6 +2083,9 @@ impl SlurachainVm {
             return result;
         }
 
+        let function_meta =
+            self.find_or_create_function_metadata(vyid, function_name, selector, &args)?;
+
         let resolved_offset =
             Self::find_function_offset_in_bytecode(&real_bytecode, function_meta.selector);
 
