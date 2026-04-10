@@ -1833,26 +1833,6 @@ impl SlurachainVm {
         false
     }
 
-/// ✅ NOUVEAU : Convertit les logs UVM en format Ethereum compatible (pour receipts + logsBloom)
-    fn convert_uvm_logs_to_eth(&self, uvm_logs: &[UvmLog]) -> Vec<serde_json::Value> {
-        uvm_logs
-            .iter()
-            .enumerate()
-            .map(|(i, log)| {
-                serde_json::json!({
-                    "address": log.address.clone(),
-                    "topics": log.topics.clone(),
-                    "data": format!("0x{}", hex::encode(&log.data)),
-                    "logIndex": format!("0x{:x}", i),
-                    "transactionIndex": "0x0",
-                    "blockNumber": "0x1",
-                    "blockHash": "0x0",
-                    "removed": false
-                })
-            })
-            .collect()
-    }
-
     /// ✅ EXÉCUTION STRICTE avec bytecode réel - CORRECTION MAJEURE POUR PROXY
     pub async fn execute_program(
         &mut self,
@@ -2083,6 +2063,29 @@ impl SlurachainVm {
             return result;
         }
 
+        // ────────────────────────────────────────────────
+        // ÉTAPE 5 : EXÉCUTION NORMALE (sans proxy)
+        // ────────────────────────────────────────────────
+        if !self.modules.contains_key(vyid) {
+            println!(
+                "🔄 [AUTO-DETECT] Analyse du bytecode réel ({} bytes)",
+                real_bytecode.len()
+            );
+            self.auto_detect_contract_functions(vyid, &real_bytecode)?;
+        } else {
+            if let Some(module) = self.modules.get_mut(vyid) {
+                if module.bytecode.len() != real_bytecode.len() {
+                    println!(
+                        "🔄 [BYTECODE UPDATE] Mise à jour bytecode: {} → {} bytes",
+                        module.bytecode.len(),
+                        real_bytecode.len()
+                    );
+                    module.bytecode = real_bytecode.clone();
+                    self.auto_detect_contract_functions(vyid, &real_bytecode)?;
+                }
+            }
+        }
+
         let function_meta =
             self.find_or_create_function_metadata(vyid, function_name, selector, &args)?;
 
@@ -2101,8 +2104,12 @@ impl SlurachainVm {
             )
             .await?;
 
+        let converted_storage = self
+            .build_dynamic_storage_from_contract_state(vyid)?
+            .unwrap_or_else(|| HashMap::new());
+
         // ────────────────────────────────────────────────
-        // EXÉCUTION RÉELLE DU BYTECODE
+        // EXÉCUTION RÉELLE + POST-PROCESSING (logs + persistance)
         // ────────────────────────────────────────────────
         let calldata_bytes: Vec<u8> = if let Some(c) = calldata {
             c.to_vec()
@@ -2110,20 +2117,10 @@ impl SlurachainVm {
             interpreter_args.state_data.clone()
         };
 
-        println!(
-            "🟢 [DEBUG] Calldata final ({} bytes) : 0x{}...",
-            calldata_bytes.len(),
-            hex::encode(&calldata_bytes[..std::cmp::min(64, calldata_bytes.len())])
-        );
-
         let result = {
             let _guard = self.global_execution_lock.lock().await;
             let mut interpreter = self.interpreter.lock().await;
             let mut helpers_guard = self.uvm_helpers.lock().await;
-            
-        let converted_storage = self
-            .build_dynamic_storage_from_contract_state(vyid)?
-            .unwrap_or_else(|| HashMap::new());
 
             uvm_runtime::interpreter::execute_program(
                 Some(&real_bytecode),
@@ -2135,100 +2132,26 @@ impl SlurachainVm {
                 return_type,
                 &exports,
                 &interpreter_args,
-                self.storage_manager.clone(),        // ← Manager réel
+                self.storage_manager.clone(),
                 Some(converted_storage),
             )
             .map_err(|e| e.to_string())
         };
 
-        // ────────────────────────────────────────────────
-        // POST-PROCESSING : Logs + Persistance slots & balances
-        // ────────────────────────────────────────────────
         let final_result = match result {
             Ok(mut val) => {
-                println!("✅ Exécution terminée → post-processing (logs + persistance)");
-                
-  let function_meta =
-            self.find_or_create_function_metadata(vyid, function_name, selector, &args)?;              
-
-                // 1. Traitement des logs emit
-                if let Err(e) = self.process_execution_result_generically(vyid, &val, &function_meta).await {
-                    println!("⚠️ Erreur lors du traitement des logs : {}", e);
-                }
-
-                // 2. Persistance explicite des slots (comme avant)
-                if let Some(manager) = &self.storage_manager {
-                    if let Some(storage_obj) = val.get("storage").and_then(|v| v.as_object()) {
-                        for (slot, value_json) in storage_obj {
-                            let storage_key = format!("storage:{}:{}", vyid, slot);
-                            let value_bytes = match value_json {
-                                serde_json::Value::String(s) if s.starts_with("0x") => {
-                                    hex::decode(&s[2..]).unwrap_or_else(|_| vec![0; 32])
-                                }
-                                serde_json::Value::Number(n) => {
-                                    let mut b = vec![0u8; 32];
-                                    if let Some(u) = n.as_u64() {
-                                        b[24..32].copy_from_slice(&u.to_be_bytes());
-                                    }
-                                    b
-                                }
-                                _ => vec![0; 32],
-                            };
-
-                            let _ = manager.write(&storage_key, &value_bytes);
-                            println!("💾 Slot persistant → {} = 0x{}", 
-                                     slot, 
-                                     hex::encode(&value_bytes[..std::cmp::min(8, value_bytes.len())]));
-                        }
-                    }
-
-                    // 3. Persistance spécifique du slot balances (très important)
-                    let balances_slot = 
-                        "37439836327923360225337895871871055371921111519445254264255886447755104894253"
-                            .to_string();
-
-                    if let Some(balances_value) = val.get("storage")
-                        .and_then(|v| v.get(&balances_slot))
-                        .or_else(|| val.get("balances").and_then(|v| v.get(&balances_slot)))
-                    {
-                        let value_bytes = match balances_value {
-                            serde_json::Value::String(s) if s.starts_with("0x") => {
-                                hex::decode(&s[2..]).unwrap_or_else(|_| vec![0; 32])
-                            }
-                            _ => vec![0; 32],
-                        };
-
-                        let balances_key = format!("storage:{}:{}", vyid, balances_slot);
-                        let _ = manager.write(&balances_key, &value_bytes);
-
-                        let u256_val = primitive_types::U256::from_big_endian(&value_bytes);
-                        println!("💰 Balance persistée → {} VEZ (hex: 0x{})", 
-                                 u256_val, 
-                                 hex::encode(&value_bytes));
-                    }
-                }
-
-                // Force le champ logs pour compatibilité RPC
-                if val.get("logs").is_none() {
-                    if let Some(obj) = val.as_object_mut() {
-                        obj.insert("logs".to_string(), serde_json::json!([]));
-                    }
-                }
-
+                // Traitement logs + persistance
+                let _ = self.process_execution_result_generically(vyid, &val, &function_meta).await;
                 val
             }
-            Err(e) => {
-                println!("❌ Erreur d'exécution du bytecode : {}", e);
-                return Err(e);
-            }
+            Err(e) => return Err(e),
         };
 
         Ok(final_result)
-}
+    }
 
     /// ✅ NOUVEAU: Post-processing générique des résultats d'exécution
-    /// ✅ PRÉPARATION DES ARGUMENTS D'EXÉCUTION (calldata + métadonnées)
-/// ✅ POST-PROCESSING GÉNÉRIQUE : Logs emit + Persistance slots & balances
+    /// ✅ POST-PROCESSING : Logs emit + Persistance slots & balances (support complet)
     async fn process_execution_result_generically(
         &mut self,
         contract_address: &str,
@@ -2240,9 +2163,7 @@ impl SlurachainVm {
             contract_address, function_meta.name
         );
 
-        // ────────────────────────────────────────────────
-        // 1. EXTRACTION ET AFFICHAGE DES LOGS EMIT
-        // ────────────────────────────────────────────────
+        // 1. Extraction et affichage des logs emit
         let logs = result
             .get("logs")
             .and_then(|v| v.as_array())
@@ -2250,38 +2171,22 @@ impl SlurachainVm {
             .unwrap_or_default();
 
         if !logs.is_empty() {
-            println!("🎉 [EMIT SUCCESS] {} événements Solidity détectés et capturés !", logs.len());
+            println!("🎉 [EMIT SUCCESS] {} événements Solidity détectés !", logs.len());
             for (i, log) in logs.iter().enumerate() {
-                let addr = log.get("address")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown");
-
-                let topic_count = log.get("topics")
-                    .and_then(|v| v.as_array())
-                    .map(|a| a.len())
-                    .unwrap_or(0);
-
-                let data = log.get("data")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("0x");
-
-                println!(
-                    "   └─ Log #{} : address={} | topics={} | data={}",
-                    i, addr, topic_count, data
-                );
+                let addr = log.get("address").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let topic_count = log.get("topics").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+                let data = log.get("data").and_then(|v| v.as_str()).unwrap_or("0x");
+                println!("   └─ Log #{} : address={} | {} topics | data={}", i, addr, topic_count, data);
             }
         } else {
             println!("ℹ️  Aucun événement émis pendant cet appel");
         }
 
-        // ────────────────────────────────────────────────
-        // 2. PERSISTANCE DES SLOTS (comme avant)
-        // ────────────────────────────────────────────────
+        // 2. Persistance des slots (exactement comme avant)
         if let Some(manager) = &self.storage_manager {
             if let Some(storage_obj) = result.get("storage").and_then(|v| v.as_object()) {
                 for (slot, value_json) in storage_obj {
                     let storage_key = format!("storage:{}:{}", contract_address, slot);
-
                     let value_bytes = match value_json {
                         serde_json::Value::String(s) if s.starts_with("0x") => {
                             hex::decode(&s[2..]).unwrap_or_else(|_| vec![0; 32])
@@ -2295,21 +2200,12 @@ impl SlurachainVm {
                         }
                         _ => vec![0; 32],
                     };
-
                     let _ = manager.write(&storage_key, &value_bytes);
-                    println!(
-                        "💾 Slot persistant → {} = 0x{}",
-                        slot,
-                        hex::encode(&value_bytes[..std::cmp::min(8, value_bytes.len())])
-                    );
                 }
             }
 
-            // Persistance spécifique du slot balances (très important)
-            let balances_slot = 
-                "37439836327923360225337895871871055371921111519445254264255886447755104894253"
-                    .to_string();
-
+            // Persistance explicite du slot balances
+            let balances_slot = "37439836327923360225337895871871055371921111519445254264255886447755104894253".to_string();
             if let Some(balances_value) = result.get("storage")
                 .and_then(|v| v.get(&balances_slot))
                 .or_else(|| result.get("balances").and_then(|v| v.get(&balances_slot)))
@@ -2320,24 +2216,11 @@ impl SlurachainVm {
                     }
                     _ => vec![0; 32],
                 };
-
                 let balances_key = format!("storage:{}:{}", contract_address, balances_slot);
                 let _ = manager.write(&balances_key, &value_bytes);
-
                 let u256_val = primitive_types::U256::from_big_endian(&value_bytes);
-                println!(
-                    "💰 Balance persistée pour {} → {} VEZ (hex: 0x{})",
-                    contract_address, u256_val, hex::encode(&value_bytes)
-                );
+                println!("💰 Balance persistée → {} VEZ", u256_val);
             }
-        } else {
-            println!("⚠️ Pas de storage_manager → persistance ignorée");
-        }
-
-        // Force le champ "logs" pour compatibilité RPC
-        // (utile pour eth_getTransactionReceipt)
-        if result.get("logs").is_none() {
-            println!("ℹ️  Champ 'logs' absent → ajout d'un tableau vide");
         }
 
         println!("✅ [POST-PROCESS] Terminé pour {}", contract_address);
