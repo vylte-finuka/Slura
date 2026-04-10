@@ -2200,7 +2200,7 @@ impl SlurachainVm {
 
         Ok(final_result)
 
-        // === NON-PROXY PATH (FIXED - variables now declared here) ===
+        // === NON-PROXY PATH (FIXED) ===
     let function_meta = self.find_or_create_function_metadata(
         vyid,
         function_name,
@@ -2212,7 +2212,12 @@ impl SlurachainVm {
         &real_bytecode,
         function_meta.selector,
     )
-    .ok_or_else(|| format!("Could not find offset for selector 0x{:08x}", function_meta.selector))?;
+    .ok_or_else(|| {
+        format!(
+            "Could not find offset for selector 0x{:08x} in contract {}",
+            function_meta.selector, vyid
+        )
+    })?;
 
     let interpreter_args = self
         .prepare_generic_execution_args(
@@ -2257,12 +2262,20 @@ impl SlurachainVm {
         .map_err(|e| e.to_string())
     };
 
-    // POST-PROCESSING (now works)
+    // ────────────────────────────────────────────────
+    // POST-PROCESSING (non-proxy)
+    // ────────────────────────────────────────────────
     let final_result = match result {
         Ok(mut val) => {
-            if let Err(e) = self.process_execution_result_generically(vyid, &val, &function_meta).await {
-                println!("⚠️ Erreur logs : {}", e);
+            println!("✅ Exécution terminée → post-processing (logs + persistance)");
+
+            if let Err(e) = self
+                .process_execution_result_generically(vyid, &val, &function_meta)
+                .await
+            {
+                println!("⚠️ Erreur lors du traitement des logs : {}", e);
             }
+
             if val.get("logs").is_none() {
                 if let Some(obj) = val.as_object_mut() {
                     obj.insert("logs".to_string(), serde_json::json!([]));
@@ -2270,11 +2283,14 @@ impl SlurachainVm {
             }
             val
         }
-        Err(e) => return Err(e),
+        Err(e) => {
+            println!("❌ Erreur d'exécution du bytecode : {}", e);
+            return Err(e);
+        }
     };
 
     Ok(final_result)
-}
+}  
 
     /// ✅ NOUVEAU: Post-processing générique des résultats d'exécution
     /// ✅ PRÉPARATION DES ARGUMENTS D'EXÉCUTION (calldata + métadonnées)
