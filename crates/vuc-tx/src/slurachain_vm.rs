@@ -2103,6 +2103,25 @@ impl SlurachainVm {
             let mut interpreter = self.interpreter.lock().await;
             let mut helpers_guard = self.uvm_helpers.lock().await;
 
+            let function_meta =
+            self.find_or_create_function_metadata(vyid, function_name, selector, &args)?;
+            
+        let interpreter_args = self
+            .prepare_generic_execution_args(
+                vyid,
+                function_name,
+                args.clone(),
+                sender,
+                calldata,
+                &function_meta,
+                resolved_offset.expect("REASON"),
+            )
+            .await?;
+
+        let converted_storage = self
+            .build_dynamic_storage_from_contract_state(vyid)?
+            .unwrap_or_else(|| HashMap::new());
+
             uvm_runtime::interpreter::execute_program(
                 Some(&real_bytecode),
                 stack_usage,
