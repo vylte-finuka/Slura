@@ -776,17 +776,42 @@ pub async fn get_account_balance(&self, address: &str) -> Result<U256, String> {
         // Liste des transactions (si demandé)
         let transactions_list = if include_txs {
             block_data.transactions.iter().enumerate().map(|(idx, tx)| {
+                // Récupération du receipt réel pour avoir les vraies valeurs
+                let receipt = self.tx_receipts.read().await
+                    .get(&tx.hash)
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}));
+
                 serde_json::json!({
                     "hash": tx.hash,
                     "nonce": format!("0x{:x}", tx.nonce_tx),
                     "from": tx.from_op,
                     "to": tx.receiver_op,
                     "value": format!("0x{:x}", tx.value_tx.parse::<u128>().unwrap_or(0)),
-                    "gas": "0x5208",
-                    "gasPrice": "0x3b9aca00",
-                    "maxFeePerGas": "0x3b9aca00",
-                    "maxPriorityFeePerGas": "0x3b9aca00",
-                    "input": "0x",
+
+                    // === CHAMPS GAS CORRIGÉS (plus jamais hardcodés) ===
+                    "gas": receipt.get("gasUsed")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("0x5208"),
+
+                    "gasPrice": receipt.get("effectiveGasPrice")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("0x3b9aca00"),
+
+                    "maxFeePerGas": receipt.get("effectiveGasPrice")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("0x3b9aca00"),
+
+                    // maxPriorityFeePerGas : maintenant pris depuis le receipt (ou fallback raisonnable)
+                    "maxPriorityFeePerGas": receipt.get("maxPriorityFeePerGas")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| receipt.get("effectiveGasPrice").and_then(|v| v.as_str()))
+                        .unwrap_or("0x3b9aca00"),
+
+                    "input": receipt.get("input")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("0x"),
+
                     "blockHash": block_hash_real.clone(),
                     "blockNumber": format!("0x{:x}", block_number),
                     "transactionIndex": format!("0x{:x}", idx),
@@ -796,7 +821,7 @@ pub async fn get_account_balance(&self, address: &str) -> Result<U256, String> {
         } else {
             tx_hashes.into_iter().map(serde_json::Value::String).collect()
         };
-
+		
         // Réponse JSON enrichie
         Ok(serde_json::json!({
             "number": format!("0x{:x}", block_number),
