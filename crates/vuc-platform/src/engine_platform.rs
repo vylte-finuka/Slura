@@ -776,7 +776,6 @@ pub async fn get_account_balance(&self, address: &str) -> Result<U256, String> {
         // Liste des transactions (si demandé)
         let transactions_list = if include_txs {
             block_data.transactions.iter().enumerate().map(|(idx, tx)| {
-                // Récupération du receipt réel pour avoir les vraies valeurs
                 let receipt = self.tx_receipts.read().await
                     .get(&tx.hash)
                     .cloned()
@@ -789,27 +788,27 @@ pub async fn get_account_balance(&self, address: &str) -> Result<U256, String> {
                     "to": tx.receiver_op,
                     "value": format!("0x{:x}", tx.value_tx.parse::<u128>().unwrap_or(0)),
 
-                    // === CHAMPS GAS CORRIGÉS (plus jamais hardcodés) ===
+                    // === CHAMPS GAS CORRIGÉS AVEC TYPES EXPLICITES ===
                     "gas": receipt.get("gasUsed")
-                        .and_then(|v| v.as_str())
+                        .and_then(|v: &serde_json::Value| v.as_str())
                         .unwrap_or("0x5208"),
 
                     "gasPrice": receipt.get("effectiveGasPrice")
-                        .and_then(|v| v.as_str())
+                        .and_then(|v: &serde_json::Value| v.as_str())
                         .unwrap_or("0x3b9aca00"),
 
                     "maxFeePerGas": receipt.get("effectiveGasPrice")
-                        .and_then(|v| v.as_str())
+                        .and_then(|v: &serde_json::Value| v.as_str())
                         .unwrap_or("0x3b9aca00"),
 
-                    // maxPriorityFeePerGas : maintenant pris depuis le receipt (ou fallback raisonnable)
                     "maxPriorityFeePerGas": receipt.get("maxPriorityFeePerGas")
-                        .and_then(|v| v.as_str())
-                        .or_else(|| receipt.get("effectiveGasPrice").and_then(|v| v.as_str()))
+                        .and_then(|v: &serde_json::Value| v.as_str())
+                        .or_else(|| receipt.get("effectiveGasPrice")
+                            .and_then(|v: &serde_json::Value| v.as_str()))
                         .unwrap_or("0x3b9aca00"),
 
                     "input": receipt.get("input")
-                        .and_then(|v| v.as_str())
+                        .and_then(|v: &serde_json::Value| v.as_str())
                         .unwrap_or("0x"),
 
                     "blockHash": block_hash_real.clone(),
