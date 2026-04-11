@@ -774,10 +774,12 @@ pub async fn get_account_balance(&self, address: &str) -> Result<U256, String> {
         let receipts_root = format!("0x{:x}", receipts_hasher.finalize());
 
         // Liste des transactions (si demandé)
+        // === Récupération des receipts UNE SEULE FOIS (async) ===
+        let receipts = self.tx_receipts.read().await;
+
         let transactions_list = if include_txs {
             block_data.transactions.iter().enumerate().map(|(idx, tx)| {
-                let receipt = self.tx_receipts.read().await
-                    .get(&tx.hash)
+                let receipt = receipts.get(&tx.hash)
                     .cloned()
                     .unwrap_or_else(|| serde_json::json!({}));
 
@@ -788,7 +790,7 @@ pub async fn get_account_balance(&self, address: &str) -> Result<U256, String> {
                     "to": tx.receiver_op,
                     "value": format!("0x{:x}", tx.value_tx.parse::<u128>().unwrap_or(0)),
 
-                    // === CHAMPS GAS CORRIGÉS AVEC TYPES EXPLICITES ===
+                    // Champs gas pris depuis le receipt réel
                     "gas": receipt.get("gasUsed")
                         .and_then(|v: &serde_json::Value| v.as_str())
                         .unwrap_or("0x5208"),
