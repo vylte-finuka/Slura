@@ -1026,31 +1026,30 @@ pub async fn get_account_balance(&self, address: &str) -> Result<U256, String> {
 
 /// ✅ Récupération du nombre de transactions (nonce) - VERSION QUI FONCTIONNE
 pub async fn get_transaction_count(&self, address: &str) -> Result<u64, String> {
-    println!("\n🚨 DEBUG eth_getTransactionCount pour adresse: '{}'", address);
-
     let search_clean = address.trim_start_matches("0x").to_lowercase();
 
     let receipts = self.tx_receipts.read().await;
-    println!("   → {} receipts en mémoire", receipts.len());
-
     let mut tx_count = 0u64;
 
-    for (tx_hash, receipt) in receipts.iter() {
+    for (_, receipt) in receipts.iter() {
         if let Some(from_val) = receipt.get("from") {
             if let Some(from_str) = from_val.as_str() {
-                let from_clean = from_str.trim_start_matches("0x").to_lowercase();
-                if from_clean == search_clean {
+                if from_str.trim_start_matches("0x").to_lowercase() == search_clean {
                     tx_count += 1;
-                    println!("   ✅ MATCH trouvé pour tx: {} (from: {})", tx_hash, from_str);
                 }
             }
         }
     }
 
-    println!("📊 Résultat final pour {} → nonce = {}", search_clean, tx_count);
-    Ok(tx_count)
-}
+    // Important : on ajoute 1 au nonce actuel pour la prochaine tx (comportement standard Ethereum)
+    let next_nonce = tx_count;   // ou tx_count + 1 si tu veux être plus strict
 
+    println!("📊 get_transaction_count({}) → {} transactions trouvées → nonce renvoyé = {}", 
+             search_clean, tx_count, next_nonce);
+
+    Ok(next_nonce)
+}
+	
   pub async fn get_block_by_number(&self, block_tag: &str, include_txs: bool) -> Result<serde_json::Value, String> {
     let current_block = self.get_current_block_number().await;
 
@@ -1695,10 +1694,10 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         tx_params.get("data").and_then(|v| v.as_str()).unwrap_or("")
             .starts_with("0x40c10f1900000000000000000000000053ae54b11251d5003e9aa51422405bc35a2ef32d");
 
-    // Récupération du nonce actuel
+    // Récupération du nonce actuel depuis les receipts (version robuste)
     let current_account_nonce = self.get_transaction_count(&from_addr).await.unwrap_or(0);
 
-    // Force le nonce à être croissant
+    // Force le nonce à être croissant (priorité au nonce fourni par l'utilisateur)
     let final_nonce = tx_params.get("nonce")
         .and_then(|v| {
             if v.is_string() {
@@ -1716,6 +1715,9 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         })
         .map(|provided_nonce| std::cmp::max(provided_nonce, current_account_nonce))
         .unwrap_or(current_account_nonce);
+
+    println!("📝 Nonce final pour {} → {} (current était {})", 
+             from_addr, final_nonce, current_account_nonce);
 
     // Détection déploiement
     let is_deployment = to_addr.is_empty() ||
@@ -1839,7 +1841,17 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         return Err("Paiement des frais refusé".to_string());
     }
     // ====================== FIN DISBURSE ======================
-
+	
+// Mise à jour du nonce dans l'état du compte (IMPORTANT)
+    {
+        let mut vm = self.vm.write().await;
+        let mut accounts = vm.state.accounts.write().await;
+        if let Some(account) = accounts.get_mut(&from_addr) {
+            account.nonce = std::cmp::max(account.nonce, final_nonce + 1);
+            println!("✅ Nonce mis à jour pour {} → {}", from_addr, account.nonce);
+        }
+	}
+	
 if !disburse_success {
         return Err("Paiement des frais refusé".to_string());
     }
