@@ -1768,24 +1768,32 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     let constructor_calldata: Vec<u8> = vec![];
 
     // Génération hash transaction
-    // ====================== GÉNÉRATION DU HASH COMPATIBLE ETHERS (IMPORTANT) ======================
+    // ====================== GÉNÉRATION DU HASH COMPATIBLE ETHERS.JS (FIX DU MISMATCH) ======================
+    let chain_id = self.get_chain_id();                    // ← Ajouté ici
+    let gas_price = self.get_gas_price().await;            // ← Déjà calculé plus haut, mais on le reprend
+    let estimated_gas = if is_deployment {
+        21000u64 + 32000u64 + (calldata_bytes.len() as u64 * 200)
+    } else if !calldata_bytes.is_empty() {
+        21000u64 + 21000u64 + (calldata_bytes.len() as u64 * 16)
+    } else {
+        21000u64
+    };
+
     let mut tx_hasher = Keccak256::new();
 
-    // On imite au maximum ce que ethers fait pour une tx de type 2
-    tx_hasher.update(&[0x02]);                                 // Type EIP-1559
-    tx_hasher.update(&chain_id.to_be_bytes());                 // chainId (ajoute-le si tu l'as)
+    tx_hasher.update(&[0x02]);                             // Type EIP-1559 (très important)
+    tx_hasher.update(&chain_id.to_be_bytes());
     tx_hasher.update(&final_nonce.to_be_bytes());
-    tx_hasher.update(&gas_price.to_be_bytes());                // ou maxFeePerGas
-    tx_hasher.update(&estimated_gas.to_be_bytes());            // gasLimit
-    tx_hasher.update(to_addr.as_bytes());                      // to (vide pour déploiement)
+    tx_hasher.update(&gas_price.to_be_bytes());            // maxFeePerGas approximatif
+    tx_hasher.update(&estimated_gas.to_be_bytes());        // gasLimit
+    tx_hasher.update(to_addr.as_bytes());                  // to (vide pour déploiement)
     tx_hasher.update(&value.to_be_bytes());
-    tx_hasher.update(&calldata_bytes);                         // data complet
+    tx_hasher.update(&calldata_bytes);                     // data complet
 
     let tx_hash = format!("0x{:x}", tx_hasher.finalize());
     let normalized_hash = self.normalize_tx_hash(&tx_hash);
 
-    println!("🔑 Hash généré (compatible ethers) : {}", normalized_hash);
-    let mut contract_address = String::new();
+    println!("🔑 Hash généré (compatible ethers) : {}", normalized_hash);et mut contract_address = String::new();
     let mut slu_zk_contract_addr = String::new();
 
     // ====================== CALCUL FRAIS DYNAMIQUES + DISBURSE ======================
