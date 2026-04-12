@@ -1767,7 +1767,6 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
 
     let constructor_calldata: Vec<u8> = vec![];
 
-     ====================== CALCUL FRAIS DYNAMIQUES + DISBURSE ======================
     let gas_price = self.get_gas_price().await;
     let estimated_gas = if is_deployment {
         21000u64 + 32000u64 + (calldata_bytes.len() as u64 * 200)
