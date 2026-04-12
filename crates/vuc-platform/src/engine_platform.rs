@@ -1768,19 +1768,23 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     let constructor_calldata: Vec<u8> = vec![];
 
     // Génération hash transaction
+    // ====================== GÉNÉRATION DU HASH COMPATIBLE ETHERS (IMPORTANT) ======================
     let mut tx_hasher = Keccak256::new();
-    tx_hasher.update(from_addr.as_bytes());
+
+    // On imite au maximum ce que ethers fait pour une tx de type 2
+    tx_hasher.update(&[0x02]);                                 // Type EIP-1559
+    tx_hasher.update(&chain_id.to_be_bytes());                 // chainId (ajoute-le si tu l'as)
     tx_hasher.update(&final_nonce.to_be_bytes());
-    tx_hasher.update(&chrono::Utc::now().timestamp_nanos().to_be_bytes());
-    tx_hasher.update(&rand::random::<u128>().to_be_bytes());
-    tx_hasher.update(&std::process::id().to_be_bytes());
-    tx_hasher.update(&(std::ptr::addr_of!(tx_hasher) as usize).to_be_bytes());
-    if !data.is_empty() {
-        tx_hasher.update(data.as_bytes());
-    }
+    tx_hasher.update(&gas_price.to_be_bytes());                // ou maxFeePerGas
+    tx_hasher.update(&estimated_gas.to_be_bytes());            // gasLimit
+    tx_hasher.update(to_addr.as_bytes());                      // to (vide pour déploiement)
+    tx_hasher.update(&value.to_be_bytes());
+    tx_hasher.update(&calldata_bytes);                         // data complet
+
     let tx_hash = format!("0x{:x}", tx_hasher.finalize());
     let normalized_hash = self.normalize_tx_hash(&tx_hash);
 
+    println!("🔑 Hash généré (compatible ethers) : {}", normalized_hash);
     let mut contract_address = String::new();
     let mut slu_zk_contract_addr = String::new();
 
