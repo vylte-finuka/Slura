@@ -1767,42 +1767,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
 
     let constructor_calldata: Vec<u8> = vec![];
 
-    // Génération hash transaction
-    if !disburse_success {
-        return Err("Paiement des frais refusé".to_string());
-    }
-
-    // ====================== GÉNÉRATION DU HASH COMPATIBLE ETHERS.JS ======================
-    let chain_id = self.get_chain_id();
-    let gas_price = self.get_gas_price().await;
-    let estimated_gas = if is_deployment {
-        21000u64 + 32000u64 + (calldata_bytes.len() as u64 * 200)
-    } else if !calldata_bytes.is_empty() {
-        21000u64 + 21000u64 + (calldata_bytes.len() as u64 * 16)
-    } else {
-        21000u64
-    };
-
-    let mut tx_hasher = Keccak256::new();
-
-    tx_hasher.update(&[0x02]);                          // Type EIP-1559
-    tx_hasher.update(&chain_id.to_be_bytes());
-    tx_hasher.update(&final_nonce.to_be_bytes());
-    tx_hasher.update(&gas_price.to_be_bytes());
-    tx_hasher.update(&estimated_gas.to_be_bytes());
-    tx_hasher.update(to_addr.as_bytes());
-    tx_hasher.update(&value.to_be_bytes());
-    tx_hasher.update(&calldata_bytes);
-
-    let tx_hash = format!("0x{:x}", tx_hasher.finalize());
-    let normalized_hash = self.normalize_tx_hash(&tx_hash);
-
-    println!("🔑 Hash généré (compatible ethers) : {}", normalized_hash);
-
-    // ====================== SUITE (déploiement ou appel normal) ======================
-    let mut contract_address = String::new();
-    let mut slu_zk_contract_addr = String::new();
-    // ====================== CALCUL FRAIS DYNAMIQUES + DISBURSE ======================
+     ====================== CALCUL FRAIS DYNAMIQUES + DISBURSE ======================
     let gas_price = self.get_gas_price().await;
     let estimated_gas = if is_deployment {
         21000u64 + 32000u64 + (calldata_bytes.len() as u64 * 200)
@@ -1875,6 +1840,42 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         return Err("Paiement des frais refusé".to_string());
     }
     // ====================== FIN DISBURSE ======================
+
+if !disburse_success {
+        return Err("Paiement des frais refusé".to_string());
+    }
+
+    // ====================== GÉNÉRATION DU HASH COMPATIBLE ETHERS.JS ======================
+    let chain_id = self.get_chain_id();
+    let gas_price = self.get_gas_price().await;
+    let estimated_gas = if is_deployment {
+        21000u64 + 32000u64 + (calldata_bytes.len() as u64 * 200)
+    } else if !calldata_bytes.is_empty() {
+        21000u64 + 21000u64 + (calldata_bytes.len() as u64 * 16)
+    } else {
+        21000u64
+    };
+
+    let mut tx_hasher = Keccak256::new();
+
+    tx_hasher.update(&[0x02]);                          // Type EIP-1559
+    tx_hasher.update(&chain_id.to_be_bytes());
+    tx_hasher.update(&final_nonce.to_be_bytes());
+    tx_hasher.update(&gas_price.to_be_bytes());
+    tx_hasher.update(&estimated_gas.to_be_bytes());
+    tx_hasher.update(to_addr.as_bytes());
+    tx_hasher.update(&value.to_be_bytes());
+    tx_hasher.update(&calldata_bytes);
+
+    let tx_hash = format!("0x{:x}", tx_hasher.finalize());
+    let normalized_hash = self.normalize_tx_hash(&tx_hash);
+
+    println!("🔑 Hash généré (compatible ethers) : {}", normalized_hash);
+
+    // ====================== SUITE (déploiement ou appel normal) ======================
+    let mut contract_address = String::new();
+    let mut slu_zk_contract_addr = String::new();
+    
 
     if is_deployment {
         let use_create2 = tx_params.get("create2").and_then(|v| v.as_bool()).unwrap_or(false);
