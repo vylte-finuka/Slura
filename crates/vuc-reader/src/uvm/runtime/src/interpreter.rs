@@ -2375,8 +2375,8 @@ pub fn execute_program(
             }
 
             // 0xf1 CALL
+            //___ 0xf1 CALL - Exécution réelle (récursif)
             0xf1 => {
-                // CALL - Similaire à CALLCODE mais exécute dans le contexte du contract appelé
                 if evm_stack.len() < 7 {
                     return Ok(halt_json_ebpf("Stack underflow on CALL"));
                 }
@@ -2390,37 +2390,98 @@ pub fn execute_program(
                 let out_size = evm_stack.pop().unwrap();
 
                 let to_address = u256_to_address(to_addr_u256);
+
                 println!(
-                    "📞 [CALL] to={}, value={}, gas={}, in=mem[{}:{}], out=mem[{}:{}]",
+                    "📞 [CALL REAL] to={}, value={}, gas={}, in=mem[{}:{}], out=mem[{}:{}]",
                     to_address, value, gas, in_offset, in_size, out_offset, out_size
                 );
 
-                // Simulate call (stub - real implementation would execute the call)
-                let call_success = true; // Assume success for stub
-                let return_data = vec![0u8; out_size.low_u64() as usize]; // Empty return data
+                // Récupération du calldata réel depuis la mémoire
+                let in_offset_usize = as_usize_or_fail(in_offset);
+                let in_size_usize = as_usize_or_fail(in_size);
 
-                // Write return data to memory
+                if !resize_memory_ebpf(&mut global_mem, in_offset_usize, in_size_usize) {
+                    return Ok(halt_json_ebpf("Memory resize failed on CALL"));
+                }
+
+                let call_data =
+                    memory_slice_len(&global_mem, in_offset_usize, in_size_usize).to_vec();
+
+                // === APPEL RÉCURSIF RÉEL ===
+                let mut sub_args = interpreter_args.clone();
+                sub_args.contract_address = to_address.clone();
+                sub_args.sender_address = interpreter_args.caller.clone();
+                sub_args.state_data = call_data;
+                sub_args.value = value;
+                sub_args.gas_limit = gas;
+                sub_args.call_depth = interpreter_args.call_depth + u256::one();
+
+                // Appel récursif à l'interpréteur
+                let sub_result = execute_program(
+                    Some(prog),
+                    Some(stack_usage),
+                    &global_mem,
+                    mbuff,
+                    helpers,
+                    allowed_memory,
+                    ret_type,
+                    exports,
+                    &sub_args,
+                    execution_context.storage_manager.clone(),
+                    None,
+                );
+
+                let call_success = sub_result.is_ok();
+                let return_data = if let Ok(val) = &sub_result {
+                    if let Some(obj) = val.as_object() {
+                        if let Some(data) = obj.get("data") {
+                            if let Some(s) = data.as_str() {
+                                if s.starts_with("0x") {
+                                    hex::decode(&s[2..]).unwrap_or_default()
+                                } else {
+                                    vec![]
+                                }
+                            } else {
+                                vec![]
+                            }
+                        } else {
+                            vec![]
+                        }
+                    } else {
+                        vec![]
+                    }
+                } else {
+                    vec![]
+                };
+
+                // Écriture des données de retour dans la mémoire du caller
                 if !resize_memory_ebpf(
                     &mut global_mem,
                     out_offset.low_u64() as usize,
                     out_size.low_u64() as usize,
                 ) {
-                    return Ok(halt_json_ebpf("Memory resize failed on CALL"));
+                    return Ok(halt_json_ebpf("Memory resize failed on CALL return"));
                 }
-                for i in 0..(out_size.low_u64() as usize) {
+
+                for i in 0..(out_size.low_u64() as usize).min(return_data.len()) {
                     if out_offset.low_u64() as usize + i < global_mem.len() {
                         global_mem[out_offset.low_u64() as usize + i] = return_data[i];
                     }
                 }
 
-                // Push success status onto stack
+                // Push success status sur la stack
                 evm_stack.push(if call_success {
                     u256::one()
                 } else {
                     u256::zero()
                 });
 
-                consume_gas_amount(&mut execution_context, 700)?; // Simplified gas cost
+                println!(
+                    "✅ [CALL REAL] Appel à {} terminé (success = {})",
+                    to_address, call_success
+                );
+
+                consume_gas_amount(&mut execution_context, 700)?;
             }
 
             //___ 0xf2 CALLCODE
