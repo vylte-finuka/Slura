@@ -1654,16 +1654,43 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
 
     println!("➡️ [send_transaction] Transaction reçue : {:?}", tx_params);
 
-    // Extraction robuste de l'adresse "from"
-    let from_addr = tx_params.get("from")
-        .or_else(|| tx_params.get("fromAddress"))   // parfois MetaMask envoie ça
-        .and_then(|v| v.as_str())
-        .map(|s| s.trim().to_lowercase())
-        .filter(|s| s.starts_with("0x") && s.len() == 42)
-        .unwrap_or_else(|| {
-            println!("⚠️ 'from' non trouvé ou invalide → fallback sur validator_address");
-            self.validator_address.to_lowercase()
-        });
+    // === EXTRACTION STRICTE DE "from" — AUCUN FALLBACK SUR VALIDATOR ===
+    let from_addr = if tx_params.is_array() {
+        // Cas standard MetaMask / Remix / ethers.js : params = [ { "from": "0x...", ... } ]
+        tx_params.as_array()
+            .and_then(|arr| arr.get(0))
+            .and_then(|obj| obj.get("from").or_else(|| obj.get("fromAddress")))
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| s.starts_with("0x") && s.len() == 42)
+    } else {
+        // Cas rare : objet direct
+        tx_params.get("from")
+            .or_else(|| tx_params.get("fromAddress"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| s.starts_with("0x") && s.len() == 42)
+    }
+    .ok_or_else(|| {
+        println!("❌ ERREUR CRITIQUE : Aucun 'from' valide trouvé dans tx_params");
+        println!("   tx_params reçu : {:?}", tx_params);
+        "Missing or invalid 'from' address in transaction params".to_string()
+    })?;
+
+    // Extraction de "to" (optionnel pour les déploiements)
+    let to_addr = if tx_params.is_array() {
+        tx_params.as_array()
+            .and_then(|arr| arr.get(0))
+            .and_then(|obj| obj.get("to"))
+            .and_then(|v| v.as_str())
+    } else {
+        tx_params.get("to").and_then(|v| v.as_str())
+    }
+    .map(|s| s.trim().to_lowercase())
+    .unwrap_or_default();
+
+    println!("✅ From address validée : {}", from_addr);
+    println!("📍 To address détectée   : {}", if to_addr.is_empty() { "(déploiement CREATE/CREATE2)" } else { &to_addr });
 
     let to_addr = tx_params.get("to")
         .and_then(|v| v.as_str())
