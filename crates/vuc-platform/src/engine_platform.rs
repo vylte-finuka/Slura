@@ -774,45 +774,19 @@ pub async fn get_account_balance(&self, address: &str) -> Result<U256, String> {
         let receipts_root = format!("0x{:x}", receipts_hasher.finalize());
 
         // Liste des transactions (si demandé)
-        // === Récupération des receipts UNE SEULE FOIS (async) ===
-        let receipts = self.tx_receipts.read().await;
-
         let transactions_list = if include_txs {
             block_data.transactions.iter().enumerate().map(|(idx, tx)| {
-                let receipt = receipts.get(&tx.hash)
-                    .cloned()
-                    .unwrap_or_else(|| serde_json::json!({}));
-
                 serde_json::json!({
                     "hash": tx.hash,
                     "nonce": format!("0x{:x}", tx.nonce_tx),
                     "from": tx.from_op,
                     "to": tx.receiver_op,
                     "value": format!("0x{:x}", tx.value_tx.parse::<u128>().unwrap_or(0)),
-
-                    // Champs gas pris depuis le receipt réel
-                    "gas": receipt.get("gasUsed")
-                        .and_then(|v: &serde_json::Value| v.as_str())
-                        .unwrap_or("0x5208"),
-
-                    "gasPrice": receipt.get("effectiveGasPrice")
-                        .and_then(|v: &serde_json::Value| v.as_str())
-                        .unwrap_or("0x3b9aca00"),
-
-                    "maxFeePerGas": receipt.get("effectiveGasPrice")
-                        .and_then(|v: &serde_json::Value| v.as_str())
-                        .unwrap_or("0x3b9aca00"),
-
-                    "maxPriorityFeePerGas": receipt.get("maxPriorityFeePerGas")
-                        .and_then(|v: &serde_json::Value| v.as_str())
-                        .or_else(|| receipt.get("effectiveGasPrice")
-                            .and_then(|v: &serde_json::Value| v.as_str()))
-                        .unwrap_or("0x3b9aca00"),
-
-                    "input": receipt.get("input")
-                        .and_then(|v: &serde_json::Value| v.as_str())
-                        .unwrap_or("0x"),
-
+                    "gas": "0x5208",
+                    "gasPrice": "0x3b9aca00",
+                    "maxFeePerGas": "0x3b9aca00",
+                    "maxPriorityFeePerGas": "0x3b9aca00",
+                    "input": "0x",
                     "blockHash": block_hash_real.clone(),
                     "blockNumber": format!("0x{:x}", block_number),
                     "transactionIndex": format!("0x{:x}", idx),
@@ -822,7 +796,7 @@ pub async fn get_account_balance(&self, address: &str) -> Result<U256, String> {
         } else {
             tx_hashes.into_iter().map(serde_json::Value::String).collect()
         };
-		
+
         // Réponse JSON enrichie
         Ok(serde_json::json!({
             "number": format!("0x{:x}", block_number),
@@ -1026,30 +1000,31 @@ pub async fn get_account_balance(&self, address: &str) -> Result<U256, String> {
 
 /// ✅ Récupération du nombre de transactions (nonce) - VERSION QUI FONCTIONNE
 pub async fn get_transaction_count(&self, address: &str) -> Result<u64, String> {
+    println!("\n🚨 DEBUG eth_getTransactionCount pour adresse: '{}'", address);
+
     let search_clean = address.trim_start_matches("0x").to_lowercase();
 
     let receipts = self.tx_receipts.read().await;
+    println!("   → {} receipts en mémoire", receipts.len());
+
     let mut tx_count = 0u64;
 
-    for (_, receipt) in receipts.iter() {
+    for (tx_hash, receipt) in receipts.iter() {
         if let Some(from_val) = receipt.get("from") {
             if let Some(from_str) = from_val.as_str() {
-                if from_str.trim_start_matches("0x").to_lowercase() == search_clean {
+                let from_clean = from_str.trim_start_matches("0x").to_lowercase();
+                if from_clean == search_clean {
                     tx_count += 1;
+                    println!("   ✅ MATCH trouvé pour tx: {} (from: {})", tx_hash, from_str);
                 }
             }
         }
     }
 
-    // Important : on ajoute 1 au nonce actuel pour la prochaine tx (comportement standard Ethereum)
-    let next_nonce = tx_count;   // ou tx_count + 1 si tu veux être plus strict
-
-    println!("📊 get_transaction_count({}) → {} transactions trouvées → nonce renvoyé = {}", 
-             search_clean, tx_count, next_nonce);
-
-    Ok(next_nonce)
+    println!("📊 Résultat final pour {} → nonce = {}", search_clean, tx_count);
+    Ok(tx_count)
 }
-	
+
   pub async fn get_block_by_number(&self, block_tag: &str, include_txs: bool) -> Result<serde_json::Value, String> {
     let current_block = self.get_current_block_number().await;
 
@@ -1679,25 +1654,34 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
 
     println!("➡️ [send_transaction] Transaction reçue : {:?}", tx_params);
 
+    // Extraction robuste de l'adresse "from"
     let from_addr = tx_params.get("from")
+        .or_else(|| tx_params.get("fromAddress"))   // parfois MetaMask envoie ça
         .and_then(|v| v.as_str())
-        .unwrap_or(&self.validator_address)
-        .to_lowercase();
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| s.starts_with("0x") && s.len() == 42)
+        .unwrap_or_else(|| {
+            println!("⚠️ 'from' non trouvé ou invalide → fallback sur validator_address");
+            self.validator_address.to_lowercase()
+        });
 
     let to_addr = tx_params.get("to")
         .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_lowercase();
+        .map(|s| s.trim().to_lowercase())
+        .unwrap_or_default();
 
-    // Exception spéciale pour l'initialisation VEZ (mint initial)
+    println!("👤 From address utilisée : {}", from_addr);
+    println!("📍 To address : {}", if to_addr.is_empty() { "(déploiement)" } else { &to_addr });
+
+    // Exception spéciale pour l'initialisation VEZ
     let is_vez_initialization = to_addr == "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" &&
         tx_params.get("data").and_then(|v| v.as_str()).unwrap_or("")
-            .starts_with("0x40c10f1900000000000000000000000053ae54b11251d5003e9aa51422405bc35a2ef32d");
+            .starts_with("0x40c10f19");
 
-    // Récupération du nonce actuel depuis les receipts (version robuste)
+    // Récupération du nonce actuel
     let current_account_nonce = self.get_transaction_count(&from_addr).await.unwrap_or(0);
 
-    // Force le nonce à être croissant (priorité au nonce fourni par l'utilisateur)
+    // Force le nonce à être croissant
     let final_nonce = tx_params.get("nonce")
         .and_then(|v| {
             if v.is_string() {
@@ -1715,9 +1699,6 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         })
         .map(|provided_nonce| std::cmp::max(provided_nonce, current_account_nonce))
         .unwrap_or(current_account_nonce);
-
-    println!("📝 Nonce final pour {} → {} (current était {})", 
-             from_addr, final_nonce, current_account_nonce);
 
     // Détection déploiement
     let is_deployment = to_addr.is_empty() ||
@@ -1769,6 +1750,20 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
 
     let constructor_calldata: Vec<u8> = vec![];
 
+    // Génération hash transaction
+let mut tx_hasher = Keccak256::new();
+    tx_hasher.update(from_addr.as_bytes());
+    tx_hasher.update(&final_nonce.to_be_bytes());
+    tx_hasher.update(&calldata_bytes);
+    tx_hasher.update(&value.to_be_bytes());
+    tx_hasher.update(&chrono::Utc::now().timestamp_nanos().to_be_bytes());
+    let tx_hash = format!("0x{:x}", tx_hasher.finalize());
+    let normalized_hash = self.normalize_tx_hash(&tx_hash);
+
+    let mut contract_address = String::new();
+    let mut slu_zk_contract_addr = String::new();
+
+    // ====================== CALCUL FRAIS DYNAMIQUES + DISBURSE ======================
     let gas_price = self.get_gas_price().await;
     let estimated_gas = if is_deployment {
         21000u64 + 32000u64 + (calldata_bytes.len() as u64 * 200)
@@ -1841,52 +1836,6 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         return Err("Paiement des frais refusé".to_string());
     }
     // ====================== FIN DISBURSE ======================
-	
-// Mise à jour du nonce dans l'état du compte (IMPORTANT)
-    {
-        let mut vm = self.vm.write().await;
-        let mut accounts = vm.state.accounts.write().await;
-        if let Some(account) = accounts.get_mut(&from_addr) {
-            account.nonce = std::cmp::max(account.nonce, final_nonce + 1);
-            println!("✅ Nonce mis à jour pour {} → {}", from_addr, account.nonce);
-        }
-	}
-	
-if !disburse_success {
-        return Err("Paiement des frais refusé".to_string());
-    }
-
-    // ====================== GÉNÉRATION DU HASH COMPATIBLE ETHERS.JS ======================
-    let chain_id = self.get_chain_id();
-    let gas_price = self.get_gas_price().await;
-    let estimated_gas = if is_deployment {
-        21000u64 + 32000u64 + (calldata_bytes.len() as u64 * 200)
-    } else if !calldata_bytes.is_empty() {
-        21000u64 + 21000u64 + (calldata_bytes.len() as u64 * 16)
-    } else {
-        21000u64
-    };
-
-    let mut tx_hasher = Keccak256::new();
-
-    tx_hasher.update(&[0x02]);                          // Type EIP-1559
-    tx_hasher.update(&chain_id.to_be_bytes());
-    tx_hasher.update(&final_nonce.to_be_bytes());
-    tx_hasher.update(&gas_price.to_be_bytes());
-    tx_hasher.update(&estimated_gas.to_be_bytes());
-    tx_hasher.update(to_addr.as_bytes());
-    tx_hasher.update(&value.to_be_bytes());
-    tx_hasher.update(&calldata_bytes);
-
-    let tx_hash = format!("0x{:x}", tx_hasher.finalize());
-    let normalized_hash = self.normalize_tx_hash(&tx_hash);
-
-    println!("🔑 Hash généré (compatible ethers) : {}", normalized_hash);
-
-    // ====================== SUITE (déploiement ou appel normal) ======================
-    let mut contract_address = String::new();
-    let mut slu_zk_contract_addr = String::new();
-    
 
     if is_deployment {
         let use_create2 = tx_params.get("create2").and_then(|v| v.as_bool()).unwrap_or(false);
