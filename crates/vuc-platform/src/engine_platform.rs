@@ -1680,13 +1680,29 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     use sha3::{Digest, Keccak256};
     use ethers::types::U256;
 
-      println!("➡️ [send_transaction] Transaction reçue : {:?}", tx_params);
+     println!("➡️ [send_transaction] Transaction reçue : {:?}", tx_params);
 
     // ===================================================================
-    // EXTRACTION STRICTE DU "from" — AUCUN FALLBACK SUR VALIDATOR
+    // EXTRACTION STRICTE DU "from"
     // ===================================================================
-    let (from_addr, is_raw_tx) = if let Some(raw_str) = tx_params.as_str() {
-        // Cas eth_sendRawTransaction (MetaMask envoie directement le raw tx)
+    let (from_addr, is_raw_tx) = if tx_params.is_array() {
+        // Cas principal : MetaMask envoie eth_sendRawTransaction avec params = [ "0x02f8b1..." ]
+        let first = tx_params.as_array().and_then(|arr| arr.get(0));
+        
+        if let Some(raw_str) = first.and_then(|v| v.as_str()) {
+            if raw_str.starts_with("0x") {
+                match self.recover_sender_from_raw_tx(raw_str) {
+                    Ok(addr) => (addr, true),
+                    Err(e) => return Err(format!("Failed to recover sender from raw tx: {}", e)),
+                }
+            } else {
+                return Err("Invalid raw transaction format".to_string());
+            }
+        } else {
+            return Err("Missing raw transaction in params array".to_string());
+        }
+    } else if let Some(raw_str) = tx_params.as_str() {
+        // Cas rare : raw tx envoyé directement comme string
         if raw_str.starts_with("0x") {
             match self.recover_sender_from_raw_tx(raw_str) {
                 Ok(addr) => (addr, true),
@@ -1695,20 +1711,8 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         } else {
             return Err("Invalid raw transaction format".to_string());
         }
-    } else if tx_params.is_array() {
-        // Cas eth_sendTransaction avec tableau [ { "from": "0x...", ... } ]
-        let obj = tx_params.as_array().and_then(|arr| arr.get(0));
-        let from = obj.and_then(|o| o.get("from").or_else(|| o.get("fromAddress")))
-            .and_then(|v| v.as_str())
-            .map(|s| s.trim().to_lowercase())
-            .filter(|s| s.starts_with("0x") && s.len() == 42)
-            .ok_or_else(|| {
-                println!("❌ Aucun 'from' valide dans le tableau params");
-                "Missing or invalid 'from' address in transaction params".to_string()
-            })?;
-        (from, false)
     } else {
-        // Cas objet direct { "from": "0x..." }
+        // Cas eth_sendTransaction avec objet (rare avec MetaMask)
         let from = tx_params.get("from")
             .or_else(|| tx_params.get("fromAddress"))
             .and_then(|v| v.as_str())
