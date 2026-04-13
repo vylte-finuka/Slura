@@ -1785,6 +1785,80 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
 
     let constructor_calldata: Vec<u8> = vec![];
 
+    let is_vez_initialization = false;  // sera recalculé plus tard si besoin
+
+    // Récupération du nonce actuel
+    let current_account_nonce = self.get_transaction_count(&from_addr).await.unwrap_or(0);
+
+    // Force le nonce à être croissant
+    let final_nonce = tx_params.get("nonce")
+        .and_then(|v| {
+            if v.is_string() {
+                let s = v.as_str().unwrap();
+                if s.starts_with("0x") {
+                    u64::from_str_radix(&s[2..], 16).ok()
+                } else {
+                    s.parse().ok()
+                }
+            } else if v.is_u64() {
+                Some(v.as_u64().unwrap())
+            } else {
+                None
+            }
+        })
+        .map(|provided_nonce| std::cmp::max(provided_nonce, current_account_nonce))
+        .unwrap_or(current_account_nonce);
+
+    // Détection déploiement
+    let is_deployment = to_addr.is_empty() ||
+                       to_addr == "0x" ||
+                       tx_params.get("to").is_none() ||
+                       tx_params.get("to") == Some(&serde_json::Value::Null);
+
+    // Valeur envoyée
+    let value = tx_params.get("value")
+        .and_then(|v| {
+            if v.is_string() {
+                let s = v.as_str().unwrap();
+                if s.starts_with("0x") {
+                    u128::from_str_radix(s.trim_start_matches("0x"), 16).ok()
+                } else {
+                    s.parse::<u128>().ok()
+                }
+            } else if v.is_u64() {
+                Some(v.as_u64().unwrap() as u128)
+            } else if v.is_number() {
+                v.as_u64().map(|n| n as u128)
+            } else {
+                None
+            }
+        }).unwrap_or(0);
+
+    let data = tx_params.get("data")
+        .or_else(|| tx_params.get("input"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let calldata_bytes = if !data.is_empty() && data.starts_with("0x") {
+        hex::decode(&data[2..]).unwrap_or_default()
+    } else if !data.is_empty() {
+        hex::decode(data).unwrap_or_default()
+    } else {
+        vec![]
+    };
+
+    let creation_bytecode = if is_deployment && !data.is_empty() {
+        calldata_bytes.clone()
+    } else {
+        vec![]
+    };
+
+    if is_deployment && creation_bytecode.is_empty() {
+        return Err("Bytecode de déploiement vide".to_string());
+    }
+
+    let constructor_calldata: Vec<u8> = vec![];
+
     // Génération hash transaction
 let mut tx_hasher = Keccak256::new();
     tx_hasher.update(from_addr.as_bytes());
