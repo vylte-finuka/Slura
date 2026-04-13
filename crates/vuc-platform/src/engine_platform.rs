@@ -1680,76 +1680,38 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     use sha3::{Digest, Keccak256};
     use ethers::types::U256;
 
-     println!("➡️ [send_transaction] Transaction reçue : {:?}", tx_params);
+    println!("➡️ [send_transaction] Transaction reçue : {:?}", tx_params);
 
     // ===================================================================
-    // EXTRACTION STRICTE DU "from"
+    // EXTRACTION DU "from" À PARTIR DU RAW TRANSACTION (eth_sendRawTransaction)
     // ===================================================================
-    let (from_addr, is_raw_tx) = if tx_params.is_array() {
-        // Cas principal : MetaMask envoie eth_sendRawTransaction avec params = [ "0x02f8b1..." ]
-        let first = tx_params.as_array().and_then(|arr| arr.get(0));
-        
-        if let Some(raw_str) = first.and_then(|v| v.as_str()) {
-            if raw_str.starts_with("0x") {
-                match self.recover_sender_from_raw_tx(raw_str) {
-                    Ok(addr) => (addr, true),
-                    Err(e) => return Err(format!("Failed to recover sender from raw tx: {}", e)),
-                }
-            } else {
-                return Err("Invalid raw transaction format".to_string());
-            }
-        } else {
-            return Err("Missing raw transaction in params array".to_string());
-        }
-    } else if let Some(raw_str) = tx_params.as_str() {
-        // Cas rare : raw tx envoyé directement comme string
-        if raw_str.starts_with("0x") {
-            match self.recover_sender_from_raw_tx(raw_str) {
-                Ok(addr) => (addr, true),
-                Err(e) => return Err(format!("Failed to recover sender from raw tx: {}", e)),
-            }
-        } else {
-            return Err("Invalid raw transaction format".to_string());
-        }
-    } else {
-        // Cas eth_sendTransaction avec objet (rare avec MetaMask)
-        let from = tx_params.get("from")
-            .or_else(|| tx_params.get("fromAddress"))
+    let raw_hex = if tx_params.is_array() {
+        tx_params.as_array()
+            .and_then(|arr| arr.get(0))
             .and_then(|v| v.as_str())
-            .map(|s| s.trim().to_lowercase())
-            .filter(|s| s.starts_with("0x") && s.len() == 42)
-            .ok_or_else(|| {
-                println!("❌ Aucun 'from' valide trouvé dans l'objet params");
-                println!("   tx_params reçu : {:?}", tx_params);
-                "Missing or invalid 'from' address in transaction params".to_string()
-            })?;
-        (from, false)
+    } else {
+        tx_params.as_str()
+    }
+    .ok_or("Missing raw transaction in params")?;
+
+    if !raw_hex.starts_with("0x") {
+        return Err("Invalid raw transaction format".to_string());
+    }
+
+    let from_addr = match self.recover_sender_from_raw_tx(raw_hex) {
+        Ok(addr) => addr,
+        Err(e) => return Err(format!("Failed to recover sender from raw tx: {}", e)),
     };
 
-    // ===================================================================
-    // EXTRACTION DE "to" (optionnel pour les déploiements)
-    // ===================================================================
-    let to_addr = if is_raw_tx {
-        "".to_string()
-    } else if tx_params.is_array() {
-        tx_params.as_array().and_then(|arr| arr.get(0))
-            .and_then(|obj| obj.get("to"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.trim().to_lowercase())
-            .unwrap_or_default()
-    } else {
-        tx_params.get("to")
-            .and_then(|v| v.as_str())
-            .map(|s| s.trim().to_lowercase())
-            .unwrap_or_default()
-    };
+    let is_raw_tx = true;
 
-    println!("✅ From address validée : {}", from_addr);
-    println!("📍 To address détectée   : {}", if to_addr.is_empty() { "(déploiement CREATE/CREATE2)" } else { &to_addr });
+    // "to" n'est pas directement disponible dans le raw tx
+    let to_addr = "".to_string();
 
-    let is_vez_initialization = to_addr == "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" &&
-        tx_params.get("data").and_then(|v| v.as_str()).unwrap_or("")
-            .starts_with("0x40c10f19");
+    println!("✅ From address validée (récupérée du raw tx) : {}", from_addr);
+    println!("📍 To address (dans raw tx) : (non disponible directement)");
+
+    let is_vez_initialization = false;  // sera recalculé plus tard si besoin
 
     // Récupération du nonce actuel
     let current_account_nonce = self.get_transaction_count(&from_addr).await.unwrap_or(0);
