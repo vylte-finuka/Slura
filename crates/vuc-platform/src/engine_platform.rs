@@ -1648,59 +1648,101 @@ pub async fn verify_contract_deployment(&self, contract_address: &str) -> Result
         }
 	}
 
+    fn recover_sender_from_raw_tx(&self, raw_hex: &str) -> Result<String, String> {
+        if !raw_hex.starts_with("0x") {
+            return Err("Raw transaction must start with 0x".to_string());
+        }
+
+        let bytes = match hex::decode(&raw_hex[2..]) {
+            Ok(b) => b,
+            Err(e) => return Err(format!("Hex decode failed: {}", e)),
+        };
+
+        // Gestion du préfixe EIP-1559 (0x02)
+        let rlp_bytes = if !bytes.is_empty() && bytes[0] == 0x02 {
+            &bytes[1..]
+        } else {
+            &bytes[..]
+        };
+
+        // Décodage RLP avec rlp 0.6.1
+        let tx: ethers::types::Transaction =  match rlp::decode(rlp_bytes) {
+            Ok(tx) => tx,
+            Err(e) => return Err(format!("Failed to decode raw transaction: {}", e)),
+        };
+
+        // Récupération du champ "from" (adresse de l'expéditeur)
+        let from = tx.from;
+        Ok(format!("{:#x}", from))
+    }
+
 pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<String, String> {
     use sha3::{Digest, Keccak256};
     use ethers::types::U256;
 
-    println!("➡️ [send_transaction] Transaction reçue : {:?}", tx_params);
+      println!("➡️ [send_transaction] Transaction reçue : {:?}", tx_params);
 
-    // === EXTRACTION STRICTE DE "from" — AUCUN FALLBACK SUR VALIDATOR ===
-    let from_addr = if tx_params.is_array() {
-        // Cas standard MetaMask / Remix / ethers.js : params = [ { "from": "0x...", ... } ]
-        tx_params.as_array()
-            .and_then(|arr| arr.get(0))
-            .and_then(|obj| obj.get("from").or_else(|| obj.get("fromAddress")))
+    // ===================================================================
+    // EXTRACTION STRICTE DU "from" — AUCUN FALLBACK SUR VALIDATOR
+    // ===================================================================
+    let (from_addr, is_raw_tx) = if let Some(raw_str) = tx_params.as_str() {
+        // Cas eth_sendRawTransaction (MetaMask envoie directement le raw tx)
+        if raw_str.starts_with("0x") {
+            match self.recover_sender_from_raw_tx(raw_str) {
+                Ok(addr) => (addr, true),
+                Err(e) => return Err(format!("Failed to recover sender from raw tx: {}", e)),
+            }
+        } else {
+            return Err("Invalid raw transaction format".to_string());
+        }
+    } else if tx_params.is_array() {
+        // Cas eth_sendTransaction avec tableau [ { "from": "0x...", ... } ]
+        let obj = tx_params.as_array().and_then(|arr| arr.get(0));
+        let from = obj.and_then(|o| o.get("from").or_else(|| o.get("fromAddress")))
             .and_then(|v| v.as_str())
             .map(|s| s.trim().to_lowercase())
             .filter(|s| s.starts_with("0x") && s.len() == 42)
+            .ok_or_else(|| {
+                println!("❌ Aucun 'from' valide dans le tableau params");
+                "Missing or invalid 'from' address in transaction params".to_string()
+            })?;
+        (from, false)
     } else {
-        // Cas rare : objet direct
-        tx_params.get("from")
+        // Cas objet direct { "from": "0x..." }
+        let from = tx_params.get("from")
             .or_else(|| tx_params.get("fromAddress"))
             .and_then(|v| v.as_str())
             .map(|s| s.trim().to_lowercase())
             .filter(|s| s.starts_with("0x") && s.len() == 42)
-    }
-    .ok_or_else(|| {
-        println!("❌ ERREUR CRITIQUE : Aucun 'from' valide trouvé dans tx_params");
-        println!("   tx_params reçu : {:?}", tx_params);
-        "Missing or invalid 'from' address in transaction params".to_string()
-    })?;
+            .ok_or_else(|| {
+                println!("❌ Aucun 'from' valide trouvé dans l'objet params");
+                println!("   tx_params reçu : {:?}", tx_params);
+                "Missing or invalid 'from' address in transaction params".to_string()
+            })?;
+        (from, false)
+    };
 
-    // Extraction de "to" (optionnel pour les déploiements)
-    let to_addr = if tx_params.is_array() {
-        tx_params.as_array()
-            .and_then(|arr| arr.get(0))
+    // ===================================================================
+    // EXTRACTION DE "to" (optionnel pour les déploiements)
+    // ===================================================================
+    let to_addr = if is_raw_tx {
+        "".to_string()
+    } else if tx_params.is_array() {
+        tx_params.as_array().and_then(|arr| arr.get(0))
             .and_then(|obj| obj.get("to"))
             .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_lowercase())
+            .unwrap_or_default()
     } else {
-        tx_params.get("to").and_then(|v| v.as_str())
-    }
-    .map(|s| s.trim().to_lowercase())
-    .unwrap_or_default();
+        tx_params.get("to")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_lowercase())
+            .unwrap_or_default()
+    };
 
     println!("✅ From address validée : {}", from_addr);
     println!("📍 To address détectée   : {}", if to_addr.is_empty() { "(déploiement CREATE/CREATE2)" } else { &to_addr });
 
-    let to_addr = tx_params.get("to")
-        .and_then(|v| v.as_str())
-        .map(|s| s.trim().to_lowercase())
-        .unwrap_or_default();
-
-    println!("👤 From address utilisée : {}", from_addr);
-    println!("📍 To address : {}", if to_addr.is_empty() { "(déploiement)" } else { &to_addr });
-
-    // Exception spéciale pour l'initialisation VEZ
     let is_vez_initialization = to_addr == "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" &&
         tx_params.get("data").and_then(|v| v.as_str()).unwrap_or("")
             .starts_with("0x40c10f19");
