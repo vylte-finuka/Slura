@@ -2375,7 +2375,6 @@ pub fn execute_program(
             }
 
             // 0xf1 CALL
-            //___ 0xf1 CALL - Exécution réelle (récursif)
             0xf1 => {
                 if evm_stack.len() < 7 {
                     return Ok(halt_json_ebpf("Stack underflow on CALL"));
@@ -2428,7 +2427,7 @@ pub fn execute_program(
                     exports,
                     &sub_args,
                     execution_context.storage_manager.clone(),
-                    None,
+                    initial_storage.clone(),
                 );
 
                 let call_success = sub_result.is_ok();
