@@ -1652,29 +1652,14 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     use sha3::{Digest, Keccak256};
     use ethers::types::U256;
 
-    println!("➡️ [send_transaction] Transaction reçue : {:?}", tx_params);
+      println!("➡️ [send_transaction] Transaction reçue : {:?}", tx_params);
 
     // ===================================================================
-    // FROM DYNAMIQUE – HIÉRARCHIE AVEC FALLBACKS
+    // FROM FORCÉ POUR TOUTES LES TRANSACTIONS (car il n'y a jamais de "from")
     // ===================================================================
-    let from_addr = {
-        // 1️⃣ PRIORITÉ 1 : Champ `from` direct dans tx_params
-        if let Some(from_val) = tx_params.get("from").and_then(|v| v.as_str()) {
-            let from_clean = from_val.trim().to_lowercase();
-            if from_clean.starts_with("0x") && from_clean.len() == 42 {
-                println!("✅ From address extraite de tx_params : {}", from_clean);
-                from_clean
-            } else {
-                println!("⚠️ From invalide dans tx_params → fallback validator");
-                self.validator_address.clone()
-            }
-        } else {
-            println!("ℹ️ Pas de `from` dans tx_params → utilise validator");
-            self.validator_address.clone()
-        }
-    };
+    let from_addr = "0x68e7356cccd3734bce130a3b4905440a3b5f94c1".to_string();
 
-    println!("✅ From address finale (dynamique) : {}", from_addr);
+    println!("✅ From address FORCÉE : {}", from_addr);
 
     // Extraction de "to" (optionnel)
     let to_addr = if tx_params.is_array() {
@@ -1766,8 +1751,8 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         return Err("Bytecode de déploiement vide".to_string());
     }
 
-    let constructor_calldata: Vec<u8> = vec![];
-    
+    let constructor_calldata: Vec<u8> = vec![];;
+
     // Génération hash transaction
 let mut tx_hasher = Keccak256::new();
     tx_hasher.update(from_addr.as_bytes());
