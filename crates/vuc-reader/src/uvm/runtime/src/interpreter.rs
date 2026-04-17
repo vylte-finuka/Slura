@@ -1804,6 +1804,42 @@ pub fn execute_program(
                 println!("📏 [RETURNDATASIZE] → {} bytes", size);
             }
 
+            // ___ 0x3e RETURNDATACOPY - Copie des données de retour dans la mémoire
+            0x3e => {
+                if evm_stack.len() < 3 {
+                    return Ok(halt_json_ebpf("Stack underflow on RETURNDATACOPY"));
+                }
+                let dest_offset = evm_stack.pop().unwrap();
+                let offset = evm_stack.pop().unwrap();
+                let size = evm_stack.pop().unwrap();
+
+                let dest_offset_usize = as_usize_or_fail(dest_offset);
+                let offset_usize = as_usize_or_fail(offset);
+                let size_usize = as_usize_or_fail(size);
+
+                if !resize_memory_ebpf(&mut global_mem, dest_offset_usize, size_usize) {
+                    return Ok(halt_json_ebpf("Memory resize failed on RETURNDATACOPY"));
+                }
+
+                let return_data = &execution_context.return_data;
+                for i in 0..size_usize {
+                    if dest_offset_usize + i < global_mem.len() {
+                        if offset_usize + i < return_data.len() {
+                            global_mem[dest_offset_usize + i] = return_data[offset_usize + i];
+                        } else {
+                            global_mem[dest_offset_usize + i] = 0;
+                        }
+                    }
+                }
+
+                println!(
+                    "📋 [RETURNDATACOPY] return_data[{}:{}] → mem[{}]",
+                    offset,
+                    offset + size,
+                    dest_offset
+                );
+            }
+
             //___ 0x40 BLOCKHASH
             0x40 => {
                 if evm_stack.is_empty() {
