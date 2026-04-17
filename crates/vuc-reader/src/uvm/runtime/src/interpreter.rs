@@ -2742,6 +2742,7 @@ pub fn execute_program(
             }
 
             //___ 0xf5 CREATE2
+            //___ 0xf5 CREATE2
             0xf5 => {
                 if evm_stack.len() < 4 {
                     return Ok(halt_json_ebpf("Stack underflow on CREATE2"));
@@ -2768,21 +2769,45 @@ pub fn execute_program(
                     salt
                 );
 
-                // Calcul adresse CREATE2
+                // ✅ CORRECTION : Calcul adresse CREATE2 conforme EIP-1014
                 let mut hasher = Keccak256::new();
-                hasher.update(&[0xff]);
-                let sender = interpreter_args.contract_address.clone();
-                hasher.update(sender.as_bytes());
 
+                // 1️⃣ Prefix 0xff
+                hasher.update(&[0xff]);
+
+                // 2️⃣ Adresse du déployeur (20 bytes, PAS la string)
+                let sender_addr = interpreter_args.contract_address.clone();
+                let mut sender_bytes = [0u8; 20];
+
+                if sender_addr.starts_with("0x") && sender_addr.len() == 42 {
+                    // Ethereum address valide
+                    if let Ok(decoded) = hex::decode(&sender_addr[2..]) {
+                        if decoded.len() == 20 {
+                            sender_bytes.copy_from_slice(&decoded);
+                        }
+                    }
+                } else {
+                    // Fallback : encode l'adresse en U256 puis prend les 20 derniers bytes
+                    let sender_u256 = encode_address_to_u256(&sender_addr);
+                    let mut full_bytes = [0u8; 32];
+                    sender_u256.to_big_endian(&mut full_bytes);
+                    sender_bytes.copy_from_slice(&full_bytes[12..32]);
+                }
+
+                hasher.update(&sender_bytes);
+
+                // 3️⃣ Salt (32 bytes)
                 let mut salt_bytes = [0u8; 32];
                 salt.to_big_endian(&mut salt_bytes);
                 hasher.update(&salt_bytes);
-                hasher.update(&Keccak256::digest(&init_code));
 
+                // 4️⃣ keccak256(initCode)
+                let init_code_hash = Keccak256::digest(&init_code);
+                hasher.update(&init_code_hash);
+
+                // 5️⃣ Résultat : prendre les 20 derniers bytes du hash
                 let hash = hasher.finalize();
                 let new_address = format!("0x{}", hex::encode(&hash[12..32]));
-
-                println!("✅ [CREATE2] Nouvelle adresse : {}", new_address);
 
                 // ====================== PERSISTANCE ROCKSDB ======================
                 if let Some(storage_manager) = &execution_context.storage_manager {
@@ -2802,7 +2827,7 @@ pub fn execute_program(
                         "balance": value.low_u64() as u128,
                         "nonce": 1u64,
                         "is_contract": true,
-                        "deployed_by": sender,
+                        "deployed_by": sender_addr,
                         "deployment_method": "create2",
                         "saved_timestamp": chrono::Utc::now().timestamp()
                     });
@@ -3098,13 +3123,14 @@ fn add_storage_written_to_result(
     }
 }
 
-/// Hash Keccak-256 (stub - implémentation réelle nécessiterait une crate crypto)
+/// Hash Keccak-256 (PRODUCTION - utilise sha3 crate)
 fn keccak_hash(data: &[u8]) -> [u8; 32] {
-    // Stub implementation - in real code use keccak256 crate
+    use sha3::Digest;
+    let mut hasher = Keccak256::new();
+    hasher.update(data);
+    let result = hasher.finalize();
     let mut hash = [0u8; 32];
-    for (i, &byte) in data.iter().enumerate() {
-        hash[i % 32] ^= byte;
-    }
+    hash.copy_from_slice(&result);
     hash
 }
 
