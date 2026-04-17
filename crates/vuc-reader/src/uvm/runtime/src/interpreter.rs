@@ -447,6 +447,109 @@ fn set_balance(world_state: &mut UvmWorldState, address: &str, balance: u256) {
     account.balance = balance;
 }
 
+pub fn extract_runtime_from_creation_bytecode(full: &[u8]) -> Result<Vec<u8>, String> {
+    if full.len() < 8000 {
+        return Err(format!(
+            "Bytecode trop court pour contenir un RETURN valide: {} bytes",
+            full.len()
+        ));
+    }
+
+    println!(
+        "Début extraction runtime - taille creation bytecode: {} bytes",
+        full.len()
+    );
+
+    let mut code = full.to_vec();
+
+    // 1. Coupe metadata finale si présente (IPFS/solc)
+    let markers: Vec<&[u8]> = vec![b"a2646970667358221220", b"64736f6c634300"];
+
+    for marker in &markers {
+        if let Some(pos) = code
+            .windows(marker.len())
+            .rposition(|w: &[u8]| w == *marker)
+        {
+            code.truncate(pos);
+            println!(
+                "→ Metadata tronquée à offset {} (reste: {} bytes)",
+                pos,
+                code.len()
+            );
+            break;
+        }
+    }
+
+    // 2. Recherche du DERNIER f3 (c'est toujours le bon dans Solidity récent)
+    let mut return_offset = None;
+    for i in (0..code.len()).rev() {
+        if code[i] == 0xf3 {
+            return_offset = Some(i);
+            println!("→ Dernier RETURN (0xf3) trouvé à offset 0x{:04x}", i);
+            break;
+        }
+    }
+
+    let return_pos =
+        return_offset.ok_or("Aucun 0xf3 trouvé dans tout le bytecode !".to_string())?;
+
+    // 3. Ce qui suit le f3 (doit être fe ou direct 60806040)
+    let suffix = &code[return_pos + 1..];
+
+    // Déclaration mutable ici pour pouvoir réassigner dans la boucle de tolérance
+    let mut runtime_start = return_pos + 1;
+
+    if suffix.starts_with(&[0xfe]) && suffix.len() > 5 && &suffix[1..6] == [0x60, 0x80, 0x60, 0x40]
+    {
+        runtime_start = return_pos + 2; // saute fe
+        println!("→ fe60806040 détecté directement après f3");
+    } else if suffix.starts_with(&[0x60, 0x80, 0x60, 0x40]) {
+        runtime_start = return_pos + 1;
+        println!("→ 60806040 direct après f3");
+    } else {
+        // Tolérance max 8 bytes après f3 (padding rare mais possible)
+        let mut pos = return_pos + 1;
+        let max_skip = 8;
+        while pos + 4 < code.len() && pos < return_pos + 1 + max_skip {
+            if &code[pos..pos + 4] == [0x60, 0x80, 0x60, 0x40] {
+                println!(
+                    "→ Pattern runtime trouvé après décalage de {} bytes (offset 0x{:04x})",
+                    pos - return_pos - 1,
+                    pos
+                );
+                runtime_start = pos;
+                break;
+            }
+            pos += 1;
+        }
+
+        if pos + 4 >= code.len() || pos >= return_pos + 1 + max_skip {
+            return Err(format!(
+                "Pas de 60806040 après f3 à 0x{:04x} (suffix={:02x?})",
+                return_pos,
+                &suffix[..20.min(suffix.len())]
+            ));
+        }
+    }
+
+    let runtime = &code[runtime_start..];
+
+    if runtime.len() < 3000 || runtime[0..4] != [0x60, 0x80, 0x60, 0x40] {
+        return Err(format!(
+            "Runtime extrait invalide: {} bytes, prefix={:02x?}",
+            runtime.len(),
+            &runtime[0..4.min(runtime.len())]
+        ));
+    }
+
+    println!(
+        "→ Extraction réussie ! Runtime: {} bytes (début offset 0x{:04x})",
+        runtime.len(),
+        runtime_start
+    );
+    Ok(runtime.to_vec())
+}
+
 // ✅ NOUVELLE FONCTION: Décodage générique universel comme Erigon
 fn decode_return_data_generic(data: &[u8], len: usize) -> JsonValue {
     // 1. RETURN vide → succès booléen
@@ -2741,8 +2844,7 @@ pub fn execute_program(
                 return Ok(result);
             }
 
-            //___ 0xf5 CREATE2
-            //___ 0xf5 CREATE2
+            //___ 0xf5 CREATE2 (VERSION RETH-STYLE)
             0xf5 => {
                 if evm_stack.len() < 4 {
                     return Ok(halt_json_ebpf("Stack underflow on CREATE2"));
@@ -2769,25 +2871,24 @@ pub fn execute_program(
                     salt
                 );
 
-                // ✅ CORRECTION : Calcul adresse CREATE2 conforme EIP-1014
-                let mut hasher = Keccak256::new();
+                // ════════════════════════════════════════════════════════════════════════════
+                // 🔥 ÉTAPE 1 : EXÉCUTION COMPLÈTE DU CONSTRUCTEUR (COMME RETH)
+                // ════════════════════════════════════════════════════════════════════════════
 
-                // 1️⃣ Prefix 0xff
+                // ✅ Calcul de l'adresse AVANT l'exécution (requis pour ADDRESS opcode)
+                let mut hasher = Keccak256::new();
                 hasher.update(&[0xff]);
 
-                // 2️⃣ Adresse du déployeur (20 bytes, PAS la string)
                 let sender_addr = interpreter_args.contract_address.clone();
                 let mut sender_bytes = [0u8; 20];
 
                 if sender_addr.starts_with("0x") && sender_addr.len() == 42 {
-                    // Ethereum address valide
                     if let Ok(decoded) = hex::decode(&sender_addr[2..]) {
                         if decoded.len() == 20 {
                             sender_bytes.copy_from_slice(&decoded);
                         }
                     }
                 } else {
-                    // Fallback : encode l'adresse en U256 puis prend les 20 derniers bytes
                     let sender_u256 = encode_address_to_u256(&sender_addr);
                     let mut full_bytes = [0u8; 32];
                     sender_u256.to_big_endian(&mut full_bytes);
@@ -2796,61 +2897,163 @@ pub fn execute_program(
 
                 hasher.update(&sender_bytes);
 
-                // 3️⃣ Salt (32 bytes)
                 let mut salt_bytes = [0u8; 32];
                 salt.to_big_endian(&mut salt_bytes);
                 hasher.update(&salt_bytes);
 
-                // 4️⃣ keccak256(initCode)
                 let init_code_hash = Keccak256::digest(&init_code);
                 hasher.update(&init_code_hash);
 
-                // 5️⃣ Résultat : prendre les 20 derniers bytes du hash
                 let hash = hasher.finalize();
                 let new_address = format!("0x{}", hex::encode(&hash[12..32]));
 
-                // ====================== PERSISTANCE ROCKSDB ======================
+                println!("📍 [CREATE2] Adresse calculée : {}", new_address);
+
+                // ✅ Création d'un contexte d'exécution pour le constructeur
+                let mut constructor_args = interpreter_args.clone();
+                constructor_args.contract_address = new_address.clone();
+                constructor_args.sender_address = interpreter_args.contract_address.clone();
+                constructor_args.caller = interpreter_args.contract_address.clone();
+                constructor_args.state_data = vec![]; // Constructeur sans calldata
+                constructor_args.value = value;
+                constructor_args.call_depth = interpreter_args.call_depth + u256::one();
+
+                // ✅ Limite anti-récursion
+                if constructor_args.call_depth > u256::from(1024) {
+                    println!("🚨 [CREATE2] Profondeur maximale atteinte");
+                    evm_stack.push(u256::zero()); // Échec
+                    consume_gas_amount(&mut execution_context, 32000)?;
+                    bytecode_pc += 1;
+                    continue;
+                }
+
+                // ✅ APPEL RÉCURSIF COMPLET (comme Reth execute_frame)
+                println!(
+                    "🔧 [CREATE2] Exécution du constructeur ({} bytes)",
+                    init_code.len()
+                );
+
+                let constructor_result = execute_program(
+                    Some(&init_code), // ← Bytecode du constructeur
+                    Some(stack_usage),
+                    &[], // Mémoire vierge
+                    &[], // Pas de calldata
+                    helpers,
+                    allowed_memory,
+                    ret_type,
+                    exports,
+                    &constructor_args,
+                    execution_context.storage_manager.clone(),
+                    Some(execution_context.world_state.storage.clone()),
+                );
+
+                // ════════════════════════════════════════════════════════════════════════════
+                // 🔥 ÉTAPE 2 : EXTRACTION DU RUNTIME DEPUIS LE RÉSULTAT
+                // ════════════════════════════════════════════════════════════════════════════
+
+                let runtime_bytecode = match constructor_result {
+                    Ok(val) => {
+                        if let Some(obj) = val.as_object() {
+                            let action = obj
+                                .get("action")
+                                .and_then(|a| a.as_str())
+                                .unwrap_or("unknown");
+
+                            if action == "return" {
+                                // ✅ RETURN réussi - extrait le runtime
+                                obj.get("data")
+                                    .and_then(|d| match d {
+                                        JsonValue::String(s) if s.starts_with("0x") => {
+                                            hex::decode(&s[2..]).ok()
+                                        }
+                                        _ => None,
+                                    })
+                                    .unwrap_or_else(|| {
+                                        println!(
+                                            "⚠️ [CREATE2] Pas de runtime dans RETURN, fallback"
+                                        );
+                                        extract_runtime_from_creation_bytecode(&init_code)
+                                            .unwrap_or(init_code.clone())
+                                    })
+                            } else {
+                                println!("❌ [CREATE2] Constructeur a échoué : {}", action);
+                                evm_stack.push(u256::zero()); // Échec
+                                consume_gas_amount(&mut execution_context, 32000)?;
+                                bytecode_pc += 1;
+                                continue;
+                            }
+                        } else {
+                            println!("❌ [CREATE2] Résultat constructeur invalide");
+                            evm_stack.push(u256::zero());
+                            consume_gas_amount(&mut execution_context, 32000)?;
+                            bytecode_pc += 1;
+                            continue;
+                        }
+                    }
+                    Err(e) => {
+                        println!("❌ [CREATE2] Erreur constructeur : {:?}", e);
+                        evm_stack.push(u256::zero());
+                        consume_gas_amount(&mut execution_context, 32000)?;
+                        bytecode_pc += 1;
+                        continue;
+                    }
+                };
+
+                if runtime_bytecode.is_empty() {
+                    println!("❌ [CREATE2] Runtime vide après exécution");
+                    evm_stack.push(u256::zero());
+                    consume_gas_amount(&mut execution_context, 32000)?;
+                    bytecode_pc += 1;
+                    continue;
+                }
+
+                println!(
+                    "✅ [CREATE2] Runtime extrait : {} bytes",
+                    runtime_bytecode.len()
+                );
+
+                // ════════════════════════════════════════════════════════════════════════════
+                // 🔥 ÉTAPE 3 : PERSISTANCE ROCKSDB + WORLD STATE (RUNTIME UNIQUEMENT)
+                // ════════════════════════════════════════════════════════════════════════════
+
                 if let Some(storage_manager) = &execution_context.storage_manager {
-                    // Bytecode brut
                     let contract_state_key = format!("account:{}:contract_state", new_address);
-                    if let Err(e) = storage_manager.write(&contract_state_key, &init_code) {
-                        eprintln!("❌ [CREATE2] Échec write bytecode : {}", e);
+                    if let Err(e) = storage_manager.write(&contract_state_key, &runtime_bytecode) {
+                        eprintln!("❌ [CREATE2] Échec write runtime : {}", e);
                     } else {
-                        println!("💾 [ROCKSDB] Bytecode stocké → {}", contract_state_key);
+                        println!(
+                            "💾 [ROCKSDB] Runtime stocké → {} ({} bytes)",
+                            contract_state_key,
+                            runtime_bytecode.len()
+                        );
                     }
 
-                    // Métadonnées compte
-                    let account_key = format!("account:{}", new_address);
                     let account_json = serde_json::json!({
                         "eth_address": new_address,
-                        "slu_zk_address": new_address,
                         "balance": value.low_u64() as u128,
                         "nonce": 1u64,
                         "is_contract": true,
                         "deployed_by": sender_addr,
                         "deployment_method": "create2",
-                        "saved_timestamp": chrono::Utc::now().timestamp()
+                        "saved_timestamp": chrono::Utc::now().timestamp(),
+                        "runtime_size": runtime_bytecode.len()
                     });
 
                     if let Ok(bytes) = serde_json::to_vec(&account_json) {
-                        let _ = storage_manager.write(&account_key, &bytes);
-                        println!("💾 [ROCKSDB] Métadonnées compte stockées → {}", account_key);
+                        let _ = storage_manager.write(&format!("account:{}", new_address), &bytes);
                     }
-                } else {
-                    println!("⚠️ [CREATE2] Storage manager non disponible");
                 }
-                // ====================== FIN PERSISTANCE ======================
 
-                // Mise à jour mémoire
+                // ✅ Mise à jour world_state (RUNTIME uniquement)
                 execution_context
                     .world_state
                     .code
-                    .insert(new_address.clone(), init_code.clone());
+                    .insert(new_address.clone(), runtime_bytecode.clone());
 
                 let new_account = AccountState {
                     balance: value,
                     nonce: u256::one(),
-                    code: init_code,
+                    code: runtime_bytecode, // ← RUNTIME UNIQUEMENT
                     storage_root: format!("storage_{}", new_address),
                     is_contract: true,
                 };
@@ -2862,8 +3065,7 @@ pub fn execute_program(
 
                 evm_stack.push(encode_address_to_u256(&new_address));
 
-                println!("✅ [CREATE2 PERSIST SUCCESS] Contrat à {}", new_address);
-
+                println!("✅ [CREATE2 SUCCESS] Contrat déployé à {}", new_address);
                 consume_gas_amount(&mut execution_context, 32000)?;
             }
 
