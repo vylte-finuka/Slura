@@ -2994,7 +2994,7 @@ pub fn execute_program(
         is_contract: true,
     };
 
-    execution_context.world_state.accounts.insert(new_address.clone(), new_account);
+    execution_context.world_state.accounts.insert(new_address.clone(), new_account.clone());
 
     // Persistance RocksDB (optionnel mais recommandé)
     if let Some(storage_manager) = &execution_context.storage_manager {
