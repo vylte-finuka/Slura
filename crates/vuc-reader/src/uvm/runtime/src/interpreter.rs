@@ -2868,7 +2868,7 @@ pub fn execute_program(
         println!("❌ [CREATE2] Init code vide");
         evm_stack.push(u256::zero());
         consume_gas_amount(&mut execution_context, 32000)?;
-        return Ok(());
+        return Ok((re.into()));
     }
 
     println!(
