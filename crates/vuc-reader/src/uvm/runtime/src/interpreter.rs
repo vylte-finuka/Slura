@@ -2868,7 +2868,7 @@ pub fn execute_program(
         println!("❌ [CREATE2] Init code vide");
         evm_stack.push(u256::zero());
         consume_gas_amount(&mut execution_context, 32000)?;
-        return Ok((re.into()));
+        return Ok(().into());
     }
 
     println!(
@@ -2958,7 +2958,7 @@ pub fn execute_program(
                     evm_stack.push(u256::zero());
                     consume_gas_amount(&mut execution_context, 32000)?;
                     bytecode_pc += 1;
-                    return Ok(());
+                    return Ok(().into());
                 }
             } else {
                 extract_runtime_from_creation_bytecode(&init_code).unwrap_or(init_code.clone())
