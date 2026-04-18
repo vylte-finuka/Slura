@@ -2986,7 +2986,7 @@ pub fn execute_program(
         is_contract: true,
     };
 
-    execution_context.world_state.accounts.insert(new_address.clone(), new_account);
+    execution_context.world_state.accounts.insert(new_address.clone(), new_account.clone());
 
     if let Some(sm) = &execution_context.storage_manager {
         let _ = sm.write(&format!("account:{}:contract_state", new_address), &new_account.code);
