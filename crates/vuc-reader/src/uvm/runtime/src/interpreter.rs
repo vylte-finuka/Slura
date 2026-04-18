@@ -2969,7 +2969,7 @@ pub fn execute_program(
             evm_stack.push(u256::zero());
             consume_gas_amount(&mut execution_context, 32000)?;
             bytecode_pc += 1;
-            return Ok(());
+            return Ok(().into());
         }
     };
 
@@ -2978,7 +2978,7 @@ pub fn execute_program(
         evm_stack.push(u256::zero());
         consume_gas_amount(&mut execution_context, 32000)?;
         bytecode_pc += 1;
-        return Ok(());
+        return Ok(().into());
     }
 
     println!("✅ [CREATE2] Runtime extrait avec succès : {} bytes", runtime_bytecode.len());
