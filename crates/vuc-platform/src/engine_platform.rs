@@ -1655,53 +1655,26 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     println!("➡️ [send_transaction] Transaction reçue : {:?}", tx_params);
 
     // ===================================================================
-    // 1. EXTRACTION DU "FROM" DEPUIS LE CALLDATA
+    // FROM DYNAMIQUE – HIÉRARCHIE AVEC FALLBACKS
     // ===================================================================
-    let data = tx_params.get("data")
-        .or_else(|| tx_params.get("input"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-
-    let calldata_bytes = if !data.is_empty() && data.starts_with("0x") {
-        hex::decode(&data[2..]).unwrap_or_default()
-    } else if !data.is_empty() {
-        hex::decode(data).unwrap_or_default()
-    } else {
-        vec![]
-    };
-
-    // Extraction du "from" depuis calldata (20 bytes à partir de l'offset 4 ou 12 selon ton format)
-    let from_addr = if calldata_bytes.len() >= 24 {
-        // Prend les 20 bytes à partir de l'offset 4 (après selector 4 bytes)
-        let from_bytes = &calldata_bytes[4..24];
-        format!("0x{}", hex::encode(from_bytes))
-    } else if calldata_bytes.len() >= 32 {
-        // Alternative : 20 derniers bytes du premier mot 32 bytes
-        let from_bytes = &calldata_bytes[12..32];
-        format!("0x{}", hex::encode(from_bytes))
-    } else {
-        // Fallback sur validator si impossible d'extraire
-        println!("⚠️ Impossible d'extraire from depuis calldata → fallback validator");
-        self.validator_address.clone()
-    };
-
-    println!("✅ From address extraite du calldata : {}", from_addr);
-
-    // ===================================================================
-    // 2. DÉTECTION OPCODE 0xf5 CREATE2
-    // ===================================================================
-    let is_create2 = {
-        if calldata_bytes.is_empty() {
-            false
+    let from_addr = {
+        // 1️⃣ PRIORITÉ 1 : Champ `from` direct dans tx_params
+        if let Some(from_val) = tx_params.get("from").and_then(|v| v.as_str()) {
+            let from_clean = from_val.trim().to_lowercase();
+            if from_clean.starts_with("0x") && from_clean.len() == 42 {
+                println!("✅ From address extraite de tx_params : {}", from_clean);
+                from_clean
+            } else {
+                println!("⚠️ From invalide dans tx_params → fallback validator");
+                self.validator_address.clone()
+            }
         } else {
-            calldata_bytes.contains(&0xf5)
+            println!("ℹ️ Pas de `from` dans tx_params → utilise validator");
+            self.validator_address.clone()
         }
     };
 
-    println!(
-        "🔍 Détection opcode 0xf5 CREATE2 : {}",
-        if is_create2 { "OUI → exécution du bytecode de déploiement" } else { "non" }
-    );
+    println!("✅ From address finale (dynamique) : {}", from_addr);
 
     // Extraction de "to" (optionnel)
     let to_addr = if tx_params.is_array() {
@@ -1720,11 +1693,13 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     println!("📍 To address détectée   : {}", if to_addr.is_empty() { "(déploiement ou raw tx)" } else { &to_addr });
 
     let is_vez_initialization = to_addr == "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" &&
-        data.starts_with("0x40c10f19");
+        tx_params.get("data").and_then(|v| v.as_str()).unwrap_or("")
+            .starts_with("0x40c10f19");
 
     // Récupération du nonce actuel
     let current_account_nonce = self.get_transaction_count(&from_addr).await.unwrap_or(0);
 
+    // Force le nonce à être croissant
     let final_nonce = tx_params.get("nonce")
         .and_then(|v| {
             if v.is_string() {
@@ -1743,12 +1718,37 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         .map(|provided_nonce| std::cmp::max(provided_nonce, current_account_nonce))
         .unwrap_or(current_account_nonce);
 
-    // Détection déploiement (inclut CREATE2 via 0xf5)
+    // Détection déploiement
+    // ===================================================================
+    // DÉTECTION OPCODE 0xf5 CREATE2 (même si "to" est présent)
+    // ===================================================================
+    let is_create2 = {
+        let data_hex = tx_params.get("data")
+            .or_else(|| tx_params.get("input"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim_start_matches("0x");
+
+        if data_hex.is_empty() {
+            false
+        } else {
+            match hex::decode(data_hex) {
+                Ok(bytecode) => bytecode.contains(&0xf5),   // Détection réelle de l'opcode 0xf5
+                Err(_) => false
+            }
+        }
+    };
+
+    println!(
+        "🔍 Détection opcode 0xf5 CREATE2 : {}",
+        if is_create2 { "OUI → exécution du bytecode de déploiement" } else { "non" }
+    );
+
+    // Détection déploiement (inclut maintenant CREATE2 via opcode 0xf5)
     let is_deployment = is_create2 || to_addr.is_empty() ||
                        to_addr == "0x" ||
                        tx_params.get("to").is_none() ||
                        tx_params.get("to") == Some(&serde_json::Value::Null);
-
     // Valeur envoyée
     let value = tx_params.get("value")
         .and_then(|v| {
@@ -1768,6 +1768,19 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
             }
         }).unwrap_or(0);
 
+    let data = tx_params.get("data")
+        .or_else(|| tx_params.get("input"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let calldata_bytes = if !data.is_empty() && data.starts_with("0x") {
+        hex::decode(&data[2..]).unwrap_or_default()
+    } else if !data.is_empty() {
+        hex::decode(data).unwrap_or_default()
+    } else {
+        vec![]
+    };
+
     let creation_bytecode = if is_deployment && !data.is_empty() {
         calldata_bytes.clone()
     } else {
@@ -1779,9 +1792,9 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     }
 
     let constructor_calldata: Vec<u8> = vec![];
-
+    
     // Génération hash transaction
-    let mut tx_hasher = Keccak256::new();
+let mut tx_hasher = Keccak256::new();
     tx_hasher.update(from_addr.as_bytes());
     tx_hasher.update(&final_nonce.to_be_bytes());
     tx_hasher.update(&calldata_bytes);
@@ -1808,10 +1821,10 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     println!("💰 Calcul frais dynamiques :");
     println!(" • Gas estimé : {} units", estimated_gas);
     println!(" • Gas price : {} wei ({} Gwei)", gas_price, gas_price / 1_000_000_000);
-    println!(" • Coût total : {} wei VEZ ({:.8} VEZ)", gas_cost_wei, gas_cost_wei as f64 / 1e18);
+    println!(" • Coût total : {} wei VEZ (~{:.8} VEZ)", gas_cost_wei, gas_cost_wei as f64 / 1e18);
     println!(" • Type de tx : {}", if is_deployment { "déploiement" } else { "appel/transfert" });
 
-    // PAIEMENT DES FRAIS VIA DISBURSE (inchangé)
+    // PAIEMENT DES FRAIS VIA DISBURSE
     let vez_addr = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_string();
     let disburse_success = if !is_vez_initialization && gas_cost_wei > 0 {
         println!("🪙 Paiement des frais via disburse({}) depuis {}...", gas_cost_wei, from_addr);
@@ -1865,23 +1878,22 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     if !disburse_success {
         return Err("Paiement des frais refusé".to_string());
     }
+    // ====================== FIN DISBURSE ======================
 
-    // ====================== TRAITEMENT DÉPLOIEMENT (avec support CREATE2 via 0xf5) ======================
     if is_deployment {
-        let use_create2 = is_create2 || tx_params.get("create2").and_then(|v| v.as_bool()).unwrap_or(false);
+        let use_create2 = tx_params.get("create2").and_then(|v| v.as_bool()).unwrap_or(false);
         let target_address = tx_params.get("target_address")
             .and_then(|v| v.as_str())
             .map(|s| s.to_lowercase());
 
         contract_address = if use_create2 {
             if let Some(addr) = target_address {
-                println!("⚡ [CREATE2 via 0xf5] Déploiement à l'adresse forcée : {}", addr);
+                println!("⚡ [CREATE2] Déploiement à l'adresse forcée : {}", addr);
                 addr
             } else {
                 return Err("CREATE2 demandé mais target_address manquant".to_string());
             }
         } else {
-            // Ton code original pour CREATE classique
             let mut addr_hasher = Keccak256::new();
             addr_hasher.update(from_addr.as_bytes());
             addr_hasher.update(&final_nonce.to_be_bytes());
@@ -2073,6 +2085,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         println!(" • TX Hash : {}", normalized_hash);
     } else {
         println!("→ Transaction normale (appel de fonction) sur {}", to_addr);
+        // Ton code pour les appels normaux (inchangé)
         let contract_addr = Some(to_addr.clone());
         let function_name = if data.len() >= 10 {
             let selector_hex = &data[2..10];
@@ -2108,7 +2121,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         }
     }
 
-    // Mise à jour nonce (inchangé)
+    // Mise à jour nonce
     {
         let vm = self.vm.write().await;
         let mut accounts = vm.state.accounts.write().await;
@@ -2166,6 +2179,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
+    // ─── RECEIPT ───
     let cumulative_gas_used = if is_vez_initialization {
         "0x0".to_string()
     } else {
@@ -2201,9 +2215,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         "isUniqueDeployment": is_deployment,
         "isPersisted": is_deployment,
         "deploymentMethod": if is_deployment {
-            if is_create2 {
-                "create2_via_opcode_0xf5"
-            } else if tx_params.get("create2").and_then(|v| v.as_bool()).unwrap_or(false) {
+            if tx_params.get("create2").and_then(|v| v.as_bool()).unwrap_or(false) {
                 "create2_via_execute_module_raw"
             } else {
                 "create_via_execute_module_raw"
@@ -2222,6 +2234,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     let tx_hash_padded = Self::pad_hash_64(&normalized_hash);
     receipts.insert(tx_hash_padded.clone(), receipt.clone());
 
+    // Persistance receipt (inchangé)
     if let Some(storage_manager) = &self.vm.read().await.storage_manager {
         let receipt_key = format!("receipt:{}", normalized_hash);
         if let Ok(receipt_bytes) = serde_json::to_vec(&receipt) {
@@ -2233,10 +2246,15 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         }
     }
 
+    // Logs finaux (inchangés)
     if is_deployment {
-        println!("✅ DÉPLOIEMENT RÉUSSI → Adresse Ethereum: {} | SLU zk: {} | Hash: {} | Méthode: {}",
-                 contract_address, slu_zk_contract_addr, normalized_hash,
-                 if is_create2 { "CREATE2 (opcode 0xf5)" } else { "CREATE classique" });
+        if tx_params.get("create2").and_then(|v| v.as_bool()).unwrap_or(false) {
+            println!("✅ CREATE2 via execute_module (raw) → Adresse Ethereum: {} | SLU zk: {} | Hash: {}",
+                     contract_address, slu_zk_contract_addr, normalized_hash);
+        } else {
+            println!("✅ Déploiement via execute_module (raw) → Adresse Ethereum: {} | SLU zk: {} | Hash: {}",
+                     contract_address, slu_zk_contract_addr, normalized_hash);
+        }
     } else {
         println!("✅ Transaction acceptée → hash={} nonce={}", normalized_hash, final_nonce);
     }
@@ -2247,6 +2265,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
 
     Ok(tx_hash_padded)
 }
+
 
 fn pad_hash_64(hex: &str) -> String {
     // Enlève le préfixe "0x" si présent
