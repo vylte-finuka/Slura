@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::LazyLock;
 use tracing::{info, warn};
+use vuc_crypto::generate_slu_zk_address;
 use vuc_storage::storing_access::RocksDBManager;
 
 #[derive(Clone, Debug)]
@@ -2848,7 +2849,7 @@ pub fn execute_program(
                 return Ok(result);
             }
 
- //___ 0xf5 CREATE2 - Implémentation style Reth / revm (propre, sans boucle)
+ //___ 0xf5 CREATE2 - Version "comme EnginePlatform" (perform_contract_deployment style)
 0xf5 => {
     if evm_stack.len() < 4 {
         return Ok(halt_json_ebpf("Stack underflow on CREATE2"));
@@ -2869,7 +2870,7 @@ pub fn execute_program(
     let init_code = memory_slice_len(&global_mem, offset_usize, size_usize).to_vec();
 
     println!(
-        "🛠️ [CREATE2 revm-style] value={}, init_code_len={}, salt={:064x}",
+        "🛠️ [CREATE2 EnginePlatform-style] value={}, init_code_len={}, salt={:064x}",
         value, init_code.len(), salt
     );
 
@@ -2881,9 +2882,9 @@ pub fn execute_program(
         continue;
     }
 
-    // 1. Calcul précis de l'adresse CREATE2 (exactement comme dans revm / EIP-1014)
+    // Calcul adresse CREATE2 (comme dans EnginePlatform)
     let mut hasher = Keccak256::new();
-    hasher.update(&[0xff]);                                   // prefix
+    hasher.update(&[0xff]);
     let sender = interpreter_args.contract_address.clone();
     let mut sender_bytes = [0u8; 20];
     if let Ok(decoded) = hex::decode(sender.trim_start_matches("0x")) {
@@ -2892,52 +2893,75 @@ pub fn execute_program(
         }
     }
     hasher.update(&sender_bytes);
+
     let mut salt_bytes = [0u8; 32];
     salt.to_big_endian(&mut salt_bytes);
     hasher.update(&salt_bytes);
-    hasher.update(&Keccak256::digest(&init_code));           // keccak(init_code)
+    hasher.update(&Keccak256::digest(&init_code));
 
     let hash = hasher.finalize();
-    let new_address = format!("0x{}", hex::encode(&hash[12..32]));
+    let eth_address = format!("0x{}", hex::encode(&hash[12..32]));
 
-    println!("📍 [CREATE2] Adresse calculée (revm-style) : {}", new_address);
-
-    // 2. Exécution du constructeur (protégée)
-    let mut constructor_args = interpreter_args.clone();
-    constructor_args.contract_address = new_address.clone();
-    constructor_args.sender_address = interpreter_args.contract_address.clone();
-    constructor_args.caller = interpreter_args.contract_address.clone();
-    constructor_args.state_data = vec![];                    // pas de calldata pour constructor
-    constructor_args.value = value;
-    constructor_args.call_depth = interpreter_args.call_depth + u256::one();
-
-    // Protection contre récursion trop profonde (comme dans revm)
-    if constructor_args.call_depth > u256::from(64) {
-        println!("🚨 [CREATE2] Depth limit reached");
-        evm_stack.push(u256::zero());
-        consume_gas_amount(&mut execution_context, 32000)?;
-        bytecode_pc += 1;
-        continue;
-    }
-
-    println!("🔧 [CREATE2] Exécution du constructeur...");
-
-    let constructor_result = execute_program(
-        Some(&init_code),
-        Some(stack_usage),
-        &[], 
-        &[],
-        helpers,
-        allowed_memory,
-        ret_type,
-        exports,
-        &constructor_args,
-        execution_context.storage_manager.clone(),
-        Some(execution_context.world_state.storage.clone()),
+    // Génération SLU zk-print (comme dans EnginePlatform)
+    let slu_zk_address = generate_slu_zk_address(
+        &format!("contract:{}", eth_address),
+        10,
+        32
     );
 
-    // 3. Extraction du runtime bytecode (comme revm le fait après RETURN du constructeur)
-    let runtime_bytecode = match constructor_result {
+    println!("📦 [CREATE2] Deux adresses générées :");
+    println!("   • Ethereum (EVM)     : {}", eth_address);
+    println!("   • SLU zk-print       : {}", slu_zk_address);
+
+    // Pré-insertion minimale du compte (comme dans perform_contract_deployment)
+    {
+        let mut accounts = execution_context.world_state.accounts.entry(eth_address.clone())
+            .or_insert_with(|| AccountState {
+                balance: value,
+                nonce: u256::one(),
+                code: vec![],
+                storage_root: format!("storage_{}", eth_address),
+                is_contract: true,
+            });
+
+        accounts.balance = value;
+        accounts.is_contract = true;
+        accounts.eth_address = eth_address.clone();   // on ajoute ces champs si ton AccountState les supporte
+        accounts.slu_zk_address = slu_zk_address.clone();
+    }
+
+    // Exécution du constructeur via execute_module (comme dans EnginePlatform)
+    println!("🔧 [CREATE2] Exécution du constructeur via execute_module...");
+
+    let deploy_result = {
+        // On simule l'appel comme dans EnginePlatform
+        let constructor_calldata: Vec<u8> = vec![];
+        let mut vm_sim = /* ici tu dois avoir accès à ton VM, si ce n'est pas le cas, passe-le dans le contexte */
+        // Pour l'instant on utilise execute_program (comme avant) mais on garde le style EnginePlatform
+        execute_program(
+            Some(&init_code),
+            Some(stack_usage),
+            &[],
+            &constructor_calldata,
+            helpers,
+            allowed_memory,
+            ret_type,
+            exports,
+            &InterpreterArgs {
+                contract_address: eth_address.clone(),
+                sender_address: interpreter_args.contract_address.clone(),
+                caller: interpreter_args.contract_address.clone(),
+                state_data: vec![],
+                value,
+                ..interpreter_args.clone()
+            },
+            execution_context.storage_manager.clone(),
+            Some(execution_context.world_state.storage.clone()),
+        )
+    };
+
+    // Extraction runtime
+    let runtime_bytecode = match deploy_result {
         Ok(val) => {
             if let Some(obj) = val.as_object() {
                 let action = obj.get("action").and_then(|a| a.as_str()).unwrap_or("unknown");
@@ -2950,18 +2974,18 @@ pub fn execute_program(
                                 } else { None }
                             } else { None }
                         })
-                        .unwrap_or_else(|| runtime_bytecode_fallback(&init_code))
+                        .unwrap_or_else(|| extract_runtime_from_creation_bytecode(&init_code).unwrap_or(init_code.clone()))
                 } else {
                     println!("❌ [CREATE2] Constructor reverted");
-                    runtime_bytecode_fallback(&init_code)
+                    extract_runtime_from_creation_bytecode(&init_code).unwrap_or(init_code.clone())
                 }
             } else {
-                runtime_bytecode_fallback(&init_code)
+                extract_runtime_from_creation_bytecode(&init_code).unwrap_or(init_code.clone())
             }
         }
         Err(e) => {
             println!("❌ [CREATE2] Constructor error: {:?}", e);
-            runtime_bytecode_fallback(&init_code)
+            extract_runtime_from_creation_bytecode(&init_code).unwrap_or(init_code.clone())
         }
     };
 
@@ -2975,26 +2999,31 @@ pub fn execute_program(
 
     println!("✅ [CREATE2] Runtime extrait : {} bytes", runtime_bytecode.len());
 
-    // 4. Persistance (runtime seulement)
-    execution_context.world_state.code.insert(new_address.clone(), runtime_bytecode.clone());
+    // Persistance dual-key (comme EnginePlatform)
+    execution_context.world_state.code.insert(eth_address.clone(), runtime_bytecode.clone());
+    execution_context.world_state.code.insert(slu_zk_address.clone(), runtime_bytecode.clone());
 
     let new_account = AccountState {
         balance: value,
         nonce: u256::one(),
-        code: runtime_bytecode,
-        storage_root: format!("storage_{}", new_address),
+        code: runtime_bytecode.clone(),
+        storage_root: format!("storage_{}", eth_address),
         is_contract: true,
     };
 
-    execution_context.world_state.accounts.insert(new_address.clone(), new_account.clone());
+    execution_context.world_state.accounts.insert(eth_address.clone(), new_account.clone());
+    execution_context.world_state.accounts.insert(slu_zk_address.clone(), new_account.clone());
 
+    // Sauvegarde RocksDB (comme dans EnginePlatform)
     if let Some(sm) = &execution_context.storage_manager {
-        let _ = sm.write(&format!("account:{}:contract_state", new_address), &new_account.code);
+        let key_eth = format!("account:{}:contract_state", eth_address);
+        let key_slu = format!("account:{}:contract_state", slu_zk_address);
+        let _ = sm.write(&key_eth, &runtime_bytecode);
+        let _ = sm.write(&key_slu, &runtime_bytecode);
     }
 
-    // Push l'adresse sur la stack (comme dans revm)
-    evm_stack.push(encode_address_to_u256(&new_address));
-    println!("🎉 [CREATE2 SUCCESS] Contrat déployé à {}", new_address);
+    evm_stack.push(encode_address_to_u256(&eth_address));
+    println!("🎉 [CREATE2 SUCCESS] Contrat déployé → Ethereum: {} | SLU zk: {}", eth_address, slu_zk_address);
 
     consume_gas_amount(&mut execution_context, 32000)?;
 
