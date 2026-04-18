@@ -2844,7 +2844,7 @@ pub fn execute_program(
                 return Ok(result);
             }
 
-            //___ 0xf5 CREATE2 - Version complète qui exécute le constructeur + extrait le runtime
+           //___ 0xf5 CREATE2 - Engine principal du bytecode de déploiement
 0xf5 => {
     if evm_stack.len() < 4 {
         return Ok(halt_json_ebpf("Stack underflow on CREATE2"));
@@ -2872,11 +2872,11 @@ pub fn execute_program(
     }
 
     println!(
-        "🛠️ [CREATE2] value={}, init_code_len={}, salt={:064x}",
+        "🛠️ [CREATE2 ENGINE] value={}, init_code_len={}, salt={:064x}",
         value, init_code.len(), salt
     );
 
-    // === 1. Calcul de l'adresse (standard CREATE2) ===
+    // 1. Calcul de l'adresse CREATE2
     let mut hasher = Keccak256::new();
     hasher.update(&[0xff]);
     let sender = interpreter_args.contract_address.clone();
@@ -2898,22 +2898,22 @@ pub fn execute_program(
 
     println!("📍 [CREATE2] Adresse calculée : {}", new_address);
 
-    // === 2. Exécution du CONSTRUCTEUR (le plus important) ===
+    // 2. Exécution RÉELLE du constructeur (bytecode de déploiement)
     let mut constructor_args = interpreter_args.clone();
     constructor_args.contract_address = new_address.clone();
     constructor_args.sender_address = interpreter_args.contract_address.clone();
     constructor_args.caller = interpreter_args.contract_address.clone();
-    constructor_args.state_data = vec![];        // Constructor n'a généralement pas de calldata
+    constructor_args.state_data = vec![];           // Constructor n'a généralement pas de calldata
     constructor_args.value = value;
     constructor_args.call_depth = interpreter_args.call_depth + u256::one();
 
-    println!("🔧 [CREATE2] Exécution du constructeur...");
+    println!("🔧 [CREATE2] Exécution du CONSTRUCTEUR (bytecode de déploiement)...");
 
     let constructor_result = execute_program(
-        Some(&init_code),           // bytecode du constructeur
+        Some(&init_code),                           // ← Bytecode de déploiement complet
         Some(stack_usage),
-        &[],                        // mémoire vierge pour le constructeur
-        &[],                        // pas de calldata
+        &[],                                        // mémoire vierge pour le constructeur
+        &[],                                        // pas de calldata
         helpers,
         allowed_memory,
         ret_type,
@@ -2923,14 +2923,14 @@ pub fn execute_program(
         Some(execution_context.world_state.storage.clone()),
     );
 
-    // === 3. Extraction du RUNTIME BYTECODE ===
+    // 3. Extraction du RUNTIME BYTECODE
     let runtime_bytecode = match constructor_result {
         Ok(val) => {
             if let Some(obj) = val.as_object() {
                 let action = obj.get("action").and_then(|a| a.as_str()).unwrap_or("unknown");
 
-                if action == "return" {
-                    // Extraction du runtime depuis le RETURN du constructeur
+                if action == "return" || action == "stop" {
+                    // Extraction depuis le RETURN du constructeur
                     obj.get("data")
                         .and_then(|d| {
                             if let Some(s) = d.as_str() {
@@ -2943,18 +2943,9 @@ pub fn execute_program(
                                 None
                             }
                         })
-                        .unwrap_or_else(|| {
-                            // Fallback : extraction manuelle
-                            match extract_runtime_from_creation_bytecode(&init_code) {
-                                Ok(rt) => rt,
-                                Err(e) => {
-                                    println!("⚠️ [CREATE2] Extraction runtime échouée: {}", e);
-                                    init_code.clone()
-                                }
-                            }
-                        })
+                        .unwrap_or_else(|| extract_runtime_from_creation_bytecode(&init_code).unwrap_or(init_code.clone()))
                 } else {
-                    println!("❌ [CREATE2] Constructeur a reverté ou stoppé : {}", action);
+                    println!("❌ [CREATE2] Constructeur a reverté : {}", action);
                     evm_stack.push(u256::zero());
                     consume_gas_amount(&mut execution_context, 32000)?;
                     bytecode_pc += 1;
@@ -2983,20 +2974,20 @@ pub fn execute_program(
 
     println!("✅ [CREATE2] Runtime extrait avec succès : {} bytes", runtime_bytecode.len());
 
-    // === 4. Persistance (RUNTIME SEULEMENT) ===
+    // 4. Persistance du RUNTIME SEULEMENT
     execution_context.world_state.code.insert(new_address.clone(), runtime_bytecode.clone());
 
     let new_account = AccountState {
         balance: value,
         nonce: u256::one(),
-        code: runtime_bytecode,           // IMPORTANT : runtime, pas init_code
+        code: runtime_bytecode,           // IMPORTANT : runtime seulement
         storage_root: format!("storage_{}", new_address),
         is_contract: true,
     };
 
     execution_context.world_state.accounts.insert(new_address.clone(), new_account.clone());
 
-    // Persistance RocksDB (optionnel mais recommandé)
+    // Persistance RocksDB (pour eth_getCode)
     if let Some(storage_manager) = &execution_context.storage_manager {
         let _ = storage_manager.write(
             &format!("account:{}:contract_state", new_address),
@@ -3004,8 +2995,10 @@ pub fn execute_program(
         );
     }
 
+    // Push l'adresse du nouveau contrat sur la stack
     evm_stack.push(encode_address_to_u256(&new_address));
-    println!("🎉 [CREATE2 SUCCESS] Contrat déployé à {}", new_address);
+
+    println!("🎉 [CREATE2 SUCCESS] Contrat déployé et fonctionnel à {}", new_address);
 
     consume_gas_amount(&mut execution_context, 32000)?;
 }
