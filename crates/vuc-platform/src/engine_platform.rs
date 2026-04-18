@@ -1655,7 +1655,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     println!("➡️ [send_transaction] Transaction reçue : {:?}", tx_params);
 
     // ===================================================================
-    // 1. EXTRACTION STRICTE DU "FROM" DEPUIS LE CALLDATA (SANS FALLBACK)
+    // 1. EXTRACTION DU "FROM" DEPUIS LE CALLDATA
     // ===================================================================
     let data = tx_params.get("data")
         .or_else(|| tx_params.get("input"))
@@ -1670,39 +1670,33 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         vec![]
     };
 
-    // Extraction stricte du from depuis calldata
-    let from_addr = if calldata_bytes.len() >= 36 {
-        // Format classique : selector (4 bytes) + address padded sur 32 bytes
-        let addr_bytes = &calldata_bytes[4..24];   // les 20 bytes utiles
-        let addr_str = format!("0x{}", hex::encode(addr_bytes).to_lowercase());
-
-        if addr_str.len() == 42 && addr_str.starts_with("0x") && addr_str != "0x0000000000000000000000000000000000000000" {
-            println!("✅ From extrait du calldata (offset 4-24) : {}", addr_str);
-            addr_str
-        } else {
-            return Err(format!("Adresse 'from' invalide extraite du calldata : {}", addr_str));
-        }
+    // Extraction du "from" depuis calldata (20 bytes à partir de l'offset 4 ou 12 selon ton format)
+    let from_addr = if calldata_bytes.len() >= 24 {
+        // Prend les 20 bytes à partir de l'offset 4 (après selector 4 bytes)
+        let from_bytes = &calldata_bytes[4..24];
+        format!("0x{}", hex::encode(from_bytes))
     } else if calldata_bytes.len() >= 32 {
-        // Fallback offset pour adresses encodées sur 32 bytes
-        let addr_bytes = &calldata_bytes[12..32];
-        let addr_str = format!("0x{}", hex::encode(addr_bytes).to_lowercase());
-
-        if addr_str.len() == 42 && addr_str.starts_with("0x") && addr_str != "0x0000000000000000000000000000000000000000" {
-            println!("✅ From extrait du calldata (offset 12-32) : {}", addr_str);
-            addr_str
-        } else {
-            return Err("Impossible d'extraire une adresse 'from' valide du calldata".to_string());
-        }
+        // Alternative : 20 derniers bytes du premier mot 32 bytes
+        let from_bytes = &calldata_bytes[12..32];
+        format!("0x{}", hex::encode(from_bytes))
     } else {
-        return Err("Calldata trop court pour extraire l'adresse 'from'".to_string());
+        // Fallback sur validator si impossible d'extraire
+        println!("⚠️ Impossible d'extraire from depuis calldata → fallback validator");
+        self.validator_address.clone()
     };
 
-    println!("✅ From address finale (extraite du calldata) : {}", from_addr);
+    println!("✅ From address extraite du calldata : {}", from_addr);
 
     // ===================================================================
     // 2. DÉTECTION OPCODE 0xf5 CREATE2
     // ===================================================================
-    let is_create2 = calldata_bytes.contains(&0xf5);
+    let is_create2 = {
+        if calldata_bytes.is_empty() {
+            false
+        } else {
+            calldata_bytes.contains(&0xf5)
+        }
+    };
 
     println!(
         "🔍 Détection opcode 0xf5 CREATE2 : {}",
@@ -1785,9 +1779,6 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     }
 
     let constructor_calldata: Vec<u8> = vec![];
-
-    // ... Le reste de ta fonction reste EXACTEMENT IDENTIQUE à partir d'ici ...
-    // (Génération hash, frais, disburse, traitement déploiement, receipt, etc.)
 
     // Génération hash transaction
     let mut tx_hasher = Keccak256::new();
