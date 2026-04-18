@@ -2848,7 +2848,7 @@ pub fn execute_program(
                 return Ok(result);
             }
 
- //___ 0xf5 CREATE2 - Version anti-boucle + engine principal
+ //___ 0xf5 CREATE2 - Structuré comme le opcode CALL (0xf1)
 0xf5 => {
     if evm_stack.len() < 4 {
         return Ok(halt_json_ebpf("Stack underflow on CREATE2"));
@@ -2869,7 +2869,7 @@ pub fn execute_program(
     let init_code = memory_slice_len(&global_mem, offset_usize, size_usize).to_vec();
 
     println!(
-        "🛠️ [CREATE2 ENGINE] value={}, init_code_len={}, salt={:064x}",
+        "🛠️ [CREATE2] value={}, init_code_len={}, salt={:064x}",
         value, init_code.len(), salt
     );
 
@@ -2877,11 +2877,11 @@ pub fn execute_program(
         println!("❌ [CREATE2] Init code vide");
         evm_stack.push(u256::zero());
         consume_gas_amount(&mut execution_context, 32000)?;
-        bytecode_pc += 1;   // ← IMPORTANT : on avance toujours
-        return Ok(().into());
+        bytecode_pc += 1;
+        continue;   // Comme dans le CALL
     }
 
-    // Calcul adresse
+    // Calcul de l'adresse CREATE2
     let mut hasher = Keccak256::new();
     hasher.update(&[0xff]);
     let sender = interpreter_args.contract_address.clone();
@@ -2903,22 +2903,33 @@ pub fn execute_program(
 
     println!("📍 [CREATE2] Adresse calculée : {}", new_address);
 
-    // Exécution du constructeur
+    // === CRÉATION DU SOUS-CONTEXTE (exactement comme CALL) ===
     let mut constructor_args = interpreter_args.clone();
     constructor_args.contract_address = new_address.clone();
     constructor_args.sender_address = interpreter_args.contract_address.clone();
     constructor_args.caller = interpreter_args.contract_address.clone();
-    constructor_args.state_data = vec![];
+    constructor_args.state_data = vec![];           // constructeur n'a pas de calldata
     constructor_args.value = value;
+    constructor_args.gas_limit = u256::from(30_000_000u64); // gas élevé pour le constructeur
     constructor_args.call_depth = interpreter_args.call_depth + u256::one();
 
-    println!("🔧 [CREATE2] Exécution du CONSTRUCTEUR...");
+    // Limite anti-récursion
+    if constructor_args.call_depth > u256::from(1024) {
+        println!("🚨 [CREATE2] Profondeur maximale atteinte");
+        evm_stack.push(u256::zero());
+        consume_gas_amount(&mut execution_context, 32000)?;
+        bytecode_pc += 1;
+        continue;
+    }
 
+    println!("🔧 [CREATE2] Exécution du CONSTRUCTEUR (comme CALL)...");
+
+    // Appel récursif exactement comme dans 0xf1 CALL
     let constructor_result = execute_program(
         Some(&init_code),
         Some(stack_usage),
-        &[],
-        &[],
+        &[],                        // mémoire vierge
+        &[],                        // pas de calldata
         helpers,
         allowed_memory,
         ret_type,
@@ -2928,40 +2939,47 @@ pub fn execute_program(
         Some(execution_context.world_state.storage.clone()),
     );
 
-    // Extraction runtime
-    let runtime_bytecode = match constructor_result {
+    // Extraction du runtime (comme dans le CALL)
+    let (success, runtime_bytecode) = match constructor_result {
         Ok(val) => {
             if let Some(obj) = val.as_object() {
                 let action = obj.get("action").and_then(|a| a.as_str()).unwrap_or("unknown");
-                if action == "return" || action == "stop" {
-                    obj.get("data")
-                        .and_then(|d| {
-                            if let Some(s) = d.as_str() {
-                                if s.starts_with("0x") {
-                                    hex::decode(&s[2..]).ok()
-                                } else {
-                                    None
-                                }
+                let data = obj.get("data")
+                    .and_then(|d| {
+                        if let Some(s) = d.as_str() {
+                            if s.starts_with("0x") {
+                                hex::decode(&s[2..]).ok()
                             } else {
                                 None
                             }
-                        })
-                        .unwrap_or_else(|| extract_runtime_from_creation_bytecode(&init_code).unwrap_or(init_code.clone()))
-                } else {
-                    println!("❌ [CREATE2] Constructeur revert");
-                    runtime_bytecode_fallback(&init_code)
-                }
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_else(|| extract_runtime_from_creation_bytecode(&init_code).unwrap_or(init_code.clone()));
+
+                (action == "return" || action == "stop", data)
             } else {
-                extract_runtime_from_creation_bytecode(&init_code).unwrap_or(init_code.clone())
+                (false, extract_runtime_from_creation_bytecode(&init_code).unwrap_or(init_code.clone()))
             }
         }
-        Err(_) => {
-            println!("❌ [CREATE2] Erreur constructeur");
-            runtime_bytecode_fallback(&init_code)
+        Err(e) => {
+            println!("❌ [CREATE2] Erreur constructeur: {:?}", e);
+            (false, extract_runtime_from_creation_bytecode(&init_code).unwrap_or(init_code.clone()))
         }
     };
 
-    // Persistance
+    if runtime_bytecode.is_empty() || runtime_bytecode.len() < 100 {
+        println!("❌ [CREATE2] Runtime extrait invalide");
+        evm_stack.push(u256::zero());
+        consume_gas_amount(&mut execution_context, 32000)?;
+        bytecode_pc += 1;
+        continue;
+    }
+
+    println!("✅ [CREATE2] Runtime extrait : {} bytes (success={})", runtime_bytecode.len(), success);
+
+    // Persistance du runtime seulement
     execution_context.world_state.code.insert(new_address.clone(), runtime_bytecode.clone());
 
     let new_account = AccountState {
@@ -2978,12 +2996,15 @@ pub fn execute_program(
         let _ = sm.write(&format!("account:{}:contract_state", new_address), &new_account.code);
     }
 
+    // Push l'adresse du nouveau contrat sur la stack (comme CALL push le success)
     evm_stack.push(encode_address_to_u256(&new_address));
-    println!("🎉 [CREATE2 SUCCESS] Contrat à {}", new_address);
+
+    println!("🎉 [CREATE2 SUCCESS] Contrat déployé à {}", new_address);
 
     consume_gas_amount(&mut execution_context, 32000)?;
 
-    bytecode_pc += 1;   // ← CRITIQUE : on avance toujours le PC
+    bytecode_pc += 1;   // ← Avance du PC comme dans le CALL
+    continue;           // ← Comme dans le CALL pour bien sortir du match
 }
             
             // ___ 0xf9 TSTORE (EIP-1153 Transient Storage Store)
