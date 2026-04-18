@@ -2848,7 +2848,7 @@ pub fn execute_program(
                 return Ok(result);
             }
 
- //___ 0xf5 CREATE2 - Structuré comme le opcode CALL (0xf1)
+ //___ 0xf5 CREATE2 - Implémentation style Reth / revm (propre, sans boucle)
 0xf5 => {
     if evm_stack.len() < 4 {
         return Ok(halt_json_ebpf("Stack underflow on CREATE2"));
@@ -2869,7 +2869,7 @@ pub fn execute_program(
     let init_code = memory_slice_len(&global_mem, offset_usize, size_usize).to_vec();
 
     println!(
-        "🛠️ [CREATE2] value={}, init_code_len={}, salt={:064x}",
+        "🛠️ [CREATE2 revm-style] value={}, init_code_len={}, salt={:064x}",
         value, init_code.len(), salt
     );
 
@@ -2878,12 +2878,12 @@ pub fn execute_program(
         evm_stack.push(u256::zero());
         consume_gas_amount(&mut execution_context, 32000)?;
         bytecode_pc += 1;
-        continue;   // Comme dans le CALL
+        continue;
     }
 
-    // Calcul de l'adresse CREATE2
+    // 1. Calcul précis de l'adresse CREATE2 (exactement comme dans revm / EIP-1014)
     let mut hasher = Keccak256::new();
-    hasher.update(&[0xff]);
+    hasher.update(&[0xff]);                                   // prefix
     let sender = interpreter_args.contract_address.clone();
     let mut sender_bytes = [0u8; 20];
     if let Ok(decoded) = hex::decode(sender.trim_start_matches("0x")) {
@@ -2892,44 +2892,41 @@ pub fn execute_program(
         }
     }
     hasher.update(&sender_bytes);
-
     let mut salt_bytes = [0u8; 32];
     salt.to_big_endian(&mut salt_bytes);
     hasher.update(&salt_bytes);
-    hasher.update(&Keccak256::digest(&init_code));
+    hasher.update(&Keccak256::digest(&init_code));           // keccak(init_code)
 
     let hash = hasher.finalize();
     let new_address = format!("0x{}", hex::encode(&hash[12..32]));
 
-    println!("📍 [CREATE2] Adresse calculée : {}", new_address);
+    println!("📍 [CREATE2] Adresse calculée (revm-style) : {}", new_address);
 
-    // === CRÉATION DU SOUS-CONTEXTE (exactement comme CALL) ===
+    // 2. Exécution du constructeur (protégée)
     let mut constructor_args = interpreter_args.clone();
     constructor_args.contract_address = new_address.clone();
     constructor_args.sender_address = interpreter_args.contract_address.clone();
     constructor_args.caller = interpreter_args.contract_address.clone();
-    constructor_args.state_data = vec![];           // constructeur n'a pas de calldata
+    constructor_args.state_data = vec![];                    // pas de calldata pour constructor
     constructor_args.value = value;
-    constructor_args.gas_limit = u256::from(30_000_000u64); // gas élevé pour le constructeur
     constructor_args.call_depth = interpreter_args.call_depth + u256::one();
 
-    // Limite anti-récursion
-    if constructor_args.call_depth > u256::from(1024) {
-        println!("🚨 [CREATE2] Profondeur maximale atteinte");
+    // Protection contre récursion trop profonde (comme dans revm)
+    if constructor_args.call_depth > u256::from(64) {
+        println!("🚨 [CREATE2] Depth limit reached");
         evm_stack.push(u256::zero());
         consume_gas_amount(&mut execution_context, 32000)?;
         bytecode_pc += 1;
         continue;
     }
 
-    println!("🔧 [CREATE2] Exécution du CONSTRUCTEUR (comme CALL)...");
+    println!("🔧 [CREATE2] Exécution du constructeur...");
 
-    // Appel récursif exactement comme dans 0xf1 CALL
     let constructor_result = execute_program(
         Some(&init_code),
         Some(stack_usage),
-        &[],                        // mémoire vierge
-        &[],                        // pas de calldata
+        &[], 
+        &[],
         helpers,
         allowed_memory,
         ret_type,
@@ -2939,47 +2936,46 @@ pub fn execute_program(
         Some(execution_context.world_state.storage.clone()),
     );
 
-    // Extraction du runtime (comme dans le CALL)
-    let (success, runtime_bytecode) = match constructor_result {
+    // 3. Extraction du runtime bytecode (comme revm le fait après RETURN du constructeur)
+    let runtime_bytecode = match constructor_result {
         Ok(val) => {
             if let Some(obj) = val.as_object() {
                 let action = obj.get("action").and_then(|a| a.as_str()).unwrap_or("unknown");
-                let data = obj.get("data")
-                    .and_then(|d| {
-                        if let Some(s) = d.as_str() {
-                            if s.starts_with("0x") {
-                                hex::decode(&s[2..]).ok()
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or_else(|| extract_runtime_from_creation_bytecode(&init_code).unwrap_or(init_code.clone()));
-
-                (action == "return" || action == "stop", data)
+                if action == "return" || action == "stop" {
+                    obj.get("data")
+                        .and_then(|d| {
+                            if let Some(s) = d.as_str() {
+                                if s.starts_with("0x") {
+                                    hex::decode(&s[2..]).ok()
+                                } else { None }
+                            } else { None }
+                        })
+                        .unwrap_or_else(|| runtime_bytecode_fallback(&init_code))
+                } else {
+                    println!("❌ [CREATE2] Constructor reverted");
+                    runtime_bytecode_fallback(&init_code)
+                }
             } else {
-                (false, extract_runtime_from_creation_bytecode(&init_code).unwrap_or(init_code.clone()))
+                runtime_bytecode_fallback(&init_code)
             }
         }
         Err(e) => {
-            println!("❌ [CREATE2] Erreur constructeur: {:?}", e);
-            (false, extract_runtime_from_creation_bytecode(&init_code).unwrap_or(init_code.clone()))
+            println!("❌ [CREATE2] Constructor error: {:?}", e);
+            runtime_bytecode_fallback(&init_code)
         }
     };
 
     if runtime_bytecode.is_empty() || runtime_bytecode.len() < 100 {
-        println!("❌ [CREATE2] Runtime extrait invalide");
+        println!("❌ [CREATE2] Runtime invalide");
         evm_stack.push(u256::zero());
         consume_gas_amount(&mut execution_context, 32000)?;
         bytecode_pc += 1;
         continue;
     }
 
-    println!("✅ [CREATE2] Runtime extrait : {} bytes (success={})", runtime_bytecode.len(), success);
+    println!("✅ [CREATE2] Runtime extrait : {} bytes", runtime_bytecode.len());
 
-    // Persistance du runtime seulement
+    // 4. Persistance (runtime seulement)
     execution_context.world_state.code.insert(new_address.clone(), runtime_bytecode.clone());
 
     let new_account = AccountState {
@@ -2990,21 +2986,20 @@ pub fn execute_program(
         is_contract: true,
     };
 
-    execution_context.world_state.accounts.insert(new_address.clone(), new_account.clone());
+    execution_context.world_state.accounts.insert(new_address.clone(), new_account);
 
     if let Some(sm) = &execution_context.storage_manager {
         let _ = sm.write(&format!("account:{}:contract_state", new_address), &new_account.code);
     }
 
-    // Push l'adresse du nouveau contrat sur la stack (comme CALL push le success)
+    // Push l'adresse sur la stack (comme dans revm)
     evm_stack.push(encode_address_to_u256(&new_address));
-
     println!("🎉 [CREATE2 SUCCESS] Contrat déployé à {}", new_address);
 
     consume_gas_amount(&mut execution_context, 32000)?;
 
-    bytecode_pc += 1;   // ← Avance du PC comme dans le CALL
-    continue;           // ← Comme dans le CALL pour bien sortir du match
+    bytecode_pc += 1;
+    continue;
 }
             
             // ___ 0xf9 TSTORE (EIP-1153 Transient Storage Store)
