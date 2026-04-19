@@ -1648,24 +1648,149 @@ pub async fn verify_contract_deployment(&self, contract_address: &str) -> Result
         }
 	}
 
+    fn recover_sender_from_raw_tx(&self, raw_hex: &str) -> Result<String, String> {
+        if !raw_hex.starts_with("0x") {
+            return Err("Raw transaction must start with 0x".to_string());
+        }
+
+        let bytes = match hex::decode(&raw_hex[2..]) {
+            Ok(b) => b,
+            Err(e) => return Err(format!("Hex decode failed: {}", e)),
+        };
+
+        // Gestion du préfixe EIP-1559 (0x02)
+        let rlp_bytes = if !bytes.is_empty() && bytes[0] == 0x02 {
+            &bytes[1..]
+        } else {
+            &bytes[..]
+        };
+
+        // Décodage RLP avec rlp 0.6.1
+        let tx: ethers::types::Transaction =  match rlp::decode(rlp_bytes) {
+            Ok(tx) => tx,
+            Err(e) => return Err(format!("Failed to decode raw transaction: {}", e)),
+        };
+
+        // Récupération du champ "from" (adresse de l'expéditeur)
+        let from = tx.from;
+        Ok(format!("{:#x}", from))
+    }
+
 pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<String, String> {
     use sha3::{Digest, Keccak256};
     use ethers::types::U256;
 
     println!("➡️ [send_transaction] Transaction reçue : {:?}", tx_params);
 
-    
-    let to_addr = tx_params.get("to")
+    // ===================================================================
+    // EXTRACTION DU RAW TRANSACTION ET DU "from"
+    // ===================================================================
+    let raw_hex = if tx_params.is_array() {
+        // MetaMask envoie : "params": [ "0x02f8b1..." ]
+        tx_params.as_array()
+            .and_then(|arr| arr.get(0))
+            .and_then(|v| v.as_str())
+    } else if let Some(s) = tx_params.as_str() {
+        // Cas rare où c'est une string directe
+        Some(s)
+    } else {
+        None
+    }
+    .ok_or_else(|| {
+        println!("❌ Aucun raw transaction trouvé dans params");
+        "Missing raw transaction in params".to_string()
+    })?;
+
+    if !raw_hex.starts_with("0x") {
+        return Err("Invalid raw transaction format".to_string());
+    }
+
+    let from_addr = match self.recover_sender_from_raw_tx(raw_hex) {
+        Ok(addr) => addr,
+        Err(e) => return Err(format!("Failed to recover sender from raw tx: {}", e)),
+    };
+
+    let is_raw_tx = true;
+    let to_addr = "".to_string();
+
+    println!("✅ From address validée (récupérée du raw tx) : {}", from_addr);
+    println!("📍 Raw tx length : {} bytes", raw_hex.len());
+
+    let is_vez_initialization = false;   // sera recalculé plus tard si besoin
+
+    // Récupération du nonce actuel
+    let current_account_nonce = self.get_transaction_count(&from_addr).await.unwrap_or(0);
+
+    // Force le nonce à être croissant
+    let final_nonce = tx_params.get("nonce")
+        .and_then(|v| {
+            if v.is_string() {
+                let s = v.as_str().unwrap();
+                if s.starts_with("0x") {
+                    u64::from_str_radix(&s[2..], 16).ok()
+                } else {
+                    s.parse().ok()
+                }
+            } else if v.is_u64() {
+                Some(v.as_u64().unwrap())
+            } else {
+                None
+            }
+        })
+        .map(|provided_nonce| std::cmp::max(provided_nonce, current_account_nonce))
+        .unwrap_or(current_account_nonce);
+
+    // Détection déploiement
+    let is_deployment = to_addr.is_empty() ||
+                       to_addr == "0x" ||
+                       tx_params.get("to").is_none() ||
+                       tx_params.get("to") == Some(&serde_json::Value::Null);
+
+    // Valeur envoyée
+    let value = tx_params.get("value")
+        .and_then(|v| {
+            if v.is_string() {
+                let s = v.as_str().unwrap();
+                if s.starts_with("0x") {
+                    u128::from_str_radix(s.trim_start_matches("0x"), 16).ok()
+                } else {
+                    s.parse::<u128>().ok()
+                }
+            } else if v.is_u64() {
+                Some(v.as_u64().unwrap() as u128)
+            } else if v.is_number() {
+                v.as_u64().map(|n| n as u128)
+            } else {
+                None
+            }
+        }).unwrap_or(0);
+
+    let data = tx_params.get("data")
+        .or_else(|| tx_params.get("input"))
         .and_then(|v| v.as_str())
-        .map(|s| s.trim().to_lowercase())
-        .unwrap_or_default();
+        .unwrap_or("");
 
-    println!("📍 To address : {}", if to_addr.is_empty() { "(déploiement)" } else { &to_addr });
+    let calldata_bytes = if !data.is_empty() && data.starts_with("0x") {
+        hex::decode(&data[2..]).unwrap_or_default()
+    } else if !data.is_empty() {
+        hex::decode(data).unwrap_or_default()
+    } else {
+        vec![]
+    };
 
-    // Exception spéciale pour l'initialisation VEZ
-    let is_vez_initialization = to_addr == "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" &&
-        tx_params.get("data").and_then(|v| v.as_str()).unwrap_or("")
-            .starts_with("0x40c10f19");
+    let creation_bytecode = if is_deployment && !data.is_empty() {
+        calldata_bytes.clone()
+    } else {
+        vec![]
+    };
+
+    if is_deployment && creation_bytecode.is_empty() {
+        return Err("Bytecode de déploiement vide".to_string());
+    }
+
+    let constructor_calldata: Vec<u8> = vec![];
+
+    let is_vez_initialization = false;  // sera recalculé plus tard si besoin
 
     // Récupération du nonce actuel
     let current_account_nonce = self.get_transaction_count(&from_addr).await.unwrap_or(0);
@@ -5914,4 +6039,4 @@ async fn validate_system_integrity(vm: &Arc<TokioRwLock<SlurachainVm>>, validato
     }
     
     Ok(())
-						}
+}
