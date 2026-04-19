@@ -1680,7 +1680,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     use sha3::{Digest, Keccak256};
     use ethers::types::U256;
 
-    println!("➡️ [send_transaction] Transaction reçue : {:?}", tx_params);
+    println!("➡️ [send_transaction] Transaction reçue (eth_sendTransaction) : {:?}", tx_params);
 
     // ===================================================================
     // 1. RÉCUPÉRATION DU CALLDATA (data ou input)
@@ -1708,10 +1708,11 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         if is_create2 { "OUI → exécution du bytecode de déploiement" } else { "non" }
     );
 
-    // Extraction de "to" (optionnel)
+    // Extraction de "to" (support tableau ou objet JSON-RPC standard)
     let to_addr = if tx_params.is_array() {
         tx_params.as_array()
             .and_then(|arr| arr.get(0))
+            .and_then(|v| v.get("to").or_else(|| v.as_str().map(|s| serde_json::Value::String(s.to_string()))))
             .and_then(|v| v.as_str())
             .map(|s| s.trim().to_lowercase())
             .unwrap_or_default()
@@ -1727,7 +1728,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     let is_vez_initialization = to_addr == "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" &&
         data.starts_with("0x40c10f19");
 
-    // Récupération du nonce (fallback à 0 si non fourni)
+    // Récupération du nonce (fallback à 0)
     let current_account_nonce = 0u64;
     let final_nonce = tx_params.get("nonce")
         .and_then(|v| {
@@ -1763,9 +1764,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
                 } else {
                     s.parse::<u128>().ok()
                 }
-            } else if v.is_u64() {
-                Some(v.as_u64().unwrap() as u128)
-            } else if v.is_number() {
+            } else if v.is_u64() || v.is_number() {
                 v.as_u64().map(|n| n as u128)
             } else {
                 None
@@ -1813,7 +1812,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     println!("💰 Calcul frais dynamiques :");
     println!(" • Gas estimé : {} units", estimated_gas);
     println!(" • Gas price : {} naeït ({} Gnaeït)", gas_price, gas_price / 1_000_000_000);
-    println!(" • Coût total : naeït VEZ (~{:.8} VEZ)", gas_cost_wei);
+    println!(" • Coût total : {} naeït VEZ (\~{:.8} VEZ)", gas_cost_wei, gas_cost_wei as f64 / 1e18);
     println!(" • Type de tx : {}", if is_deployment { "déploiement" } else { "appel/transfert" });
 
     // ====================== PAIEMENT DES FRAIS VIA DISBURSE ======================
@@ -1829,8 +1828,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         U256::from(gas_cost_wei).to_big_endian(&mut amount_padded);
         calldata.extend_from_slice(&amount_padded);
 
-        // Adresse padding vide (pas de from)
-        let addr_padded = [0u8; 32];
+        let addr_padded = [0u8; 32]; // pas de from
         calldata.extend_from_slice(&addr_padded);
 
         println!("🟢 [DEBUG] Calldata disburse généré : 0x{}", hex::encode(&calldata));
@@ -1941,7 +1939,6 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
                     resources: {
                         let mut r = BTreeMap::new();
                         r.insert("constructor_pending".to_string(), serde_json::Value::Bool(true));
-                        r.insert("deployed_by".to_string(), serde_json::Value::String("0x0".to_string()));
                         r.insert("eth_address".to_string(), serde_json::Value::String(contract_address.clone()));
                         r.insert("slu_zk_address".to_string(), serde_json::Value::String(slu_zk_contract_addr.clone()));
                         r.insert("deployment_tx".to_string(), serde_json::Value::String(normalized_hash.clone()));
@@ -2075,7 +2072,6 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         println!(" • Adresse SLU zk-print : {}", slu_zk_contract_addr);
         println!(" • TX Hash : {}", normalized_hash);
     } else {
-        // Transaction normale (appel de fonction)
         println!("→ Transaction normale (appel de fonction) sur {}", to_addr);
 
         let contract_addr = Some(to_addr.clone());
@@ -2119,7 +2115,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         }
     }
 
-    // Mise à jour nonce (exemple : sur le to_addr si contrat)
+    // Mise à jour nonce
     {
         let vm = self.vm.write().await;
         let mut accounts = vm.state.accounts.write().await;
@@ -2129,7 +2125,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         }
     }
 
-    // Construction TxRequest + mempool
+    // Construction TxRequest + mempool (sans from_op)
     let contract_addr_for_tx = if is_deployment { None } else { Some(to_addr.clone()) };
     let receiver_op = if is_deployment { contract_address.clone() } else { to_addr.clone() };
 
@@ -2157,7 +2153,6 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     } else { None };
 
     let tx_request = vuc_platform::slurachain_rpc_service::TxRequest {
-        from_op: "0x0".to_string(),           // placeholder (tu peux supprimer ce champ si le struct le permet)
         receiver_op,
         value_tx: value.to_string(),
         nonce_tx: final_nonce,
@@ -2165,6 +2160,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         contract_addr: contract_addr_for_tx,
         function_name,
         arguments,
+        // from_op supprimé
     };
 
     self.rpc_service.lurosonie_manager.add_transaction_to_mempool(tx_request.clone()).await;
@@ -2197,7 +2193,6 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         },
         "cumulativeGasUsed": cumulative_gas_used,
         "effectiveGasPrice": if is_vez_initialization { "0x0" } else { "0x3b9aca00" },
-        "from": "0x0",                                   // placeholder
         "gasUsed": if is_vez_initialization { "0x0" } else { "0x5208" },
         "logs": [],
         "logsBloom": "0x".to_string() + &"00".repeat(256),
@@ -2226,6 +2221,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         "uniquenessGuaranteed": is_deployment,
         "isVezInitialization": is_vez_initialization,
         "transactionCost": if is_vez_initialization { "0x0" } else { "0x5208" }
+        // "from" supprimé
     });
 
     let mut receipts = self.tx_receipts.write().await;
