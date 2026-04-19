@@ -1648,34 +1648,6 @@ pub async fn verify_contract_deployment(&self, contract_address: &str) -> Result
         }
 	}
 
-    fn recover_sender_from_raw_tx(&self, raw_hex: &str) -> Result<String, String> {
-        if !raw_hex.starts_with("0x") {
-            return Err("Raw transaction must start with 0x".to_string());
-        }
-
-        let bytes = match hex::decode(&raw_hex[2..]) {
-            Ok(b) => b,
-            Err(e) => return Err(format!("Hex decode failed: {}", e)),
-        };
-
-        // Gestion du préfixe EIP-1559 (0x02)
-        let rlp_bytes = if !bytes.is_empty() && bytes[0] == 0x02 {
-            &bytes[1..]
-        } else {
-            &bytes[..]
-        };
-
-        // Décodage RLP avec rlp 0.6.1
-        let tx: ethers::types::Transaction =  match rlp::decode(rlp_bytes) {
-            Ok(tx) => tx,
-            Err(e) => return Err(format!("Failed to decode raw transaction: {}", e)),
-        };
-
-        // Récupération du champ "from" (adresse de l'expéditeur)
-        let from = tx.from;
-        Ok(format!("{:#x}", from))
-    }
-
 pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<String, String> {
     use sha3::{Digest, Keccak256};
     use ethers::types::U256;
@@ -1735,10 +1707,13 @@ let to_addr = if tx_params.is_array() {
 
 println!("📍 To address détectée   : {}", if to_addr.is_empty() { "(déploiement - to null)" } else { &to_addr });
     let is_vez_initialization = to_addr == "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" &&
-        data.starts_with("0x40c10f19");
+        tx_params.get("data").and_then(|v| v.as_str()).unwrap_or("")
+            .starts_with("0x40c10f19");
 
-    // Récupération du nonce (fallback à 0 si non fourni)
-    let current_account_nonce = 0u64;
+    // Récupération du nonce actuel
+    let current_account_nonce = self.get_transaction_count(&from_addr).await.unwrap_or(0);
+
+    // Force le nonce à être croissant
     let final_nonce = tx_params.get("nonce")
         .and_then(|v| {
             if v.is_string() {
@@ -1758,7 +1733,7 @@ println!("📍 To address détectée   : {}", if to_addr.is_empty() { "(déploie
         .unwrap_or(current_account_nonce);
 
     // Détection déploiement
-    let is_deployment = is_create2 || to_addr.is_empty() ||
+    let is_deployment = to_addr.is_empty() ||
                        to_addr == "0x" ||
                        tx_params.get("to").is_none() ||
                        tx_params.get("to") == Some(&serde_json::Value::Null);
@@ -1782,6 +1757,19 @@ println!("📍 To address détectée   : {}", if to_addr.is_empty() { "(déploie
             }
         }).unwrap_or(0);
 
+    let data = tx_params.get("data")
+        .or_else(|| tx_params.get("input"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let calldata_bytes = if !data.is_empty() && data.starts_with("0x") {
+        hex::decode(&data[2..]).unwrap_or_default()
+    } else if !data.is_empty() {
+        hex::decode(data).unwrap_or_default()
+    } else {
+        vec![]
+    };
+
     let creation_bytecode = if is_deployment && !data.is_empty() {
         calldata_bytes.clone()
     } else {
@@ -1793,11 +1781,10 @@ println!("📍 To address détectée   : {}", if to_addr.is_empty() { "(déploie
     }
 
     let constructor_calldata: Vec<u8> = vec![];
-
-    // ===================================================================
-    // Génération du hash de transaction (sans from)
-    // ===================================================================
-    let mut tx_hasher = Keccak256::new();
+    
+    // Génération hash transaction
+let mut tx_hasher = Keccak256::new();
+    tx_hasher.update(from_addr.as_bytes());
     tx_hasher.update(&final_nonce.to_be_bytes());
     tx_hasher.update(&calldata_bytes);
     tx_hasher.update(&value.to_be_bytes());
@@ -1808,7 +1795,7 @@ println!("📍 To address détectée   : {}", if to_addr.is_empty() { "(déploie
     let mut contract_address = String::new();
     let mut slu_zk_contract_addr = String::new();
 
-    // ====================== CALCUL FRAIS DYNAMIQUES ======================
+    // ====================== CALCUL FRAIS DYNAMIQUES + DISBURSE ======================
     let gas_price = self.get_gas_price().await;
     let estimated_gas = if is_deployment {
         21000u64 + 32000u64 + (calldata_bytes.len() as u64 * 200)
@@ -1823,13 +1810,13 @@ println!("📍 To address détectée   : {}", if to_addr.is_empty() { "(déploie
     println!("💰 Calcul frais dynamiques :");
     println!(" • Gas estimé : {} units", estimated_gas);
     println!(" • Gas price : {} naeït ({} Gnaeït)", gas_price, gas_price / 1_000_000_000);
-    println!(" • Coût total : naeït VEZ (~{:.8} VEZ)", gas_cost_wei);
+    println!(" • Coût total : {} naeït VEZ (~{:.8} VEZ)", gas_cost_wei, gas_cost_wei as f64 / 1e18);
     println!(" • Type de tx : {}", if is_deployment { "déploiement" } else { "appel/transfert" });
 
-    // ====================== PAIEMENT DES FRAIS VIA DISBURSE ======================
+    // PAIEMENT DES FRAIS VIA DISBURSE
     let vez_addr = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_string();
     let disburse_success = if !is_vez_initialization && gas_cost_wei > 0 {
-        println!("🪙 Paiement des frais via disburse({}) ...", gas_cost_wei);
+        println!("🪙 Paiement des frais via disburse({}) depuis {}...", gas_cost_wei, from_addr);
 
         let selector = hex::decode("1c61f62b").unwrap();
         let mut calldata = Vec::with_capacity(68);
@@ -1839,8 +1826,9 @@ println!("📍 To address détectée   : {}", if to_addr.is_empty() { "(déploie
         U256::from(gas_cost_wei).to_big_endian(&mut amount_padded);
         calldata.extend_from_slice(&amount_padded);
 
-        // Adresse padding vide (pas de from)
-        let addr_padded = [0u8; 32];
+        let mut addr_padded = [0u8; 32];
+        let from_bytes = hex::decode(from_addr.trim_start_matches("0x")).unwrap_or_default();
+        addr_padded[12..].copy_from_slice(&from_bytes);
         calldata.extend_from_slice(&addr_padded);
 
         println!("🟢 [DEBUG] Calldata disburse généré : 0x{}", hex::encode(&calldata));
@@ -1851,14 +1839,14 @@ println!("📍 To address détectée   : {}", if to_addr.is_empty() { "(déploie
                 &vez_addr,
                 "function_1c61f62b",
                 vec![],
-                None,                    // pas de sender
+                Some(&from_addr),
                 Some(&calldata)
             ).await
         };
 
         match disburse_result {
             Ok(_) => {
-                println!("✅ DISBURSE FRAIS RÉUSSI ! {} naeït VEZ brûlés", gas_cost_wei);
+                println!("✅ DISBURSE FRAIS RÉUSSI ! {} naeït VEZ brûlés (10% burn + reste)", gas_cost_wei);
                 true
             }
             Err(e) => {
@@ -1879,24 +1867,24 @@ println!("📍 To address détectée   : {}", if to_addr.is_empty() { "(déploie
     if !disburse_success {
         return Err("Paiement des frais refusé".to_string());
     }
+    // ====================== FIN DISBURSE ======================
 
-    // ====================== TRAITEMENT DÉPLOIEMENT ======================
     if is_deployment {
-        let use_create2 = is_create2 || tx_params.get("create2").and_then(|v| v.as_bool()).unwrap_or(false);
+        let use_create2 = tx_params.get("create2").and_then(|v| v.as_bool()).unwrap_or(false);
         let target_address = tx_params.get("target_address")
             .and_then(|v| v.as_str())
             .map(|s| s.to_lowercase());
 
         contract_address = if use_create2 {
             if let Some(addr) = target_address {
-                println!("⚡ [CREATE2 via 0xf5] Déploiement à l'adresse forcée : {}", addr);
+                println!("⚡ [CREATE2] Déploiement à l'adresse forcée : {}", addr);
                 addr
             } else {
                 return Err("CREATE2 demandé mais target_address manquant".to_string());
             }
         } else {
-            // CREATE classique sans from
             let mut addr_hasher = Keccak256::new();
+            addr_hasher.update(from_addr.as_bytes());
             addr_hasher.update(&final_nonce.to_be_bytes());
             addr_hasher.update(&creation_bytecode);
             addr_hasher.update(&rand::random::<u128>().to_be_bytes());
@@ -1951,7 +1939,7 @@ println!("📍 To address détectée   : {}", if to_addr.is_empty() { "(déploie
                     resources: {
                         let mut r = BTreeMap::new();
                         r.insert("constructor_pending".to_string(), serde_json::Value::Bool(true));
-                        r.insert("deployed_by".to_string(), serde_json::Value::String("0x0".to_string()));
+                        r.insert("deployed_by".to_string(), serde_json::Value::String(from_addr.clone()));
                         r.insert("eth_address".to_string(), serde_json::Value::String(contract_address.clone()));
                         r.insert("slu_zk_address".to_string(), serde_json::Value::String(slu_zk_contract_addr.clone()));
                         r.insert("deployment_tx".to_string(), serde_json::Value::String(normalized_hash.clone()));
@@ -1985,7 +1973,7 @@ println!("📍 To address détectée   : {}", if to_addr.is_empty() { "(déploie
             &contract_address,
             constructor,
             vec![],
-            None,                                 // pas de sender
+            Some(&from_addr),
             Some(&constructor_calldata),
         ).await;
 
@@ -2085,9 +2073,8 @@ println!("📍 To address détectée   : {}", if to_addr.is_empty() { "(déploie
         println!(" • Adresse SLU zk-print : {}", slu_zk_contract_addr);
         println!(" • TX Hash : {}", normalized_hash);
     } else {
-        // Transaction normale (appel de fonction)
         println!("→ Transaction normale (appel de fonction) sur {}", to_addr);
-
+        // Ton code pour les appels normaux (inchangé)
         let contract_addr = Some(to_addr.clone());
         let function_name = if data.len() >= 10 {
             let selector_hex = &data[2..10];
@@ -2118,28 +2105,22 @@ println!("📍 To address détectée   : {}", if to_addr.is_empty() { "(déploie
                     }
                 });
                 let fn_name = function_name.as_deref().unwrap_or("unknown");
-                let _ = vmsim.execute_module(
-                    addr,
-                    fn_name,
-                    args,
-                    None,                    // pas de sender
-                    Some(&calldata_bytes)
-                ).await;
+                let _ = vmsim.execute_module(addr, fn_name, args, Some(&from_addr), Some(&calldata_bytes)).await;
             }
         }
     }
 
-    // Mise à jour nonce (exemple : sur le to_addr si contrat)
+    // Mise à jour nonce
     {
         let vm = self.vm.write().await;
         let mut accounts = vm.state.accounts.write().await;
-        if let Some(account) = accounts.get_mut(&to_addr) {
+        if let Some(account) = accounts.get_mut(&from_addr) {
             account.nonce = std::cmp::max(account.nonce, final_nonce + 1);
-            println!("📝 Nonce mis à jour sur {} → nonce={}", to_addr, account.nonce);
+            println!("📝 Nonce mis à jour: compte {} → nonce={}", from_addr, account.nonce);
         }
     }
 
-    // Construction TxRequest + mempool
+    // Construction TxRequest + mempool (inchangé)
     let contract_addr_for_tx = if is_deployment { None } else { Some(to_addr.clone()) };
     let receiver_op = if is_deployment { contract_address.clone() } else { to_addr.clone() };
 
@@ -2167,7 +2148,7 @@ println!("📍 To address détectée   : {}", if to_addr.is_empty() { "(déploie
     } else { None };
 
     let tx_request = vuc_platform::slurachain_rpc_service::TxRequest {
-        from_op: "0x0".to_string(),           // placeholder (tu peux supprimer ce champ si le struct le permet)
+        from_op: from_addr.clone(),
         receiver_op,
         value_tx: value.to_string(),
         nonce_tx: final_nonce,
@@ -2187,6 +2168,7 @@ println!("📍 To address détectée   : {}", if to_addr.is_empty() { "(déploie
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
+    // ─── RECEIPT ───
     let cumulative_gas_used = if is_vez_initialization {
         "0x0".to_string()
     } else {
@@ -2207,7 +2189,7 @@ println!("📍 To address détectée   : {}", if to_addr.is_empty() { "(déploie
         },
         "cumulativeGasUsed": cumulative_gas_used,
         "effectiveGasPrice": if is_vez_initialization { "0x0" } else { "0x3b9aca00" },
-        "from": "0x0",                                   // placeholder
+        "from": from_addr,
         "gasUsed": if is_vez_initialization { "0x0" } else { "0x5208" },
         "logs": [],
         "logsBloom": "0x".to_string() + &"00".repeat(256),
@@ -2222,9 +2204,7 @@ println!("📍 To address détectée   : {}", if to_addr.is_empty() { "(déploie
         "isUniqueDeployment": is_deployment,
         "isPersisted": is_deployment,
         "deploymentMethod": if is_deployment {
-            if is_create2 {
-                "create2_via_opcode_0xf5"
-            } else if tx_params.get("create2").and_then(|v| v.as_bool()).unwrap_or(false) {
+            if tx_params.get("create2").and_then(|v| v.as_bool()).unwrap_or(false) {
                 "create2_via_execute_module_raw"
             } else {
                 "create_via_execute_module_raw"
@@ -2243,6 +2223,7 @@ println!("📍 To address détectée   : {}", if to_addr.is_empty() { "(déploie
     let tx_hash_padded = Self::pad_hash_64(&normalized_hash);
     receipts.insert(tx_hash_padded.clone(), receipt.clone());
 
+    // Persistance receipt (inchangé)
     if let Some(storage_manager) = &self.vm.read().await.storage_manager {
         let receipt_key = format!("receipt:{}", normalized_hash);
         if let Ok(receipt_bytes) = serde_json::to_vec(&receipt) {
@@ -2254,10 +2235,15 @@ println!("📍 To address détectée   : {}", if to_addr.is_empty() { "(déploie
         }
     }
 
+    // Logs finaux (inchangés)
     if is_deployment {
-        println!("✅ DÉPLOIEMENT RÉUSSI → Adresse Ethereum: {} | SLU zk: {} | Hash: {} | Méthode: {}",
-                 contract_address, slu_zk_contract_addr, normalized_hash,
-                 if is_create2 { "CREATE2 (opcode 0xf5)" } else { "CREATE classique" });
+        if tx_params.get("create2").and_then(|v| v.as_bool()).unwrap_or(false) {
+            println!("✅ CREATE2 via execute_module (raw) → Adresse Ethereum: {} | SLU zk: {} | Hash: {}",
+                     contract_address, slu_zk_contract_addr, normalized_hash);
+        } else {
+            println!("✅ Déploiement via execute_module (raw) → Adresse Ethereum: {} | SLU zk: {} | Hash: {}",
+                     contract_address, slu_zk_contract_addr, normalized_hash);
+        }
     } else {
         println!("✅ Transaction acceptée → hash={} nonce={}", normalized_hash, final_nonce);
     }
@@ -2268,7 +2254,7 @@ println!("📍 To address détectée   : {}", if to_addr.is_empty() { "(déploie
 
     Ok(tx_hash_padded)
 }
-		
+
 fn pad_hash_64(hex: &str) -> String {
     // Enlève le préfixe "0x" si présent
     let hex = hex.strip_prefix("0x").unwrap_or(hex);
