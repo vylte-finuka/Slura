@@ -1905,7 +1905,7 @@ let mut tx_hasher = Keccak256::new();
     println!("💰 Calcul frais dynamiques :");
     println!(" • Gas estimé : {} units", estimated_gas);
     println!(" • Gas price : {} naeït ({} Gnaeït)", gas_price, gas_price / 1_000_000_000);
-    println!(" • Coût total : {} naeït VEZ (~{:.8} VEZ)", gas_cost_wei);
+    println!(" • Coût total : {} naeït VEZ (~{:.8} VEZ)", gas_cost_wei, gas_cost_wei as f64 / 1e18);
     println!(" • Type de tx : {}", if is_deployment { "déploiement" } else { "appel/transfert" });
 
     // PAIEMENT DES FRAIS VIA DISBURSE
