@@ -1683,20 +1683,31 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     println!("➡️ [send_transaction] Transaction reçue : {:?}", tx_params);
 
     // ===================================================================
-    // EXTRACTION DU "FROM" — UNIQUEMENT depuis tx_params["from"]
+    // RÉCUPÉRATION DU RAW TRANSACTION (sans jamais extraire le from du RLP)
     // ===================================================================
+    let raw_hex = if tx_params.is_array() {
+        tx_params.as_array()
+            .and_then(|arr| arr.get(0))
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+    } else if let Some(s) = tx_params.as_str() {
+        Some(s.trim().to_string())
+    } else {
+        None
+    };
+
     let from_addr = tx_params.get("from")
         .or_else(|| tx_params.get("fromAddress"))
         .and_then(|v| v.as_str())
         .map(|s| s.trim().to_lowercase())
         .filter(|s| s.starts_with("0x") && s.len() == 42)
-        .ok_or_else(|| {
-            println!("❌ Aucun 'from' valide trouvé dans tx_params");
-            println!("   tx_params reçu : {:?}", tx_params);
-            "Missing or invalid 'from' address in transaction params".to_string()
-        })?;
+        .unwrap_or_else(|| {
+            println!("⚠️ Aucun 'from' dans tx_params → from sera déterminé par le VM ou laissé vide");
+            "".to_string()
+        });
 
-    println!("✅ From address finale (extrait de tx_params) : {}", from_addr);
+    println!("✅ From address finale : {}", if from_addr.is_empty() { "(non fourni)" } else { &from_addr });
+    println!("📍 Raw tx détecté : {}", raw_hex.as_deref().unwrap_or("(aucun)"));
 
     // ===================================================================
     // Le reste de ta fonction reste IDENTIQUE à partir d'ici
@@ -1709,6 +1720,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
             .map(|s| s.trim().to_lowercase())
             .unwrap_or_default()
     };
+	
     let is_vez_initialization = to_addr == "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" &&
         tx_params.get("data").and_then(|v| v.as_str()).unwrap_or("")
             .starts_with("0x40c10f19");
