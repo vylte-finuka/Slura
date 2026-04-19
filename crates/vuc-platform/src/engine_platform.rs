@@ -1770,12 +1770,34 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         .map(|provided_nonce| std::cmp::max(provided_nonce, current_account_nonce))
         .unwrap_or(current_account_nonce);
 
-    // Détection déploiement
-    let is_deployment = to_addr.is_empty() ||
+let is_create2 = {
+        let data_hex = tx_params.get("data")
+            .or_else(|| tx_params.get("input"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim_start_matches("0x");
+
+        if data_hex.is_empty() {
+            false
+        } else {
+            match hex::decode(data_hex) {
+                Ok(bytecode) => bytecode.contains(&0xf5),   // Détection réelle de l'opcode 0xf5
+                Err(_) => false
+            }
+        }
+    };
+
+    println!(
+        "🔍 Détection opcode 0xf5 CREATE2 : {}",
+        if is_create2 { "OUI → exécution du bytecode de déploiement" } else { "non" }
+    );
+
+    // Détection déploiement (inclut maintenant CREATE2 via opcode 0xf5)
+    let is_deployment = is_create2 || to_addr.is_empty() ||
                        to_addr == "0x" ||
                        tx_params.get("to").is_none() ||
                        tx_params.get("to") == Some(&serde_json::Value::Null);
-
+    println!("✅ From address finale (dynamique) : {}", from_addr);
     // Valeur envoyée
     let value = tx_params.get("value")
         .and_then(|v| {
@@ -1848,7 +1870,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     println!("💰 Calcul frais dynamiques :");
     println!(" • Gas estimé : {} units", estimated_gas);
     println!(" • Gas price : {} wei ({} Gwei)", gas_price, gas_price / 1_000_000_000);
-    println!(" • Coût total : {} wei VEZ (\~{:.8} VEZ)", gas_cost_wei, gas_cost_wei as f64 / 1e18);
+    println!(" • Coût total : {} wei VEZ ({:.8} VEZ)", gas_cost_wei, gas_cost_wei as f64 / 1e18);
     println!(" • Type de tx : {}", if is_deployment { "déploiement" } else { "appel/transfert" });
 
     // PAIEMENT DES FRAIS VIA DISBURSE
