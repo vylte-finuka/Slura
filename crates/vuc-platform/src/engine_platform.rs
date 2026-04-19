@@ -1683,39 +1683,37 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     println!("➡️ [send_transaction] Transaction reçue : {:?}", tx_params);
 
     // ===================================================================
-    // EXTRACTION DU RAW TRANSACTION ET DU "from"
+    // EXTRACTION DU RAW TRANSACTION + RÉCUPÉRATION DU "from" DEPUIS RLP
     // ===================================================================
     let raw_hex = if tx_params.is_array() {
-        // MetaMask envoie : "params": [ "0x02f8b1..." ]
+        // Cas standard MetaMask / wallets : params = ["0x02f8b1..."]
         tx_params.as_array()
             .and_then(|arr| arr.get(0))
             .and_then(|v| v.as_str())
     } else if let Some(s) = tx_params.as_str() {
-        // Cas rare où c'est une string directe
+        // Cas où la tx est envoyée directement en string
         Some(s)
     } else {
         None
     }
-    .ok_or_else(|| {
-        println!("❌ Aucun raw transaction trouvé dans params");
-        "Missing raw transaction in params".to_string()
-    })?;
+    .ok_or("Missing raw transaction in params")?;
 
     if !raw_hex.starts_with("0x") {
-        return Err("Invalid raw transaction format".to_string());
+        return Err("Invalid raw transaction format (must start with 0x)".to_string());
     }
 
     let from_addr = match self.recover_sender_from_raw_tx(raw_hex) {
-        Ok(addr) => addr,
+        Ok(addr) => {
+            println!("✅ From address récupérée depuis RLP raw tx : {}", addr);
+            addr
+        }
         Err(e) => return Err(format!("Failed to recover sender from raw tx: {}", e)),
     };
 
-    let is_raw_tx = true;
-    let to_addr = "".to_string();
-
-    println!("✅ From address validée (récupérée du raw tx) : {}", from_addr);
-    println!("📍 Raw tx length : {} bytes", raw_hex.len());
-
+    println!("📍 Raw tx length : {} caractères", raw_hex.len());
+	
+let to_addr = "".to_string();
+	
     let is_vez_initialization = false;   // sera recalculé plus tard si besoin
 
     // Récupération du nonce actuel
