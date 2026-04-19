@@ -1655,60 +1655,67 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     println!("➡️ [send_transaction] Transaction reçue : {:?}", tx_params);
 
     // ===================================================================
-// 1. DÉTECTION MODE RAW (eth_sendTransaction de Remix / MetaMask / etc.)
-//    Si "from" est présent → c'est très probablement un déploiement ou appel depuis Remix
-// ===================================================================
-let is_raw_tx = tx_params.get("from").is_some()
-    || tx_params.get("to").is_some()
-    || (tx_params.is_array() && !tx_params.as_array().unwrap_or(&vec![]).is_empty());
+    // 1. DÉTECTION MODE RAW
+    // ===================================================================
+    let is_raw_tx = tx_params.get("from").is_some()
+        || tx_params.get("to").is_some()
+        || (tx_params.is_array() && !tx_params.as_array().unwrap_or(&vec![]).is_empty());
 
-println!("🔍 Mode détecté : {}", if is_raw_tx { "RAW eth_sendTransaction (Remix / Wallet)" } else { "mode standard" });
+    println!("🔍 Mode détecté : {}", if is_raw_tx { "RAW eth_sendTransaction (Remix / Wallet)" } else { "mode standard" });
 
-// ===================================================================
-// 2. RÉCUPÉRATION DU CALLDATA (data ou input)
-// ===================================================================
-let data = tx_params.get("data")
-    .or_else(|| tx_params.get("input"))
-    .and_then(|v| v.as_str())
-    .unwrap_or("");
-
-let calldata_bytes = if !data.is_empty() && data.starts_with("0x") {
-    hex::decode(&data[2..]).unwrap_or_default()
-} else if !data.is_empty() {
-    hex::decode(data).unwrap_or_default()
-} else {
-    vec![]
-};
-
-// ===================================================================
-// 3. DÉTECTION OPCODE 0xf5 CREATE2
-// ===================================================================
-let is_create2 = calldata_bytes.contains(&0xf5);
-
-println!(
-    "🔍 Détection opcode 0xf5 CREATE2 : {}",
-    if is_create2 { "OUI → déploiement CREATE2" } else { "non" }
-);
-
-// Extraction de "to" (support objet ou tableau)
-let to_addr = if tx_params.is_array() {
-    tx_params.as_array()
-        .and_then(|arr| arr.get(0))
-        .and_then(|v| v.get("to").or_else(|| Some(v)))
+    // ===================================================================
+    // 2. RÉCUPÉRATION DU CALLDATA (data ou input)
+    // ===================================================================
+    let data = tx_params.get("data")
+        .or_else(|| tx_params.get("input"))
         .and_then(|v| v.as_str())
-        .map(|s| s.trim().to_lowercase())
-        .unwrap_or_default()
-} else {
-    tx_params.get("to")
-        .and_then(|v| v.as_str())
-        .map(|s| s.trim().to_lowercase())
-        .unwrap_or_default()
-};
+        .unwrap_or("")
+        .to_string();
 
-println!("📍 To address détectée   : {}", if to_addr.is_empty() { "(déploiement - to null)" } else { &to_addr });
+    let calldata_bytes = if !data.is_empty() && data.starts_with("0x") {
+        hex::decode(&data[2..]).unwrap_or_default()
+    } else if !data.is_empty() {
+        hex::decode(&data).unwrap_or_default()
+    } else {
+        vec![]
+    };
+
+    // ===================================================================
+    // 3. DÉTECTION OPCODE 0xf5 CREATE2
+    // ===================================================================
+    let is_create2 = calldata_bytes.contains(&0xf5);
+
+    println!(
+        "🔍 Détection opcode 0xf5 CREATE2 : {}",
+        if is_create2 { "OUI → déploiement CREATE2" } else { "non" }
+    );
+
+    // Extraction de "to" (support objet ou tableau)
+    let to_addr = if tx_params.is_array() {
+        tx_params.as_array()
+            .and_then(|arr| arr.get(0))
+            .and_then(|v| v.get("to").or_else(|| Some(v)))
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_lowercase())
+            .unwrap_or_default()
+    } else {
+        tx_params.get("to")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_lowercase())
+            .unwrap_or_default()
+    };
+
+    println!("📍 To address détectée   : {}", if to_addr.is_empty() { "(déploiement - to null)" } else { &to_addr });
+
     let is_vez_initialization = to_addr == "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" &&
         tx_params.get("data").and_then(|v| v.as_str()).unwrap_or("")
             .starts_with("0x40c10f19");
+
+    // Récupération du from_addr (correction : il était utilisé avant d'être déclaré dans l'original)
+    let from_addr = tx_params.get("from")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_lowercase())
+        .unwrap_or_default();
 
     // Récupération du nonce actuel
     let current_account_nonce = self.get_transaction_count(&from_addr).await.unwrap_or(0);
@@ -1757,19 +1764,6 @@ println!("📍 To address détectée   : {}", if to_addr.is_empty() { "(déploie
             }
         }).unwrap_or(0);
 
-    let data = tx_params.get("data")
-        .or_else(|| tx_params.get("input"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-
-    let calldata_bytes = if !data.is_empty() && data.starts_with("0x") {
-        hex::decode(&data[2..]).unwrap_or_default()
-    } else if !data.is_empty() {
-        hex::decode(data).unwrap_or_default()
-    } else {
-        vec![]
-    };
-
     let creation_bytecode = if is_deployment && !data.is_empty() {
         calldata_bytes.clone()
     } else {
@@ -1781,9 +1775,9 @@ println!("📍 To address détectée   : {}", if to_addr.is_empty() { "(déploie
     }
 
     let constructor_calldata: Vec<u8> = vec![];
-    
+
     // Génération hash transaction
-let mut tx_hasher = Keccak256::new();
+    let mut tx_hasher = Keccak256::new();
     tx_hasher.update(from_addr.as_bytes());
     tx_hasher.update(&final_nonce.to_be_bytes());
     tx_hasher.update(&calldata_bytes);
@@ -2092,7 +2086,7 @@ let mut tx_hasher = Keccak256::new();
             None
         };
 
-        let arguments = Self::parse_abi_encoded_args(data);
+        let arguments = Self::parse_abi_encoded_args(&data);
 
         let mut vmsim = self.vm.write().await;
         if let Some(addr) = &contract_addr {
@@ -2120,7 +2114,7 @@ let mut tx_hasher = Keccak256::new();
         }
     }
 
-    // Construction TxRequest + mempool (inchangé)
+    // Construction TxRequest + mempool
     let contract_addr_for_tx = if is_deployment { None } else { Some(to_addr.clone()) };
     let receiver_op = if is_deployment { contract_address.clone() } else { to_addr.clone() };
 
@@ -2223,7 +2217,7 @@ let mut tx_hasher = Keccak256::new();
     let tx_hash_padded = Self::pad_hash_64(&normalized_hash);
     receipts.insert(tx_hash_padded.clone(), receipt.clone());
 
-    // Persistance receipt (inchangé)
+    // Persistance receipt
     if let Some(storage_manager) = &self.vm.read().await.storage_manager {
         let receipt_key = format!("receipt:{}", normalized_hash);
         if let Ok(receipt_bytes) = serde_json::to_vec(&receipt) {
@@ -2235,7 +2229,7 @@ let mut tx_hasher = Keccak256::new();
         }
     }
 
-    // Logs finaux (inchangés)
+    // Logs finaux
     if is_deployment {
         if tx_params.get("create2").and_then(|v| v.as_bool()).unwrap_or(false) {
             println!("✅ CREATE2 via execute_module (raw) → Adresse Ethereum: {} | SLU zk: {} | Hash: {}",
