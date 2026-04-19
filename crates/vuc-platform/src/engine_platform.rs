@@ -1683,15 +1683,15 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     println!("➡️ [send_transaction] Transaction reçue : {:?}", tx_params);
 
     // ===================================================================
-    // EXTRACTION DU RAW TRANSACTION + RÉCUPÉRATION DU "from" DEPUIS RLP
+    // EXTRACTION DU RAW TRANSACTION (eth_sendRawTransaction)
     // ===================================================================
     let raw_hex = if tx_params.is_array() {
-        // Cas standard MetaMask / wallets : params = ["0x02f8b1..."]
+        // Cas standard : "params": ["0xf86901..."]
         tx_params.as_array()
             .and_then(|arr| arr.get(0))
             .and_then(|v| v.as_str())
     } else if let Some(s) = tx_params.as_str() {
-        // Cas où la tx est envoyée directement en string
+        // Cas où on envoie directement la string
         Some(s)
     } else {
         None
@@ -1699,9 +1699,10 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     .ok_or("Missing raw transaction in params")?;
 
     if !raw_hex.starts_with("0x") {
-        return Err("Invalid raw transaction format (must start with 0x)".to_string());
+        return Err("Invalid raw transaction format: must start with 0x".to_string());
     }
 
+    // Récupération du from depuis la signature RLP
     let from_addr = match self.recover_sender_from_raw_tx(raw_hex) {
         Ok(addr) => {
             println!("✅ From address récupérée depuis RLP raw tx : {}", addr);
@@ -1711,9 +1712,12 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     };
 
     println!("📍 Raw tx length : {} caractères", raw_hex.len());
-	
-let to_addr = "".to_string();
-	
+
+    // ===================================================================
+    // Suite de ta fonction (to_addr, is_deployment, etc.)
+    // ===================================================================
+    let to_addr = "".to_string();   // sera mis à jour plus bas si besoin
+
     let is_vez_initialization = false;   // sera recalculé plus tard si besoin
 
     // Récupération du nonce actuel
