@@ -1704,6 +1704,18 @@ let raw_hex = tx_params.as_array()
     // "to" n'est pas directement disponible dans le raw tx
     let to_addr = "".to_string();
 
+	let calldata_bytes = tx_params.get("data")
+    .or_else(|| tx_params.get("input"))
+    .and_then(|v| v.as_str())
+    .map(|data| {
+        if data.starts_with("0x") {
+            hex::decode(&data[2..]).unwrap_or_default()
+        } else {
+            hex::decode(data).unwrap_or_default()
+        }
+    })
+    .unwrap_or_default();
+
     println!("✅ From address validée (récupérée du raw tx) : {}", from_addr);
     let is_create2 = calldata_bytes.contains(&0xf5);
 
