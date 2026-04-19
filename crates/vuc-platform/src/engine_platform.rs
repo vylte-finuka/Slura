@@ -1683,10 +1683,10 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     println!("➡️ [send_transaction] Transaction reçue : {:?}", tx_params);
 
     // ===================================================================
-    // RÉCUPÉRATION DU "FROM" (priorité raw tx, puis objet JSON)
+    // RÉCUPÉRATION DU "FROM" (priorité raw tx, fallback JSON, pas d'erreur forcée)
     // ===================================================================
     let from_addr = if tx_params.is_array() {
-        // Cas eth_sendRawTransaction : params = ["0xf86901..."]
+        // Cas eth_sendRawTransaction : params = ["0x02f8b1..."]
         if let Some(raw_hex) = tx_params.as_array()
             .and_then(|arr| arr.get(0))
             .and_then(|v| v.as_str())
@@ -1703,7 +1703,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
                 Err(e) => return Err(format!("Failed to recover sender from raw tx: {}", e)),
             }
         } else {
-            // Si pas de raw tx dans le tableau, on essaie l'objet JSON
+            // Pas de raw tx dans le tableau → fallback sur l'objet JSON
             if let Some(from_val) = tx_params.get("from").and_then(|v| v.as_str()) {
                 let from_clean = from_val.trim().to_lowercase();
                 if from_clean.starts_with("0x") && from_clean.len() == 42 {
@@ -1713,11 +1713,11 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
                     return Err(format!("Invalid 'from' address in tx_params: {}", from_val));
                 }
             } else {
-                return Err("Missing 'from' field in transaction params".to_string());
+                return Err("Missing 'from' field and no raw transaction found".to_string());
             }
         }
     } else {
-        // Cas eth_sendTransaction avec objet JSON
+        // Cas JSON direct (eth_sendTransaction)
         if let Some(from_val) = tx_params.get("from").and_then(|v| v.as_str()) {
             let from_clean = from_val.trim().to_lowercase();
             if from_clean.starts_with("0x") && from_clean.len() == 42 {
@@ -1727,12 +1727,29 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
                 return Err(format!("Invalid 'from' address in tx_params: {}", from_val));
             }
         } else {
-            return Err("Missing 'from' field in transaction params".to_string());
+            // Aucun 'from' dans l'objet JSON → on essaie de trouver un raw tx dans le même objet (cas rare)
+            if let Some(raw_hex) = tx_params.get("raw").and_then(|v| v.as_str())
+                .or_else(|| tx_params.get("data").and_then(|v| v.as_str()))
+            {
+                if raw_hex.starts_with("0x") {
+                    match self.recover_sender_from_raw_tx(raw_hex) {
+                        Ok(addr) => {
+                            println!("✅ From récupéré depuis raw tx dans l'objet JSON : {}", addr);
+                            addr
+                        }
+                        Err(e) => return Err(format!("Failed to recover sender from raw tx: {}", e)),
+                    }
+                } else {
+                    return Err("Invalid raw transaction format in JSON object".to_string());
+                }
+            } else {
+                return Err("Missing 'from' field in transaction params".to_string());
+            }
         }
     };
 
     println!("✅ From address finale : {}", from_addr);
-
+	
     // ===================================================================
     // Le reste de ta fonction reste IDENTIQUE à partir d'ici
     // ===================================================================
