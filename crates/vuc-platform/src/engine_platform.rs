@@ -1683,7 +1683,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     println!("➡️ [send_transaction] Transaction reçue : {:?}", tx_params);
 
     // ===================================================================
-    // RÉCUPÉRATION DU RAW TRANSACTION (sans jamais extraire le from du RLP)
+    // RÉCUPÉRATION DU "FROM" + RAW (fallback raw si from absent, jamais d'erreur)
     // ===================================================================
     let raw_hex = if tx_params.is_array() {
         tx_params.as_array()
@@ -1702,11 +1702,11 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         .map(|s| s.trim().to_lowercase())
         .filter(|s| s.starts_with("0x") && s.len() == 42)
         .unwrap_or_else(|| {
-            println!("⚠️ Aucun 'from' dans tx_params → from sera déterminé par le VM ou laissé vide");
+            println!("⚠️ Aucun 'from' dans tx_params → fallback sur raw tx (sender sera déterminé plus tard par le VM)");
             "".to_string()
         });
 
-    println!("✅ From address finale : {}", if from_addr.is_empty() { "(non fourni)" } else { &from_addr });
+    println!("✅ From address finale : {}", if from_addr.is_empty() { "(non fourni → fallback raw)" } else { &from_addr });
     println!("📍 Raw tx détecté : {}", raw_hex.as_deref().unwrap_or("(aucun)"));
 
     // ===================================================================
