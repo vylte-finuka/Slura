@@ -1682,40 +1682,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
 
     println!("➡️ [send_transaction] Transaction reçue : {:?}", tx_params);
 
-    // ===================================================================
-    // EXTRACTION DU RAW TRANSACTION ET DU "from"
-    // ===================================================================
-    let raw_hex = if tx_params.is_array() {
-        // MetaMask envoie : "params": [ "0x02f8b1..." ]
-        tx_params.as_array()
-            .and_then(|arr| arr.get(0))
-            .and_then(|v| v.as_str())
-    } else if let Some(s) = tx_params.as_str() {
-        // Cas rare où c'est une string directe
-        Some(s)
-    } else {
-        None
-    }
-    .ok_or_else(|| {
-        println!("❌ Aucun raw transaction trouvé dans params");
-        "Missing raw transaction in params".to_string()
-    })?;
-
-    if !raw_hex.starts_with("0x") {
-        return Err("Invalid raw transaction format".to_string());
-    }
-
-    let from_addr = match self.recover_sender_from_raw_tx(raw_hex) {
-        Ok(addr) => addr,
-        Err(e) => return Err(format!("Failed to recover sender from raw tx: {}", e)),
-    };
-
-    let is_raw_tx = true;
-    let to_addr = "".to_string();
-
-    println!("✅ From address validée (récupérée du raw tx) : {}", from_addr);
-    println!("📍 Raw tx length : {} bytes", raw_hex.len());
-
+    
     let is_vez_initialization = false;   // sera recalculé plus tard si besoin
 
     // Récupération du nonce actuel
@@ -1740,13 +1707,36 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         .map(|provided_nonce| std::cmp::max(provided_nonce, current_account_nonce))
         .unwrap_or(current_account_nonce);
 
-    // Détection déploiement
-    let is_deployment = to_addr.is_empty() ||
+    // ===================================================================
+    // DÉTECTION OPCODE 0xf5 CREATE2 (même si "to" est présent)
+    // ===================================================================
+    let is_create2 = {
+        let data_hex = tx_params.get("data")
+            .or_else(|| tx_params.get("input"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim_start_matches("0x");
+
+        if data_hex.is_empty() {
+            false
+        } else {
+            match hex::decode(data_hex) {
+                Ok(bytecode) => bytecode.contains(&0xf5),   // Détection réelle de l'opcode 0xf5
+                Err(_) => false
+            }
+        }
+    };
+
+    println!(
+        "🔍 Détection opcode 0xf5 CREATE2 : {}",
+        if is_create2 { "OUI → exécution du bytecode de déploiement" } else { "non" }
+    );
+
+    // Détection déploiement (inclut maintenant CREATE2 via opcode 0xf5)
+    let is_deployment = is_create2 || to_addr.is_empty() ||
                        to_addr == "0x" ||
                        tx_params.get("to").is_none() ||
                        tx_params.get("to") == Some(&serde_json::Value::Null);
-
-    // Valeur envoyée
     let value = tx_params.get("value")
         .and_then(|v| {
             if v.is_string() {
