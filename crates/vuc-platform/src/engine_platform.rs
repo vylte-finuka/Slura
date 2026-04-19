@@ -1683,121 +1683,75 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     println!("➡️ [send_transaction] Transaction reçue : {:?}", tx_params);
 
     // ===================================================================
-    // EXTRACTION DU RAW TRANSACTION (eth_sendRawTransaction)
+    // RÉCUPÉRATION DU "FROM" (priorité raw tx, puis objet JSON)
     // ===================================================================
-    let raw_hex = if tx_params.is_array() {
-        // Cas standard : "params": ["0xf86901..."]
-        tx_params.as_array()
+    let from_addr = if tx_params.is_array() {
+        // Cas eth_sendRawTransaction : params = ["0xf86901..."]
+        if let Some(raw_hex) = tx_params.as_array()
             .and_then(|arr| arr.get(0))
             .and_then(|v| v.as_str())
-    } else if let Some(s) = tx_params.as_str() {
-        // Cas où on envoie directement la string
-        Some(s)
-    } else {
-        None
-    }
-    .ok_or("Missing raw transaction in params")?;
+        {
+            if !raw_hex.starts_with("0x") {
+                return Err("Invalid raw transaction format".to_string());
+            }
 
-    if !raw_hex.starts_with("0x") {
-        return Err("Invalid raw transaction format: must start with 0x".to_string());
-    }
-
-    // Récupération du from depuis la signature RLP
-    let from_addr = match self.recover_sender_from_raw_tx(raw_hex) {
-        Ok(addr) => {
-            println!("✅ From address récupérée depuis RLP raw tx : {}", addr);
-            addr
+            match self.recover_sender_from_raw_tx(raw_hex) {
+                Ok(addr) => {
+                    println!("✅ From récupéré depuis raw tx RLP : {}", addr);
+                    addr
+                }
+                Err(e) => return Err(format!("Failed to recover sender from raw tx: {}", e)),
+            }
+        } else {
+            // Si pas de raw tx dans le tableau, on essaie l'objet JSON
+            if let Some(from_val) = tx_params.get("from").and_then(|v| v.as_str()) {
+                let from_clean = from_val.trim().to_lowercase();
+                if from_clean.starts_with("0x") && from_clean.len() == 42 {
+                    println!("✅ From extrait de l'objet JSON : {}", from_clean);
+                    from_clean
+                } else {
+                    return Err(format!("Invalid 'from' address in tx_params: {}", from_val));
+                }
+            } else {
+                return Err("Missing 'from' field in transaction params".to_string());
+            }
         }
-        Err(e) => return Err(format!("Failed to recover sender from raw tx: {}", e)),
+    } else {
+        // Cas eth_sendTransaction avec objet JSON
+        if let Some(from_val) = tx_params.get("from").and_then(|v| v.as_str()) {
+            let from_clean = from_val.trim().to_lowercase();
+            if from_clean.starts_with("0x") && from_clean.len() == 42 {
+                println!("✅ From extrait de l'objet JSON : {}", from_clean);
+                from_clean
+            } else {
+                return Err(format!("Invalid 'from' address in tx_params: {}", from_val));
+            }
+        } else {
+            return Err("Missing 'from' field in transaction params".to_string());
+        }
     };
 
-    println!("📍 Raw tx length : {} caractères", raw_hex.len());
+    println!("✅ From address finale : {}", from_addr);
 
     // ===================================================================
-    // Suite de ta fonction (to_addr, is_deployment, etc.)
+    // Le reste de ta fonction reste IDENTIQUE à partir d'ici
     // ===================================================================
-    let to_addr = "".to_string();   // sera mis à jour plus bas si besoin
+    let to_addr = if tx_params.is_array() {
+        "".to_string()
+    } else {
+        tx_params.get("to")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_lowercase())
+            .unwrap_or_default()
+    };
 
-    let is_vez_initialization = false;   // sera recalculé plus tard si besoin
+    let is_vez_initialization = to_addr == "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" &&
+        tx_params.get("data").and_then(|v| v.as_str()).unwrap_or("")
+            .starts_with("0x40c10f19");
 
     // Récupération du nonce actuel
     let current_account_nonce = self.get_transaction_count(&from_addr).await.unwrap_or(0);
 
-    // Force le nonce à être croissant
-    let final_nonce = tx_params.get("nonce")
-        .and_then(|v| {
-            if v.is_string() {
-                let s = v.as_str().unwrap();
-                if s.starts_with("0x") {
-                    u64::from_str_radix(&s[2..], 16).ok()
-                } else {
-                    s.parse().ok()
-                }
-            } else if v.is_u64() {
-                Some(v.as_u64().unwrap())
-            } else {
-                None
-            }
-        })
-        .map(|provided_nonce| std::cmp::max(provided_nonce, current_account_nonce))
-        .unwrap_or(current_account_nonce);
-
-    // Détection déploiement
-    let is_deployment = to_addr.is_empty() ||
-                       to_addr == "0x" ||
-                       tx_params.get("to").is_none() ||
-                       tx_params.get("to") == Some(&serde_json::Value::Null);
-
-    // Valeur envoyée
-    let value = tx_params.get("value")
-        .and_then(|v| {
-            if v.is_string() {
-                let s = v.as_str().unwrap();
-                if s.starts_with("0x") {
-                    u128::from_str_radix(s.trim_start_matches("0x"), 16).ok()
-                } else {
-                    s.parse::<u128>().ok()
-                }
-            } else if v.is_u64() {
-                Some(v.as_u64().unwrap() as u128)
-            } else if v.is_number() {
-                v.as_u64().map(|n| n as u128)
-            } else {
-                None
-            }
-        }).unwrap_or(0);
-
-    let data = tx_params.get("data")
-        .or_else(|| tx_params.get("input"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-
-    let calldata_bytes = if !data.is_empty() && data.starts_with("0x") {
-        hex::decode(&data[2..]).unwrap_or_default()
-    } else if !data.is_empty() {
-        hex::decode(data).unwrap_or_default()
-    } else {
-        vec![]
-    };
-
-    let creation_bytecode = if is_deployment && !data.is_empty() {
-        calldata_bytes.clone()
-    } else {
-        vec![]
-    };
-
-    if is_deployment && creation_bytecode.is_empty() {
-        return Err("Bytecode de déploiement vide".to_string());
-    }
-
-    let constructor_calldata: Vec<u8> = vec![];
-
-    let is_vez_initialization = false;  // sera recalculé plus tard si besoin
-
-    // Récupération du nonce actuel
-    let current_account_nonce = self.get_transaction_count(&from_addr).await.unwrap_or(0);
-
-    // Force le nonce à être croissant
     let final_nonce = tx_params.get("nonce")
         .and_then(|v| {
             if v.is_string() {
@@ -1867,7 +1821,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     let constructor_calldata: Vec<u8> = vec![];
 
     // Génération hash transaction
-let mut tx_hasher = Keccak256::new();
+    let mut tx_hasher = Keccak256::new();
     tx_hasher.update(from_addr.as_bytes());
     tx_hasher.update(&final_nonce.to_be_bytes());
     tx_hasher.update(&calldata_bytes);
@@ -1894,7 +1848,7 @@ let mut tx_hasher = Keccak256::new();
     println!("💰 Calcul frais dynamiques :");
     println!(" • Gas estimé : {} units", estimated_gas);
     println!(" • Gas price : {} wei ({} Gwei)", gas_price, gas_price / 1_000_000_000);
-    println!(" • Coût total : {} wei VEZ (~{:.8} VEZ)", gas_cost_wei, gas_cost_wei as f64 / 1e18);
+    println!(" • Coût total : {} wei VEZ (\~{:.8} VEZ)", gas_cost_wei, gas_cost_wei as f64 / 1e18);
     println!(" • Type de tx : {}", if is_deployment { "déploiement" } else { "appel/transfert" });
 
     // PAIEMENT DES FRAIS VIA DISBURSE
@@ -2158,7 +2112,6 @@ let mut tx_hasher = Keccak256::new();
         println!(" • TX Hash : {}", normalized_hash);
     } else {
         println!("→ Transaction normale (appel de fonction) sur {}", to_addr);
-        // Ton code pour les appels normaux (inchangé)
         let contract_addr = Some(to_addr.clone());
         let function_name = if data.len() >= 10 {
             let selector_hex = &data[2..10];
@@ -2307,7 +2260,6 @@ let mut tx_hasher = Keccak256::new();
     let tx_hash_padded = Self::pad_hash_64(&normalized_hash);
     receipts.insert(tx_hash_padded.clone(), receipt.clone());
 
-    // Persistance receipt (inchangé)
     if let Some(storage_manager) = &self.vm.read().await.storage_manager {
         let receipt_key = format!("receipt:{}", normalized_hash);
         if let Ok(receipt_bytes) = serde_json::to_vec(&receipt) {
@@ -2319,7 +2271,6 @@ let mut tx_hasher = Keccak256::new();
         }
     }
 
-    // Logs finaux (inchangés)
     if is_deployment {
         if tx_params.get("create2").and_then(|v| v.as_bool()).unwrap_or(false) {
             println!("✅ CREATE2 via execute_module (raw) → Adresse Ethereum: {} | SLU zk: {} | Hash: {}",
