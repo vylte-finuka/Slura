@@ -1728,36 +1728,11 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         .unwrap_or(current_account_nonce);
 
     // Détection déploiement
-    // ===================================================================
-    // DÉTECTION OPCODE 0xf5 CREATE2 (même si "to" est présent)
-    // ===================================================================
-    let is_create2 = {
-        let data_hex = tx_params.get("data")
-            .or_else(|| tx_params.get("input"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim_start_matches("0x");
-
-        if data_hex.is_empty() {
-            false
-        } else {
-            match hex::decode(data_hex) {
-                Ok(bytecode) => bytecode.contains(&0xf5),   // Détection réelle de l'opcode 0xf5
-                Err(_) => false
-            }
-        }
-    };
-
-    println!(
-        "🔍 Détection opcode 0xf5 CREATE2 : {}",
-        if is_create2 { "OUI → exécution du bytecode de déploiement" } else { "non" }
-    );
-
-    // Détection déploiement (inclut maintenant CREATE2 via opcode 0xf5)
-    let is_deployment = is_create2 || to_addr.is_empty() ||
+    let is_deployment = to_addr.is_empty() ||
                        to_addr == "0x" ||
                        tx_params.get("to").is_none() ||
                        tx_params.get("to") == Some(&serde_json::Value::Null);
+
     // Valeur envoyée
     let value = tx_params.get("value")
         .and_then(|v| {
@@ -5977,4 +5952,4 @@ async fn validate_system_integrity(vm: &Arc<TokioRwLock<SlurachainVm>>, validato
     }
     
     Ok(())
-}
+						}
