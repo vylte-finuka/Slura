@@ -1683,7 +1683,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     println!("➡️ [send_transaction] Transaction reçue : {:?}", tx_params);
 
     // ===================================================================
-    // 1. EXTRACTION STRICTE DU "FROM" DEPUIS LE CALLDATA (SANS FALLBACK)
+    // 1. RÉCUPÉRATION DU CALLDATA (data ou input)
     // ===================================================================
     let data = tx_params.get("data")
         .or_else(|| tx_params.get("input"))
@@ -1697,35 +1697,6 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     } else {
         vec![]
     };
-
-    // Extraction stricte du from depuis calldata
-    let from_addr = if calldata_bytes.len() >= 36 {
-        // Format classique : selector (4 bytes) + address padded sur 32 bytes
-        let addr_bytes = &calldata_bytes[4..24];   // les 20 bytes utiles
-        let addr_str = format!("0x{}", hex::encode(addr_bytes).to_lowercase());
-
-        if addr_str.len() == 42 && addr_str.starts_with("0x") && addr_str != "0x0000000000000000000000000000000000000000" {
-            println!("✅ From extrait du calldata (offset 4-24) : {}", addr_str);
-            addr_str
-        } else {
-            return Err(format!("Adresse 'from' invalide extraite du calldata : {}", addr_str));
-        }
-    } else if calldata_bytes.len() >= 32 {
-        // Fallback offset pour adresses encodées sur 32 bytes
-        let addr_bytes = &calldata_bytes[12..32];
-        let addr_str = format!("0x{}", hex::encode(addr_bytes).to_lowercase());
-
-        if addr_str.len() == 42 && addr_str.starts_with("0x") && addr_str != "0x0000000000000000000000000000000000000000" {
-            println!("✅ From extrait du calldata (offset 12-32) : {}", addr_str);
-            addr_str
-        } else {
-            return Err("Impossible d'extraire une adresse 'from' valide du calldata".to_string());
-        }
-    } else {
-        return Err("Calldata trop court pour extraire l'adresse 'from'".to_string());
-    };
-
-    println!("✅ From address finale (extraite du calldata) : {}", from_addr);
 
     // ===================================================================
     // 2. DÉTECTION OPCODE 0xf5 CREATE2
@@ -1756,9 +1727,8 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     let is_vez_initialization = to_addr == "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" &&
         data.starts_with("0x40c10f19");
 
-    // Récupération du nonce actuel
-    let current_account_nonce = self.get_transaction_count(&from_addr).await.unwrap_or(0);
-
+    // Récupération du nonce (fallback à 0 si non fourni)
+    let current_account_nonce = 0u64;
     let final_nonce = tx_params.get("nonce")
         .and_then(|v| {
             if v.is_string() {
@@ -1777,7 +1747,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         .map(|provided_nonce| std::cmp::max(provided_nonce, current_account_nonce))
         .unwrap_or(current_account_nonce);
 
-    // Détection déploiement (inclut CREATE2 via 0xf5)
+    // Détection déploiement
     let is_deployment = is_create2 || to_addr.is_empty() ||
                        to_addr == "0x" ||
                        tx_params.get("to").is_none() ||
@@ -1814,12 +1784,10 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
 
     let constructor_calldata: Vec<u8> = vec![];
 
-    // ... Le reste de ta fonction reste EXACTEMENT IDENTIQUE à partir d'ici ...
-    // (Génération hash, frais, disburse, traitement déploiement, receipt, etc.)
-
-    // Génération hash transaction
+    // ===================================================================
+    // Génération du hash de transaction (sans from)
+    // ===================================================================
     let mut tx_hasher = Keccak256::new();
-    tx_hasher.update(from_addr.as_bytes());
     tx_hasher.update(&final_nonce.to_be_bytes());
     tx_hasher.update(&calldata_bytes);
     tx_hasher.update(&value.to_be_bytes());
@@ -1830,7 +1798,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     let mut contract_address = String::new();
     let mut slu_zk_contract_addr = String::new();
 
-    // ====================== CALCUL FRAIS DYNAMIQUES + DISBURSE ======================
+    // ====================== CALCUL FRAIS DYNAMIQUES ======================
     let gas_price = self.get_gas_price().await;
     let estimated_gas = if is_deployment {
         21000u64 + 32000u64 + (calldata_bytes.len() as u64 * 200)
@@ -1844,14 +1812,14 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
 
     println!("💰 Calcul frais dynamiques :");
     println!(" • Gas estimé : {} units", estimated_gas);
-    println!(" • Gas price : {} wei ({} Gwei)", gas_price, gas_price / 1_000_000_000);
-    println!(" • Coût total : {} wei VEZ (~{:.8} VEZ)", gas_cost_wei, gas_cost_wei as f64 / 1e18);
+    println!(" • Gas price : {} naeït ({} Gnaeït)", gas_price, gas_price / 1_000_000_000);
+    println!(" • Coût total : naeït VEZ (~{:.8} VEZ)", gas_cost_wei, gas_cost_wei as f64 / 1e18);
     println!(" • Type de tx : {}", if is_deployment { "déploiement" } else { "appel/transfert" });
 
-    // PAIEMENT DES FRAIS VIA DISBURSE (inchangé)
+    // ====================== PAIEMENT DES FRAIS VIA DISBURSE ======================
     let vez_addr = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_string();
     let disburse_success = if !is_vez_initialization && gas_cost_wei > 0 {
-        println!("🪙 Paiement des frais via disburse({}) depuis {}...", gas_cost_wei, from_addr);
+        println!("🪙 Paiement des frais via disburse({}) ...", gas_cost_wei);
 
         let selector = hex::decode("1c61f62b").unwrap();
         let mut calldata = Vec::with_capacity(68);
@@ -1861,9 +1829,8 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         U256::from(gas_cost_wei).to_big_endian(&mut amount_padded);
         calldata.extend_from_slice(&amount_padded);
 
-        let mut addr_padded = [0u8; 32];
-        let from_bytes = hex::decode(from_addr.trim_start_matches("0x")).unwrap_or_default();
-        addr_padded[12..].copy_from_slice(&from_bytes);
+        // Adresse padding vide (pas de from)
+        let addr_padded = [0u8; 32];
         calldata.extend_from_slice(&addr_padded);
 
         println!("🟢 [DEBUG] Calldata disburse généré : 0x{}", hex::encode(&calldata));
@@ -1874,14 +1841,14 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
                 &vez_addr,
                 "function_1c61f62b",
                 vec![],
-                Some(&from_addr),
+                None,                    // pas de sender
                 Some(&calldata)
             ).await
         };
 
         match disburse_result {
             Ok(_) => {
-                println!("✅ DISBURSE FRAIS RÉUSSI ! {} wei VEZ brûlés (10% burn + reste)", gas_cost_wei);
+                println!("✅ DISBURSE FRAIS RÉUSSI ! {} naeït VEZ brûlés", gas_cost_wei);
                 true
             }
             Err(e) => {
@@ -1903,7 +1870,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         return Err("Paiement des frais refusé".to_string());
     }
 
-    // ====================== TRAITEMENT DÉPLOIEMENT (avec support CREATE2 via 0xf5) ======================
+    // ====================== TRAITEMENT DÉPLOIEMENT ======================
     if is_deployment {
         let use_create2 = is_create2 || tx_params.get("create2").and_then(|v| v.as_bool()).unwrap_or(false);
         let target_address = tx_params.get("target_address")
@@ -1918,9 +1885,8 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
                 return Err("CREATE2 demandé mais target_address manquant".to_string());
             }
         } else {
-            // Ton code original pour CREATE classique
+            // CREATE classique sans from
             let mut addr_hasher = Keccak256::new();
-            addr_hasher.update(from_addr.as_bytes());
             addr_hasher.update(&final_nonce.to_be_bytes());
             addr_hasher.update(&creation_bytecode);
             addr_hasher.update(&rand::random::<u128>().to_be_bytes());
@@ -1975,7 +1941,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
                     resources: {
                         let mut r = BTreeMap::new();
                         r.insert("constructor_pending".to_string(), serde_json::Value::Bool(true));
-                        r.insert("deployed_by".to_string(), serde_json::Value::String(from_addr.clone()));
+                        r.insert("deployed_by".to_string(), serde_json::Value::String("0x0".to_string()));
                         r.insert("eth_address".to_string(), serde_json::Value::String(contract_address.clone()));
                         r.insert("slu_zk_address".to_string(), serde_json::Value::String(slu_zk_contract_addr.clone()));
                         r.insert("deployment_tx".to_string(), serde_json::Value::String(normalized_hash.clone()));
@@ -2009,7 +1975,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
             &contract_address,
             constructor,
             vec![],
-            Some(&from_addr),
+            None,                                 // pas de sender
             Some(&constructor_calldata),
         ).await;
 
@@ -2109,7 +2075,9 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         println!(" • Adresse SLU zk-print : {}", slu_zk_contract_addr);
         println!(" • TX Hash : {}", normalized_hash);
     } else {
+        // Transaction normale (appel de fonction)
         println!("→ Transaction normale (appel de fonction) sur {}", to_addr);
+
         let contract_addr = Some(to_addr.clone());
         let function_name = if data.len() >= 10 {
             let selector_hex = &data[2..10];
@@ -2140,22 +2108,28 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
                     }
                 });
                 let fn_name = function_name.as_deref().unwrap_or("unknown");
-                let _ = vmsim.execute_module(addr, fn_name, args, Some(&from_addr), Some(&calldata_bytes)).await;
+                let _ = vmsim.execute_module(
+                    addr,
+                    fn_name,
+                    args,
+                    None,                    // pas de sender
+                    Some(&calldata_bytes)
+                ).await;
             }
         }
     }
 
-    // Mise à jour nonce (inchangé)
+    // Mise à jour nonce (exemple : sur le to_addr si contrat)
     {
         let vm = self.vm.write().await;
         let mut accounts = vm.state.accounts.write().await;
-        if let Some(account) = accounts.get_mut(&from_addr) {
+        if let Some(account) = accounts.get_mut(&to_addr) {
             account.nonce = std::cmp::max(account.nonce, final_nonce + 1);
-            println!("📝 Nonce mis à jour: compte {} → nonce={}", from_addr, account.nonce);
+            println!("📝 Nonce mis à jour sur {} → nonce={}", to_addr, account.nonce);
         }
     }
 
-    // Construction TxRequest + mempool (inchangé)
+    // Construction TxRequest + mempool
     let contract_addr_for_tx = if is_deployment { None } else { Some(to_addr.clone()) };
     let receiver_op = if is_deployment { contract_address.clone() } else { to_addr.clone() };
 
@@ -2183,7 +2157,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     } else { None };
 
     let tx_request = vuc_platform::slurachain_rpc_service::TxRequest {
-        from_op: from_addr.clone(),
+        from_op: "0x0".to_string(),           // placeholder (tu peux supprimer ce champ si le struct le permet)
         receiver_op,
         value_tx: value.to_string(),
         nonce_tx: final_nonce,
@@ -2223,7 +2197,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         },
         "cumulativeGasUsed": cumulative_gas_used,
         "effectiveGasPrice": if is_vez_initialization { "0x0" } else { "0x3b9aca00" },
-        "from": from_addr,
+        "from": "0x0",                                   // placeholder
         "gasUsed": if is_vez_initialization { "0x0" } else { "0x5208" },
         "logs": [],
         "logsBloom": "0x".to_string() + &"00".repeat(256),
@@ -2284,7 +2258,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
 
     Ok(tx_hash_padded)
 }
-
+		
 fn pad_hash_64(hex: &str) -> String {
     // Enlève le préfixe "0x" si présent
     let hex = hex.strip_prefix("0x").unwrap_or(hex);
