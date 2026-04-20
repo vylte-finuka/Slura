@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use vuc_storage::storing_access::RocksDBManager;
+use uvm_runtime::interpreter::Create2Callback;
 
 pub type NerenaValue = serde_json::Value;
 
@@ -829,6 +830,8 @@ pub struct SlurachainVm {
     pub parallel_engine: Option<Arc<OptimisticParallelEngine>>,
     // ✅ AJOUT: Verrou global anti-reentrancy
     pub global_execution_lock: Arc<Mutex<()>>,
+    // Callback déclenché lorsque l'opcode CREATE2 (0xf5) est exécuté depuis ce VM
+    pub on_create2_event: Option<Create2Callback>,
 }
 
 pub type UvmHelper = dyn Fn(u64, u64, u64, u64, u64, u64, u64) -> u64 + Send + Sync + 'static;
@@ -851,6 +854,7 @@ impl Clone for SlurachainVm {
             last_storage: self.last_storage.clone(),
             parallel_engine: self.parallel_engine.as_ref().map(|arc| Arc::clone(arc)),
             global_execution_lock: Arc::clone(&self.global_execution_lock),
+            on_create2_event: self.on_create2_event.clone(),
         }
     }
 }
@@ -872,6 +876,7 @@ impl SlurachainVm {
             last_storage: None,
             parallel_engine: None,
             global_execution_lock: Arc::new(Mutex::new(())), // ✅ Init du lock
+            on_create2_event: None,
         };
 
         // Module générique pour déploiement
@@ -2050,6 +2055,7 @@ impl SlurachainVm {
                     &interpreter_args,
                     storage_manager,
                     Some(converted_storage),
+                    None, // on_create2_event: pas de callback ici
                 )
                 .map_err(|e| e.to_string())
             };
@@ -2134,6 +2140,7 @@ impl SlurachainVm {
                 &interpreter_args,
                 self.storage_manager.clone(),
                 Some(converted_storage),
+                self.on_create2_event.clone(), // propagation du callback CREATE2
             )
             .map_err(|e| e.to_string())
         };

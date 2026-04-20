@@ -226,6 +226,9 @@ enum MemoryOffsetType {
     ContractAddress, // Probable adresse de contrat
 }
 
+// Type alias pour le callback CREATE2
+pub type Create2Callback = Arc<dyn Fn(&str, Vec<u8>, u256) -> Result<(), String> + Send + Sync>;
+
 // ✅ AJOUT: Context d'exécution UVM
 #[derive(Clone)]
 pub struct UvmExecutionContext {
@@ -241,6 +244,10 @@ pub struct UvmExecutionContext {
 
     // ──────────────────────────────── AJOUT PRODUCTION ────────────────────────────────
     pub ss7_pending_response: Option<Vec<u8>>, // réponse SS7 simulée ou reçue via oracle
+
+    // Callback déclenché lorsque l'opcode CREATE2 (0xf5) est exécuté
+    // Permet à engine_platform de persister le contrat déployé via CREATE2
+    pub on_create2_event: Option<Create2Callback>,
                                                // ────────────────────────────────────────────────────────────────────────────────
 }
 
@@ -1019,6 +1026,7 @@ pub fn execute_program(
     interpreter_args: &InterpreterArgs,
     storage_manager: Option<Arc<dyn RocksDBManager>>,
     initial_storage: Option<HashMap<String, HashMap<String, Vec<u8>>>>,
+    on_create2_event: Option<Create2Callback>,
 ) -> Result<serde_json::Value, Error> {
     const U32MAX: u256 = u256([u32::MAX as u64, 0, 0, 0]);
     const SHIFT_MASK_64: u256 = u256([0x3f, 0, 0, 0]);
@@ -1196,6 +1204,7 @@ pub fn execute_program(
         call_stack: vec![],
         in_internal_call: false,
         ss7_pending_response: None, // ← AJOUT,
+        on_create2_event,
     };
 
     // ✅ CORRECTION: Initialisation automatique du propriétaire
@@ -2655,6 +2664,7 @@ pub fn execute_program(
                     &sub_args,
                     execution_context.storage_manager.clone(),
                     Some(execution_context.world_state.storage.clone()), // storage hérité
+                    execution_context.on_create2_event.clone(), // propagation du callback CREATE2
                 );
 
                 // ✅ Extraction du returndata avec gestion robuste
@@ -2903,6 +2913,46 @@ pub fn execute_program(
                 let new_address = format!("0x{}", hex::encode(&hash[12..32]));
 
                 println!("📍 [CREATE2] Adresse calculée : {}", new_address);
+
+                // === Persistance du contrat dans le world_state (comme CREATE 0xf0) ===
+                execution_context
+                    .world_state
+                    .code
+                    .insert(new_address.clone(), init_code.clone());
+
+                let new_account = AccountState {
+                    balance: value,
+                    nonce: u256::one(),
+                    code: init_code.clone(),
+                    storage_root: String::new(),
+                    is_contract: true,
+                };
+                execution_context
+                    .world_state
+                    .accounts
+                    .insert(new_address.clone(), new_account);
+
+                println!(
+                    "💾 [CREATE2 PERSIST] Contrat sauvegardé en mémoire à {} ({} bytes)",
+                    new_address,
+                    init_code.len()
+                );
+
+                // Persistance RocksDB via storage_manager si disponible
+                if let Some(ref storage_manager) = execution_context.storage_manager {
+                    let code_key = format!("account:{}:contract_state", new_address);
+                    let _ = storage_manager.write(&code_key, &init_code);
+                    println!("💾 [CREATE2 ROCKSDB] Bytecode persisté pour {}", new_address);
+                }
+
+                // Déclenchement du callback engine_platform si configuré
+                if let Some(ref callback) = execution_context.on_create2_event {
+                    if let Err(e) = callback(&new_address, init_code.clone(), value) {
+                        println!("⚠️ [CREATE2] Erreur callback : {}", e);
+                    }
+                }
+
+                println!("✅ [CREATE2] Contrat déployé et persisté à {}", new_address);
 
                 // Push l'adresse sur la stack
                 evm_stack.push(encode_address_to_u256(&new_address));

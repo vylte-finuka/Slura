@@ -720,6 +720,7 @@ impl<'a> EbpfVmMbuff<'a> {
             args,
             storage_manager,
             initial_storage,
+            None, // on_create2_event: pas de callback ici
         )?;
 
         Ok(result)
