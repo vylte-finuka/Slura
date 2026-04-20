@@ -1605,6 +1605,156 @@ pub async fn verify_contract_deployment(&self, contract_address: &str) -> Result
         }
     }
 
+    /// Gère le déploiement d'un contrat déclenché par l'opcode CREATE2 (0xf5) dans l'interpréteur.
+    ///
+    /// Cette méthode est conçue pour être appelée via le callback `on_create2_event` de `UvmExecutionContext`.
+    /// Elle reçoit l'adresse calculée, l'init_code et la valeur, puis persiste le contrat
+    /// dans UvmWorldState et RocksDB de la même manière que `perform_contract_deployment`.
+    ///
+    /// # Arguments
+    /// * `contract_address` - L'adresse Ethereum du contrat calculée par CREATE2
+    /// * `init_code` - Le bytecode d'initialisation du contrat
+    /// * `value` - La valeur en wei transférée au contrat
+    pub async fn handle_create2_deployment(
+        &self,
+        contract_address: &str,
+        init_code: Vec<u8>,
+        value: primitive_types::U256,
+    ) -> Result<(), String> {
+        if init_code.is_empty() {
+            return Err("handle_create2_deployment: init_code vide".to_string());
+        }
+
+        println!(
+            "🔧 [CREATE2 HANDLER] Déploiement CREATE2 à {} ({} bytes)",
+            contract_address,
+            init_code.len()
+        );
+
+        let vez_addr = contract_address.to_string();
+
+        // Vérifier si le contrat existe déjà dans RocksDB
+        let already_exists = {
+            let vm = self.vm.read().await;
+            if let Some(manager) = vm.storage_manager.as_ref() {
+                let account_key = format!("account:{}", vez_addr);
+                match manager.read(&account_key) {
+                    Ok(_) => {
+                        println!(
+                            "🪙 [CREATE2 HANDLER] Contrat déjà présent dans RocksDB ({})",
+                            vez_addr
+                        );
+                        true
+                    }
+                    Err(_) => false,
+                }
+            } else {
+                false
+            }
+        };
+
+        if already_exists {
+            return Ok(());
+        }
+
+        // Extraction du runtime bytecode (le constructeur retourne le code runtime)
+        let runtime_bytecode = match extract_runtime_from_creation_bytecode(&init_code) {
+            Ok(runtime) => {
+                println!(
+                    "✅ [CREATE2 HANDLER] Runtime extrait : {} bytes",
+                    runtime.len()
+                );
+                runtime
+            }
+            Err(_) => {
+                // Fallback : utiliser le bytecode complet si l'extraction échoue
+                println!("⚠️ [CREATE2 HANDLER] Extraction runtime échouée, utilisation du bytecode complet");
+                init_code.clone()
+            }
+        };
+
+        // Persistance dans UvmWorldState (comptes + code)
+        {
+            let mut vm = self.vm.write().await;
+            let mut accounts = vm.state.accounts.write().await;
+
+            if !accounts.contains_key(&vez_addr) {
+                let balance_u128 = if value > primitive_types::U256::from(u128::MAX) {
+                    u128::MAX
+                } else {
+                    value.as_u128()
+                };
+
+                let initial_account = vuc_tx::slurachain_vm::AccountState {
+                    eth_address: vez_addr.clone(),
+                    slu_zk_address: vez_addr.clone(),
+                    balance: balance_u128,
+                    contract_state: runtime_bytecode.clone(),
+                    resources: {
+                        let mut r = std::collections::BTreeMap::new();
+                        r.insert(
+                            "deployed_by_create2".to_string(),
+                            serde_json::Value::Bool(true),
+                        );
+                        r
+                    },
+                    state_version: 1,
+                    last_block_number: 0,
+                    nonce: 0,
+                    code_hash: {
+                        use sha3::Digest;
+                        format!("0x{}", hex::encode(sha3::Keccak256::digest(&runtime_bytecode)))
+                    },
+                    storage_root: format!("storage_{}", vez_addr),
+                    is_contract: true,
+                    gas_used: 0,
+                };
+                accounts.insert(vez_addr.clone(), initial_account);
+                println!(
+                    "   → [CREATE2 HANDLER] Compte créé dans UvmWorldState ({} bytes)",
+                    runtime_bytecode.len()
+                );
+            }
+        }
+
+        // Persistance dans RocksDB
+        {
+            let vm = self.vm.read().await;
+            if let Some(ref storage_manager) = vm.storage_manager {
+                let code_key = format!("account:{}:contract_state", vez_addr);
+                if let Err(e) = storage_manager.write(&code_key, &runtime_bytecode) {
+                    eprintln!(
+                        "❌ [CREATE2 HANDLER] Erreur écriture RocksDB bytecode : {}",
+                        e
+                    );
+                } else {
+                    println!(
+                        "💾 [CREATE2 HANDLER] Bytecode persisté dans RocksDB pour {}",
+                        vez_addr
+                    );
+                }
+
+                let account_json = serde_json::json!({
+                    "eth_address": vez_addr,
+                    "is_contract": true,
+                    "deployed_by_create2": true,
+                    "bytecode_len": runtime_bytecode.len(),
+                });
+                let account_key = format!("account:{}", vez_addr);
+                let _ = storage_manager.write(
+                    &account_key,
+                    account_json.to_string().as_bytes(),
+                );
+            }
+        }
+
+        println!(
+            "✅ [CREATE2 HANDLER] Contrat CREATE2 persisté avec succès à {}",
+            vez_addr
+        );
+        Ok(())
+    }
+
 /// Calcul du logsBloom Ethereum (2048 bits)
     pub fn compute_logs_bloom(&self, logs: &[serde_json::Value]) -> String {
         use sha3::{Digest, Keccak256};
@@ -2083,6 +2233,27 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
 
         let constructor = std::str::from_utf8(&creation_bytecode).unwrap_or("");
 
+        // ─── Configuration du callback CREATE2 pour capturer les sous-déploiements ───
+        // (ex: factory contract qui déploie d'autres contrats via CREATE2 dans son constructeur)
+        let create2_sub_deployments: Arc<std::sync::Mutex<Vec<(String, Vec<u8>, primitive_types::U256)>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        {
+            let events = create2_sub_deployments.clone();
+            vm.on_create2_event = Some(Arc::new(
+                move |address: &str, init_code: Vec<u8>, value: primitive_types::U256| {
+                    println!(
+                        "📡 [CREATE2 EVENT] Sous-contrat {} ({} bytes) capturé",
+                        address,
+                        init_code.len()
+                    );
+                    if let Ok(mut ev) = events.lock() {
+                        ev.push((address.to_string(), init_code, value));
+                    }
+                    Ok(())
+                },
+            ));
+        }
+
         let deploy_result = vm.execute_module(
             &contract_address,
             constructor,
@@ -2090,6 +2261,47 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
             Some(&from_addr),
             Some(&constructor_calldata),
         ).await;
+
+        // Nettoyage du callback après exécution
+        vm.on_create2_event = None;
+
+        // Traitement des sous-contrats déployés via CREATE2 pendant l'exécution du constructeur
+        {
+            let sub_events = create2_sub_deployments.lock().unwrap_or_else(|e| e.into_inner());
+            for (sub_addr, sub_init_code, _sub_value) in sub_events.iter() {
+                println!(
+                    "🔧 [CREATE2 POST-DEPLOY] Enregistrement module pour {}",
+                    sub_addr
+                );
+                let sub_runtime = extract_runtime_from_creation_bytecode(sub_init_code)
+                    .unwrap_or_else(|_| sub_init_code.clone());
+
+                if !vm.modules.contains_key(sub_addr) {
+                    let sub_module = vuc_tx::slurachain_vm::Module {
+                        name: "deployed_create2".to_string(),
+                        address: sub_addr.clone(),
+                        bytecode: sub_runtime.clone(),
+                        elf_buffer: vec![],
+                        context: uvm_runtime::UbfContext::new(),
+                        stack_usage: None,
+                        functions: hashbrown::HashMap::new(),
+                        gas_estimates: hashbrown::HashMap::new(),
+                        storage_layout: hashbrown::HashMap::new(),
+                        events: vec![],
+                        constructor_params: vec![],
+                    };
+                    vm.modules.insert(sub_addr.clone(), sub_module);
+                }
+
+                if let Some(storage_manager) = &vm.storage_manager {
+                    let key = format!("account:{}:contract_state", sub_addr);
+                    let _ = storage_manager.write(&key, &sub_runtime);
+                }
+
+                let _ = vm.auto_detect_contract_functions(sub_addr, &sub_runtime);
+                println!("✅ [CREATE2 POST-DEPLOY] Module enregistré pour {}", sub_addr);
+            }
+        }
 
         let runtime_bytecode = match deploy_result {
             Ok(value) => {
@@ -2201,16 +2413,84 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
             // ⛔️ CORRECTION MAJEURE : passe un Vec vide pour args, calldata brut via Some(&calldata_bytes)
             let args = vec![]; // <-- toujours vide pour EVM pur
             
+            // Configuration du callback CREATE2 pour les factory contracts
+            let create2_call_events: Arc<std::sync::Mutex<Vec<(String, Vec<u8>, primitive_types::U256)>>> =
+                Arc::new(std::sync::Mutex::new(Vec::new()));
+
             let result = {
                 let mut vm_sim = self.vm.write().await;
-                vm_sim.execute_module(
+                // Enregistrement du callback pour capturer les déploiements CREATE2 internes
+                {
+                    let events = create2_call_events.clone();
+                    vm_sim.on_create2_event = Some(Arc::new(
+                        move |address: &str, init_code: Vec<u8>, value: primitive_types::U256| {
+                            println!(
+                                "📡 [CREATE2 CALL EVENT] Contrat {} ({} bytes) capturé",
+                                address,
+                                init_code.len()
+                            );
+                            if let Ok(mut ev) = events.lock() {
+                                ev.push((address.to_string(), init_code, value));
+                            }
+                            Ok(())
+                        },
+                    ));
+                }
+                let res = vm_sim.execute_module(
                     &to_addr,
                     fn_name,
                     args,
                     Some(&from_addr),
                     Some(&calldata_bytes) // ← CALLDATA BRUT ICI (comme eth_call)
-                ).await
+                ).await;
+                // Nettoyage du callback après exécution
+                vm_sim.on_create2_event = None;
+                res
             };
+
+            // Traitement des contrats déployés via CREATE2 pendant l'appel de fonction
+            // Collecte des événements AVANT l'await pour éviter de tenir le MutexGuard
+            let collected_call_events: Vec<(String, Vec<u8>, primitive_types::U256)> = {
+                let guard = create2_call_events.lock().unwrap_or_else(|e| e.into_inner());
+                guard.clone()
+            };
+
+            if !collected_call_events.is_empty() {
+                let mut vm_reg = self.vm.write().await;
+                for (sub_addr, sub_init_code, _sub_value) in collected_call_events.iter() {
+                    println!(
+                        "🔧 [CREATE2 CALL POST] Enregistrement module pour {}",
+                        sub_addr
+                    );
+                    let sub_runtime = extract_runtime_from_creation_bytecode(sub_init_code)
+                        .unwrap_or_else(|_| sub_init_code.clone());
+
+                    if !vm_reg.modules.contains_key(sub_addr) {
+                        let sub_module = vuc_tx::slurachain_vm::Module {
+                            name: "deployed_create2".to_string(),
+                            address: sub_addr.clone(),
+                            bytecode: sub_runtime.clone(),
+                            elf_buffer: vec![],
+                            context: uvm_runtime::UbfContext::new(),
+                            stack_usage: None,
+                            functions: hashbrown::HashMap::new(),
+                            gas_estimates: hashbrown::HashMap::new(),
+                            storage_layout: hashbrown::HashMap::new(),
+                            events: vec![],
+                            constructor_params: vec![],
+                        };
+                        vm_reg.modules.insert(sub_addr.clone(), sub_module);
+                    }
+
+                    if let Some(storage_manager) = &vm_reg.storage_manager {
+                        let key = format!("account:{}:contract_state", sub_addr);
+                        let _ = storage_manager.write(&key, &sub_runtime);
+                    }
+
+                    let _ = vm_reg.auto_detect_contract_functions(sub_addr, &sub_runtime);
+                    println!("✅ [CREATE2 CALL POST] Module enregistré pour {}", sub_addr);
+                }
+            }
 
             match result {
                 Ok(exec_result) => {
