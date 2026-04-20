@@ -881,7 +881,83 @@ pub async fn get_account_balance(&self, address: &str) -> Result<U256, String> {
         }))
     }
 }
+	/// ✅ EXTRACTION GÉNÉRIQUE DES EMIT SOLIDITY (tous les events, tous les contrats)
+    /// Extraction générique des emit Solidity après 0xf3 (RETURN)
+    pub fn extract_emits_from_0xf3_response(&self, vm_result: &serde_json::Value) -> Vec<serde_json::Value> {
+        let mut logs: Vec<serde_json::Value> = vec![];
 
+        // Priorité 1 : logs déjà fournis par le VM
+        if let Some(log_array) = vm_result.get("logs")
+            .or_else(|| vm_result.get("events"))
+            .or_else(|| vm_result.get("emitted"))
+            .and_then(|v| v.as_array())
+        {
+            logs = log_array.clone();
+            if !logs.is_empty() {
+                println!("✅ [EMIT] {} log(s) déjà présents dans la réponse VM", logs.len());
+            }
+            return logs;
+        }
+
+        // Priorité 2 : extraction depuis le payload après le dernier 0xf3
+        let return_data = vm_result
+            .get("returnData")
+            .or_else(|| vm_result.get("return"))
+            .or_else(|| vm_result.get("result"))
+            .or_else(|| vm_result.get("data"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        if !return_data.starts_with("0x") || return_data.len() < 10 {
+            return logs;
+        }
+
+        let bytes = match hex::decode(&return_data[2..]) {
+            Ok(b) => b,
+            Err(_) => return logs,
+        };
+
+        if let Some(f3_pos) = bytes.windows(1).rposition(|w| w[0] == 0xf3) {
+            let mut after_return = &bytes[f3_pos + 1..];
+
+            if !after_return.is_empty() && after_return[0] == 0xfe {
+                after_return = &after_return[1..];
+            }
+
+            if after_return.len() > 64 {
+                println!("🔍 [EMIT] Payload après 0xf3 détecté ({} bytes)", after_return.len());
+
+                let mut i = 0;
+                while i + 32 <= after_return.len() {
+                    let candidate = &after_return[i..i + 32];
+
+                    if candidate.iter().any(|&b| b != 0) {
+                        let log_entry = serde_json::json!({
+                            "address": "0x0000000000000000000000000000000000000000",
+                            "topics": [format!("0x{}", hex::encode(candidate))],
+                            "data": "0x",
+                            "logIndex": format!("0x{:x}", logs.len()),
+                            "transactionIndex": "0x0",
+                            "blockNumber": "0x1",
+                            "blockHash": "0x0"
+                        });
+
+                        logs.push(log_entry);
+                        i += 32;
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+        }
+
+        if !logs.is_empty() {
+            println!("✅ [EMIT] {} log(s) extrait(s) après 0xf3", logs.len());
+        }
+
+        logs
+	}
+	
     /// ✅ AJOUT: Méthode manquante get_ledger_info
     pub async fn get_ledger_info(&self) -> Result<serde_json::Value, String> {
         let vm = self.vm.read().await;
@@ -924,138 +1000,200 @@ pub async fn get_account_balance(&self, address: &str) -> Result<U256, String> {
 
 /// ✅ Récupération du nombre de transactions (nonce) - VERSION QUI FONCTIONNE
 pub async fn get_transaction_count(&self, address: &str) -> Result<u64, String> {
-    println!("\n🚨🚨🚨 ===== DEBUG eth_getTransactionCount =====");
-    println!("🔍 Adresse reçue         : '{}'", address);
+    let search_clean = address.trim_start_matches("0x").to_lowercase();
 
-    // Normalisation fiable (minuscules + sans 0x)
-    let search_clean = address
-        .trim_start_matches("0x")
-        .to_lowercase();
-
-    println!("🔍 Recherche pour clean : '{}'", search_clean);
-
+    let receipts = self.tx_receipts.read().await;
     let mut tx_count = 0u64;
 
-    // Lecture de l'état en mémoire (tx_receipts)
-    let receipts = self.tx_receipts.read().await;
-
-    println!("🔍 État actuel : {} receipts en mémoire", receipts.len());
-
-    if receipts.is_empty() {
-        println!("   → Aucun receipt en mémoire → nonce = 0");
-        return Ok(0);
-    }
-
-    println!("\n🔍 Parcours des receipts existants :");
-
-    for (tx_hash, receipt) in receipts.iter() {
-        // On cherche le champ "from" (celui ajouté dans send_transaction)
+    for (_, receipt) in receipts.iter() {
         if let Some(from_val) = receipt.get("from") {
             if let Some(from_str) = from_val.as_str() {
-                let from_clean = from_str
-                    .trim_start_matches("0x")
-                    .to_lowercase();
-
-                if from_clean == search_clean {
+                if from_str.trim_start_matches("0x").to_lowercase() == search_clean {
                     tx_count += 1;
-                    println!(
-                        "   ✅ MATCH → tx {} | from = {} (clean: {})",
-                        tx_hash, from_str, from_clean
-                    );
                 }
             }
         }
     }
 
-    println!("\n📊 RÉSULTAT");
-    println!("   • Adresse clean recherchée : '{}'", search_clean);
-    println!("   • Tx envoyées trouvées     : {}", tx_count);
-    println!("   • Nonce actuel (prochaine) : {}", tx_count);
-    println!("==================================\n");
+    // Important : on ajoute 1 au nonce actuel pour la prochaine tx (comportement standard Ethereum)
+    let next_nonce = tx_count;   // ou tx_count + 1 si tu veux être plus strict
 
-    Ok(tx_count)
+    println!("📊 get_transaction_count({}) → {} transactions trouvées → nonce renvoyé = {}", 
+             search_clean, tx_count, next_nonce);
+
+    Ok(next_nonce)
 }
 
-    pub async fn get_block_by_number(&self, block_tag: &str, include_txs: bool) -> Result<serde_json::Value, String> {
-        let current_block = self.get_current_block_number().await;
-        let block_number = match block_tag {
-            "latest" | "pending" => current_block,
-            "earliest" => 0,
-            _ => {
-                if block_tag.starts_with("0x") {
-                    u64::from_str_radix(&block_tag[2..], 16).unwrap_or(current_block)
-                } else {
-                    block_tag.parse().unwrap_or(current_block)
-                }
+  pub async fn get_block_by_number(&self, block_tag: &str, include_txs: bool) -> Result<serde_json::Value, String> {
+    let current_block = self.get_current_block_number().await;
+
+    // ─── Résolution du tag en numéro de bloc ───
+    let block_number = match block_tag {
+        "latest" | "pending" => current_block,
+        "earliest" => 0,
+        _ => {
+            if block_tag.starts_with("0x") {
+                u64::from_str_radix(&block_tag[2..], 16).unwrap_or(current_block)
+            } else {
+                block_tag.parse().unwrap_or(current_block)
             }
-        };
-    
-        let block_data_opt = self.rpc_service.lurosonie_manager.get_block_by_number(block_number).await;
-        if let Some(block_data) = block_data_opt {
-            // Adresse du mineur réelle
-            let miner = block_data.validator.clone();
-            let miner_eth = if miner.starts_with("0x") { miner } else { self.convert_uip10_to_ethereum(&miner) };
-
-            // Hash du bloc calculé
-            use sha3::{Digest, Keccak256};
-            let block_serialized = serde_json::to_string(&block_data).unwrap_or_default();
-            let mut hasher = Keccak256::new();
-            hasher.update(block_serialized.as_bytes());
-            let block_hash = format!("0x{:x}", hasher.finalize());
-
-            // Parent hash
-            let parent_hash = self.rpc_service.lurosonie_manager.get_block_by_number(block_number.saturating_sub(1)).await
-                .map(|bd| {
-                    let block_serialized = serde_json::to_string(&bd).unwrap_or_default();
-                    let mut hasher = Keccak256::new();
-                    hasher.update(block_serialized.as_bytes());
-                    format!("0x{:x}", hasher.finalize())
-                })
-                .unwrap_or_else(|| "0x0000000000000000000000000000000000000000000000000000000000000000".to_string());
-
-            // Nonce aléatoire
-            let nonce = format!("0x{:016x}", rand::random::<u64>());
-
-            // Roots (à calculer selon ton VM/état)
-            let state_root = block_hash.clone();
-            let transactions_root = block_hash.clone();
-            let receipts_root = block_hash.clone();
-
-            Ok(serde_json::json!({
-                "number": format!("0x{:x}", block_number),
-                "hash": block_hash,
-                "mixHash": block_hash,
-                "parentHash": parent_hash,
-                "nonce": nonce,
-                "sha3Uncles": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
-                "logsBloom": "0x".to_string() + &"0".repeat(512),
-                "transactionsRoot": transactions_root,
-                "stateRoot": state_root,
-                "receiptsRoot": receipts_root,
-                "miner": miner_eth,
-                "difficulty": "0x1",
-                "totalDifficulty": "0x1",
-                "gasLimit": "0x47e7c4",
-                "gasUsed": "0x0",
-                "size": "0x334",
-                "extraData": "0x",
-                "nonce": "0x0000000000000000",
-                "logs_bloom": "0x".to_string() + &"0".repeat(512),
-                "transactions_root": block_hash.clone(),
-                "state_root": block_hash.clone(),
-                "receipts_root": block_hash.clone(),
-                "sha3_uncles": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
-                "mix_hash": block_hash.clone(),
-                "base_fee_per_gas": "0x7",
-                "withdrawals_root": block_hash.clone(),
-                "blob_gas_used": "0x0",
-                "excess_blob_gas": "0x0",
-                "parent_beacon_block_root": block_hash.clone(),
-            }))
-        } else {
-            Ok(serde_json::json!({}))
         }
+    };
+
+    // ─── CAS SPÉCIAL : BLOC GENESIS / BLOC 1 ───
+    // C'est ici qu'on force un format compatible Ethereum pour éviter le crash d'outils. 
+    if block_number <= 1 {
+        let genesis_hash = "0x04a8efabadcb1c2556393a09833b710d7a7b57ba8698cb7905ddf55b0b426812".to_string();
+
+        let genesis = serde_json::json!({
+            "number":           "0x1",
+            "hash":             genesis_hash.clone(),
+            "parentHash":       "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "mixHash":          "0x0000000000000000000000000000000000000000000000000000000000000000", // ← DIFFÉRENT du hash
+            "stateRoot":        "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421", // racine vide standard Ethereum
+            "transactionsRoot": "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421",
+            "receiptsRoot":     "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421",
+            "nonce":            "0x0000000000000000",
+            "sha3Uncles":       "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
+            "logsBloom":        format!("0x{}", "0".repeat(512)),
+            "miner":            "0x53ae54b11251d5003e9aa51422405bc35a2ef32d",
+            "difficulty":       "0x2",
+            "totalDifficulty":  "0x2",
+            "extraData":        "0x",
+            "size":             "0x334",
+            "gasLimit":         "0x47e7c4",
+            "gasUsed":          "0x0",
+            "timestamp":        format!("0x{:x}", Utc::now().timestamp()),
+            "transactions":     if include_txs { json!([]) } else { json!([]) },
+            "uncles":           json!([]),
+            "baseFeePerGas":    "0x7",
+            "withdrawals":      json!([]),
+            "withdrawalsRoot":  "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421",
+            "blobGasUsed":      "0x0",
+            "excessBlobGas":    "0x0",
+            "parentBeaconBlockRoot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+            // Optionnel : pour debug Blockscout / outils custom
+            "zkIdentityRoot":   "0x0000000000000000000000000000000000000000000000000000000000000000"
+        });
+
+        println!("↩️  Retour genesis/block #1 formaté proprement pour Blockscout");
+        return Ok(genesis);
     }
+
+    // ─── CAS NORMAL : blocs ≥ 2 ───
+    let block_data_opt = self.rpc_service.lurosonie_manager.get_block_by_number(block_number).await;
+
+    if let Some(block_data) = block_data_opt {
+        let miner = block_data.validator.clone();
+        let miner_eth = if miner.starts_with("0x") {
+            miner
+        } else {
+            self.convert_uip10_to_ethereum(&miner)
+        };
+
+        // Hash déterministe du bloc
+        let block_serialized = serde_json::to_string(&block_data).unwrap_or_default();
+        let mut hasher = sha3::Keccak256::new();
+        hasher.update(block_serialized.as_bytes());
+        let block_hash = format!("0x{:x}", hasher.finalize());
+
+        // Parent hash
+        let parent_hash = if block_number > 0 {
+            self.rpc_service.lurosonie_manager.get_block_by_number(block_number - 1).await
+                .map(|bd| {
+                    let ser = serde_json::to_string(&bd).unwrap_or_default();
+                    let mut h = sha3::Keccak256::new();
+                    h.update(ser.as_bytes());
+                    format!("0x{:x}", h.finalize())
+                })
+                .unwrap_or_else(|| "0x0000000000000000000000000000000000000000000000000000000000000000".to_string())
+        } else {
+            "0x0000000000000000000000000000000000000000000000000000000000000000".to_string()
+        };
+
+        // ─── Calcul des roots (état, tx, receipts) ───
+        let accounts = {
+            let vm = self.vm.read().await;
+            let acc = vm.state.accounts.read().await;
+            acc.clone()
+        };
+
+        let (post_state, standard_root, zk_root) = vuc_tx::slura_merkle::build_extended_state_trie(&accounts);
+        let state_root_hex = format!("0x{}", hex::encode(standard_root));
+        let zk_identity_root_hex = format!("0x{}", hex::encode(zk_root));
+
+        let tx_hashes: Vec<String> = block_data.transactions.iter().map(|tx| tx.hash.clone()).collect();
+        let mut tx_hasher = Keccak256::new();
+        for h in &tx_hashes {
+            tx_hasher.update(h.as_bytes());
+        }
+        let transactions_root = format!("0x{:x}", tx_hasher.finalize());
+
+        let mut receipts_hasher = Keccak256::new();
+        for (_, result) in &block_data.execution_results {
+            receipts_hasher.update(serde_json::to_string(result).unwrap_or_default().as_bytes());
+        }
+        let receipts_root = format!("0x{:x}", receipts_hasher.finalize());
+
+        // Transactions list si demandé
+        let transactions_list = if include_txs {
+            block_data.transactions.iter().enumerate().map(|(idx, tx)| {
+                serde_json::json!({
+                    "hash": tx.hash,
+                    "nonce": format!("0x{:x}", tx.nonce_tx),
+                    "from": tx.from_op,
+                    "to": tx.receiver_op,
+                    "value": format!("0x{:x}", tx.value_tx.parse::<u128>().unwrap_or(0)),
+                    "gas": "0x5208",
+                    "gasPrice": "0x3b9aca00",
+                    "maxFeePerGas": "0x3b9aca00",
+                    "maxPriorityFeePerGas": "0x3b9aca00",
+                    "input": "0x",
+                    "blockHash": block_hash.clone(),
+                    "blockNumber": format!("0x{:x}", block_number),
+                    "transactionIndex": format!("0x{:x}", idx),
+                    "type": "0x2"
+                })
+            }).collect::<Vec<_>>()
+        } else {
+            tx_hashes.into_iter().map(serde_json::Value::String).collect()
+        };
+
+        // Réponse finale
+        Ok(serde_json::json!({
+            "number": format!("0x{:x}", block_number),
+            "hash": block_hash,
+            "mixHash": block_hash,
+            "parentHash": parent_hash,
+            "nonce": format!("0x{:016x}", rand::random::<u64>()),
+            "sha3Uncles": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
+            "logsBloom": format!("0x{}", "0".repeat(512)),
+            "transactionsRoot": transactions_root,
+            "stateRoot": state_root_hex,
+            "receiptsRoot": receipts_root,
+            "miner": miner_eth,
+            "difficulty": "0x2",
+            "totalDifficulty": format!("0x{:x}", block_number * 2),
+            "gasLimit": "0x47e7c4",
+            "gasUsed": "0x0",
+            "size": "0x334",
+            "extraData": zk_identity_root_hex,  // on peut aussi mettre "0x" si tu préfères
+            "timestamp": format!("0x{:x}", block_data.block.timestamp.timestamp()),
+            "uncles": [],
+            "transactions": transactions_list,
+            "baseFeePerGas": "0x7",
+            "withdrawalsRoot": receipts_root,
+            "withdrawals": [],
+            "blobGasUsed": "0x0",
+            "excessBlobGas": "0x0",
+            "parentBeaconBlockRoot": parent_hash,
+            "zkIdentityRoot": zk_identity_root_hex  // champ custom pour debug
+        }))
+    } else {
+        // Bloc inexistant → retour vide ou erreur selon ton choix
+        Err(format!("Bloc {} non trouvé", block_number))
+    }
+}
 
     /// Recharge tous les receipts persistés depuis RocksDB dans tx_receipts (mémoire)
 pub async fn load_persisted_receipts(&self) -> Result<u32, String> {
@@ -1467,24 +1605,111 @@ pub async fn verify_contract_deployment(&self, contract_address: &str) -> Result
         }
     }
 
+/// Calcul du logsBloom Ethereum (2048 bits)
+    pub fn compute_logs_bloom(&self, logs: &[serde_json::Value]) -> String {
+        use sha3::{Digest, Keccak256};
+
+        let mut bloom = [0u8; 256];
+
+        for log in logs {
+            // Address
+            if let Some(addr) = log.get("address").and_then(|v| v.as_str()) {
+                if let Ok(addr_bytes) = hex::decode(addr.trim_start_matches("0x")) {
+                    if addr_bytes.len() == 20 {
+                        let hash = Keccak256::digest(&addr_bytes);
+                        self.bloom_bits_from_hash(&mut bloom, &hash.into());
+                    }
+                }
+            }
+
+            // Topics
+            if let Some(topics) = log.get("topics").and_then(|v| v.as_array()) {
+                for topic in topics {
+                    if let Some(t) = topic.as_str() {
+                        if let Ok(topic_bytes) = hex::decode(t.trim_start_matches("0x")) {
+                            if topic_bytes.len() == 32 {
+                                let hash = Keccak256::digest(&topic_bytes);
+                                self.bloom_bits_from_hash(&mut bloom, &hash.into());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        format!("0x{}", hex::encode(bloom))
+    }
+		
+    fn bloom_bits_from_hash(&self, bloom: &mut [u8; 256], hash: &[u8; 32]) {
+        for i in 0..3 {
+            let byte_pos = ((hash[i * 2] as usize) << 8 | hash[i * 2 + 1] as usize) % 2048;
+            bloom[byte_pos / 8] |= 1 << (byte_pos % 8);
+        }
+	}
+
 pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<String, String> {
     use sha3::{Digest, Keccak256};
     use ethers::types::U256;
 
     println!("➡️ [send_transaction] Transaction reçue : {:?}", tx_params);
 
-    let from_addr = tx_params.get("from")
-        .and_then(|v| v.as_str()).expect("Missing 'from' field in transaction")
-        .to_lowercase();
+    // ─── SUPPORT DU FORMAT ARRAY (comme eth_call) ───
+    let tx_obj = if tx_params.is_array() {
+        tx_params.as_array().unwrap().get(0).cloned().unwrap_or_default()
+    } else {
+        tx_params.clone()
+    };
 
-    let to_addr = tx_params.get("to")
+    // ─── PARSING DES CHAMPS (avec support RLP si data brute) ───
+    let from_addr = tx_obj.get("from")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_lowercase();
 
+    let to_addr = tx_obj.get("to")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    let gas_price = tx_obj.get("gasPrice")
+        .or_else(|| tx_obj.get("maxFeePerGas"))
+        .or_else(|| tx_obj.get("max_priority_fee_per_gas"))
+        .and_then(|v| {
+            if v.is_string() {
+                let s = v.as_str().unwrap();
+                if s.starts_with("0x") {
+                    u64::from_str_radix(&s[2..], 16).ok()
+                } else {
+                    s.parse().ok()
+                }
+            } else if v.is_u64() {
+                Some(v.as_u64().unwrap())
+            } else {
+                None
+            }
+        })
+        .unwrap_or(1);
+
+    let estimated_gas = tx_obj.get("gas")
+        .and_then(|v| {
+            if v.is_string() {
+                let s = v.as_str().unwrap();
+                if s.starts_with("0x") {
+                    u64::from_str_radix(&s[2..], 16).ok()
+                } else {
+                    s.parse().ok()
+                }
+            } else if v.is_u64() {
+                Some(v.as_u64().unwrap())
+            } else {
+                None
+            }
+        })
+        .unwrap_or(21000);
+
     // Exception spéciale pour l'initialisation VEZ (mint initial) → pas de frais
     let is_vez_initialization = to_addr == "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" &&
-        tx_params.get("data").and_then(|v| v.as_str()).unwrap_or("")
+        tx_obj.get("data").and_then(|v| v.as_str()).unwrap_or("")
             .starts_with("0x40c10f1900000000000000000000000053ae54b11251d5003e9aa51422405bc35a2ef32d");
 
     if is_vez_initialization {
@@ -1494,7 +1719,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     // Récupération du nonce actuel
     let current_account_nonce = self.get_transaction_count(&from_addr).await.unwrap_or(0);
 
-    let calldata_bytes = tx_params.get("data")
+	let calldata_bytes = tx_params.get("data")
     .or_else(|| tx_params.get("input"))
     .and_then(|v| v.as_str())
     .map(|data| {
@@ -1506,7 +1731,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     })
     .unwrap_or_default();
 
-    // Nonce final (priorité au fourni s'il est plus grand)
+    println!("✅ From address validée (récupérée du raw tx) : {}", from_addr);
     let is_create2 = calldata_bytes.contains(&0xf5);
 
     println!(
@@ -1530,11 +1755,6 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     };
 
     println!("📍 To address détectée   : {}", if to_addr.is_empty() { "(déploiement - to null)" } else { &to_addr });
-
-    let is_vez_initialization = false;  // sera recalculé plus tard si besoin
-
-    // Récupération du nonce actuel
-    let current_account_nonce = self.get_transaction_count(&from_addr).await.unwrap_or(0);
 
     // Force le nonce à être croissant
     let final_nonce = tx_params.get("nonce")
@@ -1562,7 +1782,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
                        tx_params.get("to") == Some(&serde_json::Value::Null);
 
     // Valeur envoyée (u128)
-    let value = tx_params.get("value")
+    let value = tx_obj.get("value")
         .and_then(|v| {
             if v.is_string() {
                 let s = v.as_str().unwrap();
@@ -1580,18 +1800,61 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
             }
         }).unwrap_or(0);
 
-    let data = tx_params.get("data")
-        .or_else(|| tx_params.get("input"))
+    // ─── RÉCUPÉRATION DES DONNÉES AVEC SUPPORT "data" ET "input" ───
+    let data = tx_obj.get("data")
+        .or_else(|| tx_obj.get("input"))
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    let calldata_bytes = if !data.is_empty() && data.starts_with("0x") {
-        hex::decode(&data[2..]).unwrap_or_default()
-    } else if !data.is_empty() {
-        hex::decode(data).unwrap_or_default()
+    // ─── DÉCODAGE HEX → BYTES (exactement comme eth_call) ───
+    let calldata_bytes = if !data.is_empty() {
+        let hex_clean = data.trim_start_matches("0x");
+        hex::decode(hex_clean).unwrap_or_default()
     } else {
         vec![]
     };
+
+    println!(
+        "🟢 [DEBUG] Formation du calldata in send_transaction : 0x{}",
+        hex::encode(&calldata_bytes)
+    );
+
+    // ─── EXTRACTION DU SELECTOR ET ARGUMENTS (comme eth_call) ───
+    let (function_name, arguments) = if calldata_bytes.len() >= 4 {
+        let selector = u32::from_be_bytes(calldata_bytes[0..4].try_into().unwrap_or([0; 4]));
+        
+        // Tentative de récupération du nom de fonction depuis les modules
+        let fn_name = if !to_addr.is_empty() {
+            let vm = self.vm.read().await;
+            if let Some(module) = vm.modules.get(&to_addr) {
+                if let Some((name, _)) = module.functions.iter().find(|(_, meta)| meta.selector == selector) {
+                    Some(name.clone())
+                } else {
+                    Some(format!("function_{:08x}", selector))
+                }
+            } else {
+                Some(format!("function_{:08x}", selector))
+            }
+        } else {
+            Some(format!("function_{:08x}", selector))
+        };
+
+        // Parsing des arguments (comme eth_call)
+        let args = if !data.is_empty() {
+            Self::parse_abi_encoded_args(data)
+        } else {
+            None
+        };
+
+        (fn_name, args)
+    } else {
+        (None, None)
+    };
+
+    println!(
+        "🔍 [send_transaction] contract_addr={}, function_name={:?}, arguments={:?}",
+        to_addr, function_name, arguments
+    );
 
     // Bytecode de création (uniquement pour déploiement)
     let creation_bytecode = if is_deployment && !data.is_empty() {
@@ -1600,43 +1863,43 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         vec![]
     };
 
+    // Calldata constructeur (vide par défaut)
+    let constructor_calldata: Vec<u8> = vec![];
+
     if is_deployment && creation_bytecode.is_empty() {
         return Err("Bytecode de déploiement vide".to_string());
     }
 
-    // Calldata constructeur (vide par défaut)
-    let constructor_calldata: Vec<u8> = vec![];
-
-    // Génération hash transaction unique
-    let mut tx_hasher = Keccak256::new();
-    tx_hasher.update(from_addr.as_bytes());
-    tx_hasher.update(&final_nonce.to_be_bytes());
-    tx_hasher.update(&chrono::Utc::now().timestamp_nanos().to_be_bytes());
-    tx_hasher.update(&rand::random::<u128>().to_be_bytes());
-    tx_hasher.update(&std::process::id().to_be_bytes());
-    tx_hasher.update(&(std::ptr::addr_of!(tx_hasher) as usize).to_be_bytes());
-    if !data.is_empty() {
-        tx_hasher.update(data.as_bytes());
+    // ─── HASH DE TRANSACTION (avec calldata_bytes correct) ───
+    let mut rlp_hasher = Keccak256::new();
+    
+    rlp_hasher.update(&final_nonce.to_be_bytes());
+    rlp_hasher.update(&gas_price.to_be_bytes());
+    rlp_hasher.update(&(estimated_gas as u64).to_be_bytes());
+    if !to_addr.is_empty() && to_addr != "0x" {
+        rlp_hasher.update(&hex::decode(&to_addr[2..]).unwrap_or_default());
+    } else {
+        rlp_hasher.update(&[] as &[u8]);
     }
-    let tx_hash = format!("0x{:x}", tx_hasher.finalize());
+    rlp_hasher.update(&value.to_be_bytes());
+    rlp_hasher.update(&calldata_bytes); // ← Utilise calldata_bytes propre
+
+    let tx_hash = format!("0x{:x}", rlp_hasher.finalize());
     let normalized_hash = self.normalize_tx_hash(&tx_hash);
 
-    let mut contract_address = String::new();       // adresse Ethereum (racine EVM)
-    let mut slu_zk_contract_addr = String::new();   // adresse SLU zk-print longue
+    println!("🔑 Hash généré : {}", normalized_hash);
 
-    // ────────────────────────────────────────────────────────────────
-    // CALCUL DYNAMIQUE DES FRAIS DE GAS (avant tout traitement)
-    // ────────────────────────────────────────────────────────────────
-    let gas_price = self.get_gas_price().await; // 1 Gnaeït par défaut ou dynamique
+    let mut contract_address = String::new();
+    let mut slu_zk_contract_addr = String::new();
+
+    // CALCUL DYNAMIQUE DES FRAIS DE GAS
+    let gas_price = self.get_gas_price().await;
 
     let estimated_gas = if is_deployment {
-        // Déploiement : base + bytecode + constructor
-        21000u64 + 32000u64 + (calldata_bytes.len() as u64 * 200) // ~200 gas par byte
+        21000u64 + 32000u64 + (calldata_bytes.len() as u64 * 200)
     } else if calldata_bytes.len() > 0 {
-        // Appel de fonction : base + calldata
-        21000u64 + 21000u64 + (calldata_bytes.len() as u64 * 16) // 16 gas par byte
+        21000u64 + 21000u64 + (calldata_bytes.len() as u64 * 16)
     } else {
-        // Transfert simple
         21000u64
     };
 
@@ -1648,41 +1911,68 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     println!("   • Coût total          : {} naeït VEZ (~{:.8} VEZ)", gas_cost_naeït, gas_cost_naeït as f64 / 1e18);
     println!("   • Type de tx          : {}", if is_deployment { "déploiement" } else { "appel/transfert" });
 
-    // ────────────────────────────────────────────────────────────────
-    // PAIEMENT OBLIGATOIRE DES FRAIS VIA DISBURSE (AVANT EXÉCUTION)
-    // ────────────────────────────────────────────────────────────────
+    // PAIEMENT DES FRAIS VIA DISBURSE
     let vez_addr = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_string();
 
+    // ────────────────────────────────────────────────────────────────
+    // PAIEMENT DES FRAIS VIA DISBURSE (version corrigée)
+    // ────────────────────────────────────────────────────────────────
     let disburse_success = if !is_vez_initialization && gas_cost_naeït > 0 {
         println!("🪙 Paiement des frais via disburse({}) depuis {}...", gas_cost_naeït, from_addr);
 
-        let disburse_args = vec![serde_json::Value::Number(serde_json::Number::from(gas_cost_naeït))];
+        // Construction du calldata ABI complet pour disburse(uint256 amount, address disburser)
+        // Selector de disburse = 0x1c61f62b
+        let selector = hex::decode("1c61f62b").unwrap();
+
+        let mut calldata = Vec::with_capacity(68);
+        calldata.extend_from_slice(&selector);
+
+        // amount (uint256) – padded à 32 bytes
+        let mut amount_padded = [0u8; 32];
+        U256::from(gas_cost_naeït).to_big_endian(&mut amount_padded);
+        calldata.extend_from_slice(&amount_padded);
+
+        // disburser (address) – padded à 32 bytes
+        let mut addr_padded = [0u8; 32];
+        let from_bytes = hex::decode(from_addr.trim_start_matches("0x")).unwrap_or_default();
+        addr_padded[12..].copy_from_slice(&from_bytes);
+        calldata.extend_from_slice(&addr_padded);
+
+        println!("🟢 [DEBUG] Calldata disburse généré : 0x{}", hex::encode(&calldata));
 
         let disburse_result = {
             let mut vm_sim = self.vm.write().await;
             vm_sim.execute_module(
                 &vez_addr,
                 "function_1c61f62b",
-                disburse_args,
+                vec![],
                 Some(&from_addr),
-                None
+                Some(&calldata)
             ).await
         };
 
         match disburse_result {
             Ok(_) => {
-                println!("✅ DISBURSE FRAIS RÉUSSI ! {} naeït VEZ envoyés → burn 10% ({})", 
-                         gas_cost_naeït, gas_cost_naeït * 10 / 100);
+                println!("✅ DISBURSE FRAIS RÉUSSI ! {} naeït VEZ brûlés (10% burn + reste)", gas_cost_naeït);
                 true
             }
             Err(e) => {
-                println!("❌ ÉCHEC DISBURSE FRAIS : {}", e);
-                println!("   → Transaction rejetée (solde insuffisant ou revert dans disburse)");
-                return Err(format!("Impossible de payer les frais via disburse : {}", e));
+                println!("❌ ÉCHEC DISBURSE : {}", e);
+                
+                if let Ok(balance) = self.get_account_balance(&from_addr).await {
+                    println!("   Solde actuel de {} : {} VEZ", from_addr, balance);
+                }
+                
+                if cfg!(debug_assertions) {
+                    println!("⚠️ Mode debug → on continue malgré échec disburse (tolérance dev)");
+                    true
+                } else {
+                    return Err(format!("Impossible de payer les frais via disburse : {}", e));
+                }
             }
         }
     } else {
-        println!("ℹ️ Aucun disburse nécessaire (init VEZ ou gas_cost=0)");
+        println!("ℹ️ Aucun disburse nécessaire (init VEZ ou gas=0)");
         true
     };
 
@@ -1691,12 +1981,11 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     }
 
     if is_deployment {
-        let use_create2 = tx_params.get("create2").and_then(|v| v.as_bool()).unwrap_or(false);
-        let target_address = tx_params.get("target_address")
+        let use_create2 = tx_obj.get("create2").and_then(|v| v.as_bool()).unwrap_or(false);
+        let target_address = tx_obj.get("target_address")
             .and_then(|v| v.as_str())
             .map(|s| s.to_lowercase());
 
-        // 1. Génération adresse Ethereum classique (racine EVM)
         contract_address = if use_create2 {
             if let Some(addr) = target_address {
                 println!("⚡ [CREATE2] Déploiement à l'adresse forcée : {}", addr);
@@ -1705,7 +1994,6 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
                 return Err("CREATE2 demandé mais target_address manquant".to_string());
             }
         } else {
-            // CREATE déterministe + random si collision
             let mut addr_hasher = Keccak256::new();
             addr_hasher.update(from_addr.as_bytes());
             addr_hasher.update(&final_nonce.to_be_bytes());
@@ -1740,7 +2028,6 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
             }
         };
 
-        // 2. Génération adresse SLU zk-print
         slu_zk_contract_addr = generate_slu_zk_address(
             &format!("contract:{}", contract_address),
             10,
@@ -1753,7 +2040,6 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
 
         let mut vm = self.vm.write().await;
 
-        // 3. Pré-création / mise à jour du compte contrat avec LES DEUX adresses
         {
             let mut accounts = vm.state.accounts.write().await;
 
@@ -1786,56 +2072,14 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
             account.is_contract = true;
             account.eth_address = contract_address.clone();
             account.slu_zk_address = slu_zk_contract_addr.clone();
-
-            println!(
-                "   → Creation bytecode inscrit dans contract_state ({} bytes) pour {}",
-                creation_bytecode.len(),
-                contract_address
-            );
         }
 
-        // 4. Persistance IMMÉDIATE du bytecode brut + métadonnées (les deux adresses)
         if let Some(storage_manager) = &vm.storage_manager {
-            println!("💾 [PERSISTANCE AVANT EXÉCUTION] Sauvegarde bytecode BRUT + métadonnées");
-
-            let account_prefix = format!("account:{}", contract_address);
-            let contract_state_key = format!("{}:contract_state", account_prefix);
-
-            if !creation_bytecode.is_empty() {
-                if let Err(e) = storage_manager.write(&contract_state_key, &creation_bytecode) {
-                    eprintln!("❌ Échec écriture bytecode brut dans {} : {}", contract_state_key, e);
-                } else {
-                    println!(
-                        "   → Bytecode creation brut persisté ({} bytes) dans clé : {}",
-                        creation_bytecode.len(),
-                        contract_state_key
-                    );
-                }
-            }
-
-            let account_key = account_prefix;
-            let account_json = serde_json::json!({
-                "eth_address": contract_address,
-                "slu_zk_address": slu_zk_contract_addr,
-                "balance": value,
-                "nonce": 0,
-                "is_contract": true,
-                "deployed_by": from_addr,
-                "deployment_tx": normalized_hash,
-                "saved_timestamp": chrono::Utc::now().timestamp()
-            });
-
-            if let Ok(bytes) = serde_json::to_vec(&account_json) {
-                if let Err(e) = storage_manager.write(&account_key, &bytes) {
-                    eprintln!("❌ Échec persistance métadonnées compte {} : {}", account_key, e);
-                } else {
-                    println!("   → Métadonnées enrichies (avec deux adresses) persistées dans {}", account_key);
-                }
-            }
+            let contract_state_key = format!("account:{}:contract_state", contract_address);
+            let _ = storage_manager.write(&contract_state_key, &creation_bytecode);
         }
 
-        // 5. Exécution du constructeur
-        println!("🚀 Déploiement via execute_module (raw_creation) → {}", contract_address);
+        println!("🚀 Exécution constructeur via execute_module → {}", contract_address);
 
         let constructor = std::str::from_utf8(&creation_bytecode).unwrap_or("");
 
@@ -1893,16 +2137,11 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
 
                 let mut runtime = candidate.unwrap_or_else(|| creation_bytecode.clone());
 
-                let markers: &[&[u8]] = &[
-                    b"a2646970667358221220",
-                    b"a165627a7a72305820",
-                    b"64736f6c634300",
-                ];
+                let markers: &[&[u8]] = &[b"a2646970667358221220", b"a165627a7a72305820", b"64736f6c634300"];
 
                 for marker in markers {
                     if let Some(pos) = runtime.windows(marker.len()).rposition(|w| w == *marker) {
                         runtime.truncate(pos);
-                        println!("→ Metadata supprimée à offset {} (marker: {:02x?})", pos, marker);
                     }
                 }
 
@@ -1911,9 +2150,6 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
             Err(e) => return Err(format!("Échec exécution constructor : {}", e)),
         };
 
-        println!("→ Runtime extrait et validé : {} bytes", runtime_bytecode.len());
-
-        // Mise à jour module
         if !vm.modules.contains_key(&contract_address) {
             let module = vuc_tx::slurachain_vm::Module {
                 name: "deployed".to_string(),
@@ -1933,7 +2169,6 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
             m.bytecode = runtime_bytecode.clone();
         }
 
-        // Mise à jour compte final (runtime au lieu de creation)
         {
             let mut accounts = vm.state.accounts.write().await;
             if let Some(acc) = accounts.get_mut(&contract_address) {
@@ -1945,61 +2180,51 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
             }
         }
 
-        // Persistance runtime
         if let Some(storage_manager) = &vm.storage_manager {
             let key = format!("account:{}:contract_state", contract_address);
             let _ = storage_manager.write(&key, &runtime_bytecode);
         }
 
-        // Détection auto des fonctions
         let _ = vm.auto_detect_contract_functions(&contract_address, &runtime_bytecode);
 
         println!("✅ DÉPLOIEMENT + PERSISTANCE RÉUSSIE");
         println!("   • Adresse Ethereum (racine) : {}", contract_address);
         println!("   • Adresse SLU zk-print      : {}", slu_zk_contract_addr);
-        println!("   • Bytecode clé              : account:{}:contract_state", contract_address);
-        println!("   • Déployeur                 : {}", from_addr);
         println!("   • TX Hash                   : {}", normalized_hash);
     } else {
-        // ─── TRANSACTIONS NORMALES (appel de fonction) ───
-        let contract_addr = Some(to_addr.clone());
+        println!("→ Transaction normale (appel de fonction) sur {}", to_addr);
+        
+        // ─── MODIFICATION CLÉS POUR L'EXÉCUTION (transactions normales) ───
+        if !to_addr.is_empty() {
+            let fn_name = function_name.as_deref().unwrap_or("fallback");
+            
+            // ⛔️ CORRECTION MAJEURE : passe un Vec vide pour args, calldata brut via Some(&calldata_bytes)
+            let args = vec![]; // <-- toujours vide pour EVM pur
+            
+            let result = {
+                let mut vm_sim = self.vm.write().await;
+                vm_sim.execute_module(
+                    &to_addr,
+                    fn_name,
+                    args,
+                    Some(&from_addr),
+                    Some(&calldata_bytes) // ← CALLDATA BRUT ICI (comme eth_call)
+                ).await
+            };
 
-        let function_name = if data.len() >= 10 {
-            let selector_hex = &data[2..10];
-            let selector = u32::from_str_radix(selector_hex, 16).unwrap_or(0);
-            let vm = self.vm.read().await;
-            if let Some(module) = vm.modules.get(&to_addr) {
-                module.functions.iter()
-                    .find(|(_, meta)| meta.selector == selector)
-                    .map(|(name, _)| name.clone())
-                    .or_else(|| Some(format!("function_{:08x}", selector)))
-            } else {
-                Some(format!("function_{:08x}", selector))
-            }
-        } else {
-            None
-        };
-
-        let arguments = Self::parse_abi_encoded_args(data);
-
-        let mut vmsim = self.vm.write().await;
-
-        if let Some(addr) = &contract_addr {
-            if vmsim.modules.contains_key(addr) {
-                let args = arguments.unwrap_or_else(|| {
-                    if value > 0 {
-                        vec![serde_json::Value::Number(serde_json::Number::from(value))]
-                    } else {
-                        vec![]
-                    }
-                });
-                let fn_name = function_name.as_deref().unwrap_or("unknown");
-                let _ = vmsim.execute_module(addr, fn_name, args, Some(&from_addr), Some(&calldata_bytes)).await;
+            match result {
+                Ok(exec_result) => {
+                    println!("✅ Exécution fonction réussie : {:?}", exec_result);
+                }
+                Err(e) => {
+                    println!("❌ Échec exécution fonction : {}", e);
+                    return Err(format!("Exécution échouée : {}", e));
+                }
             }
         }
     }
 
-    // ─── MISE À JOUR NONCE EXPÉDITEUR ───
+    // Mise à jour nonce expéditeur
     {
         let vm = self.vm.write().await;
         let mut accounts = vm.state.accounts.write().await;
@@ -2007,165 +2232,85 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         if let Some(account) = accounts.get_mut(&from_addr) {
             account.nonce = std::cmp::max(account.nonce, final_nonce + 1);
             println!("📝 Nonce mis à jour: compte {} → nonce={}", from_addr, account.nonce);
-        } else {
-            println!("ℹ️ Compte {} n'existe pas - aucune création automatique", from_addr);
         }
     }
 
-    // ─── CONSTRUCTION TxRequest + mempool ───
-    let contract_addr_for_tx = if is_deployment { None } else { Some(to_addr.clone()) };
-    let receiver_op = if is_deployment { contract_address.clone() } else { to_addr.clone() };
-
-    let function_name = if let Some(data) = tx_params.get("data").and_then(|v| v.as_str()) {
-        if data.len() >= 10 && !is_deployment {
-            let selector_hex = &data[2..10];
-            let selector = u32::from_str_radix(selector_hex, 16).unwrap_or(0);
-            let vm = self.vm.read().await;
-            if let Some(module) = vm.modules.get(&to_addr) {
-                if let Some((name, _)) = module.functions.iter().find(|(_, meta)| meta.selector == selector) {
-                    Some(name.clone())
-                } else {
-                    Some(format!("function_{:08x}", selector))
-                }
-            } else {
-                Some(format!("function_{:08x}", selector))
-            }
-        } else { None }
-    } else { None };
-
-    let arguments = if let Some(data) = tx_params.get("data").and_then(|v| v.as_str()) {
-        if !is_deployment {
-            Self::parse_abi_encoded_args(data)
-        } else { None }
-    } else { None };
-
-    let tx_request = vuc_platform::slurachain_rpc_service::TxRequest {
-        from_op: from_addr.clone(),
-        receiver_op,
-        value_tx: value.to_string(),
-        nonce_tx: final_nonce,
-        hash: normalized_hash.clone(),
-        contract_addr: contract_addr_for_tx,
-        function_name,
-        arguments,
+    /// ─── EXTRACTION GÉNÉRIQUE DES EMIT SOLIDITY ───
+    let logs = if let Ok(result) = {
+        let mut vm_sim = self.vm.write().await;
+        vm_sim.execute_module(
+            if is_deployment { &contract_address } else { &to_addr },
+            if is_deployment { "constructor" } else { "fallback" },
+            vec![],
+            Some(&from_addr),
+            Some(&calldata_bytes)
+        ).await
+    } {
+        self.extract_emits_from_0xf3_response(&result)
+    } else {
+        vec![]
     };
 
-    self.rpc_service.lurosonie_manager.add_transaction_to_mempool(tx_request.clone()).await;
-    let _ = self.block_finalized_tx.send(vec![tx_request.hash.clone()]);
+    let logs_bloom = self.compute_logs_bloom(&logs);
 
     let (current_block_number, current_block_hash) = self.get_latest_block_info().await;
 
-    let is_sluzk_enabled = tx_params
-        .get("sluzk")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+        {
+        let mut vm = self.vm.write().await;
+        let mut accounts = vm.state.accounts.write().await;
+        if let Some(account) = accounts.get_mut(&from_addr) {
+            account.nonce = std::cmp::max(account.nonce, final_nonce + 1);
+            println!("✅ Nonce mis à jour pour {} → {}", from_addr, account.nonce);
+        }
+	}
 
-    // ─── RECEIPT ENRICHI AVEC LES DEUX ADRESSES + LOG DISBURSE ───
-    let mut receipts = self.tx_receipts.write().await;
     let receipt = serde_json::json!({
         "blockHash": current_block_hash,
         "blockNumber": format!("0x{:x}", current_block_number),
-        
-        // UN SEUL CHAMP : contractAddress
-        "contractAddress": if is_deployment {
-            if is_sluzk_enabled && !slu_zk_contract_addr.is_empty() {
-                serde_json::Value::String(slu_zk_contract_addr.clone())
-            } else {
-                serde_json::Value::String(contract_address.clone())
-            }
-        } else {
-            serde_json::Value::Null
-        },
-
-        "cumulativeGasUsed": if is_vez_initialization { 
-    "0x0".to_string() 
-} else { 
-    format!("0x{:x}", estimated_gas) 
-},
-        "effectiveGasPrice": format!("0x{:x}", gas_price),
+        "contractAddress": if is_deployment { serde_json::Value::String(contract_address.clone()) } else { serde_json::Value::Null },
         "from": from_addr,
-        "gasUsed": if is_vez_initialization { 
-    "0x0".to_string() 
-} else { 
-    format!("0x{:x}", estimated_gas) 
-},
-        "logs": [],
-        "logsBloom": "0x".to_string() + &"00".repeat(256),
-        "status": "0x1",
         "to": if is_deployment { serde_json::Value::Null } else { serde_json::Value::String(to_addr) },
         "transactionHash": normalized_hash.clone(),
+        "status": "0x1",
+        "gasUsed": format!("0x{:x}", estimated_gas),
+        "effectiveGasPrice": format!("0x{:x}", gas_price),
+        "logs": logs,
+        "logsBloom": logs_bloom,
         "transactionIndex": "0x0",
         "type": "0x2",
         "nonce": format!("0x{:x}", final_nonce),
         "value": format!("0x{:x}", value),
-        "deploymentTimestamp": chrono::Utc::now().timestamp_nanos(),
-        "isUniqueDeployment": is_deployment,
-        "isPersisted": is_deployment,
-        "deploymentMethod": if is_deployment {
-            if tx_params.get("create2").and_then(|v| v.as_bool()).unwrap_or(false) {
-                "create2_via_execute_module_raw"
-            } else {
-                "create_via_execute_module_raw"
-            }
-        } else {
-            "transaction"
-        },
-        "addressEntropy": if is_deployment { rand::random::<u64>() } else { 0 },
-        "uniquenessGuaranteed": is_deployment,
-        "isVezInitialization": is_vez_initialization,
-        "transactionCost": if is_vez_initialization { 
-    "0x0".to_string() 
-} else { 
-    format!("0x{:x}", gas_cost_naeït) 
-},
-        "disburseFees": if !is_vez_initialization && gas_cost_naeït > 0 {
-            serde_json::json!({
-                "disburseCalled": true,
-                "amountDisbursed": gas_cost_naeït,
-                "burned": gas_cost_naeït * 10 / 100,
-                "remainingDistributed": gas_cost_naeït * 90 / 100,
-                "paidVia": "disburse",
-                "success": true,
-                "note": "Frais de transaction payés en VEZ via disburse avant exécution"
-            })
-        } else {
-            serde_json::json!({
-                "disburseCalled": false,
-                "note": "Aucun disburse (init VEZ ou gas_cost=0)"
-            })
-        }
+        "cumulativeGasUsed": format!("0x{:x}", estimated_gas),
+        "blobGasUsed": "0x0",
+        "blobGasPrice": "0x0"
     });
-
-    receipts.insert(normalized_hash.clone(), receipt.clone());
+    
     let tx_hash_padded = pad_hash_64(&normalized_hash);
-    receipts.insert(tx_hash_padded.clone(), receipt.clone());
+    
+    {
+        let mut receipts = self.tx_receipts.write().await;
+        receipts.insert(normalized_hash.clone(), receipt.clone());
+        receipts.insert(tx_hash_padded.clone(), receipt.clone());
+    }
 
-    // Persistance receipt dans RocksDB
     if let Some(storage_manager) = &self.vm.read().await.storage_manager {
         let receipt_key = format!("receipt:{}", normalized_hash);
         if let Ok(receipt_bytes) = serde_json::to_vec(&receipt) {
-            if let Err(e) = storage_manager.write(&receipt_key, &receipt_bytes) {
-                eprintln!("⚠️ Erreur persistance receipt {}: {}", normalized_hash, e);
-            } else {
-                println!("💾 Receipt {} persisté dans RocksDB", normalized_hash);
-            }
+            let _ = storage_manager.write(&receipt_key, &receipt_bytes);
+            println!("💾 Receipt {} persisté dans RocksDB", normalized_hash);
         }
 
         let receipt_key_padded = format!("receipt:{}", tx_hash_padded);
         if let Ok(receipt_bytes) = serde_json::to_vec(&receipt) {
-            if let Err(e) = storage_manager.write(&receipt_key_padded, &receipt_bytes) {
-                eprintln!("⚠️ Erreur persistance receipt padded {}: {}", tx_hash_padded, e);
-            } else {
-                println!("💾 Receipt {} (padded) persisté dans RocksDB", tx_hash_padded);
-            }
+            let _ = storage_manager.write(&receipt_key_padded, &receipt_bytes);
+            println!("💾 Receipt padded {} persisté dans RocksDB", tx_hash_padded);
         }
     } else {
         println!("⚠️ Storage manager non disponible pour persistance des receipts");
     }
 
-    // Logs finaux
     if is_deployment {
-        if tx_params.get("create2").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if tx_obj.get("create2").and_then(|v| v.as_bool()).unwrap_or(false) {
             println!("✅ CREATE2 via execute_module (raw) → Adresse Ethereum: {} | SLU zk: {} | Hash: {}",
                      contract_address, slu_zk_contract_addr, normalized_hash);
         } else {
@@ -2184,63 +2329,83 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
 }
     
     /// ✅ Récupération d'un reçu de transaction
-        pub async fn get_transaction_receipt(&self, input_hash: String) -> Result<serde_json::Value, String> {
-        let hash = self.normalize_tx_hash(&input_hash);
-    
-        let receipts = self.tx_receipts.read().await;
-    
-        if let Some(receipt) = receipts.get(&hash) {
-            let mut r = receipt.clone();
-    
-            // Si blockHash est encore à 0x000... on le met à jour
-            if r.get("blockHash").and_then(|h| h.as_str()) == Some("0x0000000000000000000000000000000000000000000000000000000000000000") {
-                let (bn, bh) = self.get_latest_block_info().await;
-                r["blockNumber"] = serde_json::json!(format!("0x{:x}", bn));
-                r["blockHash"] = serde_json::json!(bh);
-            }
-    
-            // Ajoute tous les champs attendus si absents
-            let mut ensure = |k: &str, v: serde_json::Value| {
-                if !r.get(k).is_some() {
-                    r[k] = v;
-                }
-            };
-            ensure("cumulativeGasUsed", serde_json::json!("0x5208"));
-            ensure("gasUsed", serde_json::json!("0x5208"));
-            ensure("logs", serde_json::json!([]));
-            ensure("logsBloom", serde_json::json!("0x".to_string() + &"00".repeat(256)));
-            ensure("status", serde_json::json!("0x1"));
-            ensure("transactionIndex", serde_json::json!("0x1"));
-            ensure("effectiveGasPrice", serde_json::json!("0x1"));
-            ensure("blobGasUsed", serde_json::json!("0x20000"));
-            ensure("blobGasPrice", serde_json::json!("0x3"));
-            ensure("contractAddress", serde_json::Value::Null);
-            ensure("to", serde_json::Value::Null);
-    
-            return Ok(r);
+   pub async fn get_transaction_receipt(&self, input_hash: String) -> Result<serde_json::Value, String> {
+    // Normalisation du hash (on accepte les deux formats : normal + padded)
+    let normalized_hash = self.normalize_tx_hash(&input_hash);
+    let padded_hash = pad_hash_64(&input_hash);
+
+    println!("🔍 get_transaction_receipt demandé pour : {} (normalized: {})", input_hash, normalized_hash);
+
+    let receipts = self.tx_receipts.read().await;
+
+    // 1. Recherche dans les deux formats (priorité au normalized)
+    if let Some(receipt) = receipts.get(&normalized_hash).or_else(|| receipts.get(&padded_hash)) {
+        let mut r = receipt.clone();
+
+        // Mise à jour du block si encore à 0x0
+        if r.get("blockHash").and_then(|h| h.as_str()) == Some("0x0") 
+            || r.get("blockHash").and_then(|h| h.as_str()) == Some("0x0000000000000000000000000000000000000000000000000000000000000000") 
+        {
+            let (bn, bh) = self.get_latest_block_info().await;
+            r["blockNumber"] = serde_json::json!(format!("0x{:x}", bn));
+            r["blockHash"] = serde_json::json!(bh);
         }
-    
-        // Fallback : receipt par défaut (comme Anvil/Hardhat)
-        let (current_block, current_block_hash) = self.get_latest_block_info().await;
-    
-        Ok(serde_json::json!({
-            "transactionHash": pad_hash_64(&hash),
-            "transactionIndex": "0x0",
-            "blockNumber": format!("0x{:x}", current_block),
-            "blockHash": current_block_hash,
-            "from": self.validator_address,
-            "to": "0x0000000000000000000000000000000000000000",
-            "contractAddress": serde_json::Value::Null,
-            "cumulativeGasUsed": "0x5208",
-            "gasUsed": "0x5208",
-            "logsBloom": "0x".to_string() + &"00".repeat(256),
-            "logs": [],
-            "status": "0x1",
-            "effectiveGasPrice": "0x3b9aca00",
-            "blobGasUsed": "0x0",
-            "blobGasPrice": "0x0"
-        }))
+
+        // Compléter les champs manquants (standard Ethereum)
+        let mut ensure = |key: &str, default: serde_json::Value| {
+            if !r.get(key).is_some() || r[key].is_null() {
+                r[key] = default;
+            }
+        };
+
+        ensure("cumulativeGasUsed", serde_json::json!("0x5208"));
+        ensure("gasUsed", serde_json::json!("0x5208"));
+        ensure("logs", serde_json::json!([]));
+        ensure("logsBloom", serde_json::json!("0x".to_owned() + &"00".repeat(256)));
+        ensure("status", serde_json::json!("0x1"));
+        ensure("transactionIndex", serde_json::json!("0x0"));
+        ensure("effectiveGasPrice", serde_json::json!("0x3b9aca00"));
+        ensure("type", serde_json::json!("0x2"));
+        ensure("blobGasUsed", serde_json::json!("0x0"));
+        ensure("blobGasPrice", serde_json::json!("0x0"));
+
+        // Pour les déploiements : on s'assure que contractAddress est bien présent
+        if r.get("contractAddress").is_none() || r["contractAddress"].is_null() {
+            if let Some(contract) = receipt.get("contractAddress") {
+                r["contractAddress"] = contract.clone();
+            }
+        }
+
+        println!("✅ Receipt trouvée et enrichie pour hash: {}", normalized_hash);
+        return Ok(r);
     }
+
+    // 2. Fallback : receipt par défaut (comportement compatible Anvil/Hardhat/Remix)
+    println!("⚠️ Receipt non trouvée pour {} → retour d'une receipt par défaut", input_hash);
+
+    let (current_block, current_block_hash) = self.get_latest_block_info().await;
+
+    let default_receipt = serde_json::json!({
+        "transactionHash": pad_hash_64(&normalized_hash),
+        "transactionIndex": "0x0",
+        "blockNumber": format!("0x{:x}", current_block),
+        "blockHash": current_block_hash,
+        "from": self.validator_address.clone(),
+        "to": "0x0000000000000000000000000000000000000000",
+        "contractAddress": serde_json::Value::Null,
+        "cumulativeGasUsed": "0x5208",
+        "gasUsed": "0x5208",
+        "logsBloom": "0x".to_owned() + &"00".repeat(256),
+        "logs": [],
+        "status": "0x1",
+        "effectiveGasPrice": "0x3b9aca00",
+        "type": "0x2",
+        "blobGasUsed": "0x0",
+        "blobGasPrice": "0x0"
+    });
+
+    Ok(default_receipt)
+}
 
 pub async fn eth_call(&self, call_object: serde_json::Value) -> Result<String, String> {
     // Supporte [call_object, blockTag] ou juste call_object
@@ -2877,20 +3042,22 @@ module.register_async_method("wallet_switchEthereumChain", move |params, _meta, 
 }).expect("Failed to register wallet_switchEthereumChain method");
 
 // Endpoint eth_getTransactionByHash
-        let engine_platform_clone = self.clone();
+     let engine_platform_clone = self.clone();
 module.register_async_method("eth_getTransactionByHash", move |params, _meta, _| {
     let engine_platform = engine_platform_clone.clone();
     async move {
         let params_array: Vec<serde_json::Value> = params.parse().unwrap_or_default();
-        let tx_hash = params_array.get(0).and_then(|v| v.as_str()).unwrap_or("");
-        
+        let raw_tx_hash = params_array.get(0).and_then(|v| v.as_str()).unwrap_or("");
+
+        let normalized = engine_platform.normalize_tx_hash(raw_tx_hash);
+        let padded = pad_hash_64(raw_tx_hash);
+
         let receipts = engine_platform.tx_receipts.read().await;
-        let normalized_hash = engine_platform.normalize_tx_hash(tx_hash);
-        
-        if let Some(receipt) = receipts.get(&normalized_hash) {
-            // ✅ CONSTRUIT UN OBJET TRANSACTION COMPLET POUR METAMASK
+
+        // On cherche dans les deux formats
+        if let Some(receipt) = receipts.get(&normalized).or_else(|| receipts.get(&padded)) {
             let tx = serde_json::json!({
-                "hash": normalized_hash,
+                "hash": normalized,
                 "nonce": receipt.get("nonce").unwrap_or(&serde_json::json!("0x0")),
                 "blockHash": receipt.get("blockHash").unwrap_or(&serde_json::json!(null)),
                 "blockNumber": receipt.get("blockNumber").unwrap_or(&serde_json::json!(null)),
@@ -2900,19 +3067,21 @@ module.register_async_method("eth_getTransactionByHash", move |params, _meta, _|
                 "value": receipt.get("value").unwrap_or(&serde_json::json!("0x0")),
                 "gas": "0x5208",
                 "gasPrice": "0x3b9aca00",
-                "maxFeePerGas": "0x3b9aca00", // ✅ EIP-1559 support
+                "maxFeePerGas": "0x3b9aca00",
                 "maxPriorityFeePerGas": "0x3b9aca00",
                 "input": "0x",
-                "r": "0x0", "s": "0x0", "v": "0x0", // ✅ Signature placeholder
-                "type": "0x2", // ✅ EIP-1559 transaction type
-                "accessList": [], // ✅ EIP-2930 access list
+                "r": "0x0",
+                "s": "0x0",
+                "v": "0x0",
+                "type": "0x2",
+                "accessList": [],
                 "chainId": format!("0x{:x}", engine_platform.get_chain_id())
             });
-            Ok::<_, jsonrpsee_types::error::ErrorObject>(tx)
-        } else {
-            // ✅ Transaction non trouvée = null (standard Ethereum)
-            Ok::<_, jsonrpsee_types::error::ErrorObject>(serde_json::json!(null))
+            return Ok::<_, jsonrpsee_types::error::ErrorObject>(tx);
         }
+
+        // Transaction non trouvée → null (comportement Ethereum standard)
+        Ok::<_, jsonrpsee_types::error::ErrorObject>(serde_json::json!(null))
     }
 }).expect("Failed to register eth_getTransactionByHash");
 
@@ -3145,14 +3314,14 @@ module.register_async_method("eth_sendTransaction", move |params, _meta, _| {
             }
         };
 
-        // Support Remix/MetaMask (array ou objet)
+        // Support Remix / MetaMask (array ou objet)
         let tx_obj = if tx_params.is_array() {
             tx_params.as_array().unwrap().get(0).cloned().unwrap_or_default()
         } else {
             tx_params
         };
 
-        // ====================== DÉTECTION DÉPLOIEMENT ======================
+        // Détection déploiement
         let is_deployment = {
             let to = tx_obj.get("to")
                 .and_then(|v| v.as_str())
@@ -3162,7 +3331,6 @@ module.register_async_method("eth_sendTransaction", move |params, _meta, _| {
         };
 
         if is_deployment {
-            // === LOGIQUE EXACTE VEZ UNIQUEMENT POUR LES DÉPLOIEMENTS ===
             let from = tx_obj.get("from")
                 .and_then(|v| v.as_str())
                 .unwrap_or(&engine_platform.validator_address)
@@ -3184,7 +3352,6 @@ module.register_async_method("eth_sendTransaction", move |params, _meta, _| {
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_lowercase());
 
-            // Appel à la fonction dédiée (logique identique à VEZ)
             match engine_platform.perform_contract_deployment(
                 from,
                 data,
@@ -3200,7 +3367,7 @@ module.register_async_method("eth_sendTransaction", move |params, _meta, _| {
                 )),
             }
         } else {
-            // === TRANSACTION NORMALE (appel de fonction) ===
+            // Transaction normale
             match engine_platform.send_transaction(tx_obj).await {
                 Ok(tx_hash) => Ok::<_, jsonrpsee_types::error::ErrorObject>(serde_json::json!(tx_hash)),
                 Err(e) => Err(jsonrpsee_types::error::ErrorObject::owned(
@@ -3213,8 +3380,7 @@ module.register_async_method("eth_sendTransaction", move |params, _meta, _| {
     }
 }).expect("Failed to register eth_sendTransaction method");
 
-                 // Endpoint eth_sendRawTransaction
-// Endpoint eth_sendRawTransaction – VERSION CORRIGÉE (support déploiement + legacy/EIP-1559)
+// Endpoint eth_sendRawTransaction – VERSION CORRIGÉE SANS FALLBACK
 let engine_platform_clone = self.clone();
 module.register_async_method("eth_sendRawTransaction", move |params, _meta, _| {
     let engine_platform = engine_platform_clone.clone();
@@ -3235,6 +3401,9 @@ module.register_async_method("eth_sendRawTransaction", move |params, _meta, _| {
         };
 
         let raw_tx = params_array.get(0).and_then(|v| v.as_str()).unwrap_or("");
+        
+        println!("🔍 [eth_sendRawTransaction] RLP brut reçu : {}", raw_tx);
+        
         let raw_tx_str = raw_tx.trim_start_matches("0x");
         let raw_tx_fixed = if raw_tx_str.len() % 2 != 0 {
             format!("0{}", raw_tx_str)
@@ -3261,126 +3430,525 @@ module.register_async_method("eth_sendRawTransaction", move |params, _meta, _| {
             ));
         }
 
-        // Hash de la tx (pour référence)
-        let mut hasher = Keccak256::new();
-        hasher.update(&raw_bytes);
-        let tx_hash = format!("0x{:x}", hasher.finalize());
-        let tx_hash_padded = pad_hash_64(&tx_hash);
+        println!("📦 [eth_sendRawTransaction] Bytes décodés : {} bytes", raw_bytes.len());
 
-        println!("➡️ eth_sendRawTransaction – raw tx hash: {}", tx_hash);
-
-        // Détection du type de transaction
-        let tx_type = if raw_bytes[0] < 0x80 {
-            raw_bytes[0]  // Typed tx (0x01, 0x02, 0x03, etc.)
-        } else {
-            0  // Legacy
+        // DÉTECTION DU TYPE DE TRANSACTION
+        let tx_type = if raw_bytes[0] < 0x80 { 
+            raw_bytes[0] 
+        } else { 
+            0 
         };
 
-        let mut tx_obj = serde_json::Map::new();
-        tx_obj.insert("type".to_string(), serde_json::Value::Number(tx_type.into()));
+        println!("🔍 Type de transaction détecté : 0x{:02x} ({})", 
+                 tx_type, 
+                 match tx_type {
+                     0 => "Legacy",
+                     0x01 => "EIP-2930",
+                     0x02 => "EIP-1559",
+                     _ => "Inconnu"
+                 }
+        );
 
+        let mut tx_obj = serde_json::Map::new();
         let is_deployment: bool;
         let mut to_addr: Option<String> = None;
 
         match tx_type {
-// Legacy transaction (tx_type == 0)
-0 => {
-    let rlp = Rlp::new(&raw_bytes);
-    if rlp.item_count().unwrap_or(0) < 9 {  // legacy a 9 items min (nonce .. v,r,s)
-        return Err(jsonrpsee_types::error::ErrorObject::owned(
-            -32000,
-            "RLP legacy invalide (trop court)",
-            None::<()>,
-        ));
-    }
+            // ═══════════════════════════════════════════════════════════
+            // LEGACY TRANSACTION (ECDSA recovery CORRIGÉ)
+            // ═══════════════════════════════════════════════════════════
+            0 => { 
+                println!("🔧 Parsing LEGACY transaction...");
+                
+                let rlp = Rlp::new(&raw_bytes);
+                let item_count = rlp.item_count().unwrap_or(0);
+                
+                println!("   → Items RLP : {}", item_count);
+                
+                if item_count < 9 {
+                    return Err(jsonrpsee_types::error::ErrorObject::owned(
+                        -32000, 
+                        format!("RLP legacy invalide (seulement {} items, attendu ≥9)", item_count), 
+                        None::<()>
+                    ));
+                }
+                
+                // Parsing RLP legacy : [nonce, gasPrice, gasLimit, to, value, data, v, r, s]
+                let nonce = rlp.val_at::<u64>(0).unwrap_or(0);
+                let gas_price = rlp.val_at::<u64>(1).unwrap_or(0);
+                let gas = rlp.val_at::<u64>(2).unwrap_or(0);
+                let to_bytes = rlp.at(3).unwrap().data().unwrap_or(&[]);
+                let value = rlp.val_at::<u128>(4).unwrap_or(0);
+                let data = rlp.at(5).unwrap().data().unwrap_or(&[]);
+                
+                // Signature (v, r, s)
+                let v = rlp.val_at::<u64>(6).unwrap_or(0);
+                let r_bytes = rlp.at(7).unwrap().data().unwrap_or(&[]);
+                let s_bytes = rlp.at(8).unwrap().data().unwrap_or(&[]);
 
-    let nonce              = rlp.val_at::<u64>(0).unwrap_or(0);
-    let gas_price          = rlp.val_at::<u64>(1).unwrap_or(0);
-    let gas                = rlp.val_at::<u64>(2).unwrap_or(0);
-    let to_bytes           = rlp.at(3).unwrap().data().unwrap_or(&[]);
-    let value              = rlp.val_at::<u128>(4).unwrap_or(0);
-    let data               = rlp.at(5).unwrap().data().unwrap_or(&[]);
+                println!("   → nonce: {}", nonce);
+                println!("   → gasPrice: {}", gas_price);
+                println!("   → gas: {}", gas);
+                println!("   → value: {}", value);
+                println!("   → data: {} bytes", data.len());
+                println!("   → to: {} bytes", to_bytes.len());
+                println!("   → v: {}", v);
+                
+                // ────────────────────────────────────────────────────────
+                // 🔥 ECDSA RECOVERY CORRIGÉ - UTILISE RLP ENCODING
+                // ────────────────────────────────────────────────────────
+                let chain_id = if v >= 35 {
+                    Some((v - 35) / 2)
+                } else {
+                    None
+                };
 
-    tx_obj.insert("nonce".to_string(), serde_json::Value::Number(nonce.into()));
-    tx_obj.insert("gasPrice".to_string(), serde_json::Value::Number(gas_price.into()));
-    tx_obj.insert("gas".to_string(), serde_json::Value::Number(gas.into()));
-    tx_obj.insert("value".to_string(), serde_json::Value::String(format!("0x{:x}", value)));
-    tx_obj.insert("data".to_string(), serde_json::Value::String(format!("0x{}", hex::encode(data))));
+                println!("   → Chain ID (EIP-155) : {:?}", chain_id);
 
-    is_deployment = to_bytes.is_empty();
-    if !is_deployment {
-        to_addr = Some(format!("0x{}", hex::encode(to_bytes)));
-        tx_obj.insert("to".to_string(), serde_json::Value::String(to_addr.clone().unwrap()));
-    }
-}
+                // 🔥 CORRECTION CRITIQUE : Reconstruit le hash avec RLP encoding
+                use rlp::RlpStream;
+                
+                let mut rlp_stream = RlpStream::new();
+                rlp_stream.begin_list(if chain_id.is_some() { 9 } else { 6 });
+                rlp_stream.append(&nonce);
+                rlp_stream.append(&gas_price);
+                rlp_stream.append(&gas);
+                
+                if to_bytes.is_empty() {
+                    rlp_stream.append_empty_data();
+                } else {
+                    rlp_stream.append(&to_bytes);
+                }
+                
+                rlp_stream.append(&value);
+                rlp_stream.append(&data);
+                
+                // EIP-155 : ajoute chainId, 0, 0
+                if let Some(cid) = chain_id {
+                    rlp_stream.append(&cid);
+                    rlp_stream.append(&0u8);
+                    rlp_stream.append(&0u8);
+                }
+                
+                let encoded = rlp_stream.out();
+                
+                let mut hasher = Keccak256::new();
+                hasher.update(&encoded);
+                let msg_hash = hasher.finalize();
 
-// EIP-1559 (tx_type == 0x02)
-0x02 => {
-    let payload = &raw_bytes[1..];
-    let rlp = Rlp::new(payload);
+                println!("   → Hash reconstruit (RLP): 0x{}", hex::encode(&msg_hash));
 
-    if rlp.item_count().unwrap_or(0) < 9 {
-        return Err(jsonrpsee_types::error::ErrorObject::owned(
-            -32000,
-            "RLP EIP-1559 invalide (trop court)",
-            None::<()>,
-        ));
-    }
+                // Recovery ID (v)
+                let recovery_id = if let Some(cid) = chain_id {
+                    ((v - 35 - 2 * cid) % 2) as u8
+                } else {
+                    (v - 27) as u8
+                };
 
-    let chain_id           = rlp.val_at::<u64>(0).unwrap_or(0);
-    let nonce              = rlp.val_at::<u64>(1).unwrap_or(0);
-    let max_priority_fee   = rlp.val_at::<u128>(2).unwrap_or(0);
-    let max_fee            = rlp.val_at::<u128>(3).unwrap_or(0);
-    let gas_limit          = rlp.val_at::<u64>(4).unwrap_or(0);
-    let to_bytes           = rlp.at(5).unwrap().data().unwrap_or(&[]);
-    let value              = rlp.val_at::<u128>(6).unwrap_or(0);
-    let data               = rlp.at(7).unwrap().data().unwrap_or(&[]);
+                println!("   → Recovery ID: {}", recovery_id);
 
-    tx_obj.insert("chainId".to_string(), serde_json::Value::Number(chain_id.into()));
-    tx_obj.insert("nonce".to_string(), serde_json::Value::Number(nonce.into()));
-    tx_obj.insert("maxPriorityFeePerGas".to_string(), serde_json::Value::String(format!("0x{:x}", max_priority_fee)));
-    tx_obj.insert("maxFeePerGas".to_string(), serde_json::Value::String(format!("0x{:x}", max_fee)));
-    tx_obj.insert("gas".to_string(), serde_json::Value::Number(gas_limit.into()));
-    tx_obj.insert("value".to_string(), serde_json::Value::String(format!("0x{:x}", value)));
-    tx_obj.insert("data".to_string(), serde_json::Value::String(format!("0x{}", hex::encode(data))));
+                // Conversion r, s en format [u8; 32]
+                let mut r = [0u8; 32];
+                let mut s = [0u8; 32];
+                
+                if r_bytes.len() <= 32 {
+                    r[32 - r_bytes.len()..].copy_from_slice(r_bytes);
+                }
+                if s_bytes.len() <= 32 {
+                    s[32 - s_bytes.len()..].copy_from_slice(s_bytes);
+                }
 
-    is_deployment = to_bytes.is_empty();
-    if !is_deployment {
-        to_addr = Some(format!("0x{}", hex::encode(to_bytes)));
-        tx_obj.insert("to".to_string(), serde_json::Value::String(to_addr.unwrap()));
-    }
-}
-            _ => {
-                // Autres types non supportés pour l'instant
+                println!("   → r: 0x{}", hex::encode(&r));
+                println!("   → s: 0x{}", hex::encode(&s));
+
+                // Recovery de l'adresse avec k256
+                use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
+                
+                let from_addr = match RecoveryId::try_from(recovery_id) {
+                    Ok(rid) => {
+                        let mut sig_bytes = [0u8; 64];
+                        sig_bytes[..32].copy_from_slice(&r);
+                        sig_bytes[32..].copy_from_slice(&s);
+                        
+                        match Signature::from_bytes(&sig_bytes.into()) {
+                            Ok(sig) => {
+                                match VerifyingKey::recover_from_prehash(&msg_hash, &sig, rid) {
+                                    Ok(vk) => {
+                                        let pubkey = vk.to_encoded_point(false);
+                                        let pubkey_bytes = pubkey.as_bytes();
+                                        
+                                        let mut addr_hasher = Keccak256::new();
+                                        addr_hasher.update(&pubkey_bytes[1..]); // sans le préfixe 04
+                                        let addr_hash = addr_hasher.finalize();
+                                        
+                                        let recovered = format!("0x{}", hex::encode(&addr_hash[12..]));
+                                        println!("   ✅ FROM récupéré via ECDSA : {}", recovered);
+                                        recovered
+                                    }
+                                    Err(e) => {
+                                        // 🔥 PLUS DE FALLBACK - ON RETOURNE UNE ERREUR
+                                        return Err(jsonrpsee_types::error::ErrorObject::owned(
+                                            -32000,
+                                            format!("ECDSA recovery failed: {}", e),
+                                            Some(format!("Cannot recover sender address from signature")),
+                                        ));
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                return Err(jsonrpsee_types::error::ErrorObject::owned(
+                                    -32000,
+                                    format!("Invalid signature: {}", e),
+                                    Some(format!("Signature verification failed")),
+                                ));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        return Err(jsonrpsee_types::error::ErrorObject::owned(
+                            -32000,
+                            format!("Invalid recovery ID: {}", e),
+                            Some(format!("v parameter is invalid: {}", v)),
+                        ));
+                    }
+                };
+
+                tx_obj.insert("from".to_string(), serde_json::Value::String(from_addr));
+                
+                tx_obj.insert("nonce".to_string(), serde_json::Value::Number(nonce.into()));
+                tx_obj.insert("gasPrice".to_string(), serde_json::Value::Number(gas_price.into()));
+                tx_obj.insert("gas".to_string(), serde_json::Value::Number(gas.into()));
+                tx_obj.insert("value".to_string(), serde_json::Value::String(format!("0x{:x}", value)));
+                tx_obj.insert("data".to_string(), serde_json::Value::String(format!("0x{}", hex::encode(data))));
+
+                is_deployment = to_bytes.is_empty();
+                
+                if !is_deployment {
+                    to_addr = Some(format!("0x{}", hex::encode(to_bytes)));
+                    tx_obj.insert("to".to_string(), serde_json::Value::String(to_addr.clone().unwrap()));
+                    println!("   → Transaction d'appel vers : {}", to_addr.as_ref().unwrap());
+                } else {
+                    println!("   → DÉPLOIEMENT DE CONTRAT détecté (to vide)");
+                }
+            }
+            
+  // ═══════════════════════════════════════════════════════════
+    // EIP-2930 TRANSACTION (Access List)
+    // ═══════════════════════════════════════════════════════════
+    0x01 => {
+        println!("🔧 Parsing EIP-2930 transaction...");
+        
+        let rlp = Rlp::new(&raw_bytes[1..]); // Skip type byte
+        let item_count = rlp.item_count().unwrap_or(0);
+        
+        println!("   → Items RLP EIP-2930 : {}", item_count);
+        
+        if item_count < 8 {
+            return Err(jsonrpsee_types::error::ErrorObject::owned(
+                -32000, 
+                format!("RLP EIP-2930 invalide (seulement {} items, attendu ≥8)", item_count), 
+                None::<()>
+            ));
+        }
+        
+        // Parsing RLP EIP-2930 : [chainId, nonce, gasPrice, gasLimit, to, value, data, accessList, v, r, s]
+        let chain_id = rlp.val_at::<u64>(0).unwrap_or(0);
+        let nonce = rlp.val_at::<u64>(1).unwrap_or(0);
+        let gas_price = rlp.val_at::<u64>(2).unwrap_or(0);
+        let gas = rlp.val_at::<u64>(3).unwrap_or(0);
+        let to_bytes = rlp.at(4).unwrap().data().unwrap_or(&[]);
+        let value = rlp.val_at::<u128>(5).unwrap_or(0);
+        let data = rlp.at(6).unwrap().data().unwrap_or(&[]);
+        
+        // Signature (v, r, s) - derniers éléments
+        let v = rlp.val_at::<u64>(item_count - 3).unwrap_or(0);
+        let r_bytes = rlp.at(item_count - 2).unwrap().data().unwrap_or(&[]);
+        let s_bytes = rlp.at(item_count - 1).unwrap().data().unwrap_or(&[]);
+
+        println!("   → chainId: {}", chain_id);
+        println!("   → nonce: {}", nonce);
+        println!("   → gasPrice: {}", gas_price);
+        println!("   → gas: {}", gas);
+        
+        // ECDSA Recovery (même logique que legacy)
+        use rlp::RlpStream;
+        use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
+        
+        let mut rlp_stream = RlpStream::new();
+        rlp_stream.begin_list(8); // 8 champs avant signature
+        rlp_stream.append(&chain_id);
+        rlp_stream.append(&nonce);
+        rlp_stream.append(&gas_price);
+        rlp_stream.append(&gas);
+        
+        if to_bytes.is_empty() {
+            rlp_stream.append_empty_data();
+        } else {
+            rlp_stream.append(&to_bytes);
+        }
+        
+        rlp_stream.append(&value);
+        rlp_stream.append(&data);
+        rlp_stream.begin_list(0); // accessList vide pour simplifier
+        
+        let encoded = rlp_stream.out();
+        
+        let mut hasher = Keccak256::new();
+        hasher.update(&[0x01]); // Type prefix
+        hasher.update(&encoded);
+        let msg_hash = hasher.finalize();
+
+        let recovery_id = (v % 2) as u8;
+        
+        let mut r = [0u8; 32];
+        let mut s = [0u8; 32];
+        
+        if r_bytes.len() <= 32 {
+            r[32 - r_bytes.len()..].copy_from_slice(r_bytes);
+        }
+        if s_bytes.len() <= 32 {
+            s[32 - s_bytes.len()..].copy_from_slice(s_bytes);
+        }
+
+        let from_addr = match RecoveryId::try_from(recovery_id) {
+            Ok(rid) => {
+                let mut sig_bytes = [0u8; 64];
+                sig_bytes[..32].copy_from_slice(&r);
+                sig_bytes[32..].copy_from_slice(&s);
+                
+                match Signature::from_bytes(&sig_bytes.into()) {
+                    Ok(sig) => {
+                        match VerifyingKey::recover_from_prehash(&msg_hash, &sig, rid) {
+                            Ok(vk) => {
+                                let pubkey = vk.to_encoded_point(false);
+                                let pubkey_bytes = pubkey.as_bytes();
+                                
+                                let mut addr_hasher = Keccak256::new();
+                                addr_hasher.update(&pubkey_bytes[1..]);
+                                let addr_hash = addr_hasher.finalize();
+                                
+                                let recovered = format!("0x{}", hex::encode(&addr_hash[12..]));
+                                println!("   ✅ FROM récupéré (EIP-2930) : {}", recovered);
+                                recovered
+                            }
+                            Err(e) => {
+                                return Err(jsonrpsee_types::error::ErrorObject::owned(
+                                    -32000,
+                                    format!("ECDSA recovery failed (EIP-2930): {}", e),
+                                    None::<()>,
+                                ));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        return Err(jsonrpsee_types::error::ErrorObject::owned(
+                            -32000,
+                            format!("Invalid signature (EIP-2930): {}", e),
+                            None::<()>,
+                        ));
+                    }
+                }
+            }
+            Err(e) => {
                 return Err(jsonrpsee_types::error::ErrorObject::owned(
                     -32000,
-                    format!("Type de transaction non supporté: 0x{:02x}", tx_type),
+                    format!("Invalid recovery ID (EIP-2930): {}", e),
                     None::<()>,
                 ));
             }
+        };
+
+        tx_obj.insert("from".to_string(), serde_json::Value::String(from_addr));
+        tx_obj.insert("chainId".to_string(), serde_json::Value::Number(chain_id.into()));
+        tx_obj.insert("nonce".to_string(), serde_json::Value::Number(nonce.into()));
+        tx_obj.insert("gasPrice".to_string(), serde_json::Value::Number(gas_price.into()));
+        tx_obj.insert("gas".to_string(), serde_json::Value::Number(gas.into()));
+        tx_obj.insert("value".to_string(), serde_json::Value::String(format!("0x{:x}", value)));
+        tx_obj.insert("data".to_string(), serde_json::Value::String(format!("0x{}", hex::encode(data))));
+
+        is_deployment = to_bytes.is_empty();
+        
+        if !is_deployment {
+            to_addr = Some(format!("0x{}", hex::encode(to_bytes)));
+            tx_obj.insert("to".to_string(), serde_json::Value::String(to_addr.clone().unwrap()));
+        }
+    }
+    
+    // ═══════════════════════════════════════════════════════════
+    // EIP-1559 TRANSACTION (London Hard Fork) - CORRECTION COMPLÈTE
+    // ═══════════════════════════════════════════════════════════
+    0x02 => {
+        println!("🔧 Parsing EIP-1559 transaction...");
+        
+        let rlp = Rlp::new(&raw_bytes[1..]); // Skip type byte
+        let item_count = rlp.item_count().unwrap_or(0);
+        
+        println!("   → Items RLP EIP-1559 : {}", item_count);
+        
+        if item_count < 9 {
+            return Err(jsonrpsee_types::error::ErrorObject::owned(
+                -32000, 
+                format!("RLP EIP-1559 invalide (seulement {} items, attendu ≥9)", item_count), 
+                None::<()>
+            ));
+        }
+        
+        // Parsing RLP EIP-1559 : [chainId, nonce, maxPriorityFeePerGas, maxFeePerGas, gasLimit, to, value, data, accessList, v, r, s]
+        let chain_id = rlp.val_at::<u64>(0).unwrap_or(0);
+        let nonce = rlp.val_at::<u64>(1).unwrap_or(0);
+        let max_priority_fee = rlp.val_at::<u128>(2).unwrap_or(0);
+        let max_fee = rlp.val_at::<u128>(3).unwrap_or(0);
+        let gas = rlp.val_at::<u64>(4).unwrap_or(0);
+        let to_bytes = rlp.at(5).unwrap().data().unwrap_or(&[]);
+        let value = rlp.val_at::<u128>(6).unwrap_or(0);
+        let data = rlp.at(7).unwrap().data().unwrap_or(&[]);
+        
+        // Signature (v, r, s) - derniers éléments
+        let v = rlp.val_at::<u64>(item_count - 3).unwrap_or(0);
+        let r_bytes = rlp.at(item_count - 2).unwrap().data().unwrap_or(&[]);
+        let s_bytes = rlp.at(item_count - 1).unwrap().data().unwrap_or(&[]);
+
+        println!("   → chainId: {}", chain_id);
+        println!("   → nonce: {}", nonce);
+        println!("   → maxPriorityFeePerGas: {}", max_priority_fee);
+        println!("   → maxFeePerGas: {}", max_fee);
+        println!("   → gas: {}", gas);
+        
+        // ECDSA Recovery pour EIP-1559
+        use rlp::RlpStream;
+        use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
+        
+        let mut rlp_stream = RlpStream::new();
+        rlp_stream.begin_list(9); // 9 champs avant signature
+        rlp_stream.append(&chain_id);
+        rlp_stream.append(&nonce);
+        rlp_stream.append(&max_priority_fee);
+        rlp_stream.append(&max_fee);
+        rlp_stream.append(&gas);
+        
+        if to_bytes.is_empty() {
+            rlp_stream.append_empty_data();
+        } else {
+            rlp_stream.append(&to_bytes);
+        }
+        
+        rlp_stream.append(&value);
+        rlp_stream.append(&data);
+        rlp_stream.begin_list(0); // accessList vide
+        
+        let encoded = rlp_stream.out();
+        
+        let mut hasher = Keccak256::new();
+        hasher.update(&[0x02]); // Type prefix EIP-1559
+        hasher.update(&encoded);
+        let msg_hash = hasher.finalize();
+
+        let recovery_id = (v % 2) as u8;
+        
+        let mut r = [0u8; 32];
+        let mut s = [0u8; 32];
+        
+        if r_bytes.len() <= 32 {
+            r[32 - r_bytes.len()..].copy_from_slice(r_bytes);
+        }
+        if s_bytes.len() <= 32 {
+            s[32 - s_bytes.len()..].copy_from_slice(s_bytes);
         }
 
-        // Pour les déploiements, on force l'absence de "to"
+        let from_addr = match RecoveryId::try_from(recovery_id) {
+            Ok(rid) => {
+                let mut sig_bytes = [0u8; 64];
+                sig_bytes[..32].copy_from_slice(&r);
+                sig_bytes[32..].copy_from_slice(&s);
+                
+                match Signature::from_bytes(&sig_bytes.into()) {
+                    Ok(sig) => {
+                        match VerifyingKey::recover_from_prehash(&msg_hash, &sig, rid) {
+                            Ok(vk) => {
+                                let pubkey = vk.to_encoded_point(false);
+                                let pubkey_bytes = pubkey.as_bytes();
+                                
+                                let mut addr_hasher = Keccak256::new();
+                                addr_hasher.update(&pubkey_bytes[1..]);
+                                let addr_hash = addr_hasher.finalize();
+                                
+                                let recovered = format!("0x{}", hex::encode(&addr_hash[12..]));
+                                println!("   ✅ FROM récupéré (EIP-1559) : {}", recovered);
+                                recovered
+                            }
+                            Err(e) => {
+                                return Err(jsonrpsee_types::error::ErrorObject::owned(
+                                    -32000,
+                                    format!("ECDSA recovery failed (EIP-1559): {}", e),
+                                    None::<()>,
+                                ));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        return Err(jsonrpsee_types::error::ErrorObject::owned(
+                            -32000,
+                            format!("Invalid signature (EIP-1559): {}", e),
+                            None::<()>,
+                        ));
+                    }
+                }
+            }
+            Err(e) => {
+                return Err(jsonrpsee_types::error::ErrorObject::owned(
+                    -32000,
+                    format!("Invalid recovery ID (EIP-1559): {}", e),
+                    None::<()>,
+                ));
+            }
+        };
+
+        tx_obj.insert("from".to_string(), serde_json::Value::String(from_addr));
+        tx_obj.insert("chainId".to_string(), serde_json::Value::Number(chain_id.into()));
+        tx_obj.insert("nonce".to_string(), serde_json::Value::Number(nonce.into()));
+        tx_obj.insert("maxPriorityFeePerGas".to_string(), serde_json::Value::String(format!("0x{:x}", max_priority_fee)));
+        tx_obj.insert("maxFeePerGas".to_string(), serde_json::Value::String(format!("0x{:x}", max_fee)));
+        tx_obj.insert("gas".to_string(), serde_json::Value::Number(gas.into()));
+        tx_obj.insert("value".to_string(), serde_json::Value::String(format!("0x{:x}", value)));
+        tx_obj.insert("data".to_string(), serde_json::Value::String(format!("0x{}", hex::encode(data))));
+
+        is_deployment = to_bytes.is_empty();
+        
+        if !is_deployment {
+            to_addr = Some(format!("0x{}", hex::encode(to_bytes)));
+            tx_obj.insert("to".to_string(), serde_json::Value::String(to_addr.clone().unwrap()));
+        }
+    }
+    
+    _ => {
+        return Err(jsonrpsee_types::error::ErrorObject::owned(
+            -32000,
+            format!("Type de transaction non supporté: 0x{:02x}", tx_type),
+            None::<()>,
+        ));
+    }
+}
+
+        // ENVOI DE LA TRANSACTION VERS send_transaction
         if is_deployment {
             tx_obj.remove("to");
-            println!("→ Détection déploiement (to absent)");
-        } else {
-            println!("→ Transaction appel (to: {:?})", tx_obj.get("to"));
         }
 
-        // Appel à send_transaction avec l'objet reconstruit
         let tx_val = serde_json::Value::Object(tx_obj);
+
+        println!("📤 [eth_sendRawTransaction] Transaction parsée → envoi vers send_transaction");
+        println!("   → Type : {}", if is_deployment { "Déploiement" } else { "Appel" });
 
         match engine_platform.send_transaction(tx_val).await {
             Ok(tx_hash_returned) => {
-                println!("✅ Transaction traitée → hash retourné: {}", tx_hash_returned);
+                println!("✅ eth_sendRawTransaction traité → hash: {}", tx_hash_returned);
                 Ok(serde_json::json!(tx_hash_returned))
             }
             Err(e) => {
-                eprintln!("❌ Erreur dans send_transaction: {}", e);
+                println!("❌ Échec traitement raw transaction : {}", e);
                 Err(jsonrpsee_types::error::ErrorObject::owned(
                     ErrorCode::ServerError(-32000).code(),
-                    "Échec traitement transaction",
+                    "Échec traitement raw transaction",
                     Some(format!("{}", e)),
                 ))
             }
@@ -3635,7 +4203,7 @@ module.register_async_method("eth_getCode", move |params, _meta, _| {
         use tokio::time::timeout;
         use std::time::Duration;
 
-        println!("➡️ eth_getCode appelé avec params: {:?}", params); // LOG
+        println!("➡️ eth_getCode appelé avec params: {:?}", params);
 
         let params_array: Vec<serde_json::Value> = match params.parse() {
             Ok(p) => p,
@@ -3647,38 +4215,88 @@ module.register_async_method("eth_getCode", move |params, _meta, _| {
                 ));
             }
         };
-        let address = params_array.get(0).and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
-        println!("➡️ eth_getCode address: {}", address); // LOG
 
-        // Timeout sur la lecture VM
-        let code_opt = match timeout(Duration::from_secs(20), async {
+        let address = params_array.get(0)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_lowercase()
+            .trim_start_matches("0x")
+            .to_string();
+
+        let full_address = format!("0x{}", address);
+        println!("➡️ eth_getCode address: {}", full_address);
+
+        // Timeout de sécurité
+        let code_opt = match timeout(Duration::from_secs(15), async {
             let vm = engine_platform.vm.read().await;
             let accounts = vm.state.accounts.read().await;
-            accounts.get(&address).map(|account| account.contract_state.clone())
+
+            // 1. Recherche directe dans la mémoire VM
+            if let Some(account) = accounts.get(&full_address) {
+                if !account.contract_state.is_empty() {
+                    return Some(account.contract_state.clone());
+                }
+            }
+            None
         }).await {
             Ok(result) => result,
             Err(_) => {
-                println!("⏰ Timeout eth_getCode pour address: {}", address);
+                println!("⏰ Timeout eth_getCode pour {}", full_address);
                 return Err(jsonrpsee_types::error::ErrorObject::owned(
                     ErrorCode::ServerError(-32002).code(),
-                    "Timeout VM (plus de 20 secondes)",
-                    Some("La VM est trop lente ou bloquée".to_string()),
+                    "Timeout VM",
+                    Some("La VM est trop lente".to_string()),
                 ));
             }
         };
 
+        // ====================== FALLBACK ROCKSDB (LE PLUS IMPORTANT) ======================
+        if code_opt.is_none() || code_opt.as_ref().map_or(true, |c| c.is_empty()) {
+            println!("🔍 [eth_getCode] Pas trouvé en mémoire → fallback RocksDB");
+
+            if let Some(storage_manager) = engine_platform.vm.read().await.storage_manager.clone() {
+                // Clé principale écrite par CREATE2
+                let contract_state_key = format!("account:{}:contract_state", full_address);
+                match storage_manager.read(&contract_state_key) {
+                    Ok(bytecode) if !bytecode.is_empty() => {
+                        println!("✅ [ROCKSDB] Bytecode trouvé pour {} ({} bytes)", full_address, bytecode.len());
+                        return Ok(serde_json::json!(format!("0x{}", hex::encode(&bytecode))));
+                    }
+                    _ => {}
+                }
+
+                // Fallback clé simple
+                let simple_key = format!("account:{}", full_address);
+                if let Ok(data) = storage_manager.read(&simple_key) {
+                    if let Ok(json_val) = serde_json::from_slice::<serde_json::Value>(&data) {
+                        if let Some(code) = json_val.get("contract_state")
+                            .or_else(|| json_val.get("bytecode"))
+                            .and_then(|v| v.as_str())
+                        {
+                            let clean_code = code.trim_start_matches("0x");
+                            if !clean_code.is_empty() {
+                                println!("✅ [ROCKSDB fallback] Bytecode trouvé via métadonnées");
+                                return Ok(serde_json::json!(format!("0x{}", clean_code)));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ====================== RÉSULTAT FINAL ======================
         let code_hex = match code_opt {
-            Some(ref code) if !code.is_empty() => {
-                println!("🟢 [eth_getCode] Bytecode trouvé pour {} : {} octets, hex: {}...", address, code.len(), hex::encode(&code[..std::cmp::min(16, code.len())]));
-                format!("0x{}", hex::encode(code))
-            },
+            Some(code) if !code.is_empty() => {
+                println!("🟢 [eth_getCode] Bytecode trouvé en mémoire pour {} : {} octets", full_address, code.len());
+                format!("0x{}", hex::encode(&code))
+            }
             _ => {
-                println!("🔴 [eth_getCode] Aucun bytecode pour {}", address);
+                println!("🔴 [eth_getCode] Aucun bytecode trouvé pour {}", full_address);
                 "0x".to_string()
             }
         };
 
-        println!("➡️ eth_getCode retourne: {}", code_hex); // LOG
+        println!("➡️ eth_getCode retourne: {}... (tronqué)", &code_hex[..std::cmp::min(100, code_hex.len())]);
 
         Ok::<_, jsonrpsee_types::error::ErrorObject>(serde_json::json!(code_hex))
     }
@@ -5696,4 +6314,4 @@ fn pad_hash_64(hex: &str) -> String {
     // Enlève le préfixe "0x" si présent
     let hex = hex.strip_prefix("0x").unwrap_or(hex);
     format!("0x{:0>64}", hex)
-                        }
+}
