@@ -2845,74 +2845,76 @@ pub fn execute_program(
             }
 
             //___ 0xf5 CREATE2 - Version adaptée (assemblage adresse + salt uniquement)
-0xf5 => {
-    if evm_stack.len() < 4 {
-        return Ok(halt_json_ebpf("Stack underflow on CREATE2"));
-    }
+            0xf5 => {
+                if evm_stack.len() < 4 {
+                    return Ok(halt_json_ebpf("Stack underflow on CREATE2"));
+                }
 
-    let value = evm_stack.pop().unwrap();
-    let offset = evm_stack.pop().unwrap();
-    let size = evm_stack.pop().unwrap();
-    let salt = evm_stack.pop().unwrap();
+                let value = evm_stack.pop().unwrap();
+                let offset = evm_stack.pop().unwrap();
+                let size = evm_stack.pop().unwrap();
+                let salt = evm_stack.pop().unwrap();
 
-    let offset_usize = as_usize_or_fail(offset);
-    let size_usize = as_usize_or_fail(size);
+                let offset_usize = as_usize_or_fail(offset);
+                let size_usize = as_usize_or_fail(size);
 
-    if !resize_memory_ebpf(&mut global_mem, offset_usize, size_usize) {
-        return Ok(halt_json_ebpf("Memory resize failed on CREATE2"));
-    }
+                if !resize_memory_ebpf(&mut global_mem, offset_usize, size_usize) {
+                    return Ok(halt_json_ebpf("Memory resize failed on CREATE2"));
+                }
 
-    let init_code = memory_slice_len(&global_mem, offset_usize, size_usize).to_vec();
+                let init_code = memory_slice_len(&global_mem, offset_usize, size_usize).to_vec();
 
-    println!(
-        "🛠️ [CREATE2] value={}, init_code_len={}, salt={:064x}",
-        value, init_code.len(), salt
-    );
+                println!(
+                    "🛠️ [CREATE2] value={}, init_code_len={}, salt={:064x}",
+                    value,
+                    init_code.len(),
+                    salt
+                );
 
-    if init_code.is_empty() {
-        println!("❌ [CREATE2] Init code vide");
-        evm_stack.push(u256::zero());
-        consume_gas_amount(&mut execution_context, 32000)?;
-        bytecode_pc += 1;
-        continue;
-    }
+                if init_code.is_empty() {
+                    println!("❌ [CREATE2] Init code vide");
+                    evm_stack.push(u256::zero());
+                    consume_gas_amount(&mut execution_context, 32000)?;
+                    bytecode_pc += 1;
+                    continue;
+                }
 
-    // === Assemblage adresse CREATE2 (seulement calcul, pas d'exécution) ===
-    let mut hasher = Keccak256::new();
-    hasher.update(&[0xff]);
+                // === Assemblage adresse CREATE2 (seulement calcul, pas d'exécution) ===
+                let mut hasher = Keccak256::new();
+                hasher.update(&[0xff]);
 
-    let sender = interpreter_args.contract_address.clone();
-    let mut sender_bytes = [0u8; 20];
-    if let Ok(decoded) = hex::decode(sender.trim_start_matches("0x")) {
-        if decoded.len() == 20 {
-            sender_bytes.copy_from_slice(&decoded);
-        }
-    }
-    hasher.update(&sender_bytes);
+                let sender = interpreter_args.contract_address.clone();
+                let mut sender_bytes = [0u8; 20];
+                if let Ok(decoded) = hex::decode(sender.trim_start_matches("0x")) {
+                    if decoded.len() == 20 {
+                        sender_bytes.copy_from_slice(&decoded);
+                    }
+                }
+                hasher.update(&sender_bytes);
 
-    let mut salt_bytes = [0u8; 32];
-    salt.to_big_endian(&mut salt_bytes);
-    hasher.update(&salt_bytes);
+                let mut salt_bytes = [0u8; 32];
+                salt.to_big_endian(&mut salt_bytes);
+                hasher.update(&salt_bytes);
 
-    let init_code_hash = Keccak256::digest(&init_code);
-    hasher.update(&init_code_hash);
+                let init_code_hash = Keccak256::digest(&init_code);
+                hasher.update(&init_code_hash);
 
-    let hash = hasher.finalize();
-    let new_address = format!("0x{}", hex::encode(&hash[12..32]));
+                let hash = hasher.finalize();
+                let new_address = format!("0x{}", hex::encode(&hash[12..32]));
 
-    println!("📍 [CREATE2] Adresse calculée : {}", new_address);
+                println!("📍 [CREATE2] Adresse calculée : {}", new_address);
 
-    // Push l'adresse sur la stack
-    evm_stack.push(encode_address_to_u256(&new_address));
+                // Push l'adresse sur la stack
+                evm_stack.push(encode_address_to_u256(&new_address));
 
-    // Consommation gas standard
-    consume_gas_amount(&mut execution_context, 32000)?;
+                // Consommation gas standard
+                consume_gas_amount(&mut execution_context, 32000)?;
 
-    // Avance toujours le PC
-    bytecode_pc += 1;
-    continue;
-}
-            
+                // Avance toujours le PC
+                bytecode_pc += 1;
+                continue;
+            }
+
             // ___ 0xf9 TSTORE (EIP-1153 Transient Storage Store)
             0xf9 => {
                 if evm_stack.len() < 2 {
