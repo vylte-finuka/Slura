@@ -2854,7 +2854,7 @@ pub fn execute_program(
                 return Ok(result);
             }
 
-            //___ 0xf5 CREATE2 - Version adaptée (assemblage adresse + salt uniquement)
+                     //___ 0xf5 CREATE2 - Version corrigée avec extraction runtime
             0xf5 => {
                 if evm_stack.len() < 4 {
                     return Ok(halt_json_ebpf("Stack underflow on CREATE2"));
@@ -2889,7 +2889,7 @@ pub fn execute_program(
                     continue;
                 }
 
-                // === Assemblage adresse CREATE2 (seulement calcul, pas d'exécution) ===
+                // === Assemblage adresse CREATE2 ===
                 let mut hasher = Keccak256::new();
                 hasher.update(&[0xff]);
 
@@ -2914,16 +2914,29 @@ pub fn execute_program(
 
                 println!("📍 [CREATE2] Adresse calculée : {}", new_address);
 
-                // === Persistance du contrat dans le world_state (comme CREATE 0xf0) ===
+                // ✅ NOUVEAU: Extraction du runtime depuis le creation bytecode
+                let runtime_bytecode = match extract_runtime_from_creation_bytecode(&init_code) {
+                    Ok(runtime) => {
+                        println!("✅ [CREATE2] Runtime extrait: {} bytes", runtime.len());
+                        runtime
+                    }
+                    Err(e) => {
+                        println!("⚠️ [CREATE2] Impossible d'extraire le runtime: {} - utilise creation code", e);
+                        // Fallback: utilise le creation code directement
+                        init_code.clone()
+                    }
+                };
+
+                // === Persistance du contrat avec le RUNTIME ===
                 execution_context
                     .world_state
                     .code
-                    .insert(new_address.clone(), init_code.clone());
+                    .insert(new_address.clone(), runtime_bytecode.clone());
 
                 let new_account = AccountState {
                     balance: value,
                     nonce: u256::one(),
-                    code: init_code.clone(),
+                    code: runtime_bytecode.clone(), // ✅ CORRECTION: utilise le runtime
                     storage_root: String::new(),
                     is_contract: true,
                 };
@@ -2933,36 +2946,31 @@ pub fn execute_program(
                     .insert(new_address.clone(), new_account);
 
                 println!(
-                    "💾 [CREATE2 PERSIST] Contrat sauvegardé en mémoire à {} ({} bytes)",
+                    "💾 [CREATE2 PERSIST] Contrat sauvegardé avec runtime à {} ({} bytes)",
                     new_address,
-                    init_code.len()
+                    runtime_bytecode.len()
                 );
 
-                // Persistance RocksDB via storage_manager si disponible
+                // Persistance RocksDB avec le runtime
                 if let Some(ref storage_manager) = execution_context.storage_manager {
                     let code_key = format!("account:{}:contract_state", new_address);
-                    let _ = storage_manager.write(&code_key, &init_code);
-                    println!("💾 [CREATE2 ROCKSDB] Bytecode persisté pour {}", new_address);
+                    let _ = storage_manager.write(&code_key, &runtime_bytecode); // ✅ runtime, pas init_code
+                    println!("💾 [CREATE2 ROCKSDB] Runtime persisté pour {}", new_address);
                 }
 
-                // Déclenchement du callback engine_platform si configuré
+                // Déclenchement du callback avec le runtime
                 if let Some(ref callback) = execution_context.on_create2_event {
-                    if let Err(e) = callback(&new_address, init_code.clone(), value) {
+                    if let Err(e) = callback(&new_address, runtime_bytecode.clone(), value) {
                         println!("⚠️ [CREATE2] Erreur callback : {}", e);
                     }
                 }
 
-                println!("✅ [CREATE2] Contrat déployé et persisté à {}", new_address);
+                println!("✅ [CREATE2] Contrat déployé avec runtime à {}", new_address);
 
                 // Push l'adresse sur la stack
                 evm_stack.push(encode_address_to_u256(&new_address));
 
-                // Consommation gas standard
                 consume_gas_amount(&mut execution_context, 32000)?;
-
-                // Avance toujours le PC
-                bytecode_pc += 1;
-                continue;
             }
 
             // ___ 0xf9 TSTORE (EIP-1153 Transient Storage Store)

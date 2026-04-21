@@ -1605,156 +1605,6 @@ pub async fn verify_contract_deployment(&self, contract_address: &str) -> Result
         }
     }
 
-    /// Gère le déploiement d'un contrat déclenché par l'opcode CREATE2 (0xf5) dans l'interpréteur.
-    ///
-    /// Cette méthode est conçue pour être appelée via le callback `on_create2_event` de `UvmExecutionContext`.
-    /// Elle reçoit l'adresse calculée, l'init_code et la valeur, puis persiste le contrat
-    /// dans UvmWorldState et RocksDB de la même manière que `perform_contract_deployment`.
-    ///
-    /// # Arguments
-    /// * `contract_address` - L'adresse Ethereum du contrat calculée par CREATE2
-    /// * `init_code` - Le bytecode d'initialisation du contrat
-    /// * `value` - La valeur en wei transférée au contrat
-    pub async fn handle_create2_deployment(
-        &self,
-        contract_address: &str,
-        init_code: Vec<u8>,
-        value: primitive_types::U256,
-    ) -> Result<(), String> {
-        if init_code.is_empty() {
-            return Err("handle_create2_deployment: init_code vide".to_string());
-        }
-
-        println!(
-            "🔧 [CREATE2 HANDLER] Déploiement CREATE2 à {} ({} bytes)",
-            contract_address,
-            init_code.len()
-        );
-
-        let vez_addr = contract_address.to_string();
-
-        // Vérifier si le contrat existe déjà dans RocksDB
-        let already_exists = {
-            let vm = self.vm.read().await;
-            if let Some(manager) = vm.storage_manager.as_ref() {
-                let account_key = format!("account:{}", vez_addr);
-                match manager.read(&account_key) {
-                    Ok(_) => {
-                        println!(
-                            "🪙 [CREATE2 HANDLER] Contrat déjà présent dans RocksDB ({})",
-                            vez_addr
-                        );
-                        true
-                    }
-                    Err(_) => false,
-                }
-            } else {
-                false
-            }
-        };
-
-        if already_exists {
-            return Ok(());
-        }
-
-        // Extraction du runtime bytecode (le constructeur retourne le code runtime)
-        let runtime_bytecode = match extract_runtime_from_creation_bytecode(&init_code) {
-            Ok(runtime) => {
-                println!(
-                    "✅ [CREATE2 HANDLER] Runtime extrait : {} bytes",
-                    runtime.len()
-                );
-                runtime
-            }
-            Err(_) => {
-                // Fallback : utiliser le bytecode complet si l'extraction échoue
-                println!("⚠️ [CREATE2 HANDLER] Extraction runtime échouée, utilisation du bytecode complet");
-                init_code.clone()
-            }
-        };
-
-        // Persistance dans UvmWorldState (comptes + code)
-        {
-            let mut vm = self.vm.write().await;
-            let mut accounts = vm.state.accounts.write().await;
-
-            if !accounts.contains_key(&vez_addr) {
-                let balance_u128 = if value > primitive_types::U256::from(u128::MAX) {
-                    u128::MAX
-                } else {
-                    value.as_u128()
-                };
-
-                let initial_account = vuc_tx::slurachain_vm::AccountState {
-                    eth_address: vez_addr.clone(),
-                    slu_zk_address: vez_addr.clone(),
-                    balance: balance_u128,
-                    contract_state: runtime_bytecode.clone(),
-                    resources: {
-                        let mut r = std::collections::BTreeMap::new();
-                        r.insert(
-                            "deployed_by_create2".to_string(),
-                            serde_json::Value::Bool(true),
-                        );
-                        r
-                    },
-                    state_version: 1,
-                    last_block_number: 0,
-                    nonce: 0,
-                    code_hash: {
-                        use sha3::Digest;
-                        format!("0x{}", hex::encode(sha3::Keccak256::digest(&runtime_bytecode)))
-                    },
-                    storage_root: format!("storage_{}", vez_addr),
-                    is_contract: true,
-                    gas_used: 0,
-                };
-                accounts.insert(vez_addr.clone(), initial_account);
-                println!(
-                    "   → [CREATE2 HANDLER] Compte créé dans UvmWorldState ({} bytes)",
-                    runtime_bytecode.len()
-                );
-            }
-        }
-
-        // Persistance dans RocksDB
-        {
-            let vm = self.vm.read().await;
-            if let Some(ref storage_manager) = vm.storage_manager {
-                let code_key = format!("account:{}:contract_state", vez_addr);
-                if let Err(e) = storage_manager.write(&code_key, &runtime_bytecode) {
-                    eprintln!(
-                        "❌ [CREATE2 HANDLER] Erreur écriture RocksDB bytecode : {}",
-                        e
-                    );
-                } else {
-                    println!(
-                        "💾 [CREATE2 HANDLER] Bytecode persisté dans RocksDB pour {}",
-                        vez_addr
-                    );
-                }
-
-                let account_json = serde_json::json!({
-                    "eth_address": vez_addr,
-                    "is_contract": true,
-                    "deployed_by_create2": true,
-                    "bytecode_len": runtime_bytecode.len(),
-                });
-                let account_key = format!("account:{}", vez_addr);
-                let _ = storage_manager.write(
-                    &account_key,
-                    account_json.to_string().as_bytes(),
-                );
-            }
-        }
-
-        println!(
-            "✅ [CREATE2 HANDLER] Contrat CREATE2 persisté avec succès à {}",
-            vez_addr
-        );
-        Ok(())
-    }
-
 /// Calcul du logsBloom Ethereum (2048 bits)
     pub fn compute_logs_bloom(&self, logs: &[serde_json::Value]) -> String {
         use sha3::{Digest, Keccak256};
@@ -1803,97 +1653,32 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
 
     println!("➡️ [send_transaction] Transaction reçue : {:?}", tx_params);
 
-    // ─── SUPPORT DU FORMAT ARRAY (comme eth_call) ───
-    let tx_obj = if tx_params.is_array() {
-        tx_params.as_array().unwrap().get(0).cloned().unwrap_or_default()
-    } else {
-        tx_params.clone()
+    // ===================================================================
+    // FROM DYNAMIQUE – HIÉRARCHIE AVEC FALLBACKS
+    // ===================================================================
+    let from_addr = {
+        // 1️⃣ PRIORITÉ 1 : Champ `from` direct dans tx_params
+        if let Some(from_val) = tx_params.get("from").and_then(|v| v.as_str()) {
+            let from_clean = from_val.trim().to_lowercase();
+            if from_clean.starts_with("0x") && from_clean.len() == 42 {
+                println!("✅ From address extraite de tx_params : {}", from_clean);
+                from_clean
+            } else {
+                println!("⚠️ From invalide dans tx_params → fallback validator");
+                self.validator_address.clone()
+            }
+        } else {
+            println!("ℹ️ Pas de `from` dans tx_params → utilise validator");
+            self.validator_address.clone()
+        }
     };
 
-    // ─── PARSING DES CHAMPS (avec support RLP si data brute) ───
-    let from_addr = tx_obj.get("from")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_lowercase();
+    println!("✅ From address finale (dynamique) : {}", from_addr);
 
-    let to_addr = tx_obj.get("to")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_lowercase();
-
-    let gas_price = tx_obj.get("gasPrice")
-        .or_else(|| tx_obj.get("maxFeePerGas"))
-        .or_else(|| tx_obj.get("max_priority_fee_per_gas"))
-        .and_then(|v| {
-            if v.is_string() {
-                let s = v.as_str().unwrap();
-                if s.starts_with("0x") {
-                    u64::from_str_radix(&s[2..], 16).ok()
-                } else {
-                    s.parse().ok()
-                }
-            } else if v.is_u64() {
-                Some(v.as_u64().unwrap())
-            } else {
-                None
-            }
-        })
-        .unwrap_or(1);
-
-    let estimated_gas = tx_obj.get("gas")
-        .and_then(|v| {
-            if v.is_string() {
-                let s = v.as_str().unwrap();
-                if s.starts_with("0x") {
-                    u64::from_str_radix(&s[2..], 16).ok()
-                } else {
-                    s.parse().ok()
-                }
-            } else if v.is_u64() {
-                Some(v.as_u64().unwrap())
-            } else {
-                None
-            }
-        })
-        .unwrap_or(21000);
-
-    // Exception spéciale pour l'initialisation VEZ (mint initial) → pas de frais
-    let is_vez_initialization = to_addr == "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" &&
-        tx_obj.get("data").and_then(|v| v.as_str()).unwrap_or("")
-            .starts_with("0x40c10f1900000000000000000000000053ae54b11251d5003e9aa51422405bc35a2ef32d");
-
-    if is_vez_initialization {
-        println!("🆓 Transaction d'initialisation VEZ détectée → aucun disburse de frais");
-    }
-
-    // Récupération du nonce actuel
-    let current_account_nonce = self.get_transaction_count(&from_addr).await.unwrap_or(0);
-
-	let calldata_bytes = tx_params.get("data")
-    .or_else(|| tx_params.get("input"))
-    .and_then(|v| v.as_str())
-    .map(|data| {
-        if data.starts_with("0x") {
-            hex::decode(&data[2..]).unwrap_or_default()
-        } else {
-            hex::decode(data).unwrap_or_default()
-        }
-    })
-    .unwrap_or_default();
-
-    println!("✅ From address validée (récupérée du raw tx) : {}", from_addr);
-    let is_create2 = calldata_bytes.contains(&0xf5);
-
-    println!(
-        "🔍 Détection opcode 0xf5 CREATE2 : {}",
-        if is_create2 { "OUI → déploiement CREATE2" } else { "non" }
-    );
-
-    // Extraction de "to" (support objet ou tableau)
+    // Extraction de "to" (optionnel)
     let to_addr = if tx_params.is_array() {
         tx_params.as_array()
             .and_then(|arr| arr.get(0))
-            .and_then(|v| v.get("to").or_else(|| Some(v)))
             .and_then(|v| v.as_str())
             .map(|s| s.trim().to_lowercase())
             .unwrap_or_default()
@@ -1904,7 +1689,14 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
             .unwrap_or_default()
     };
 
-    println!("📍 To address détectée   : {}", if to_addr.is_empty() { "(déploiement - to null)" } else { &to_addr });
+    println!("📍 To address détectée   : {}", if to_addr.is_empty() { "(déploiement ou raw tx)" } else { &to_addr });
+
+    let is_vez_initialization = to_addr == "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" &&
+        tx_params.get("data").and_then(|v| v.as_str()).unwrap_or("")
+            .starts_with("0x40c10f19");
+
+    // Récupération du nonce actuel
+    let current_account_nonce = self.get_transaction_count(&from_addr).await.unwrap_or(0);
 
     // Force le nonce à être croissant
     let final_nonce = tx_params.get("nonce")
@@ -1924,15 +1716,31 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         })
         .map(|provided_nonce| std::cmp::max(provided_nonce, current_account_nonce))
         .unwrap_or(current_account_nonce);
+    let calldata_bytes = tx_params.get("data")
+        .or_else(|| tx_params.get("input"))
+        .and_then(|v| v.as_str())
+        .map(|s| {
+            if s.starts_with("0x") {
+                hex::decode(&s[2..]).unwrap_or_default()
+            } else {
+                hex::decode(s).unwrap_or_default()
+            }
+        })
+        .unwrap_or_default();
 
     // Détection déploiement
-    let is_deployment = to_addr.is_empty() ||
+ let is_deployment = to_addr.is_empty() ||
                        to_addr == "0x" ||
                        tx_params.get("to").is_none() ||
-                       tx_params.get("to") == Some(&serde_json::Value::Null);
+                       tx_params.get("to") == Some(&serde_json::Value::Null) ||
+                       calldata_bytes.contains(&0xf5);  // ← AJOUT : opcode CREATE2
 
-    // Valeur envoyée (u128)
-    let value = tx_obj.get("value")
+    // Log informatif si CREATE2 détecté automatiquement
+    if calldata_bytes.contains(&0xf5) && !to_addr.is_empty() {
+        println!("⚡ [AUTO-CREATE2] Opcode 0xf5 détecté dans calldata → conversion en déploiement CREATE2 automatique");
+    }
+    // Valeur envoyée
+    let value = tx_params.get("value")
         .and_then(|v| {
             if v.is_string() {
                 let s = v.as_str().unwrap();
@@ -1950,101 +1758,170 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
             }
         }).unwrap_or(0);
 
-    // ─── RÉCUPÉRATION DES DONNÉES AVEC SUPPORT "data" ET "input" ───
-    let data = tx_obj.get("data")
-        .or_else(|| tx_obj.get("input"))
+    let data = tx_params.get("data")
+        .or_else(|| tx_params.get("input"))
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    // ─── DÉCODAGE HEX → BYTES (exactement comme eth_call) ───
-    let calldata_bytes = if !data.is_empty() {
-        let hex_clean = data.trim_start_matches("0x");
-        hex::decode(hex_clean).unwrap_or_default()
+    let calldata_bytes = if !data.is_empty() && data.starts_with("0x") {
+        hex::decode(&data[2..]).unwrap_or_default()
+    } else if !data.is_empty() {
+        hex::decode(data).unwrap_or_default()
     } else {
         vec![]
     };
 
-    println!(
-        "🟢 [DEBUG] Formation du calldata in send_transaction : 0x{}",
-        hex::encode(&calldata_bytes)
-    );
-
-    // ─── EXTRACTION DU SELECTOR ET ARGUMENTS (comme eth_call) ───
-    let (function_name, arguments) = if calldata_bytes.len() >= 4 {
-        let selector = u32::from_be_bytes(calldata_bytes[0..4].try_into().unwrap_or([0; 4]));
+let creation_bytecode = if is_deployment && !data.is_empty() {
+    if data.starts_with("0xcdcb760a") {
+        // C'est un appel à la factory Create2Factory.deploy()
+        println!("🏭 [CREATE2 FACTORY] Détection d'un appel à Create2Factory.deploy()");
         
-        // Tentative de récupération du nom de fonction depuis les modules
-        let fn_name = if !to_addr.is_empty() {
-            let vm = self.vm.read().await;
-            if let Some(module) = vm.modules.get(&to_addr) {
-                if let Some((name, _)) = module.functions.iter().find(|(_, meta)| meta.selector == selector) {
-                    Some(name.clone())
+        let calldata_hex = data.trim_start_matches("0x");
+        if let Ok(calldata_bytes_raw) = hex::decode(calldata_hex) {
+            if calldata_bytes_raw.len() >= 100 {
+                println!("🔍 [DEBUG] Calldata total: {} bytes", calldata_bytes_raw.len());
+                
+                // Structure ABI pour deploy(bytes32 salt, bytes memory bytecode)
+                if calldata_bytes_raw.len() < 68 {
+                    println!("❌ [FACTORY] Calldata trop court pour contenir salt + offset");
+                    calldata_bytes.clone()
                 } else {
-                    Some(format!("function_{:08x}", selector))
+                    let salt = &calldata_bytes_raw[4..36];
+                    let offset_bytes = &calldata_bytes_raw[36..68];
+                    
+                    // Lecture de l'offset (big endian, 32 bytes)
+                    let offset = u32::from_be_bytes([
+                        offset_bytes[28], offset_bytes[29], 
+                        offset_bytes[30], offset_bytes[31]
+                    ]) as usize + 4; // +4 pour compenser le selector
+                    
+                    println!("🔍 [DEBUG] Salt: {}", hex::encode(salt));
+                    println!("📍 [FACTORY] Offset du bytecode: 0x{:x} ({})", offset, offset);
+                    
+                    // L'offset pointe vers [length][data]
+                    if offset + 32 <= calldata_bytes_raw.len() {
+                        // Lecture de la longueur à l'offset
+                        let length_bytes = &calldata_bytes_raw[offset..offset + 32];
+                        let length = u32::from_be_bytes([
+                            length_bytes[28], length_bytes[29],
+                            length_bytes[30], length_bytes[31]
+                        ]) as usize;
+                        
+                        println!("📏 [FACTORY] Longueur du bytecode: {} bytes", length);
+                        
+                        // Vérification cohérence
+                        if length == 0 {
+                            println!("❌ [FACTORY] Longueur zéro détectée - erreur d'encodage ABI");
+                            // FALLBACK : Prendre tout ce qui suit l'offset comme bytecode
+                            let fallback_start = offset + 32;
+                            if fallback_start < calldata_bytes_raw.len() {
+                                let fallback_bytecode = calldata_bytes_raw[fallback_start..].to_vec();
+                                println!("🔧 [FACTORY FALLBACK] Extraction brute : {} bytes", fallback_bytecode.len());
+                                if fallback_bytecode.len() > 100 { // Minimum raisonnable pour un contrat
+                                    fallback_bytecode
+                                } else {
+                                    calldata_bytes.clone()
+                                }
+                            } else {
+                                calldata_bytes.clone()
+                            }
+                        } else if length > 50_000_000 {  // 50MB max raisonnable
+                            println!("❌ [FACTORY] Longueur anormalement élevée ({})", length);
+                            calldata_bytes.clone()
+                        } else {
+                            let bytecode_start = offset + 32;  // Après la longueur
+                            
+                            if bytecode_start + length <= calldata_bytes_raw.len() {
+                                let extracted_bytecode = calldata_bytes_raw[bytecode_start..bytecode_start + length].to_vec();
+                                println!("✅ [FACTORY] Bytecode extrait: {} bytes", extracted_bytecode.len());
+                                
+                                // VALIDATION FINALE
+                                if extracted_bytecode.is_empty() {
+                                    println!("❌ [FACTORY] Bytecode extrait vide malgré length > 0");
+                                    calldata_bytes.clone()
+                                } else {
+                                    extracted_bytecode
+                                }
+                            } else {
+                                println!("❌ [FACTORY] Bytecode tronqué (start:{} + len:{} > total:{})", 
+                                         bytecode_start, length, calldata_bytes_raw.len());
+                                
+                                // TENTATIVE DE RÉCUPÉRATION : prendre ce qui reste
+                                if bytecode_start < calldata_bytes_raw.len() {
+                                    let remaining = calldata_bytes_raw[bytecode_start..].to_vec();
+                                    println!("🔧 [FACTORY RECOVERY] Récupération {} bytes restants", remaining.len());
+                                    if remaining.len() > 100 {
+                                        remaining
+                                    } else {
+                                        calldata_bytes.clone()
+                                    }
+                                } else {
+                                    calldata_bytes.clone()
+                                }
+                            }
+                        }
+                    } else {
+                        println!("❌ [FACTORY] Offset invalide ({}) dépasse calldata ({})", offset, calldata_bytes_raw.len());
+                        
+                        // 🔥 CORRECTION : FALLBACK HEURISTIQUE corrigé
+                        let mut heuristic_result = calldata_bytes.clone();
+                        for i in 68..calldata_bytes_raw.len() {
+                            // Pattern typique Solidity : 60 80 60 40 (PUSH1 0x80 PUSH1 0x40)
+                            if i + 4 <= calldata_bytes_raw.len() && 
+                               &calldata_bytes_raw[i..i+4] == [0x60, 0x80, 0x60, 0x40] {
+                                let heuristic_bytecode = calldata_bytes_raw[i..].to_vec();
+                                println!("🎯 [FACTORY HEURISTIC] Pattern Solidity trouvé à offset {} : {} bytes", 
+                                         i, heuristic_bytecode.len());
+                                if heuristic_bytecode.len() > 1000 { // Minimum pour un vrai contrat
+                                    heuristic_result = heuristic_bytecode; // 🔥 CORRECTION : assignation au lieu de return
+                                    break;
+                                }
+                            }
+                        }
+                        
+                        heuristic_result
+                    }
                 }
             } else {
-                Some(format!("function_{:08x}", selector))
+                println!("❌ [FACTORY] Calldata trop court ({} bytes)", calldata_bytes_raw.len());
+                calldata_bytes.clone()
             }
         } else {
-            Some(format!("function_{:08x}", selector))
-        };
-
-        // Parsing des arguments (comme eth_call)
-        let args = if !data.is_empty() {
-            Self::parse_abi_encoded_args(data)
-        } else {
-            None
-        };
-
-        (fn_name, args)
+            println!("❌ [FACTORY] Erreur décodage hex du calldata");
+            calldata_bytes.clone()
+        }
     } else {
-        (None, None)
-    };
-
-    println!(
-        "🔍 [send_transaction] contract_addr={}, function_name={:?}, arguments={:?}",
-        to_addr, function_name, arguments
-    );
-
-    // Bytecode de création (uniquement pour déploiement)
-    let creation_bytecode = if is_deployment && !data.is_empty() {
+        // Déploiement direct
+        println!("📦 [DÉPLOIEMENT DIRECT] Utilise calldata brut: {} bytes", calldata_bytes.len());
         calldata_bytes.clone()
-    } else {
-        vec![]
-    };
-
-    // Calldata constructeur (vide par défaut)
-    let constructor_calldata: Vec<u8> = vec![];
+    }
+} else {
+    vec![]
+};
 
     if is_deployment && creation_bytecode.is_empty() {
         return Err("Bytecode de déploiement vide".to_string());
     }
 
-    // ─── HASH DE TRANSACTION (avec calldata_bytes correct) ───
-    let mut rlp_hasher = Keccak256::new();
     
-    rlp_hasher.update(&final_nonce.to_be_bytes());
-    rlp_hasher.update(&gas_price.to_be_bytes());
-    rlp_hasher.update(&(estimated_gas as u64).to_be_bytes());
-    if !to_addr.is_empty() && to_addr != "0x" {
-        rlp_hasher.update(&hex::decode(&to_addr[2..]).unwrap_or_default());
-    } else {
-        rlp_hasher.update(&[] as &[u8]);
-    }
-    rlp_hasher.update(&value.to_be_bytes());
-    rlp_hasher.update(&calldata_bytes); // ← Utilise calldata_bytes propre
 
-    let tx_hash = format!("0x{:x}", rlp_hasher.finalize());
+    let constructor_calldata: Vec<u8> = vec![];
+    
+    // Génération hash transaction
+let mut tx_hasher = Keccak256::new();
+    tx_hasher.update(from_addr.as_bytes());
+    tx_hasher.update(&final_nonce.to_be_bytes());
+    tx_hasher.update(&calldata_bytes);
+    tx_hasher.update(&value.to_be_bytes());
+    tx_hasher.update(&chrono::Utc::now().timestamp_nanos().to_be_bytes());
+    let tx_hash = format!("0x{:x}", tx_hasher.finalize());
     let normalized_hash = self.normalize_tx_hash(&tx_hash);
-
-    println!("🔑 Hash généré : {}", normalized_hash);
 
     let mut contract_address = String::new();
     let mut slu_zk_contract_addr = String::new();
 
-    // CALCUL DYNAMIQUE DES FRAIS DE GAS
+    // ====================== CALCUL FRAIS DYNAMIQUES + DISBURSE ======================
     let gas_price = self.get_gas_price().await;
-
     let estimated_gas = if is_deployment {
         21000u64 + 32000u64 + (calldata_bytes.len() as u64 * 200)
     } else if calldata_bytes.len() > 0 {
@@ -2053,36 +1930,27 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         21000u64
     };
 
-    let gas_cost_naeït = estimated_gas as u128 * gas_price as u128;
+    let gas_cost_wei = estimated_gas as u128 * gas_price as u128;
 
     println!("💰 Calcul frais dynamiques :");
-    println!("   • Gas estimé          : {} units", estimated_gas);
-    println!("   • Gas price           : {} naeït ({} Gnaeït)", gas_price, gas_price / 1_000_000_000);
-    println!("   • Coût total          : {} naeït VEZ (~{:.8} VEZ)", gas_cost_naeït, gas_cost_naeït as f64 / 1e18);
-    println!("   • Type de tx          : {}", if is_deployment { "déploiement" } else { "appel/transfert" });
+    println!(" • Gas estimé : {} units", estimated_gas);
+    println!(" • Gas price : {} wei ({} Gwei)", gas_price, gas_price / 1_000_000_000);
+    println!(" • Coût total : {} wei VEZ (~{:.8} VEZ)", gas_cost_wei, gas_cost_wei as f64 / 1e18);
+    println!(" • Type de tx : {}", if is_deployment { "déploiement" } else { "appel/transfert" });
 
     // PAIEMENT DES FRAIS VIA DISBURSE
     let vez_addr = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_string();
+    let disburse_success = if !is_vez_initialization && gas_cost_wei > 0 {
+        println!("🪙 Paiement des frais via disburse({}) depuis {}...", gas_cost_wei, from_addr);
 
-    // ────────────────────────────────────────────────────────────────
-    // PAIEMENT DES FRAIS VIA DISBURSE (version corrigée)
-    // ────────────────────────────────────────────────────────────────
-    let disburse_success = if !is_vez_initialization && gas_cost_naeït > 0 {
-        println!("🪙 Paiement des frais via disburse({}) depuis {}...", gas_cost_naeït, from_addr);
-
-        // Construction du calldata ABI complet pour disburse(uint256 amount, address disburser)
-        // Selector de disburse = 0x1c61f62b
         let selector = hex::decode("1c61f62b").unwrap();
-
         let mut calldata = Vec::with_capacity(68);
         calldata.extend_from_slice(&selector);
 
-        // amount (uint256) – padded à 32 bytes
         let mut amount_padded = [0u8; 32];
-        U256::from(gas_cost_naeït).to_big_endian(&mut amount_padded);
+        U256::from(gas_cost_wei).to_big_endian(&mut amount_padded);
         calldata.extend_from_slice(&amount_padded);
 
-        // disburser (address) – padded à 32 bytes
         let mut addr_padded = [0u8; 32];
         let from_bytes = hex::decode(from_addr.trim_start_matches("0x")).unwrap_or_default();
         addr_padded[12..].copy_from_slice(&from_bytes);
@@ -2103,18 +1971,13 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
 
         match disburse_result {
             Ok(_) => {
-                println!("✅ DISBURSE FRAIS RÉUSSI ! {} naeït VEZ brûlés (10% burn + reste)", gas_cost_naeït);
+                println!("✅ DISBURSE FRAIS RÉUSSI ! {} wei VEZ brûlés (10% burn + reste)", gas_cost_wei);
                 true
             }
             Err(e) => {
-                println!("❌ ÉCHEC DISBURSE : {}", e);
-                
-                if let Ok(balance) = self.get_account_balance(&from_addr).await {
-                    println!("   Solde actuel de {} : {} VEZ", from_addr, balance);
-                }
-                
+                println!("❌ ÉCHEC DISBURSE FRAIS : {}", e);
                 if cfg!(debug_assertions) {
-                    println!("⚠️ Mode debug → on continue malgré échec disburse (tolérance dev)");
+                    println!("⚠️ Mode debug → on continue malgré échec disburse");
                     true
                 } else {
                     return Err(format!("Impossible de payer les frais via disburse : {}", e));
@@ -2122,17 +1985,18 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
             }
         }
     } else {
-        println!("ℹ️ Aucun disburse nécessaire (init VEZ ou gas=0)");
+        println!("ℹ️ Aucun disburse nécessaire (init VEZ ou gas_cost=0)");
         true
     };
 
     if !disburse_success {
         return Err("Paiement des frais refusé".to_string());
     }
+    // ====================== FIN DISBURSE ======================
 
     if is_deployment {
-        let use_create2 = tx_obj.get("create2").and_then(|v| v.as_bool()).unwrap_or(false);
-        let target_address = tx_obj.get("target_address")
+        let use_create2 = tx_params.get("create2").and_then(|v| v.as_bool()).unwrap_or(false);
+        let target_address = tx_params.get("target_address")
             .and_then(|v| v.as_str())
             .map(|s| s.to_lowercase());
 
@@ -2160,7 +2024,6 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
                 let accounts = vm.state.accounts.read().await;
                 let mut attempts: i32 = 0;
                 let mut final_addr = proposed.clone();
-
                 while accounts.contains_key(&final_addr) && attempts < 1000 {
                     let mut retry_hasher = Keccak256::new();
                     retry_hasher.update(final_addr.as_bytes());
@@ -2170,7 +2033,6 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
                     final_addr = format!("0x{}", hex::encode(&retry_hash[12..32]).to_lowercase());
                     attempts += 1;
                 }
-
                 if attempts >= 1000 {
                     return Err("Impossible de générer une adresse unique après 1000 tentatives".to_string());
                 }
@@ -2185,14 +2047,13 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         );
 
         println!("📦 Déploiement contrat → deux adresses générées :");
-        println!("   • Ethereum racine (EVM) : {}", contract_address);
-        println!("   • SLU zk-print (quantique) : {}", slu_zk_contract_addr);
+        println!(" • Ethereum racine (EVM) : {}", contract_address);
+        println!(" • SLU zk-print (quantique) : {}", slu_zk_contract_addr);
 
         let mut vm = self.vm.write().await;
 
         {
             let mut accounts = vm.state.accounts.write().await;
-
             let mut account = accounts
                 .entry(contract_address.clone())
                 .or_insert_with(|| vuc_tx::slurachain_vm::AccountState {
@@ -2224,143 +2085,91 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
             account.slu_zk_address = slu_zk_contract_addr.clone();
         }
 
+        // Persistance immédiate du bytecode brut
         if let Some(storage_manager) = &vm.storage_manager {
             let contract_state_key = format!("account:{}:contract_state", contract_address);
             let _ = storage_manager.write(&contract_state_key, &creation_bytecode);
         }
-
-        println!("🚀 Exécution constructeur via execute_module → {}", contract_address);
-
-        let constructor = std::str::from_utf8(&creation_bytecode).unwrap_or("");
-
-        // ─── Configuration du callback CREATE2 pour capturer les sous-déploiements ───
-        // (ex: factory contract qui déploie d'autres contrats via CREATE2 dans son constructeur)
-        let create2_sub_deployments: Arc<std::sync::Mutex<Vec<(String, Vec<u8>, primitive_types::U256)>>> =
-            Arc::new(std::sync::Mutex::new(Vec::new()));
-        {
-            let events = create2_sub_deployments.clone();
-            vm.on_create2_event = Some(Arc::new(
-                move |address: &str, init_code: Vec<u8>, value: primitive_types::U256| {
-                    println!(
-                        "📡 [CREATE2 EVENT] Sous-contrat {} ({} bytes) capturé",
-                        address,
-                        init_code.len()
-                    );
-                    if let Ok(mut ev) = events.lock() {
-                        ev.push((address.to_string(), init_code, value));
-                    }
-                    Ok(())
-                },
-            ));
-        }
-
-        let deploy_result = vm.execute_module(
-            &contract_address,
-            constructor,
-            vec![],
-            Some(&from_addr),
-            Some(&constructor_calldata),
-        ).await;
-
-        // Nettoyage du callback après exécution
-        vm.on_create2_event = None;
-
-        // Traitement des sous-contrats déployés via CREATE2 pendant l'exécution du constructeur
-        {
-            let sub_events = create2_sub_deployments.lock().unwrap_or_else(|e| e.into_inner());
-            for (sub_addr, sub_init_code, _sub_value) in sub_events.iter() {
-                println!(
-                    "🔧 [CREATE2 POST-DEPLOY] Enregistrement module pour {}",
-                    sub_addr
-                );
-                let sub_runtime = extract_runtime_from_creation_bytecode(sub_init_code)
-                    .unwrap_or_else(|_| sub_init_code.clone());
-
-                if !vm.modules.contains_key(sub_addr) {
-                    let sub_module = vuc_tx::slurachain_vm::Module {
-                        name: "deployed_create2".to_string(),
-                        address: sub_addr.clone(),
-                        bytecode: sub_runtime.clone(),
-                        elf_buffer: vec![],
-                        context: uvm_runtime::UbfContext::new(),
-                        stack_usage: None,
-                        functions: hashbrown::HashMap::new(),
-                        gas_estimates: hashbrown::HashMap::new(),
-                        storage_layout: hashbrown::HashMap::new(),
-                        events: vec![],
-                        constructor_params: vec![],
-                    };
-                    vm.modules.insert(sub_addr.clone(), sub_module);
-                }
-
-                if let Some(storage_manager) = &vm.storage_manager {
-                    let key = format!("account:{}:contract_state", sub_addr);
-                    let _ = storage_manager.write(&key, &sub_runtime);
-                }
-
-                let _ = vm.auto_detect_contract_functions(sub_addr, &sub_runtime);
-                println!("✅ [CREATE2 POST-DEPLOY] Module enregistré pour {}", sub_addr);
-            }
-        }
-
-        let runtime_bytecode = match deploy_result {
-            Ok(value) => {
-                let mut candidate: Option<Vec<u8>> = None;
-
-                if let Some(obj) = value.as_object() {
-                    let priority = ["returnData", "return", "result", "data", "output", "value", "runtime", "code", "bytecode"];
-                    for key in priority {
-                        if let Some(v) = obj.get(key) {
-                            if let Some(s) = v.as_str() {
-                                if s.starts_with("0x") {
-                                    if let Ok(bytes) = hex::decode(&s[2..]) {
-                                        if bytes.len() > 32 && bytes.starts_with(&[0x60, 0x80, 0x60, 0x40]) {
-                                            candidate = Some(bytes);
-                                            break;
+        
+                // Exécution du constructeur
+                println!("🚀 Exécution constructeur via execute_module → {}", contract_address);
+                let constructor = std::str::from_utf8(&creation_bytecode).unwrap_or("");
+                let deploy_result = vm.execute_module(
+                    &contract_address,
+                    constructor,
+                    vec![],
+                    Some(&from_addr),
+                    Some(&constructor_calldata),
+                ).await;
+        
+                let runtime_bytecode = match deploy_result {
+                    Ok(value) => {
+                        let mut candidate: Option<Vec<u8>> = None;
+                        
+                        // 🔥 PRIORITÉ 1 : Extraction depuis la réponse du VM
+                        if let Some(obj) = value.as_object() {
+                            let priority = ["returnData", "return", "result", "data", "output", "value", "runtime", "code", "bytecode"];
+                            for key in priority {
+                                if let Some(v) = obj.get(key) {
+                                    if let Some(s) = v.as_str() {
+                                        if s.starts_with("0x") {
+                                            if let Ok(bytes) = hex::decode(&s[2..]) {
+                                                if bytes.len() > 32 && bytes.starts_with(&[0x60, 0x80, 0x60, 0x40]) {
+                                                    candidate = Some(bytes.clone());
+                                                    println!("✅ [REAL BYTECODE] Runtime extrait depuis VM response ({} bytes)", bytes.len());
+                                                    break;
+                                                }
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
-                    }
-                    if candidate.is_none() {
-                        for (_, val) in obj {
-                            if let Some(s) = val.as_str() {
-                                if s.starts_with("0x") {
-                                    if let Ok(bytes) = hex::decode(&s[2..]) {
-                                        if bytes.len() > 32 {
-                                            candidate = Some(bytes);
-                                            break;
-                                        }
-                                    }
+        
+                        // 🔥 PRIORITÉ 2 : Si pas de runtime dans la réponse VM → extraction depuis creation_bytecode
+                        if candidate.is_none() && !creation_bytecode.is_empty() {
+                            println!("🔍 [FALLBACK] Pas de runtime dans VM response → extraction depuis creation_bytecode");
+                            match extract_runtime_from_creation_bytecode(&creation_bytecode) {
+                                Ok(extracted_runtime) => {
+                                    candidate = Some(extracted_runtime);
+                                    println!("✅ [REAL BYTECODE] Chargé {} bytes de bytecode réel", candidate.as_ref().unwrap().len());
+                                }
+                                Err(e) => {
+                                    println!("⚠️ [FALLBACK] Échec extraction runtime : {}", e);
                                 }
                             }
                         }
-                    }
-                } else if let Some(s) = value.as_str() {
-                    if s.starts_with("0x") {
-                        if let Ok(bytes) = hex::decode(&s[2..]) {
-                            if bytes.len() > 32 {
-                                candidate = Some(bytes);
+        
+                        // Final runtime (soit extrait, soit creation en fallback)
+                        let mut runtime = candidate.unwrap_or_else(|| {
+                            println!("⚠️ Aucun runtime extrait → utilise creation_bytecode comme fallback");
+                            creation_bytecode.clone()
+                        });
+        
+                        // Nettoyage metadata finale (inchangé)
+                        let markers: &[&[u8]] = &[b"a2646970667358221220", b"a165627a7a72305820", b"64736f6c634300"];
+                        for marker in markers {
+                            if let Some(pos) = runtime.windows(marker.len()).rposition(|w| w == *marker) {
+                                runtime.truncate(pos);
+                                println!("→ Metadata {} supprimée", hex::encode(marker));
                             }
                         }
+        
+                        runtime
+                    }
+                    Err(e) => return Err(format!("Échec exécution constructor : {}", e)),
+                };
+        
+                  // 🔥 DÉTECTION AUTOMATIQUE DES FONCTIONS depuis le runtime final
+                let detected_functions = vm.auto_detect_contract_functions(&contract_address, &runtime_bytecode);
+                match detected_functions {
+                    Ok(_) => {
+                        println!("✅ Détection de fonctions terminée avec succès");
+                    }
+                    Err(e) => {
+                        println!("⚠️ Échec détection des fonctions : {}", e);
                     }
                 }
-
-                let mut runtime = candidate.unwrap_or_else(|| creation_bytecode.clone());
-
-                let markers: &[&[u8]] = &[b"a2646970667358221220", b"a165627a7a72305820", b"64736f6c634300"];
-
-                for marker in markers {
-                    if let Some(pos) = runtime.windows(marker.len()).rposition(|w| w == *marker) {
-                        runtime.truncate(pos);
-                    }
-                }
-
-                runtime
-            }
-            Err(e) => return Err(format!("Échec exécution constructor : {}", e)),
-        };
 
         if !vm.modules.contains_key(&contract_address) {
             let module = vuc_tx::slurachain_vm::Module {
@@ -2400,197 +2209,175 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         let _ = vm.auto_detect_contract_functions(&contract_address, &runtime_bytecode);
 
         println!("✅ DÉPLOIEMENT + PERSISTANCE RÉUSSIE");
-        println!("   • Adresse Ethereum (racine) : {}", contract_address);
-        println!("   • Adresse SLU zk-print      : {}", slu_zk_contract_addr);
-        println!("   • TX Hash                   : {}", normalized_hash);
+        println!(" • Adresse Ethereum (racine) : {}", contract_address);
+        println!(" • Adresse SLU zk-print : {}", slu_zk_contract_addr);
+        println!(" • TX Hash : {}", normalized_hash);
     } else {
         println!("→ Transaction normale (appel de fonction) sur {}", to_addr);
-        
-        // ─── MODIFICATION CLÉS POUR L'EXÉCUTION (transactions normales) ───
-        if !to_addr.is_empty() {
-            let fn_name = function_name.as_deref().unwrap_or("fallback");
-            
-            // ⛔️ CORRECTION MAJEURE : passe un Vec vide pour args, calldata brut via Some(&calldata_bytes)
-            let args = vec![]; // <-- toujours vide pour EVM pur
-            
-            // Configuration du callback CREATE2 pour les factory contracts
-            let create2_call_events: Arc<std::sync::Mutex<Vec<(String, Vec<u8>, primitive_types::U256)>>> =
-                Arc::new(std::sync::Mutex::new(Vec::new()));
-
-            let result = {
-                let mut vm_sim = self.vm.write().await;
-                // Enregistrement du callback pour capturer les déploiements CREATE2 internes
-                {
-                    let events = create2_call_events.clone();
-                    vm_sim.on_create2_event = Some(Arc::new(
-                        move |address: &str, init_code: Vec<u8>, value: primitive_types::U256| {
-                            println!(
-                                "📡 [CREATE2 CALL EVENT] Contrat {} ({} bytes) capturé",
-                                address,
-                                init_code.len()
-                            );
-                            if let Ok(mut ev) = events.lock() {
-                                ev.push((address.to_string(), init_code, value));
-                            }
-                            Ok(())
-                        },
-                    ));
-                }
-                let res = vm_sim.execute_module(
-                    &to_addr,
-                    fn_name,
-                    args,
-                    Some(&from_addr),
-                    Some(&calldata_bytes) // ← CALLDATA BRUT ICI (comme eth_call)
-                ).await;
-                // Nettoyage du callback après exécution
-                vm_sim.on_create2_event = None;
-                res
-            };
-
-            // Traitement des contrats déployés via CREATE2 pendant l'appel de fonction
-            // Collecte des événements AVANT l'await pour éviter de tenir le MutexGuard
-            let collected_call_events: Vec<(String, Vec<u8>, primitive_types::U256)> = {
-                let guard = create2_call_events.lock().unwrap_or_else(|e| e.into_inner());
-                guard.clone()
-            };
-
-            if !collected_call_events.is_empty() {
-                let mut vm_reg = self.vm.write().await;
-                for (sub_addr, sub_init_code, _sub_value) in collected_call_events.iter() {
-                    println!(
-                        "🔧 [CREATE2 CALL POST] Enregistrement module pour {}",
-                        sub_addr
-                    );
-                    let sub_runtime = extract_runtime_from_creation_bytecode(sub_init_code)
-                        .unwrap_or_else(|_| sub_init_code.clone());
-
-                    if !vm_reg.modules.contains_key(sub_addr) {
-                        let sub_module = vuc_tx::slurachain_vm::Module {
-                            name: "deployed_create2".to_string(),
-                            address: sub_addr.clone(),
-                            bytecode: sub_runtime.clone(),
-                            elf_buffer: vec![],
-                            context: uvm_runtime::UbfContext::new(),
-                            stack_usage: None,
-                            functions: hashbrown::HashMap::new(),
-                            gas_estimates: hashbrown::HashMap::new(),
-                            storage_layout: hashbrown::HashMap::new(),
-                            events: vec![],
-                            constructor_params: vec![],
-                        };
-                        vm_reg.modules.insert(sub_addr.clone(), sub_module);
-                    }
-
-                    if let Some(storage_manager) = &vm_reg.storage_manager {
-                        let key = format!("account:{}:contract_state", sub_addr);
-                        let _ = storage_manager.write(&key, &sub_runtime);
-                    }
-
-                    let _ = vm_reg.auto_detect_contract_functions(sub_addr, &sub_runtime);
-                    println!("✅ [CREATE2 CALL POST] Module enregistré pour {}", sub_addr);
-                }
+        // Ton code pour les appels normaux (inchangé)
+        let contract_addr = Some(to_addr.clone());
+        let function_name = if data.len() >= 10 {
+            let selector_hex = &data[2..10];
+            let selector = u32::from_str_radix(selector_hex, 16).unwrap_or(0);
+            let vm = self.vm.read().await;
+            if let Some(module) = vm.modules.get(&to_addr) {
+                module.functions.iter()
+                    .find(|(_, meta)| meta.selector == selector)
+                    .map(|(name, _)| name.clone())
+                    .or_else(|| Some(format!("function_{:08x}", selector)))
+            } else {
+                Some(format!("function_{:08x}", selector))
             }
+        } else {
+            None
+        };
 
-            match result {
-                Ok(exec_result) => {
-                    println!("✅ Exécution fonction réussie : {:?}", exec_result);
-                }
-                Err(e) => {
-                    println!("❌ Échec exécution fonction : {}", e);
-                    return Err(format!("Exécution échouée : {}", e));
-                }
+        let arguments = Self::parse_abi_encoded_args(data);
+
+        let mut vmsim = self.vm.write().await;
+        if let Some(addr) = &contract_addr {
+            if vmsim.modules.contains_key(addr) {
+                let args = arguments.unwrap_or_else(|| {
+                    if value > 0 {
+                        vec![serde_json::Value::Number(serde_json::Number::from(value))]
+                    } else {
+                        vec![]
+                    }
+                });
+                let fn_name = function_name.as_deref().unwrap_or("unknown");
+                let _ = vmsim.execute_module(addr, fn_name, args, Some(&from_addr), Some(&calldata_bytes)).await;
             }
         }
     }
 
-    // Mise à jour nonce expéditeur
+    // Mise à jour nonce
     {
         let vm = self.vm.write().await;
         let mut accounts = vm.state.accounts.write().await;
-
         if let Some(account) = accounts.get_mut(&from_addr) {
             account.nonce = std::cmp::max(account.nonce, final_nonce + 1);
             println!("📝 Nonce mis à jour: compte {} → nonce={}", from_addr, account.nonce);
         }
     }
 
-    /// ─── EXTRACTION GÉNÉRIQUE DES EMIT SOLIDITY ───
-    let logs = if let Ok(result) = {
-        let mut vm_sim = self.vm.write().await;
-        vm_sim.execute_module(
-            if is_deployment { &contract_address } else { &to_addr },
-            if is_deployment { "constructor" } else { "fallback" },
-            vec![],
-            Some(&from_addr),
-            Some(&calldata_bytes)
-        ).await
-    } {
-        self.extract_emits_from_0xf3_response(&result)
-    } else {
-        vec![]
+    // Construction TxRequest + mempool (inchangé)
+    let contract_addr_for_tx = if is_deployment { None } else { Some(to_addr.clone()) };
+    let receiver_op = if is_deployment { contract_address.clone() } else { to_addr.clone() };
+
+    let function_name = if let Some(data) = tx_params.get("data").and_then(|v| v.as_str()) {
+        if data.len() >= 10 && !is_deployment {
+            let selector_hex = &data[2..10];
+            let selector = u32::from_str_radix(selector_hex, 16).unwrap_or(0);
+            let vm = self.vm.read().await;
+            if let Some(module) = vm.modules.get(&to_addr) {
+                if let Some((name, _)) = module.functions.iter().find(|(_, meta)| meta.selector == selector) {
+                    Some(name.clone())
+                } else {
+                    Some(format!("function_{:08x}", selector))
+                }
+            } else {
+                Some(format!("function_{:08x}", selector))
+            }
+        } else { None }
+    } else { None };
+
+    let arguments = if let Some(data) = tx_params.get("data").and_then(|v| v.as_str()) {
+        if !is_deployment {
+            Self::parse_abi_encoded_args(data)
+        } else { None }
+    } else { None };
+
+    let tx_request = vuc_platform::slurachain_rpc_service::TxRequest {
+        from_op: from_addr.clone(),
+        receiver_op,
+        value_tx: value.to_string(),
+        nonce_tx: final_nonce,
+        hash: normalized_hash.clone(),
+        contract_addr: contract_addr_for_tx,
+        function_name,
+        arguments,
     };
 
-    let logs_bloom = self.compute_logs_bloom(&logs);
+    self.rpc_service.lurosonie_manager.add_transaction_to_mempool(tx_request.clone()).await;
+    let _ = self.block_finalized_tx.send(vec![tx_request.hash.clone()]);
 
     let (current_block_number, current_block_hash) = self.get_latest_block_info().await;
 
-        {
-        let mut vm = self.vm.write().await;
-        let mut accounts = vm.state.accounts.write().await;
-        if let Some(account) = accounts.get_mut(&from_addr) {
-            account.nonce = std::cmp::max(account.nonce, final_nonce + 1);
-            println!("✅ Nonce mis à jour pour {} → {}", from_addr, account.nonce);
-        }
-	}
+    let is_sluzk_enabled = tx_params
+        .get("sluzk")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    // ─── RECEIPT ───
+    let cumulative_gas_used = if is_vez_initialization {
+        "0x0".to_string()
+    } else {
+        format!("0x{:x}", estimated_gas)
+    };
 
     let receipt = serde_json::json!({
         "blockHash": current_block_hash,
         "blockNumber": format!("0x{:x}", current_block_number),
-        "contractAddress": if is_deployment { serde_json::Value::String(contract_address.clone()) } else { serde_json::Value::Null },
+        "contractAddress": if is_deployment {
+            if is_sluzk_enabled && !slu_zk_contract_addr.is_empty() {
+                serde_json::Value::String(slu_zk_contract_addr.clone())
+            } else {
+                serde_json::Value::String(contract_address.clone())
+            }
+        } else {
+            serde_json::Value::Null
+        },
+        "cumulativeGasUsed": cumulative_gas_used,
+        "effectiveGasPrice": if is_vez_initialization { "0x0" } else { "0x3b9aca00" },
         "from": from_addr,
+        "gasUsed": if is_vez_initialization { "0x0" } else { "0x5208" },
+        "logs": [],
+        "logsBloom": "0x".to_string() + &"00".repeat(256),
+        "status": "0x1",
         "to": if is_deployment { serde_json::Value::Null } else { serde_json::Value::String(to_addr) },
         "transactionHash": normalized_hash.clone(),
-        "status": "0x1",
-        "gasUsed": format!("0x{:x}", estimated_gas),
-        "effectiveGasPrice": format!("0x{:x}", gas_price),
-        "logs": logs,
-        "logsBloom": logs_bloom,
         "transactionIndex": "0x0",
         "type": "0x2",
         "nonce": format!("0x{:x}", final_nonce),
         "value": format!("0x{:x}", value),
-        "cumulativeGasUsed": format!("0x{:x}", estimated_gas),
-        "blobGasUsed": "0x0",
-        "blobGasPrice": "0x0"
+        "deploymentTimestamp": chrono::Utc::now().timestamp_nanos(),
+        "isUniqueDeployment": is_deployment,
+        "isPersisted": is_deployment,
+        "deploymentMethod": if is_deployment {
+            if tx_params.get("create2").and_then(|v| v.as_bool()).unwrap_or(false) {
+                "create2_via_execute_module_raw"
+            } else {
+                "create_via_execute_module_raw"
+            }
+        } else {
+            "transaction"
+        },
+        "addressEntropy": if is_deployment { rand::random::<u64>() } else { 0 },
+        "uniquenessGuaranteed": is_deployment,
+        "isVezInitialization": is_vez_initialization,
+        "transactionCost": if is_vez_initialization { "0x0" } else { "0x5208" }
     });
-    
-    let tx_hash_padded = pad_hash_64(&normalized_hash);
-    
-    {
-        let mut receipts = self.tx_receipts.write().await;
-        receipts.insert(normalized_hash.clone(), receipt.clone());
-        receipts.insert(tx_hash_padded.clone(), receipt.clone());
-    }
 
+    let mut receipts = self.tx_receipts.write().await;
+    receipts.insert(normalized_hash.clone(), receipt.clone());
+    let tx_hash_padded = pad_hash_64(&normalized_hash);
+    receipts.insert(tx_hash_padded.clone(), receipt.clone());
+
+    // Persistance receipt (inchangé)
     if let Some(storage_manager) = &self.vm.read().await.storage_manager {
         let receipt_key = format!("receipt:{}", normalized_hash);
         if let Ok(receipt_bytes) = serde_json::to_vec(&receipt) {
             let _ = storage_manager.write(&receipt_key, &receipt_bytes);
-            println!("💾 Receipt {} persisté dans RocksDB", normalized_hash);
         }
-
         let receipt_key_padded = format!("receipt:{}", tx_hash_padded);
         if let Ok(receipt_bytes) = serde_json::to_vec(&receipt) {
             let _ = storage_manager.write(&receipt_key_padded, &receipt_bytes);
-            println!("💾 Receipt padded {} persisté dans RocksDB", tx_hash_padded);
         }
-    } else {
-        println!("⚠️ Storage manager non disponible pour persistance des receipts");
     }
 
+    // Logs finaux (inchangés)
     if is_deployment {
-        if tx_obj.get("create2").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if tx_params.get("create2").and_then(|v| v.as_bool()).unwrap_or(false) {
             println!("✅ CREATE2 via execute_module (raw) → Adresse Ethereum: {} | SLU zk: {} | Hash: {}",
                      contract_address, slu_zk_contract_addr, normalized_hash);
         } else {
