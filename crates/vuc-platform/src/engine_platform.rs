@@ -192,6 +192,31 @@ impl EnginePlatform {
         vuc_platform::operator::crypto_perf::generate_and_create_account(&mut vm, "acc").await
     }
 
+    /// 🔥 Configuration du callback CREATE2 pour intercepter les événements depuis les factories
+    pub async fn setup_create2_callback(&self, target_address_storage: Arc<tokio::sync::RwLock<Option<String>>>) {
+        let mut vm = self.vm.write().await;
+        
+        let callback = Arc::new(move |address: &str, _bytecode: Vec<u8>, _value: primitive_types::U256| -> Result<(), String> {
+            println!("🎯 [CREATE2 CALLBACK] Adresse interceptée depuis factory : {}", address);
+            
+            // Convertir immédiatement la référence en String owned
+            let address_owned = address.to_string();
+            
+            // Store l'adresse pour utilisation dans send_transaction
+            let storage_clone = target_address_storage.clone();
+            tokio::spawn(async move {
+                let mut storage = storage_clone.write().await;
+                *storage = Some(address_owned.clone());
+                println!("💾 [CREATE2 CALLBACK] Adresse stockée : {}", address_owned);
+            });
+            
+            Ok(())
+        });
+        
+        vm.on_create2_event = Some(callback);
+        println!("✅ [CREATE2 CALLBACK] Configuré pour intercepter les événements factory");
+    }
+
                      /// ✅ NOUVEAU: Persistance complète automatique (CORRIGÉ POUR SEND - AUCUN AWAIT AVEC GUARDS)
                 pub async fn persist_all_state(&self) -> Result<(), String> {
                     // ✅ ÉTAPE 1: CLONE LE STORAGE MANAGER EN PREMIER
@@ -1697,6 +1722,10 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     // 🎯 Variable pour stocker l'adresse CREATE2 calculée
     let mut target_address_final: Option<String> = None;
 
+    // 🔥 Configuration du callback CREATE2 pour intercepter les événements depuis les factories
+    let create2_intercepted = Arc::new(tokio::sync::RwLock::new(None::<String>));
+    self.setup_create2_callback(create2_intercepted.clone()).await;
+
     // ===================================================================
     // FROM DYNAMIQUE – HIÉRARCHIE AVEC FALLBACKS
     // ===================================================================
@@ -2407,6 +2436,14 @@ let mut tx_hasher = Keccak256::new();
                 });
                 let fn_name = function_name.as_deref().unwrap_or("unknown");
                 let _ = vmsim.execute_module(addr, fn_name, args, Some(&from_addr), Some(&calldata_bytes)).await;
+                
+                // 🔥 Récupération de l'adresse CREATE2 interceptée par le callback
+                if let Some(intercepted_addr) = create2_intercepted.read().await.clone() {
+                    println!("🎯 [CREATE2 INTERCEPTED] Adresse récupérée depuis factory callback : {}", intercepted_addr);
+                    if target_address_final.is_none() {
+                        target_address_final = Some(intercepted_addr);
+                    }
+                }
             }
         }
     }
