@@ -196,19 +196,35 @@ impl EnginePlatform {
     pub async fn setup_create2_callback(&self, target_address_storage: Arc<tokio::sync::RwLock<Option<String>>>) {
         let mut vm = self.vm.write().await;
         
-        let callback = Arc::new(move |address: &str, _bytecode: Vec<u8>, _value: primitive_types::U256| -> Result<(), String> {
+        let callback = Arc::new(move |address: &str, bytecode: Vec<u8>, value: primitive_types::U256| -> Result<(), String> {
             println!("🎯 [CREATE2 CALLBACK] Adresse interceptée depuis factory : {}", address);
+            println!("🎯 [CREATE2 CALLBACK] Bytecode taille : {} bytes", bytecode.len());
+            println!("🎯 [CREATE2 CALLBACK] Value : {}", value);
             
             // Convertir immédiatement la référence en String owned
             let address_owned = address.to_string();
             
             // Store l'adresse pour utilisation dans send_transaction
             let storage_clone = target_address_storage.clone();
-            tokio::spawn(async move {
+            println!("🔄 [CREATE2 CALLBACK] Lancement du stockage async...");
+            
+            let handle = tokio::spawn(async move {
+                println!("📝 [CREATE2 CALLBACK ASYNC] Début du stockage...");
                 let mut storage = storage_clone.write().await;
                 *storage = Some(address_owned.clone());
-                println!("💾 [CREATE2 CALLBACK] Adresse stockée : {}", address_owned);
+                println!("💾 [CREATE2 CALLBACK ASYNC] Adresse stockée : {}", address_owned);
             });
+            
+            println!("⏳ [CREATE2 CALLBACK] Attente de la completion du stockage...");
+            
+            // Attendre synchrone la completion
+            let runtime = tokio::runtime::Handle::try_current();
+            if let Ok(rt) = runtime {
+                let _ = rt.block_on(handle);
+                println!("✅ [CREATE2 CALLBACK] Stockage terminé avec succès");
+            } else {
+                println!("⚠️ [CREATE2 CALLBACK] Pas de runtime Tokio disponible");
+            }
             
             Ok(())
         });
