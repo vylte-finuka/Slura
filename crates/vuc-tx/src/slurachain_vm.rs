@@ -2055,7 +2055,7 @@ impl SlurachainVm {
                     &interpreter_args,
                     storage_manager,
                     Some(converted_storage),
-                    None, // on_create2_event: pas de callback ici
+                    self.on_create2_event.clone(), // ✅ CORRECTION: propagation du callback CREATE2
                 )
                 .map_err(|e| e.to_string())
             };
