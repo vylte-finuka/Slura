@@ -248,6 +248,10 @@ pub struct UvmExecutionContext {
     // Callback déclenché lorsque l'opcode CREATE2 (0xf5) est exécuté
     // Permet à engine_platform de persister le contrat déployé via CREATE2
     pub on_create2_event: Option<Create2Callback>,
+    
+    // ──────────────────────────────── EIP-3074 AUTH CONTEXT ────────────────────────────────
+    /// Context d'autorisation pour EIP-3074 (AUTH/AUTHCALL)
+    pub auth_context: Option<(String, u256)>, // (authority_address, commit)
                                                // ────────────────────────────────────────────────────────────────────────────────
 }
 
@@ -1205,6 +1209,7 @@ pub fn execute_program(
         in_internal_call: false,
         ss7_pending_response: None, // ← AJOUT,
         on_create2_event,
+        auth_context: None, // ← EIP-3074 AUTH context
     };
 
     // ✅ CORRECTION: Initialisation automatique du propriétaire
@@ -3049,6 +3054,98 @@ pub fn execute_program(
                 for i in 0..(out_size.low_u64() as usize) {
                     if out_offset.low_u64() as usize + i < global_mem.len() {
                         global_mem[out_offset.low_u64() as usize + i] = return_data[i];
+                    }
+                }
+
+                // Push success status onto stack
+                evm_stack.push(if call_success {
+                    u256::one()
+                } else {
+                    u256::zero()
+                });
+
+                consume_gas_amount(&mut execution_context, 700)?; // Simplified gas cost
+            }
+
+            // ___ 0xf6 AUTH (EIP-3074 Authorization)
+            0xf6 => {
+                if evm_stack.len() < 2 {
+                    return Ok(halt_json_ebpf("Stack underflow on AUTH"));
+                }
+
+                let authority = evm_stack.pop().unwrap(); // address
+                let commit = evm_stack.pop().unwrap();    // bytes32
+
+                let authority_addr = u256_to_address(authority);
+                println!(
+                    "🔐 [AUTH] authority={}, commit={:064x}",
+                    authority_addr, commit
+                );
+
+                // Simulate authorization (stub - real implementation would verify signature)
+                let auth_success = true; // Assume success for stub
+                
+                // Set authorization context for subsequent AUTHCALL
+                execution_context.auth_context = Some((authority_addr.clone(), commit));
+                
+                println!("✅ [AUTH] Authorization set for {}", authority_addr);
+
+                // Push success status onto stack (1 = success, 0 = failure)
+                evm_stack.push(if auth_success {
+                    u256::one()
+                } else {
+                    u256::zero()
+                });
+
+                consume_gas_amount(&mut execution_context, 3100)?; // EIP-3074 gas cost
+            }
+
+            // ___ 0xf7 AUTHCALL (EIP-3074 Authorized Call)  
+            0xf7 => {
+                if evm_stack.len() < 7 {
+                    return Ok(halt_json_ebpf("Stack underflow on AUTHCALL"));
+                }
+
+                let gas = evm_stack.pop().unwrap();
+                let addr = evm_stack.pop().unwrap();
+                let value = evm_stack.pop().unwrap();
+                let args_offset = evm_stack.pop().unwrap();
+                let args_size = evm_stack.pop().unwrap();
+                let ret_offset = evm_stack.pop().unwrap();
+                let ret_size = evm_stack.pop().unwrap();
+
+                let target_addr = u256_to_address(addr);
+                println!(
+                    "🔐 [AUTHCALL] to={}, value={}, gas={}, args=mem[{}:{}], ret=mem[{}:{}]",
+                    target_addr, value, gas, args_offset, args_size, ret_offset, ret_size
+                );
+
+                // Check if authorization is set
+                if execution_context.auth_context.is_none() {
+                    println!("❌ [AUTHCALL] No authorization set - AUTH must be called first");
+                    evm_stack.push(u256::zero()); // Failure
+                    consume_gas_amount(&mut execution_context, 100)?;
+                    continue;
+                }
+
+                let (auth_addr, _commit) = execution_context.auth_context.as_ref().unwrap();
+                println!("✅ [AUTHCALL] Using authorization from {}", auth_addr);
+
+                // Simulate authorized call (stub - real implementation would execute with authority context)
+                let call_success = true; // Assume success for stub
+                let return_data = vec![0u8; ret_size.low_u64() as usize]; // Empty return data
+
+                // Write return data to memory
+                if !resize_memory_ebpf(
+                    &mut global_mem,
+                    ret_offset.low_u64() as usize,
+                    ret_size.low_u64() as usize,
+                ) {
+                    return Ok(halt_json_ebpf("Memory resize failed on AUTHCALL"));
+                }
+                for i in 0..(ret_size.low_u64() as usize) {
+                    if ret_offset.low_u64() as usize + i < global_mem.len() {
+                        global_mem[ret_offset.low_u64() as usize + i] = return_data[i];
                     }
                 }
 

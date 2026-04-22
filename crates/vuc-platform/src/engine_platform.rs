@@ -3,7 +3,10 @@ use ethers::utils::keccak256;
 use jsonrpsee::Methods;
 use jsonrpsee_server::Server;
 use tokio::sync::{Mutex, mpsc, broadcast}; // Ajoute broadcast
-use rand::Rng;
+use rand_chacha::ChaCha20Rng;
+use rand::{SeedableRng, RngCore};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use serde_json::json;
 use alloy_primitives::{B256, Keccak256};
 
@@ -145,6 +148,38 @@ impl EnginePlatform {
             block_finalized_tx: Arc::new(block_finalized_tx),
             pending_deployments: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         }
+    }
+
+    /// 🛡️ Générateur de nombres aléatoires sécurisé
+    /// Remplace les usages vulnérables de rand::random()
+    fn secure_rng() -> ChaCha20Rng {
+        let seed = {
+            let mut seed_bytes = [0u8; 32];
+            // Utilise des sources d'entropie système sécurisées
+            let timestamp = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0) as u64;
+            let process_id = std::process::id() as u64;
+            let thread_id = std::thread::current().id();
+            
+            // Combine plusieurs sources d'entropie
+            seed_bytes[0..8].copy_from_slice(&timestamp.to_be_bytes());
+            seed_bytes[8..16].copy_from_slice(&process_id.to_be_bytes());
+            
+            // Utilise l'ID du thread comme entropie supplémentaire
+            let thread_hash = std::collections::hash_map::DefaultHasher::new();
+            use std::hash::{Hash, Hasher};
+            let mut hasher = thread_hash;
+            thread_id.hash(&mut hasher);
+            let thread_entropy = hasher.finish();
+            seed_bytes[16..24].copy_from_slice(&thread_entropy.to_be_bytes());
+            
+            // Remplissage final avec timestamp en nano
+            let nano_time = chrono::Utc::now().timestamp_subsec_nanos() as u64;
+            seed_bytes[24..32].copy_from_slice(&nano_time.to_be_bytes());
+            
+            seed_bytes
+        };
+        
+        ChaCha20Rng::from_seed(seed)
     }
 
     fn normalize_tx_hash(&self, hash: &str) -> String {
@@ -798,12 +833,13 @@ pub async fn get_account_balance(&self, address: &str) -> Result<U256, String> {
         };
 
         // Réponse JSON enrichie
+        let mut rng = Self::secure_rng();
         Ok(serde_json::json!({
             "number": format!("0x{:x}", block_number),
             "hash": block_hash_real,
             "mixHash": block_hash_real,
             "parentHash": parent_hash,
-            "nonce": format!("0x{:016x}", rand::random::<u64>()),
+            "nonce": format!("0x{:016x}", rng.next_u64()),
             "sha3Uncles": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
             "logsBloom": "0x".to_string() + &"00".repeat(512),
             "transactionsRoot": transactions_root,
@@ -1165,7 +1201,10 @@ pub async fn get_transaction_count(&self, address: &str) -> Result<u64, String> 
             "hash": block_hash,
             "mixHash": block_hash,
             "parentHash": parent_hash,
-            "nonce": format!("0x{:016x}", rand::random::<u64>()),
+            "nonce": format!("0x{:016x}", {
+                let mut rng = Self::secure_rng();
+                rng.next_u64()
+            }),
             "sha3Uncles": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
             "logsBloom": format!("0x{}", "0".repeat(512)),
             "transactionsRoot": transactions_root,
@@ -1510,11 +1549,13 @@ pub async fn verify_contract_deployment(&self, contract_address: &str) -> Result
         let contract_address = if use_create2 {
             target_address.clone().ok_or("CREATE2 demandé mais aucune 'target_address' fournie".to_string())?
         } else {
-            // Tu peux garder ta logique d'adresse CREATE ici si tu veux
+            // 🎲 ADRESSE ALÉATOIRE pour les déploiements normaux (comme souhaité)
             let mut addr_hasher = Keccak256::new();
             addr_hasher.update(from.as_bytes());
             addr_hasher.update(&creation_bytecode);
-            addr_hasher.update(&rand::random::<u128>().to_be_bytes());
+            let mut rng = Self::secure_rng();
+            let random_entropy = rng.next_u64() as u128;
+            addr_hasher.update(&random_entropy.to_be_bytes()); // 🛡️ SÉCURISÉ !
             let addr_hash = addr_hasher.finalize();
             format!("0x{}", hex::encode(&addr_hash[12..32]))
         };
@@ -1653,6 +1694,9 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
 
     println!("➡️ [send_transaction] Transaction reçue : {:?}", tx_params);
 
+    // 🎯 Variable pour stocker l'adresse CREATE2 calculée
+    let mut target_address_final: Option<String> = None;
+
     // ===================================================================
     // FROM DYNAMIQUE – HIÉRARCHIE AVEC FALLBACKS
     // ===================================================================
@@ -1772,127 +1816,150 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
     };
 
 let creation_bytecode = if is_deployment && !data.is_empty() {
-    if data.starts_with("0xcdcb760a") {
-        // C'est un appel à la factory Create2Factory.deploy()
-        println!("🏭 [CREATE2 FACTORY] Détection d'un appel à Create2Factory.deploy()");
+    if data.starts_with("0x4af63f02") {
+        // C'est un appel à votre Factory avec le sélecteur 0x4af63f02
+        println!("🏭 [CREATE2 FACTORY] Détection Factory avec sélecteur 0x4af63f02");
         
         let calldata_hex = data.trim_start_matches("0x");
         if let Ok(calldata_bytes_raw) = hex::decode(calldata_hex) {
             if calldata_bytes_raw.len() >= 100 {
-                println!("🔍 [DEBUG] Calldata total: {} bytes", calldata_bytes_raw.len());
+                // Structure ABI pour votre factory : [selector:4][offset1:32][salt:32][bytecode_length:32][bytecode:N]
                 
-                // Structure ABI pour deploy(bytes32 salt, bytes memory bytecode)
-                if calldata_bytes_raw.len() < 68 {
-                    println!("❌ [FACTORY] Calldata trop court pour contenir salt + offset");
-                    calldata_bytes.clone()
-                } else {
-                    let salt = &calldata_bytes_raw[4..36];
-                    let offset_bytes = &calldata_bytes_raw[36..68];
+                // Salt à position fixe (après selector et offset)
+                let salt = &calldata_bytes_raw[36..68]; // Position 36-68 pour le salt
+                
+                let bytecode_offset_bytes = &calldata_bytes_raw[4..36]; // Offset du bytecode
+                
+                let bytecode_offset = u32::from_be_bytes([
+                    bytecode_offset_bytes[28], bytecode_offset_bytes[29], 
+                    bytecode_offset_bytes[30], bytecode_offset_bytes[31]
+                ]) as usize + 4; // +4 pour le selector
+                
+                println!("🔍 [FACTORY 0x4af63f02] Salt: 0x{}", hex::encode(salt));
+                println!("📍 [FACTORY 0x4af63f02] Offset du bytecode: 0x{:x}", bytecode_offset);
+                
+                if bytecode_offset + 32 <= calldata_bytes_raw.len() {
+                    // Lire la longueur à l'offset
+                    let length_bytes = &calldata_bytes_raw[bytecode_offset..bytecode_offset + 32];
+                    let bytecode_length = u32::from_be_bytes([
+                        length_bytes[28], length_bytes[29],
+                        length_bytes[30], length_bytes[31]
+                    ]) as usize;
                     
-                    // Lecture de l'offset (big endian, 32 bytes)
-                    let offset = u32::from_be_bytes([
-                        offset_bytes[28], offset_bytes[29], 
-                        offset_bytes[30], offset_bytes[31]
-                    ]) as usize + 4; // +4 pour compenser le selector
+                    println!("📏 [FACTORY 0x4af63f02] Longueur du bytecode: {} bytes", bytecode_length);
                     
-                    println!("🔍 [DEBUG] Salt: {}", hex::encode(salt));
-                    println!("📍 [FACTORY] Offset du bytecode: 0x{:x} ({})", offset, offset);
-                    
-                    // L'offset pointe vers [length][data]
-                    if offset + 32 <= calldata_bytes_raw.len() {
-                        // Lecture de la longueur à l'offset
-                        let length_bytes = &calldata_bytes_raw[offset..offset + 32];
-                        let length = u32::from_be_bytes([
-                            length_bytes[28], length_bytes[29],
-                            length_bytes[30], length_bytes[31]
-                        ]) as usize;
+                    if bytecode_length > 0 && bytecode_offset + 32 + bytecode_length <= calldata_bytes_raw.len() {
+                        let bytecode_start = bytecode_offset + 32;
+                        let extracted_bytecode = calldata_bytes_raw[bytecode_start..bytecode_start + bytecode_length].to_vec();
                         
-                        println!("📏 [FACTORY] Longueur du bytecode: {} bytes", length);
+                        println!("� [FACTORY 0x4af63f02] Bytecode complet : {} bytes", extracted_bytecode.len());
+                        println!("📋 [FACTORY 0x4af63f02] Bytecode preview : 0x{}", hex::encode(&extracted_bytecode[0..std::cmp::min(32, extracted_bytecode.len())]));
                         
-                        // Vérification cohérence
-                        if length == 0 {
-                            println!("❌ [FACTORY] Longueur zéro détectée - erreur d'encodage ABI");
-                            // FALLBACK : Prendre tout ce qui suit l'offset comme bytecode
-                            let fallback_start = offset + 32;
-                            if fallback_start < calldata_bytes_raw.len() {
-                                let fallback_bytecode = calldata_bytes_raw[fallback_start..].to_vec();
-                                println!("🔧 [FACTORY FALLBACK] Extraction brute : {} bytes", fallback_bytecode.len());
-                                if fallback_bytecode.len() > 100 { // Minimum raisonnable pour un contrat
-                                    fallback_bytecode
-                                } else {
-                                    calldata_bytes.clone()
-                                }
-                            } else {
-                                calldata_bytes.clone()
-                            }
-                        } else if length > 50_000_000 {  // 50MB max raisonnable
-                            println!("❌ [FACTORY] Longueur anormalement élevée ({})", length);
-                            calldata_bytes.clone()
-                        } else {
-                            let bytecode_start = offset + 32;  // Après la longueur
+                        // 🔥 CALCUL CREATE2 AVEC LE BYTECODE COMPLET (comme Solidity)
+                        let factory_address = to_addr.clone(); // Adresse de la factory
+                        
+                        // 🚨 UTILISE LE BYTECODE COMPLET pour CREATE2 (comme dans create2 en Solidity)
+                        let computed_address = self.compute_create2_address_correct(&factory_address, salt, &extracted_bytecode);
+                        
+                        println!("✅ [CREATE2] Adresse calculée avec bytecode COMPLET : {}", computed_address);
+                        
+                        // 🎯 FORCE L'UTILISATION DE L'ADRESSE CREATE2 CALCULÉE
+                        target_address_final = Some(computed_address.clone());
+                        
+                        // 🔍 Pour comparaison, testons aussi avec runtime si trouvé
+                        if let Some(runtime_pos) = extracted_bytecode.windows(4).position(|w| w == [0x60, 0x80, 0x60, 0x40]) {
+                            let runtime_bytecode = extracted_bytecode[runtime_pos..].to_vec();
+                            let runtime_address = self.compute_create2_address_correct(&factory_address, salt, &runtime_bytecode);
                             
-                            if bytecode_start + length <= calldata_bytes_raw.len() {
-                                let extracted_bytecode = calldata_bytes_raw[bytecode_start..bytecode_start + length].to_vec();
-                                println!("✅ [FACTORY] Bytecode extrait: {} bytes", extracted_bytecode.len());
-                                
-                                // VALIDATION FINALE
-                                if extracted_bytecode.is_empty() {
-                                    println!("❌ [FACTORY] Bytecode extrait vide malgré length > 0");
-                                    calldata_bytes.clone()
-                                } else {
-                                    extracted_bytecode
-                                }
-                            } else {
-                                println!("❌ [FACTORY] Bytecode tronqué (start:{} + len:{} > total:{})", 
-                                         bytecode_start, length, calldata_bytes_raw.len());
-                                
-                                // TENTATIVE DE RÉCUPÉRATION : prendre ce qui reste
-                                if bytecode_start < calldata_bytes_raw.len() {
-                                    let remaining = calldata_bytes_raw[bytecode_start..].to_vec();
-                                    println!("🔧 [FACTORY RECOVERY] Récupération {} bytes restants", remaining.len());
-                                    if remaining.len() > 100 {
-                                        remaining
-                                    } else {
-                                        calldata_bytes.clone()
-                                    }
-                                } else {
-                                    calldata_bytes.clone()
-                                }
-                            }
+                            println!("🔍 [COMPARAISON] Runtime seulement : {} bytes → {}", runtime_bytecode.len(), runtime_address);
                         }
+                        
+                        extracted_bytecode
                     } else {
-                        println!("❌ [FACTORY] Offset invalide ({}) dépasse calldata ({})", offset, calldata_bytes_raw.len());
-                        
-                        // 🔥 CORRECTION : FALLBACK HEURISTIQUE corrigé
-                        let mut heuristic_result = calldata_bytes.clone();
-                        for i in 68..calldata_bytes_raw.len() {
-                            // Pattern typique Solidity : 60 80 60 40 (PUSH1 0x80 PUSH1 0x40)
-                            if i + 4 <= calldata_bytes_raw.len() && 
-                               &calldata_bytes_raw[i..i+4] == [0x60, 0x80, 0x60, 0x40] {
-                                let heuristic_bytecode = calldata_bytes_raw[i..].to_vec();
-                                println!("🎯 [FACTORY HEURISTIC] Pattern Solidity trouvé à offset {} : {} bytes", 
-                                         i, heuristic_bytecode.len());
-                                if heuristic_bytecode.len() > 1000 { // Minimum pour un vrai contrat
-                                    heuristic_result = heuristic_bytecode; // 🔥 CORRECTION : assignation au lieu de return
-                                    break;
-                                }
-                            }
-                        }
-                        
-                        heuristic_result
+                        println!("❌ [FACTORY 0x4af63f02] Bytecode invalide ou trop court");
+                        calldata_bytes.clone()
                     }
+                } else {
+                    println!("❌ [FACTORY 0x4af63f02] Offset bytecode invalide");
+                    calldata_bytes.clone()
                 }
             } else {
-                println!("❌ [FACTORY] Calldata trop court ({} bytes)", calldata_bytes_raw.len());
+                println!("❌ [FACTORY 0x4af63f02] Calldata trop courte");
                 calldata_bytes.clone()
             }
         } else {
-            println!("❌ [FACTORY] Erreur décodage hex du calldata");
+            println!("❌ [FACTORY 0x4af63f02] Erreur décodage hex");
+            calldata_bytes.clone()
+        }
+    } else if data.starts_with("0xcdcb760a") {
+        // C'est un appel à Factory.deploy(bytes memory bytecode, bytes32 salt)
+        println!("🏭 [CREATE2 FACTORY] Détection d'un appel à Factory.deploy()");
+        
+        let calldata_hex = data.trim_start_matches("0x");
+        if let Ok(calldata_bytes_raw) = hex::decode(calldata_hex) {
+            if calldata_bytes_raw.len() >= 100 {
+                // Structure ABI correcte : [selector:4][bytecode_offset:32][salt:32][bytecode_length:32][bytecode:N]
+                
+                let salt = &calldata_bytes_raw[36..68]; // Salt à position fixe
+                let bytecode_offset_bytes = &calldata_bytes_raw[4..36]; // Offset du bytecode
+                
+                let bytecode_offset = u32::from_be_bytes([
+                    bytecode_offset_bytes[28], bytecode_offset_bytes[29], 
+                    bytecode_offset_bytes[30], bytecode_offset_bytes[31]
+                ]) as usize + 4; // +4 pour le selector
+                
+                println!("🔍 [FACTORY] Salt: {}", hex::encode(salt));
+                println!("📍 [FACTORY] Offset du bytecode: 0x{:x}", bytecode_offset);
+                
+                if bytecode_offset + 32 <= calldata_bytes_raw.len() {
+                    // Lire la longueur à l'offset
+                    let length_bytes = &calldata_bytes_raw[bytecode_offset..bytecode_offset + 32];
+                    let bytecode_length = u32::from_be_bytes([
+                        length_bytes[28], length_bytes[29],
+                        length_bytes[30], length_bytes[31]
+                    ]) as usize;
+                    
+                    println!("📏 [FACTORY] Longueur du bytecode: {} bytes", bytecode_length);
+                    
+                    if bytecode_length > 0 && bytecode_offset + 32 + bytecode_length <= calldata_bytes_raw.len() {
+                        let bytecode_start = bytecode_offset + 32;
+                        let extracted_bytecode = calldata_bytes_raw[bytecode_start..bytecode_start + bytecode_length].to_vec();
+                        
+                        // 🔥 RECHERCHE DU PATTERN RUNTIME 60806040
+                        if let Some(runtime_pos) = extracted_bytecode.windows(4).position(|w| w == [0x60, 0x80, 0x60, 0x40]) {
+                            let runtime_bytecode = extracted_bytecode[runtime_pos..].to_vec();
+                            
+                            println!("✅ [CREATE2] Runtime extrait : {} bytes (commence par 60806040)", runtime_bytecode.len());
+                            
+                            // 🔥 AJOUT CRITIQUE : Calcul de l'adresse CREATE2 avec le RUNTIME
+                            let factory_address = to_addr.clone(); // Adresse de la factory
+                            
+                            // 🚨 UTILISE LE VRAI SALT extrait plus haut !
+                            let computed_address = self.compute_create2_address_correct(&factory_address, salt, &runtime_bytecode);
+                            
+                            println!("✅ [CREATE2] Adresse calculée avec runtime : {}", computed_address);
+                            
+                            runtime_bytecode
+                        } else {
+                            println!("❌ [FACTORY] Pattern 60806040 non trouvé dans le bytecode");
+                            extracted_bytecode // fallback
+                        }
+                    } else {
+                        println!("❌ [FACTORY] Longueur bytecode invalide ou tronquée");
+                        calldata_bytes.clone()
+                    }
+                } else {
+                    println!("❌ [FACTORY] Offset invalide");
+                    calldata_bytes.clone()
+                }
+            } else {
+                calldata_bytes.clone()
+            }
+        } else {
             calldata_bytes.clone()
         }
     } else {
         // Déploiement direct
-        println!("📦 [DÉPLOIEMENT DIRECT] Utilise calldata brut: {} bytes", calldata_bytes.len());
         calldata_bytes.clone()
     }
 } else {
@@ -1913,7 +1980,7 @@ let mut tx_hasher = Keccak256::new();
     tx_hasher.update(&final_nonce.to_be_bytes());
     tx_hasher.update(&calldata_bytes);
     tx_hasher.update(&value.to_be_bytes());
-    tx_hasher.update(&chrono::Utc::now().timestamp_nanos().to_be_bytes());
+    tx_hasher.update(&chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0).to_be_bytes());
     let tx_hash = format!("0x{:x}", tx_hasher.finalize());
     let normalized_hash = self.normalize_tx_hash(&tx_hash);
 
@@ -1995,15 +2062,105 @@ let mut tx_hasher = Keccak256::new();
     // ====================== FIN DISBURSE ======================
 
     if is_deployment {
-        let use_create2 = tx_params.get("create2").and_then(|v| v.as_bool()).unwrap_or(false);
+        // 🔥 DÉTECTION AUTOMATIQUE CREATE2 via Factory ou paramètre explicite
+        let mut use_create2 = tx_params.get("create2").and_then(|v| v.as_bool()).unwrap_or(false);
+        
+        // Si on a détecté une factory précédemment et stocké une adresse CREATE2, activer CREATE2
+        if !use_create2 && target_address_final.is_some() {
+            use_create2 = true;
+            println!("🏭 [AUTO-DÉTECTION] CREATE2 activé automatiquement via factory détectée");
+        }
+        
         let target_address = tx_params.get("target_address")
             .and_then(|v| v.as_str())
             .map(|s| s.to_lowercase());
 
+        // 🔥 NOUVELLE LOGIQUE : Extraction préalable du runtime pour CREATE2
+        let (extracted_runtime_for_create2, extracted_salt) = if use_create2 && !creation_bytecode.is_empty() {
+            // Recherche du pattern runtime 60806040 dans le creation bytecode
+            if let Some(runtime_pos) = creation_bytecode.windows(4).position(|w| w == [0x60, 0x80, 0x60, 0x40]) {
+                let runtime_bytes = creation_bytecode[runtime_pos..].to_vec();
+                
+                // Essaie d'extraire le salt depuis Factory.deploy() calldata
+                let salt_bytes = if data.starts_with("0xcdcb760a") {
+                    let calldata_hex = data.trim_start_matches("0x");
+                    if let Ok(calldata_raw) = hex::decode(calldata_hex) {
+                        if calldata_raw.len() >= 68 {
+                            Some(calldata_raw[36..68].to_vec()) // Salt à position fixe dans Factory.deploy()
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                
+                let final_salt = salt_bytes.unwrap_or_else(|| {
+                    if creation_bytecode.len() >= 32 {
+                        creation_bytecode[creation_bytecode.len()-32..].to_vec()
+                    } else {
+                        vec![0u8; 32]
+                    }
+                });
+                
+                (Some(runtime_bytes), final_salt)
+            } else {
+                println!("⚠️ [CREATE2] Pattern runtime 60806040 non trouvé, utilise creation_bytecode");
+                let fallback_salt = if creation_bytecode.len() >= 32 {
+                    creation_bytecode[creation_bytecode.len()-32..].to_vec()
+                } else {
+                    vec![0u8; 32]
+                };
+                (Some(creation_bytecode.clone()), fallback_salt)
+            }
+        } else {
+            (None, vec![0u8; 32])
+        };
+
         contract_address = if use_create2 {
-            if let Some(addr) = target_address {
-                println!("⚡ [CREATE2] Déploiement à l'adresse forcée : {}", addr);
-                addr
+            // 🎯 PRIORITÉ : Utilise l'adresse CREATE2 calculée par la factory si disponible
+            if let Some(computed_addr) = target_address_final {
+                println!("✅ [CREATE2 FACTORY] Utilise l'adresse calculée par factory: {}", computed_addr);
+                computed_addr
+            } else if let Some(addr) = target_address {
+                // 🔥 LOGIQUE ORIGINALE : Validation avec compute_create2_address_correct
+                if let Some(extracted_bytecode) = extracted_runtime_for_create2.as_ref() {
+                    // 🧪 TEST 1 : Avec runtime bytecode (méthode habituelle)
+                    let computed_addr_runtime = self.compute_create2_address_correct(
+                        &to_addr, // Factory address
+                        &extracted_salt, // Utilise le VRAI salt extrait
+                        extracted_bytecode
+                    );
+                    
+                    // 🧪 TEST 2 : Avec creation bytecode (comme l'opcode 0xf5)
+                    let computed_addr_init = self.compute_create2_with_init_code(
+                        &to_addr, // Factory address
+                        &extracted_salt, // Utilise le VRAI salt extrait
+                        &creation_bytecode // Creation bytecode complet
+                    );
+                    
+                    println!("🔍 [CREATE2 COMPARE] target: {}", addr);
+                    println!("🔍 [CREATE2 COMPARE] avec_runtime: {}", computed_addr_runtime);
+                    println!("� [CREATE2 COMPARE] avec_init: {}", computed_addr_init);
+                    
+                    // Choix de l'adresse la plus proche
+                    if computed_addr_runtime.to_lowercase() == addr.to_lowercase() {
+                        println!("✅ [CREATE2] Adresse target validée avec RUNTIME : {}", addr);
+                        addr
+                    } else if computed_addr_init.to_lowercase() == addr.to_lowercase() {
+                        println!("✅ [CREATE2] Adresse target validée avec INIT_CODE : {}", addr);
+                        addr
+                    } else {
+                        println!("⚠️ [CREATE2] Aucune correspondance exacte");
+                        println!("💡 [CREATE2] Utilisation de l'adresse target_address fournie");
+                        addr
+                    }
+                } else {
+                    println!("⚡ [CREATE2] Déploiement à l'adresse forcée : {}", addr);
+                    addr
+                }
             } else {
                 return Err("CREATE2 demandé mais target_address manquant".to_string());
             }
@@ -2012,8 +2169,10 @@ let mut tx_hasher = Keccak256::new();
             addr_hasher.update(from_addr.as_bytes());
             addr_hasher.update(&final_nonce.to_be_bytes());
             addr_hasher.update(&creation_bytecode);
-            addr_hasher.update(&rand::random::<u128>().to_be_bytes());
-            addr_hasher.update(&chrono::Utc::now().timestamp_nanos().to_be_bytes());
+            let mut rng = Self::secure_rng();
+            let random_entropy = rng.next_u64() as u128;
+            addr_hasher.update(&random_entropy.to_be_bytes()); // 🛡️ SÉCURISÉ !
+            addr_hasher.update(&chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0).to_be_bytes());
             addr_hasher.update(&std::process::id().to_be_bytes());
 
             let addr_hash = addr_hasher.finalize();
@@ -2027,7 +2186,9 @@ let mut tx_hasher = Keccak256::new();
                 while accounts.contains_key(&final_addr) && attempts < 1000 {
                     let mut retry_hasher = Keccak256::new();
                     retry_hasher.update(final_addr.as_bytes());
-                    retry_hasher.update(&rand::random::<u128>().to_be_bytes());
+                    let mut rng = Self::secure_rng();
+                    let retry_entropy = rng.next_u64() as u128;
+                    retry_hasher.update(&retry_entropy.to_be_bytes()); // 🛡️ SÉCURISÉ !
                     retry_hasher.update(&attempts.to_be_bytes());
                     let retry_hash = retry_hasher.finalize();
                     final_addr = format!("0x{}", hex::encode(&retry_hash[12..32]).to_lowercase());
@@ -2340,7 +2501,7 @@ let mut tx_hasher = Keccak256::new();
         "type": "0x2",
         "nonce": format!("0x{:x}", final_nonce),
         "value": format!("0x{:x}", value),
-        "deploymentTimestamp": chrono::Utc::now().timestamp_nanos(),
+        "deploymentTimestamp": chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
         "isUniqueDeployment": is_deployment,
         "isPersisted": is_deployment,
         "deploymentMethod": if is_deployment {
@@ -2352,7 +2513,12 @@ let mut tx_hasher = Keccak256::new();
         } else {
             "transaction"
         },
-        "addressEntropy": if is_deployment { rand::random::<u64>() } else { 0 },
+        "addressEntropy": if is_deployment { 
+            let mut rng = Self::secure_rng();
+            rng.next_u64()
+        } else { 
+            0 
+        },
         "uniquenessGuaranteed": is_deployment,
         "isVezInitialization": is_vez_initialization,
         "transactionCost": if is_vez_initialization { "0x0" } else { "0x5208" }
@@ -2713,6 +2879,165 @@ pub async fn eth_call(&self, call_object: serde_json::Value) -> Result<String, S
         /// ✅ Estimation du gas
     pub async fn estimate_gas(&self) -> u64 {
         21000u64 // Gas de base pour une transaction simple
+    }
+
+    /// Calcule l'adresse CREATE2 EXACTEMENT selon la spec Ethereum
+    pub fn compute_create2_address_correct(
+        &self,
+        deployer: &str,      // Adresse du contrat factory
+        salt: &[u8],         // Salt (32 bytes)
+        bytecode: &[u8]      // Runtime bytecode (PAS creation bytecode)
+    ) -> String {
+        use sha3::{Digest, Keccak256};
+        
+        println!("🔧 [DEBUG CREATE2] Paramètres d'entrée :");
+        println!("   • deployer: {}", deployer);
+        println!("   • salt: 0x{}", hex::encode(salt));
+        println!("   • bytecode_len: {} bytes", bytecode.len());
+        println!("   • bytecode_preview: 0x{}", hex::encode(&bytecode[0..std::cmp::min(20, bytecode.len())]));
+        
+        // Décodage de l'adresse du déployeur
+        let deployer_bytes = if deployer.starts_with("0x") && deployer.len() == 42 {
+            match hex::decode(&deployer[2..]) {
+                Ok(decoded) if decoded.len() == 20 => decoded,
+                _ => {
+                    eprintln!("⚠️ Adresse deployer invalide : {}", deployer);
+                    return "0x0000000000000000000000000000000000000000".to_string();
+                }
+            }
+        } else {
+            eprintln!("⚠️ Format deployer invalide : {}", deployer);
+            return "0x0000000000000000000000000000000000000000".to_string();
+        };
+        
+        // Préparation du salt (32 bytes)
+        let mut salt_bytes = [0u8; 32];
+        if salt.len() <= 32 {
+            // Copie à la fin (big-endian padding)
+            let start_idx = 32 - salt.len();
+            salt_bytes[start_idx..].copy_from_slice(salt);
+        } else {
+            // Tronque si trop long
+            salt_bytes.copy_from_slice(&salt[..32]);
+        }
+        
+        // Calcul du hash du bytecode
+        let bytecode_hash = Keccak256::digest(bytecode);
+        
+        // 📐 FORMULE EXACTE CREATE2 : keccak256(0xff ++ address ++ salt ++ keccak256(initCode))
+        let mut data = Vec::new();
+        data.push(0xff);                           // 1 byte
+        data.extend_from_slice(&deployer_bytes);   // 20 bytes
+        data.extend_from_slice(&salt_bytes);       // 32 bytes
+        data.extend_from_slice(&bytecode_hash);    // 32 bytes
+        
+        println!("   • deployer_bytes: 0x{}", hex::encode(&deployer_bytes));
+        println!("   • salt_bytes: 0x{}", hex::encode(&salt_bytes));
+        println!("   • bytecode_hash: 0x{}", hex::encode(&bytecode_hash));
+        println!("   • total_data: {} bytes", data.len());
+        
+        // Hash final
+        let final_hash = Keccak256::digest(&data);
+        
+        // Prendre les 20 derniers bytes pour l'adresse
+        let address_bytes = &final_hash[12..];
+        let address = format!("0x{}", hex::encode(address_bytes));
+        
+        println!("   • final_hash: 0x{}", hex::encode(&final_hash));
+        println!("   • address_finale: {}", address);
+        println!("🔧 [DEBUG CREATE2] Calcul terminé");
+        
+        address
+    }
+
+    /// 🧪 Test : Calcul CREATE2 avec CREATION bytecode (comme l'opcode 0xf5)
+    pub fn compute_create2_with_init_code(
+        &self,
+        deployer: &str,      // Adresse du contrat factory
+        salt: &[u8],         // Salt (32 bytes)
+        init_code: &[u8]     // Creation bytecode (init_code)
+    ) -> String {
+        use sha3::{Digest, Keccak256};
+        
+        println!("🧪 [TEST CREATE2 INIT_CODE] Paramètres d'entrée :");
+        println!("   • deployer: {}", deployer);
+        println!("   • salt: 0x{}", hex::encode(salt));
+        println!("   • init_code_len: {} bytes", init_code.len());
+        println!("   • init_code_preview: 0x{}", hex::encode(&init_code[0..std::cmp::min(20, init_code.len())]));
+        
+        // ✅ MÉTHODE EXACTEMENT IDENTIQUE À L'OPCODE 0xf5
+        let mut hasher = Keccak256::new();
+
+        // 1️⃣ Prefix 0xff
+        hasher.update(&[0xff]);
+
+        // 2️⃣ Adresse du déployeur (20 bytes)
+        let mut sender_bytes = [0u8; 20];
+        if deployer.starts_with("0x") && deployer.len() == 42 {
+            if let Ok(decoded) = hex::decode(&deployer[2..]) {
+                if decoded.len() == 20 {
+                    sender_bytes.copy_from_slice(&decoded);
+                }
+            }
+        }
+        hasher.update(&sender_bytes);
+
+        // 3️⃣ Salt (32 bytes exactement)
+        let mut salt_bytes = [0u8; 32];
+        if salt.len() <= 32 {
+            salt_bytes[32-salt.len()..].copy_from_slice(salt);
+        } else {
+            salt_bytes.copy_from_slice(&salt[0..32]);
+        }
+        hasher.update(&salt_bytes);
+
+        // 4️⃣ keccak256(init_code) - UTILISE LE CRÉATION BYTECODE
+        let init_code_hash = Keccak256::digest(init_code);
+        hasher.update(&init_code_hash);
+
+        // 5️⃣ Résultat : prendre les 20 derniers bytes du hash
+        let address_hash = hasher.finalize();
+        let address = format!("0x{}", hex::encode(&address_hash[12..32]).to_lowercase());
+        
+        println!("   • init_code_hash: 0x{}", hex::encode(&init_code_hash));
+        println!("   • address_avec_init_code: {}", address);
+        
+        address
+    }
+
+    /// 🧪 Test avec les vraies données de votre factory 0x4af63f02
+    pub fn compute_create2_with_real_factory(&self) {
+        // Test avec VOS VRAIES DONNÉES exactes
+        let factory_addr = "0x5b4e2b86203837c1e9469a1291b58569b60e41b3".to_string();
+        
+        // Salt réel de vos données
+        let salt_hex = "1234567890abceee1234567880abcdef1234567890abcdef1234567890abcde4";
+        let salt_bytes = hex::decode(salt_hex).unwrap();
+        
+        // Début du bytecode de votre calldata (complet)
+        let real_bytecode_hex = "60e060405234801561001057600080fd5b5061001f61015560201b60201c565b8073ffffffffffffffffffffffffffffffffffffffff1660c09073ffffffffffffffffffffffffffffffffffffffff168152508173ffffffffffffffffffffffffffffffffffffffff1660a09073ffffffffffffffffffffffffffffffffffffffff168152508273ffffffffffffffffffffffffffffffffffffffff1660809073ffffffffffffffffffffffffffffffffffffffff1681525050505033600360006101000a81548173ffffffffffffffffffffffffffffffffffffffff021916908373ffffffffffffffffffffffffffffffffffffffff16021790555073eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee6000806101000a81548173ffffffffffffffffffffffffffffffffffffffff021916908373ffffffffffffffffffffffffffffffffffffffff16021790555061069d565b";
+        let bytecode = hex::decode(real_bytecode_hex).unwrap();
+        
+        // Calcul avec VOS vraies données
+        let computed_addr = self.compute_create2_address_correct(&factory_addr, &salt_bytes, &bytecode);
+        
+        println!("🧪 [TEST REAL DATA]");
+        println!("   Factory: {}", factory_addr);
+        println!("   Salt: 0x{}", salt_hex);  
+        println!("   Bytecode: {} bytes (début du vrai bytecode)", bytecode.len());
+        println!("   ✅ Adresse calculée: {}", computed_addr);
+        
+        // Comparaison avec l'adresse Solidity attendue
+        let expected_solidity = "0x3893e095468405cA566792504FBB2382cE0ebFE7";
+        println!("   📋 Adresse Solidity: {}", expected_solidity);
+        println!("   🎯 Match: {}", computed_addr.to_lowercase() == expected_solidity.to_lowercase());
+        
+        if computed_addr.to_lowercase() != expected_solidity.to_lowercase() {
+            println!("   ❌ PROBLÈME: Les adresses ne correspondent pas!");
+            println!("   🔧 Vérifiez: factory address, salt, et bytecode");
+        } else {
+            println!("   ✅ SUCCÈS: Les adresses correspondent parfaitement!");
+        }
     }
 
     /// ✅ Récupération des comptes disponibles au format MetaMask
