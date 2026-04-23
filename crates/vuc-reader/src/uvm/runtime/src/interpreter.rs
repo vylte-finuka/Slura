@@ -226,17 +226,8 @@ enum MemoryOffsetType {
     ContractAddress, // Probable adresse de contrat
 }
 
-// Données brutes CREATE2 à transmettre à l'engine
-#[derive(Clone, Debug)]
-pub struct Create2Data {
-    pub sender: String,     // Adresse du contrat appelant CREATE2
-    pub salt: u256,         // Salt utilisé pour CREATE2
-    pub init_code: Vec<u8>, // Bytecode de création
-    pub value: u256,        // ETH envoyé
-}
-
-// Type alias pour le callback CREATE2 - transmet les données brutes pour calcul engine
-pub type Create2Callback = Arc<dyn Fn(Create2Data) -> Result<String, String> + Send + Sync>;
+// Type alias pour le callback CREATE2
+pub type Create2Callback = Arc<dyn Fn(&str, Vec<u8>, u256) -> Result<(), String> + Send + Sync>;
 
 // ✅ AJOUT: Context d'exécution UVM
 #[derive(Clone)]
@@ -2868,7 +2859,7 @@ pub fn execute_program(
                 return Ok(result);
             }
 
-                     //___ 0xf5 CREATE2 - Transmission des données brutes à l'engine
+                     //___ 0xf5 CREATE2 - Version corrigée avec extraction runtime
             0xf5 => {
                 if evm_stack.len() < 4 {
                     return Ok(halt_json_ebpf("Stack underflow on CREATE2"));
@@ -2889,11 +2880,10 @@ pub fn execute_program(
                 let init_code = memory_slice_len(&global_mem, offset_usize, size_usize).to_vec();
 
                 println!(
-                    "🛠️ [CREATE2 RAW] value={}, init_code_len={}, salt={:064x}, sender={}",
+                    "🛠️ [CREATE2] value={}, init_code_len={}, salt={:064x}",
                     value,
                     init_code.len(),
-                    salt,
-                    interpreter_args.contract_address
+                    salt
                 );
 
                 if init_code.is_empty() {
@@ -2904,56 +2894,32 @@ pub fn execute_program(
                     continue;
                 }
 
-                // 🔥 NOUVELLE LOGIQUE: Transmettre les données brutes à l'engine
-                let new_address = if let Some(ref callback) = execution_context.on_create2_event {
-                    let create2_data = Create2Data {
-                        sender: interpreter_args.contract_address.clone(),
-                        salt,
-                        init_code: init_code.clone(),
-                        value,
-                    };
-                    
-                    println!("🚀 [CREATE2 RAW] Transmission des données à l'engine...");
-                    
-                    match callback(create2_data) {
-                        Ok(engine_address) => {
-                            println!("✅ [CREATE2 ENGINE] Adresse calculée par l'engine : {}", engine_address);
-                            engine_address
-                        }
-                        Err(e) => {
-                            println!("❌ [CREATE2 ENGINE] Erreur callback : {}", e);
-                            return Ok(halt_json_ebpf(&format!("CREATE2 engine callback error: {}", e)));
-                        }
+                // === Assemblage adresse CREATE2 ===
+                let mut hasher = Keccak256::new();
+                hasher.update(&[0xff]);
+
+                let sender = interpreter_args.contract_address.clone();
+                let mut sender_bytes = [0u8; 20];
+                if let Ok(decoded) = hex::decode(sender.trim_start_matches("0x")) {
+                    if decoded.len() == 20 {
+                        sender_bytes.copy_from_slice(&decoded);
                     }
-                } else {
-                    // Fallback: calcul local si pas de callback
-                    println!("⚠️ [CREATE2] Pas de callback engine - calcul local");
-                    let mut hasher = Keccak256::new();
-                    hasher.update(&[0xff]);
+                }
+                hasher.update(&sender_bytes);
 
-                    let sender = interpreter_args.contract_address.clone();
-                    let mut sender_bytes = [0u8; 20];
-                    if let Ok(decoded) = hex::decode(sender.trim_start_matches("0x")) {
-                        if decoded.len() == 20 {
-                            sender_bytes.copy_from_slice(&decoded);
-                        }
-                    }
-                    hasher.update(&sender_bytes);
+                let mut salt_bytes = [0u8; 32];
+                salt.to_big_endian(&mut salt_bytes);
+                hasher.update(&salt_bytes);
 
-                    let mut salt_bytes = [0u8; 32];
-                    salt.to_big_endian(&mut salt_bytes);
-                    hasher.update(&salt_bytes);
+                let init_code_hash = Keccak256::digest(&init_code);
+                hasher.update(&init_code_hash);
 
-                    let init_code_hash = Keccak256::digest(&init_code);
-                    hasher.update(&init_code_hash);
+                let hash = hasher.finalize();
+                let new_address = format!("0x{}", hex::encode(&hash[12..32]));
 
-                    let hash = hasher.finalize();
-                    format!("0x{}", hex::encode(&hash[12..32]))
-                };
+                println!("📍 [CREATE2] Adresse calculée : {}", new_address);
 
-                println!("📍 [CREATE2 FINAL] Adresse finale : {}", new_address);
-
-                // ✅ Extraction du runtime depuis le creation bytecode
+                // ✅ NOUVEAU: Extraction du runtime depuis le creation bytecode
                 let runtime_bytecode = match extract_runtime_from_creation_bytecode(&init_code) {
                     Ok(runtime) => {
                         println!("✅ [CREATE2] Runtime extrait: {} bytes", runtime.len());
@@ -2961,6 +2927,7 @@ pub fn execute_program(
                     }
                     Err(e) => {
                         println!("⚠️ [CREATE2] Impossible d'extraire le runtime: {} - utilise creation code", e);
+                        // Fallback: utilise le creation code directement
                         init_code.clone()
                     }
                 };
@@ -2974,7 +2941,7 @@ pub fn execute_program(
                 let new_account = AccountState {
                     balance: value,
                     nonce: u256::one(),
-                    code: runtime_bytecode.clone(),
+                    code: runtime_bytecode.clone(), // ✅ CORRECTION: utilise le runtime
                     storage_root: String::new(),
                     is_contract: true,
                 };
@@ -2992,8 +2959,15 @@ pub fn execute_program(
                 // Persistance RocksDB avec le runtime
                 if let Some(ref storage_manager) = execution_context.storage_manager {
                     let code_key = format!("account:{}:contract_state", new_address);
-                    let _ = storage_manager.write(&code_key, &runtime_bytecode);
+                    let _ = storage_manager.write(&code_key, &runtime_bytecode); // ✅ runtime, pas init_code
                     println!("💾 [CREATE2 ROCKSDB] Runtime persisté pour {}", new_address);
+                }
+
+                // Déclenchement du callback avec le runtime
+                if let Some(ref callback) = execution_context.on_create2_event {
+                    if let Err(e) = callback(&new_address, runtime_bytecode.clone(), value) {
+                        println!("⚠️ [CREATE2] Erreur callback : {}", e);
+                    }
                 }
 
                 println!("✅ [CREATE2] Contrat déployé avec runtime à {}", new_address);
