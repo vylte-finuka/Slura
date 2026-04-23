@@ -36,7 +36,6 @@ use tracing::{info, error};
 use chrono::Utc;
 use jsonrpsee_types::error::ErrorCode;
 use tracing_subscriber;
-use sha3::Digest;
 use tokio::time::{Duration, timeout};
 
 // ✅ AJOUTS POUR LA FONCTION MAIN
