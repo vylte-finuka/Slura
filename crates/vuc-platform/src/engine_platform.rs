@@ -8,9 +8,7 @@ use rand::{SeedableRng, RngCore};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use serde_json::json;
-use alloy_primitives::B256;
-use sha3::{Digest, Keccak256};
-use hex;
+use alloy_primitives::{B256, Keccak256};
 
 // Ensure the correct module path for TimestampRelease
 use vuc_events::timestamp_release::TimestampRelease;
@@ -36,6 +34,7 @@ use tracing::{info, error};
 use chrono::Utc;
 use jsonrpsee_types::error::ErrorCode;
 use tracing_subscriber;
+use sha3::Digest;
 use tokio::time::{Duration, timeout};
 
 // ✅ AJOUTS POUR LA FONCTION MAIN
@@ -46,7 +45,6 @@ use vuc_tx::slura_merkle::build_state_trie;
 use uvm_runtime::interpreter::execute_program;
 use vuc_platform::operator::crypto_perf::generate_slu_zk_address;
 use uvm_runtime::interpreter::InterpreterArgs;
-use uvm_runtime::interpreter::{Create2Data, Create2Callback};
 use vuc_platform::{slurachain_rpc_service::slurachainRpcService, consensus::lurosonie_manager::LurosonieManager};
 use vuc_storage::storing_access::RocksDBManagerImpl;
 use vuc_storage::storing_access::RocksDBManager;
@@ -194,74 +192,45 @@ impl EnginePlatform {
         vuc_platform::operator::crypto_perf::generate_and_create_account(&mut vm, "acc").await
     }
 
-    /// 🔥 Configuration du callback CREATE2 pour calculer l'adresse dans l'engine
+    /// 🔥 Configuration du callback CREATE2 pour intercepter les événements depuis les factories
     pub async fn setup_create2_callback(&self, target_address_storage: Arc<tokio::sync::RwLock<Option<String>>>) {
         let mut vm = self.vm.write().await;
         
-        let callback = Arc::new(move |create2_data: Create2Data| -> Result<String, String> {
-            println!("🎯 [CREATE2 ENGINE] Données reçues depuis l'opcode 0xf5");
-            println!("  - Sender: {}", create2_data.sender);
-            println!("  - Salt: {:064x}", create2_data.salt);
-            println!("  - Init code: {} bytes", create2_data.init_code.len());
-            println!("  - Value: {}", create2_data.value);
+        let callback = Arc::new(move |address: &str, bytecode: Vec<u8>, value: primitive_types::U256| -> Result<(), String> {
+            println!("🎯 [CREATE2 CALLBACK] Adresse interceptée depuis factory : {}", address);
+            println!("🎯 [CREATE2 CALLBACK] Bytecode taille : {} bytes", bytecode.len());
+            println!("🎯 [CREATE2 CALLBACK] Value : {}", value);
             
-            // 🔥 CALCUL CREATE2 DANS L'ENGINE (la bonne logique)
-            let mut data = Vec::new();
-            data.push(0xff);
-            
-            // Sender address (20 bytes)
-            let mut sender_bytes = [0u8; 20];
-            if let Ok(decoded) = hex::decode(create2_data.sender.trim_start_matches("0x")) {
-                if decoded.len() == 20 {
-                    sender_bytes.copy_from_slice(&decoded);
-                }
-            }
-            data.extend_from_slice(&sender_bytes);
-            
-            // Salt (32 bytes)
-            let mut salt_bytes = [0u8; 32];
-            create2_data.salt.to_big_endian(&mut salt_bytes);
-            data.extend_from_slice(&salt_bytes);
-            
-            // Init code hash
-            let init_code_hash = Keccak256::digest(&create2_data.init_code);
-            data.extend_from_slice(&init_code_hash);
-            
-            let hash = Keccak256::digest(&data);
-            let calculated_address = format!("0x{}", hex::encode(&hash[12..32]));
-            
-            println!("✅ [CREATE2 ENGINE] Adresse calculée par l'engine : {}", calculated_address);
+            // Convertir immédiatement la référence en String owned
+            let address_owned = address.to_string();
             
             // Store l'adresse pour utilisation dans send_transaction
             let storage_clone = target_address_storage.clone();
-            let address_for_storage = calculated_address.clone();
-            
-            println!("🔄 [CREATE2 ENGINE] Lancement du stockage async...");
+            println!("🔄 [CREATE2 CALLBACK] Lancement du stockage async...");
             
             let handle = tokio::spawn(async move {
-                println!("📝 [CREATE2 ENGINE ASYNC] Début du stockage...");
+                println!("📝 [CREATE2 CALLBACK ASYNC] Début du stockage...");
                 let mut storage = storage_clone.write().await;
-                *storage = Some(address_for_storage.clone());
-                println!("💾 [CREATE2 ENGINE ASYNC] Adresse stockée : {}", address_for_storage);
+                *storage = Some(address_owned.clone());
+                println!("💾 [CREATE2 CALLBACK ASYNC] Adresse stockée : {}", address_owned);
             });
             
-            println!("⏳ [CREATE2 ENGINE] Attente de la completion du stockage...");
+            println!("⏳ [CREATE2 CALLBACK] Attente de la completion du stockage...");
             
             // Attendre synchrone la completion
             let runtime = tokio::runtime::Handle::try_current();
             if let Ok(rt) = runtime {
                 let _ = rt.block_on(handle);
-                println!("✅ [CREATE2 ENGINE] Stockage terminé avec succès");
+                println!("✅ [CREATE2 CALLBACK] Stockage terminé avec succès");
             } else {
-                println!("⚠️ [CREATE2 ENGINE] Pas de runtime Tokio disponible");
+                println!("⚠️ [CREATE2 CALLBACK] Pas de runtime Tokio disponible");
             }
             
-            // Retourner l'adresse calculée pour que l'opcode 0xf5 l'utilise
-            Ok(calculated_address)
+            Ok(())
         });
         
         vm.on_create2_event = Some(callback);
-        println!("✅ [CREATE2 ENGINE] Callback configuré pour calcul d'adresse dans l'engine");
+        println!("✅ [CREATE2 CALLBACK] Configuré pour intercepter les événements factory");
     }
 
                      /// ✅ NOUVEAU: Persistance complète automatique (CORRIGÉ POUR SEND - AUCUN AWAIT AVEC GUARDS)
