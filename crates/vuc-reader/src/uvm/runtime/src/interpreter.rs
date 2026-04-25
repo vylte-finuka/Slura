@@ -3232,10 +3232,25 @@ pub fn execute_program(
         if call_data.len() >= 36 && &call_data[0..4] == [0x70, 0xa0, 0x82, 0x31] {
             let addr_bytes = &call_data[16..36]; // 20 bytes d'adresse (ABI: 12 zéros + 20 bytes)
             let addr_hex = hex::encode(addr_bytes);
-            // Clé du mapping Solidity : keccak256(address.padded(32) ++ slot(32))
-            // La fonction get_storage supporte le format "0x{hex}|{slot_num}"
-            let slot_key = format!("0x{}|0", addr_hex);
-            let bal_bytes = get_storage(&execution_context.world_state, &to_address, &slot_key);
+            
+            // ✅ FIX: Special handling for native ETH address (0xEeee...eeEE)
+            // Check if target is the canonical native token address
+            let is_native_token = to_address.to_lowercase() == "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+            
+            let bal_bytes = if is_native_token {
+                // For native token address, return the actual ETH balance from accounts
+                let query_addr = format!("0x{}", addr_hex);
+                let balance = get_balance(&execution_context.world_state, &query_addr);
+                let mut bytes = [0u8; 32];
+                balance.to_big_endian(&mut bytes);
+                bytes.to_vec()
+            } else {
+                // For ERC20 contracts, read from storage mapping
+                // Clé du mapping Solidity : keccak256(address.padded(32) ++ slot(32))
+                // La fonction get_storage supporte le format "0x{hex}|{slot_num}"
+                let slot_key = format!("0x{}|0", addr_hex);
+                get_storage(&execution_context.world_state, &to_address, &slot_key)
+            };
 
             // Encode en ABI uint256 (32 bytes big-endian, right-aligned)
             let mut out32 = vec![0u8; 32];
@@ -3254,10 +3269,11 @@ pub fn execute_program(
             execution_context.return_data = out32;
             evm_stack.push(u256::one()); // success
             println!(
-                "🔎 [STATICCALL FALLBACK] balanceOf(0x{}) on {} -> 0x{}",
+                "🔎 [STATICCALL FALLBACK] balanceOf(0x{}) on {} -> 0x{} (native={})",
                 addr_hex,
                 to_address,
-                hex::encode(&execution_context.return_data)
+                hex::encode(&execution_context.return_data),
+                is_native_token
             );
             consume_gas_amount(&mut execution_context, 700)?;
             bytecode_pc += 1;
