@@ -3222,10 +3222,50 @@ pub fn execute_program(
         }
     }
 
-    // Si pas de code -> EOA ou inexistante : succès + returndata vide
+    // Si pas de code -> tentative de lecture directe du storage (balanceOf, etc.)
+    // avant de traiter comme un EOA.
     if target_code.is_empty() {
+        // ── Fallback : balanceOf(address) → selector 0x70a08231 ──────────────────
+        // Si le calldata commence par ce sélecteur et contient 32 octets d'adresse,
+        // on lit directement le slot du mapping (slot 0) dans le storage du contrat cible
+        // et on renvoie la valeur encodée en ABI uint256 (32 bytes).
+        if call_data.len() >= 36 && &call_data[0..4] == [0x70, 0xa0, 0x82, 0x31] {
+            let addr_bytes = &call_data[16..36]; // 20 bytes d'adresse (ABI: 12 zéros + 20 bytes)
+            let addr_hex = hex::encode(addr_bytes);
+            // Clé du mapping Solidity : keccak256(address.padded(32) ++ slot(32))
+            // La fonction get_storage supporte le format "0x{hex}|{slot_num}"
+            let slot_key = format!("0x{}|0", addr_hex);
+            let bal_bytes = get_storage(&execution_context.world_state, &to_address, &slot_key);
+
+            // Encode en ABI uint256 (32 bytes big-endian, right-aligned)
+            let mut out32 = vec![0u8; 32];
+            let copy_len = bal_bytes.len().min(32);
+            out32[32 - copy_len..].copy_from_slice(&bal_bytes[bal_bytes.len() - copy_len..]);
+
+            let out_offset_usize = out_offset.low_u64() as usize;
+            let out_size_usize = out_size.low_u64() as usize;
+            if !resize_memory_ebpf(&mut global_mem, out_offset_usize, out_size_usize) {
+                return Ok(halt_json_ebpf("Memory resize failed on STATICCALL (balanceOf fallback)"));
+            }
+            let copy_len = out32.len().min(out_size_usize);
+            global_mem[out_offset_usize..out_offset_usize + out_size_usize].fill(0);
+            global_mem[out_offset_usize..out_offset_usize + copy_len].copy_from_slice(&out32[..copy_len]);
+
+            execution_context.return_data = out32;
+            evm_stack.push(u256::one()); // success
+            println!(
+                "🔎 [STATICCALL FALLBACK] balanceOf(0x{}) on {} -> 0x{}",
+                addr_hex,
+                to_address,
+                hex::encode(&execution_context.return_data)
+            );
+            consume_gas_amount(&mut execution_context, 700)?;
+            bytecode_pc += 1;
+            continue;
+        }
+
+        // ── EOA ou contrat sans code connu : succès + returndata vide ────────────
         execution_context.return_data = vec![];
-        // écrire zeros dans out area (respect padding)
         if !resize_memory_ebpf(&mut global_mem, out_offset.low_u64() as usize, out_size.low_u64() as usize) {
             return Ok(halt_json_ebpf("Memory resize failed on STATICCALL"));
         }
