@@ -3247,20 +3247,17 @@ pub fn execute_program(
             if !resize_memory_ebpf(&mut global_mem, out_offset_usize, out_size_usize) {
                 return Ok(halt_json_ebpf("Memory resize failed on STATICCALL (balanceOf fallback)"));
             }
-            for i in 0..out_size_usize {
-                global_mem[out_offset_usize + i] = 0;
-            }
-            for i in 0..out32.len().min(out_size_usize) {
-                global_mem[out_offset_usize + i] = out32[i];
-            }
+            let copy_len = out32.len().min(out_size_usize);
+            global_mem[out_offset_usize..out_offset_usize + out_size_usize].fill(0);
+            global_mem[out_offset_usize..out_offset_usize + copy_len].copy_from_slice(&out32[..copy_len]);
 
-            execution_context.return_data = out32.clone();
+            execution_context.return_data = out32;
             evm_stack.push(u256::one()); // success
             println!(
                 "🔎 [STATICCALL FALLBACK] balanceOf(0x{}) on {} -> 0x{}",
                 addr_hex,
                 to_address,
-                hex::encode(&out32)
+                hex::encode(&execution_context.return_data)
             );
             consume_gas_amount(&mut execution_context, 700)?;
             bytecode_pc += 1;
