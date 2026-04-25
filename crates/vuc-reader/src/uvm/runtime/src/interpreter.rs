@@ -2279,6 +2279,109 @@ pub fn execute_program(
                 consume_gas_amount(&mut execution_context, 1)?;
             }
 
+            // ___ 0x5c TLOAD (EIP-1153 Transient Storage Load) - Version production
+0x5c => {
+    if evm_stack.is_empty() {
+        return Ok(halt_json_ebpf("Stack underflow on TLOAD"));
+    }
+
+    let key_u256 = evm_stack.pop().unwrap();
+
+    // Conversion clé en bytes32
+    let mut key_bytes = [0u8; 32];
+    key_u256.to_big_endian(&mut key_bytes);
+
+    // Lecture dans transient_storage (HashMap<[u8;32], [u8;32]>)
+    let value = execution_context
+        .world_state
+        .transient_storage
+        .get(&key_bytes)
+        .cloned()
+        .unwrap_or([0u8; 32]);  // valeur par défaut = 0 si absent
+
+    let value_u256 = u256::from_big_endian(&value);
+
+    evm_stack.push(value_u256);
+
+    println!(
+        "📖 [TLOAD] transient[0x{}] = 0x{:064x}",
+        hex::encode(&key_bytes),
+        value_u256
+    );
+
+    // Gas cost pour TLOAD = 100 (warm access)
+    consume_gas_amount(&mut execution_context, 100)?;
+}
+
+            // ___ 0x5d TSTORE (EIP-1153 Transient Storage Store)
+            0x5d => {
+                if evm_stack.len() < 2 {
+                    return Ok(halt_json_ebpf("Stack underflow on TSTORE"));
+                }
+
+                let value_u256 = evm_stack.pop().unwrap();
+                let key_u256 = evm_stack.pop().unwrap();
+
+                // Conversion en bytes
+                let mut key_bytes = [0u8; 32];
+                let mut value_bytes = [0u8; 32];
+                key_u256.to_big_endian(&mut key_bytes);
+                value_u256.to_big_endian(&mut value_bytes);
+
+                // Écriture dans transient storage
+                if value_u256.is_zero() {
+                    // TSTORE 0 = delete (comme SSTORE)
+                    execution_context
+                        .world_state
+                        .transient_storage
+                        .remove(&key_bytes);
+                    println!(
+                        "🗑️ [TSTORE] transient[0x{}] ← DELETE",
+                        hex::encode(&key_bytes)
+                    );
+                } else {
+                    execution_context
+                        .world_state
+                        .transient_storage
+                        .insert(key_bytes, value_bytes);
+                    println!(
+                        "💾 [TSTORE] transient[0x{}] ← 0x{:064x}",
+                        hex::encode(&key_bytes),
+                        value_u256
+                    );
+                }
+
+                // Gas : 100 (warm) ou 2100 (cold/change) – simplifié à 100
+                consume_gas_amount(&mut execution_context, 100)?;
+            }
+
+            //___ 0x5e MCOPY
+            0x5e => {
+                let dst_offset = reg[_dst].low_u64() as usize;
+                let src_offset = reg[_src].low_u64() as usize;
+                let len = insn.imm as usize;
+                let max_len = global_mem
+                    .len()
+                    .saturating_sub(dst_offset)
+                    .min(global_mem.len().saturating_sub(src_offset));
+                let safe_len = len.min(max_len);
+                if safe_len > 0
+                    && src_offset + safe_len <= global_mem.len()
+                    && dst_offset + safe_len <= global_mem.len()
+                {
+                    if let Some(end) = dst_offset.checked_add(safe_len) {
+                        ensure_memory_size(
+                            &mut global_mem,
+                            end,
+                            &mut execution_context.free_memory_pointer,
+                        )?;
+                        let data: Vec<u8> = global_mem[src_offset..src_offset + safe_len].to_vec();
+                        global_mem[dst_offset..dst_offset + safe_len].copy_from_slice(&data);
+                    }
+                }
+                consume_gas_amount(&mut execution_context, 3 + 3 * ((len + 31) / 32) as u64)?;
+            }
+
             //___ 0x5f PUSH0
             0x5f => {
                 evm_stack.push(u256::zero());
@@ -2764,55 +2867,165 @@ pub fn execute_program(
                 consume_gas_amount(&mut execution_context, 700)?;
             }
 
-            //___ 0xf2 CALLCODE
-            0xf2 => {
-                // CALLCODE - Similaire à CALL mais exécute dans le contexte du contract appelant
-                if evm_stack.len() < 7 {
-                    return Ok(halt_json_ebpf("Stack underflow on CALLCODE"));
+            //___ 0xf2 CALLCODE - Version production (exécute dans le contexte du caller, value transférée)
+0xf2 => {
+    if evm_stack.len() < 7 {
+        return Ok(halt_json_ebpf("Stack underflow on CALLCODE"));
+    }
+
+    let gas = evm_stack.pop().unwrap();
+    let to_addr_u256 = evm_stack.pop().unwrap();
+    let value = evm_stack.pop().unwrap();
+    let in_offset = evm_stack.pop().unwrap();
+    let in_size = evm_stack.pop().unwrap();
+    let out_offset = evm_stack.pop().unwrap();
+    let out_size = evm_stack.pop().unwrap();
+
+    let to_address = u256_to_address(to_addr_u256);
+
+    println!(
+        "📞 [CALLCODE] to={}, value={}, gas={}, in=mem[{}:{}], out=mem[{}:{}]",
+        to_address, value, gas, in_offset, in_size, out_offset, out_size
+    );
+
+    // Extraction du calldata depuis la mémoire
+    let in_offset_usize = as_usize_or_fail(in_offset);
+    let in_size_usize = as_usize_or_fail(in_size);
+
+    if !resize_memory_ebpf(&mut global_mem, in_offset_usize, in_size_usize) {
+        return Ok(halt_json_ebpf("Memory resize failed on CALLCODE (input)"));
+    }
+
+    let call_data = memory_slice_len(&global_mem, in_offset_usize, in_size_usize).to_vec();
+
+    // Récupération du bytecode cible
+    let mut target_code = execution_context
+        .world_state
+        .code
+        .get(&to_address)
+        .or_else(|| execution_context.world_state.accounts.get(&to_address).map(|acc| &acc.code))
+        .cloned()
+        .unwrap_or_default();
+
+    // Fallback RocksDB si nécessaire
+    if target_code.is_empty() {
+        if let Some(ref storage_manager) = execution_context.storage_manager {
+            let contract_state_key = format!("account:{}:contract_state", to_address);
+            if let Ok(bytecode) = storage_manager.read(&contract_state_key) {
+                if !bytecode.is_empty() {
+                    target_code = bytecode;
+                    execution_context.world_state.code.insert(to_address.clone(), target_code.clone());
                 }
-
-                let gas = evm_stack.pop().unwrap();
-                let to_addr_u256 = evm_stack.pop().unwrap();
-                let value = evm_stack.pop().unwrap();
-                let in_offset = evm_stack.pop().unwrap();
-                let in_size = evm_stack.pop().unwrap();
-                let out_offset = evm_stack.pop().unwrap();
-                let out_size = evm_stack.pop().unwrap();
-
-                let to_address = u256_to_address(to_addr_u256);
-                println!(
-                    "📞 [CALLCODE] to={}, value={}, gas={}, in=mem[{}:{}], out=mem[{}:{}]",
-                    to_address, value, gas, in_offset, in_size, out_offset, out_size
-                );
-
-                // Simulate callcode (stub - real implementation would execute the call)
-                let call_success = true; // Assume success for stub
-                let return_data = vec![0u8; out_size.low_u64() as usize]; // Empty return data
-
-                // Write return data to memory
-                if !resize_memory_ebpf(
-                    &mut global_mem,
-                    out_offset.low_u64() as usize,
-                    out_size.low_u64() as usize,
-                ) {
-                    return Ok(halt_json_ebpf("Memory resize failed on CALLCODE"));
-                }
-                for i in 0..(out_size.low_u64() as usize) {
-                    if out_offset.low_u64() as usize + i < global_mem.len() {
-                        global_mem[out_offset.low_u64() as usize + i] = return_data[i];
-                    }
-                }
-
-                // Push success status onto stack
-                evm_stack.push(if call_success {
-                    u256::one()
-                } else {
-                    u256::zero()
-                });
-
-                consume_gas_amount(&mut execution_context, 700)?; // Simplified gas cost
             }
+        }
+    }
 
+    if target_code.is_empty() {
+        // EOA ou contrat sans code → succès, pas de retour de données
+        execution_context.return_data = vec![];
+        let out_offset_usize = as_usize_or_fail(out_offset);
+        let out_size_usize = as_usize_or_fail(out_size);
+        if resize_memory_ebpf(&mut global_mem, out_offset_usize, out_size_usize) {
+            for i in 0..out_size_usize {
+                global_mem[out_offset_usize + i] = 0;
+            }
+        }
+        evm_stack.push(u256::one());
+        consume_gas_amount(&mut execution_context, 700)?;
+        bytecode_pc += 1;
+        continue;
+    }
+
+    // Création du sous-contexte (CALLCODE exécute dans le contexte du caller)
+    let mut sub_args = interpreter_args.clone();
+    sub_args.contract_address = to_address.clone();
+    sub_args.sender_address = interpreter_args.contract_address.clone(); // msg.sender reste le caller
+    sub_args.caller = interpreter_args.contract_address.clone();
+    sub_args.state_data = call_data.clone();
+    sub_args.value = value;                    // value est transférée (contrairement à DELEGATECALL)
+    sub_args.gas_limit = gas;
+    sub_args.call_depth = interpreter_args.call_depth + u256::one();
+
+    if sub_args.call_depth > u256::from(1024) {
+        println!("🚨 [CALLCODE] Max call depth reached");
+        execution_context.return_data = vec![];
+        evm_stack.push(u256::zero());
+        consume_gas_amount(&mut execution_context, 700)?;
+        bytecode_pc += 1;
+        continue;
+    }
+
+    // Appel récursif
+    let sub_result = execute_program(
+        Some(&target_code),
+        Some(stack_usage),
+        &[],                    // mem vierge
+        &call_data,
+        helpers,
+        allowed_memory,
+        ret_type,
+        exports,
+        &sub_args,
+        execution_context.storage_manager.clone(),
+        Some(execution_context.world_state.storage.clone()),
+        execution_context.on_create2_event.clone(),
+    );
+
+    let (call_success, return_data) = match sub_result {
+        Ok(val) => {
+            if let Some(obj) = val.as_object() {
+                let action = obj.get("action").and_then(|a| a.as_str()).unwrap_or("unknown");
+                let success = action == "return" || action == "stop";
+
+                let data = if action == "return" || action == "stop" {
+                    obj.get("data").and_then(|d| match d {
+                        JsonValue::String(s) if s.starts_with("0x") => hex::decode(&s[2..]).ok(),
+                        JsonValue::Bool(b) => {
+                            let mut bytes = [0u8; 32];
+                            if *b { bytes[31] = 1; }
+                            Some(bytes.to_vec())
+                        }
+                        JsonValue::Number(n) => {
+                            let num = n.as_u64().unwrap_or(0);
+                            let mut bytes = [0u8; 32];
+                            u256::from(num).to_big_endian(&mut bytes);
+                            Some(bytes.to_vec())
+                        }
+                        _ => Some(vec![]),
+                    }).unwrap_or_default()
+                } else {
+                    vec![]
+                };
+                (success, data)
+            } else {
+                (false, vec![])
+            }
+        }
+        Err(e) => {
+            println!("❌ [CALLCODE ERROR] {:?}", e);
+            (false, vec![])
+        }
+    };
+
+    // Copie du retour dans la mémoire du caller
+    let out_offset_usize = as_usize_or_fail(out_offset);
+    let out_size_usize = as_usize_or_fail(out_size);
+    if resize_memory_ebpf(&mut global_mem, out_offset_usize, out_size_usize) {
+        for i in 0..out_size_usize {
+            global_mem[out_offset_usize + i] = 0;
+        }
+        let copy_len = std::cmp::min(return_data.len(), out_size_usize);
+        global_mem[out_offset_usize..out_offset_usize + copy_len].copy_from_slice(&return_data[0..copy_len]);
+    }
+
+    execution_context.return_data = return_data;
+
+    evm_stack.push(if call_success { u256::one() } else { u256::zero() });
+
+    consume_gas_amount(&mut execution_context, 700)?;
+    bytecode_pc += 1;
+}
+            
             //___ 0xf3 RETURN - Style eBPF avec action et résultat
             0xf3 => {
                 // RETURN
@@ -2976,48 +3189,6 @@ pub fn execute_program(
                 evm_stack.push(encode_address_to_u256(&new_address));
 
                 consume_gas_amount(&mut execution_context, 32000)?;
-            }
-
-            // ___ 0xf9 TSTORE (EIP-1153 Transient Storage Store)
-            0xf9 => {
-                if evm_stack.len() < 2 {
-                    return Ok(halt_json_ebpf("Stack underflow on TSTORE"));
-                }
-
-                let value_u256 = evm_stack.pop().unwrap();
-                let key_u256 = evm_stack.pop().unwrap();
-
-                // Conversion en bytes
-                let mut key_bytes = [0u8; 32];
-                let mut value_bytes = [0u8; 32];
-                key_u256.to_big_endian(&mut key_bytes);
-                value_u256.to_big_endian(&mut value_bytes);
-
-                // Écriture dans transient storage
-                if value_u256.is_zero() {
-                    // TSTORE 0 = delete (comme SSTORE)
-                    execution_context
-                        .world_state
-                        .transient_storage
-                        .remove(&key_bytes);
-                    println!(
-                        "🗑️ [TSTORE] transient[0x{}] ← DELETE",
-                        hex::encode(&key_bytes)
-                    );
-                } else {
-                    execution_context
-                        .world_state
-                        .transient_storage
-                        .insert(key_bytes, value_bytes);
-                    println!(
-                        "💾 [TSTORE] transient[0x{}] ← 0x{:064x}",
-                        hex::encode(&key_bytes),
-                        value_u256
-                    );
-                }
-
-                // Gas : 100 (warm) ou 2100 (cold/change) – simplifié à 100
-                consume_gas_amount(&mut execution_context, 100)?;
             }
 
             // 0xf4 DELEGATECALL - Similaire à CALLCODE mais sans transfert de valeur
