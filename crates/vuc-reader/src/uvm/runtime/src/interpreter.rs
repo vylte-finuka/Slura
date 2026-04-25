@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: (Apache-2.0 OR MIT)
 // Derived from uBPF <https://github.com/iovisor/ubpf>
-// Copyright 2025 Vyft SAS
+// Copyright 2025 Vyft Ltd
 //      (sluBPF: UVM architecture, parts of the interpreter, originally in C)
 
 use crate::ebpf;
