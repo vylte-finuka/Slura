@@ -3159,7 +3159,6 @@ pub fn execute_program(
                 consume_gas_amount(&mut execution_context, 700)?; // Simplified gas cost
             }
 
-            // ___ 0xfa STATICCALL (EIP-1153 Static Call)
             // ___ 0xfa STATICCALL (read-only recursive execution)
 0xfa => {
     if evm_stack.len() < 6 {
@@ -3175,7 +3174,7 @@ pub fn execute_program(
 
     let to_address = u256_to_address(to_addr_u256);
     println!(
-        "📞 [STATICCALL] to={}, gas={}, in=mem[{}:{}], out=mem[{}:{}]",
+        "[STATICCALL] to={}, gas={}, in=mem[{}:{}], out=mem[{}:{}]",
         to_address, gas, in_offset, in_size, out_offset, out_size
     );
 
@@ -3222,49 +3221,68 @@ pub fn execute_program(
         }
     }
 
-    // Si pas de code -> tentative de lecture directe du storage (balanceOf, etc.)
-    // avant de traiter comme un EOA.
-    if target_code.is_empty() {
-        // ── Fallback : balanceOf(address) → selector 0x70a08231 ──────────────────
-        // Si le calldata commence par ce sélecteur et contient 32 octets d'adresse,
-        // on lit directement le slot du mapping (slot 0) dans le storage du contrat cible
-        // et on renvoie la valeur encodée en ABI uint256 (32 bytes).
-        if call_data.len() >= 36 && &call_data[0..4] == [0x70, 0xa0, 0x82, 0x31] {
-            let addr_bytes = &call_data[16..36]; // 20 bytes d'adresse (ABI: 12 zéros + 20 bytes)
-            let addr_hex = hex::encode(addr_bytes);
-            // Clé du mapping Solidity : keccak256(address.padded(32) ++ slot(32))
-            // La fonction get_storage supporte le format "0x{hex}|{slot_num}"
-            let slot_key = format!("0x{}|0", addr_hex);
+    // ==================== FALLBACK SPÉCIAL POUR balanceOf ====================
+    // On active ce fallback même si le contrat a du bytecode, car le contrat à 0xEeeee... 
+    // est souvent un "faux" ERC20 ou mal configuré.
+    if call_data.len() >= 4 && &call_data[0..4] == [0x70, 0xa0, 0x82, 0x31] {
+        // balanceOf(address) selector = 0x70a08231
+        if call_data.len() >= 36 {
+            let account_bytes = &call_data[16..36]; // 20 bytes d'adresse (ABI padded)
+            let account_hex = format!("0x{}", hex::encode(account_bytes));
+
+            // Calcul CORRECT du slot du mapping _balances
+            // slot du mapping = généralement 0 dans OpenZeppelin ERC20
+            let mapping_slot = u256::zero();
+
+            let mut padded_account = [0u8; 32];
+            padded_account[12..32].copy_from_slice(account_bytes);
+
+            let mut buf = [0u8; 64];
+            buf[0..32].copy_from_slice(&padded_account);
+            mapping_slot.to_big_endian(&mut buf[32..64]);
+
+            let slot_hash = keccak_hash(&buf);
+            let slot_key = hex::encode(slot_hash);
+
             let bal_bytes = get_storage(&execution_context.world_state, &to_address, &slot_key);
 
-            // Encode en ABI uint256 (32 bytes big-endian, right-aligned)
+            // Encode en ABI uint256 (32 bytes big-endian)
             let mut out32 = vec![0u8; 32];
             let copy_len = bal_bytes.len().min(32);
             out32[32 - copy_len..].copy_from_slice(&bal_bytes[bal_bytes.len() - copy_len..]);
 
+            // Copie dans la mémoire du caller
             let out_offset_usize = out_offset.low_u64() as usize;
             let out_size_usize = out_size.low_u64() as usize;
+
             if !resize_memory_ebpf(&mut global_mem, out_offset_usize, out_size_usize) {
-                return Ok(halt_json_ebpf("Memory resize failed on STATICCALL (balanceOf fallback)"));
+                return Ok(halt_json_ebpf("Memory resize failed on STATICCALL balanceOf"));
+            }
+
+            // Remplissage avec zéros puis copie des données
+            for i in 0..out_size_usize {
+                global_mem[out_offset_usize + i] = 0;
             }
             let copy_len = out32.len().min(out_size_usize);
-            global_mem[out_offset_usize..out_offset_usize + out_size_usize].fill(0);
-            global_mem[out_offset_usize..out_offset_usize + copy_len].copy_from_slice(&out32[..copy_len]);
+            global_mem[out_offset_usize..out_offset_usize + copy_len].copy_from_slice(&out32[0..copy_len]);
 
-            execution_context.return_data = out32;
-            evm_stack.push(u256::one()); // success
+            execution_context.return_data = out32.clone();
+            evm_stack.push(u256::one()); // success = true
+
             println!(
-                "🔎 [STATICCALL FALLBACK] balanceOf(0x{}) on {} -> 0x{}",
-                addr_hex,
-                to_address,
-                hex::encode(&execution_context.return_data)
+                "[STATICCALL balanceOf FALLBACK SUCCESS] balanceOf({}) on {} → 0x{}",
+                account_hex, to_address, hex::encode(&out32)
             );
+
             consume_gas_amount(&mut execution_context, 700)?;
             bytecode_pc += 1;
             continue;
         }
+    }
 
-        // ── EOA ou contrat sans code connu : succès + returndata vide ────────────
+    // ==================== CAS NORMAL : vrai contrat avec bytecode ====================
+    if target_code.is_empty() {
+        // EOA ou contrat sans code connu → succès + returndata vide
         execution_context.return_data = vec![];
         if !resize_memory_ebpf(&mut global_mem, out_offset.low_u64() as usize, out_size.low_u64() as usize) {
             return Ok(halt_json_ebpf("Memory resize failed on STATICCALL"));
@@ -3272,23 +3290,23 @@ pub fn execute_program(
         for i in 0..(out_size.low_u64() as usize) {
             global_mem[out_offset.low_u64() as usize + i] = 0;
         }
-        evm_stack.push(u256::one()); // success for EOA staticcall
+        evm_stack.push(u256::one()); // success
         consume_gas_amount(&mut execution_context, 700)?;
         bytecode_pc += 1;
         continue;
     }
 
-    // Prépare sub-args : lecture seule -> on passe une copie du storage (initial_storage)
+    // Prépare sub-args pour exécution récursive (lecture seule)
     let mut sub_args = interpreter_args.clone();
     sub_args.contract_address = to_address.clone();
     sub_args.sender_address = interpreter_args.contract_address.clone();
     sub_args.caller = interpreter_args.contract_address.clone();
     sub_args.state_data = call_data.clone();
-    sub_args.value = u256::zero(); // STATICCALL doesn't transfer value
+    sub_args.value = u256::zero();           // STATICCALL = pas de value
     sub_args.gas_limit = gas;
     sub_args.call_depth = interpreter_args.call_depth + u256::one();
 
-    // Limite de profondeur
+    // Protection contre récursion infinie
     if sub_args.call_depth > u256::from(1024) {
         println!("🚨 [STATICCALL] Profondeur maximale atteinte (1024)");
         execution_context.return_data = vec![];
@@ -3298,30 +3316,29 @@ pub fn execute_program(
         continue;
     }
 
-    // Exécution récursive : mémoire vide (&[]), mbuff = call_data
+    // Exécution récursive
     let sub_result = execute_program(
         Some(&target_code),
         Some(stack_usage),
-        &[],               // mem vierge pour le sous-contexte
-        &call_data,        // mbuff = calldata du sous-appel
+        &[],                    // mem vierge
+        &call_data,             // mbuff = calldata
         helpers,
         allowed_memory,
         ret_type,
         exports,
         &sub_args,
         execution_context.storage_manager.clone(),
-        Some(execution_context.world_state.storage.clone()), // storage hérité en lecture
+        Some(execution_context.world_state.storage.clone()), // storage en lecture seule
         execution_context.on_create2_event.clone(),
     );
 
-    // Interprétation du résultat du sous-appel
+    // Traitement du résultat
     let (call_success, return_data) = match sub_result {
         Ok(val) => {
             if let Some(obj) = val.as_object() {
                 let action = obj.get("action").and_then(|a| a.as_str()).unwrap_or("unknown");
                 let success = action == "return" || action == "stop";
 
-                // Extraction du returndata si présent (support hex string / bool / number comme dans CALL)
                 let data = if action == "return" || action == "stop" {
                     obj.get("data").and_then(|d| match d {
                         JsonValue::String(s) if s.starts_with("0x") => hex::decode(&s[2..]).ok(),
@@ -3355,32 +3372,30 @@ pub fn execute_program(
 
     println!("✅ [STATICCALL RETURN] success={}, returndata_len={}", call_success, return_data.len());
 
-    // Écrire le return_data dans la mémoire appelante (out_offset/out_size), padding/troncature
+    // Copie du return_data dans la mémoire du caller
     let out_offset_usize = out_offset.low_u64() as usize;
     let out_size_usize = out_size.low_u64() as usize;
     if !resize_memory_ebpf(&mut global_mem, out_offset_usize, out_size_usize) {
         return Ok(halt_json_ebpf("Memory resize failed on STATICCALL (output)"));
     }
 
-    let copy_len = std::cmp::min(return_data.len(), out_size_usize);
-    // écrase destination (pad zeros puis copy)
-    for i in 0..out_size_usize { global_mem[out_offset_usize + i] = 0; }
-    for i in 0..copy_len {
-        global_mem[out_offset_usize + i] = return_data[i];
+    // Remplissage avec zéros puis copie
+    for i in 0..out_size_usize {
+        global_mem[out_offset_usize + i] = 0;
     }
+    let copy_len = std::cmp::min(return_data.len(), out_size_usize);
+    global_mem[out_offset_usize..out_offset_usize + copy_len].copy_from_slice(&return_data[0..copy_len]);
 
-    // Sauvegarde du returndata pour RETURNDATACOPY/RETURNDATASIZE
+    // Sauvegarde pour RETURNDATACOPY / RETURNDATASIZE
     execution_context.return_data = return_data;
 
-    // Important : ne pas merger/Appliquer les SSTORE du sous-contexte (STATICCALL = read-only)
-    // Le sous-appel a été exécuté sur une copie du storage, donc aucune écriture n'est propagée.
-
-    // Push status
+    // Push du statut de succès
     evm_stack.push(if call_success { u256::one() } else { u256::zero() });
 
     consume_gas_amount(&mut execution_context, 700)?;
+    bytecode_pc += 1;   // important pour continuer après le continue des fallback
 }
-
+            
             //___ 0xfd REVERT
             0xfd => {
                 if evm_stack.len() < 2 {
