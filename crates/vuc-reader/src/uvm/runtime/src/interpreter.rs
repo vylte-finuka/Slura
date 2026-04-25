@@ -2355,32 +2355,56 @@ pub fn execute_program(
                 consume_gas_amount(&mut execution_context, 100)?;
             }
 
-            //___ 0x5e MCOPY
-            0x5e => {
-                let dst_offset = reg[_dst].low_u64() as usize;
-                let src_offset = reg[_src].low_u64() as usize;
-                let len = insn.imm as usize;
-                let max_len = global_mem
-                    .len()
-                    .saturating_sub(dst_offset)
-                    .min(global_mem.len().saturating_sub(src_offset));
-                let safe_len = len.min(max_len);
-                if safe_len > 0
-                    && src_offset + safe_len <= global_mem.len()
-                    && dst_offset + safe_len <= global_mem.len()
-                {
-                    if let Some(end) = dst_offset.checked_add(safe_len) {
-                        ensure_memory_size(
-                            &mut global_mem,
-                            end,
-                            &mut execution_context.free_memory_pointer,
-                        )?;
-                        let data: Vec<u8> = global_mem[src_offset..src_offset + safe_len].to_vec();
-                        global_mem[dst_offset..dst_offset + safe_len].copy_from_slice(&data);
-                    }
-                }
-                consume_gas_amount(&mut execution_context, 3 + 3 * ((len + 31) / 32) as u64)?;
-            }
+            // ___ 0x5e MCOPY - EIP-5656 : Memory Copy (dstOffset, srcOffset, length)
+0x5e => {
+    if evm_stack.len() < 3 {
+        return Ok(halt_json_ebpf("Stack underflow on MCOPY"));
+    }
+
+    let length = evm_stack.pop().unwrap();
+    let src_offset = evm_stack.pop().unwrap();
+    let dst_offset = evm_stack.pop().unwrap();
+
+    let dst_offset_usize = as_usize_or_fail(dst_offset);
+    let src_offset_usize = as_usize_or_fail(src_offset);
+    let len_usize = as_usize_or_fail(length);
+
+    // Gas : 3 + 3 * (length + 31) / 32  (identique à CALLDATACOPY / CODECOPY)
+    let words = (len_usize + 31) / 32;
+    consume_gas_amount(&mut execution_context, 3 + 3 * words as u64)?;
+
+    if len_usize == 0 {
+        println!("📋 [MCOPY] length=0 → no-op");
+        break; // ou continue selon ton style
+    }
+
+    // Redimensionnement sécurisé de la mémoire
+    let max_needed = dst_offset_usize.saturating_add(len_usize)
+        .max(src_offset_usize.saturating_add(len_usize));
+
+    if !resize_memory_ebpf(&mut global_mem, max_needed, 0) {  // le 2e paramètre n'est plus utilisé dans ta fn actuelle
+        return Ok(halt_json_ebpf("Memory resize failed on MCOPY"));
+    }
+
+    // Copie sécurisée (overlap-safe comme memmove, pas memcpy)
+    let copy_len = len_usize.min(
+        global_mem.len().saturating_sub(dst_offset_usize)
+            .min(global_mem.len().saturating_sub(src_offset_usize))
+    );
+
+    if copy_len > 0 {
+        // On utilise une slice temporaire pour gérer correctement les overlaps
+        let data: Vec<u8> = global_mem[src_offset_usize..src_offset_usize + copy_len].to_vec();
+        global_mem[dst_offset_usize..dst_offset_usize + copy_len].copy_from_slice(&data);
+    }
+
+    println!(
+        "📋 [MCOPY] mem[{}:{}] ← mem[{}:{}] ({} bytes copiés)",
+        dst_offset, dst_offset + length,
+        src_offset, src_offset + length,
+        copy_len
+    );
+}
 
             //___ 0x5f PUSH0
             0x5f => {
