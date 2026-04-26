@@ -3354,232 +3354,242 @@ pub fn execute_program(
                 consume_gas_amount(&mut execution_context, 700)?; // Simplified gas cost
             }
 
-// ___ 0xfa STATICCALL - FAIT EXACTEMENT COMME 0xf1 CALL (version propre)
-0xfa => {
-    if evm_stack.len() < 6 {
-        return Ok(halt_json_ebpf("Stack underflow on STATICCALL"));
-    }
-
-    let gas = evm_stack.pop().unwrap();
-    let to_addr_u256 = evm_stack.pop().unwrap();
-    let in_offset = evm_stack.pop().unwrap();
-    let in_size = evm_stack.pop().unwrap();
-    let out_offset = evm_stack.pop().unwrap();
-    let out_size = evm_stack.pop().unwrap();
-
-    let to_address = u256_to_address(to_addr_u256);
-
-    println!(
-        "[STATICCALL] to={}, gas={}, in=mem[{}:{}], out=mem[{}:{}]",
-        to_address, gas, in_offset, in_size, out_offset, out_size
-    );
-
-    // Extraction du calldata (identique à CALL, avec protection contre offset trop grand)
-    let in_offset_usize = as_usize_or_fail(in_offset).min(global_mem.len());
-    let in_size_usize = as_usize_or_fail(in_size).min(global_mem.len().saturating_sub(in_offset_usize));
-
-    if !resize_memory_ebpf(&mut global_mem, in_offset_usize, in_size_usize) {
-        println!("[STATICCALL] Memory resize failed on input - using empty data");
-        execution_context.return_data = vec![];
-        evm_stack.push(u256::one());
-        consume_gas_amount(&mut execution_context, 700)?;
-        bytecode_pc += 1;
-        continue;
-    }
-
-    let call_data = memory_slice_len(&global_mem, in_offset_usize, in_size_usize).to_vec();
-
-    println!(
-        "📥 [STATICCALL INPUT] calldata = 0x{}",
-        if call_data.len() > 64 {
-            hex::encode(&call_data[..64]) + "..."
-        } else {
-            hex::encode(&call_data)
-        }
-    );
-
-    // Récupération du bytecode (identique à CALL)
-    let mut target_code = execution_context
-        .world_state
-        .code
-        .get(&to_address)
-        .or_else(|| {
-            execution_context
-                .world_state
-                .accounts
-                .get(&to_address)
-                .map(|acc| &acc.code)
-        })
-        .cloned()
-        .unwrap_or_default();
-
-    // Fallback RocksDB (identique à CALL)
-    if target_code.is_empty() {
-        if let Some(ref storage_manager) = execution_context.storage_manager {
-            let contract_state_key = format!("account:{}:contract_state", to_address);
-
-            match storage_manager.read(&contract_state_key) {
-                Ok(bytecode) if !bytecode.is_empty() => {
-                    println!(
-                        "💾 [STATICCALL ROCKSDB] Bytecode récupéré : {} bytes",
-                        bytecode.len()
-                    );
-                    target_code = bytecode;
-                    execution_context
-                        .world_state
-                        .code
-                        .insert(to_address.clone(), target_code.clone());
+//___ 0xfa STATICCALL
+            0xfa => {
+                if evm_stack.len() < 7 {
+                    return Ok(halt_json_ebpf("Stack underflow on STATICCALL"));
                 }
-                Ok(_) => {
+
+                let gas = evm_stack.pop().unwrap();
+                let to_addr_u256 = evm_stack.pop().unwrap();
+                let value = evm_stack.pop().unwrap();
+                let in_offset = evm_stack.pop().unwrap();
+                let in_size = evm_stack.pop().unwrap();
+                let out_offset = evm_stack.pop().unwrap();
+                let out_size = evm_stack.pop().unwrap();
+
+                let to_address = u256_to_address(to_addr_u256);
+
+                println!(
+                    "📞 [STATICCALL] to={}, value={}, gas={}, in_offset={}, in_size={}, out_offset={}, out_size={}",
+                    to_address, value, gas, in_offset, in_size, out_offset, out_size
+                );
+
+                // ✅ Extraction du calldata RÉEL depuis la mémoire du caller
+                let in_offset_usize = as_usize_or_fail(in_offset);
+                let in_size_usize = as_usize_or_fail(in_size);
+
+                if !resize_memory_ebpf(&mut global_mem, in_offset_usize, in_size_usize) {
+                    return Ok(halt_json_ebpf("Memory resize failed on CALL (input)"));
+                }
+
+                let call_data =
+                    memory_slice_len(&global_mem, in_offset_usize, in_size_usize).to_vec();
+
+                println!(
+                    "📥 [STATICCALL INPUT] calldata = 0x{}",
+                    if call_data.len() > 64 {
+                        hex::encode(&call_data[..64]) + "..."
+                    } else {
+                        hex::encode(&call_data)
+                    }
+                );
+
+                // ✅ CORRECTION MAJEURE : Récupération du bytecode avec fallback RocksDB
+                let mut target_code = execution_context
+                    .world_state
+                    .code
+                    .get(&to_address)
+                    .or_else(|| {
+                        execution_context
+                            .world_state
+                            .accounts
+                            .get(&to_address)
+                            .map(|acc| &acc.code)
+                    })
+                    .cloned()
+                    .unwrap_or_default();
+
+                // ✅ FALLBACK ROCKSDB : Si le code est vide en mémoire, cherche dans RocksDB
+                if target_code.is_empty() {
+                    if let Some(ref storage_manager) = execution_context.storage_manager {
+                        let contract_state_key = format!("account:{}:contract_state", to_address);
+
+                        match storage_manager.read(&contract_state_key) {
+                            Ok(bytecode) if !bytecode.is_empty() => {
+                                println!(
+                                    "💾 [STATICCALL ROCKSDB] Bytecode récupéré depuis RocksDB : {} bytes",
+                                    bytecode.len()
+                                );
+                                target_code = bytecode;
+
+                                // ✅ Met en cache pour les prochains appels
+                                execution_context
+                                    .world_state
+                                    .code
+                                    .insert(to_address.clone(), target_code.clone());
+                            }
+                            Ok(_) => {
+                                println!(
+                                    "🔍 [STATICCALL ROCKSDB] Bytecode vide ou inexistant pour {}",
+                                    to_address
+                                );
+                            }
+                            Err(e) => {
+                                println!("❌ [STATICCALL ROCKSDB] Erreur lecture : {}", e);
+                            }
+                        }
+                    }
+                }
+
+                // ✅ VÉRIFICATION FINALE
+                if target_code.is_empty() {
                     println!(
-                        "🔍 [STATICCALL ROCKSDB] Bytecode vide ou inexistant pour {}",
+                        "⚠️ [STATICCALL] Contrat {} n'a pas de code (EOA ou inexistant)",
                         to_address
                     );
+
+                    // ✅ Pour un EOA, returndata vide mais succès
+                    execution_context.return_data = vec![];
+                    evm_stack.push(u256::one());
+
+                    consume_gas_amount(&mut execution_context, 700)?;
+                    bytecode_pc += 1;
+                    continue;
                 }
-                Err(e) => {
-                    println!("❌ [STATICCALL ROCKSDB] Erreur lecture : {}", e);
+
+                println!(
+                    "🔄 [STATICCALL RECURSIVE] Exécution de {} bytes de bytecode",
+                    target_code.len()
+                );
+
+                // ✅ Création d'un sous-contexte ISOLÉ
+                let mut sub_args = interpreter_args.clone();
+                sub_args.contract_address = to_address.clone();
+                sub_args.sender_address = interpreter_args.contract_address.clone(); // msg.sender = caller contract
+                sub_args.caller = interpreter_args.contract_address.clone();
+                sub_args.state_data = call_data.clone();
+                sub_args.value = value;
+                sub_args.gas_limit = gas;
+                sub_args.call_depth = interpreter_args.call_depth + u256::one();
+
+                // ✅ Limite anti-récursion infinie
+                if sub_args.call_depth > u256::from(1024) {
+                    println!("🚨 [STATICCALL] Profondeur maximale atteinte (1024)");
+                    execution_context.return_data = vec![];
+                    evm_stack.push(u256::zero());
+                    consume_gas_amount(&mut execution_context, 700)?;
+                    bytecode_pc += 1;
+                    continue;
                 }
-            }
-        }
-    }
 
-    if target_code.is_empty() {
-        println!(
-            "⚠️ [STATICCALL] Contrat {} n'a pas de code (EOA ou inexistant)",
-            to_address
-        );
+                // ✅ Appel récursif avec bytecode et storage isolés
+                let sub_result = execute_program(
+                    Some(&target_code), // ← BYTECODE RÉCUPÉRÉ (mémoire OU RocksDB)
+                    Some(stack_usage),
+                    &[],        // mémoire vierge pour le sous-contexte
+                    &call_data, // mbuff = calldata
+                    helpers,
+                    allowed_memory,
+                    ret_type,
+                    exports,
+                    &sub_args,
+                    execution_context.storage_manager.clone(),
+                    Some(execution_context.world_state.storage.clone()), // storage hérité
+                    execution_context.on_create2_event.clone(), // propagation du callback CREATE2
+                );
 
-        execution_context.return_data = vec![];
-        evm_stack.push(u256::one());
+                // ✅ Extraction du returndata avec gestion robuste
+                let (call_success, return_data) = match sub_result {
+                    Ok(val) => {
+                        if let Some(obj) = val.as_object() {
+                            let action = obj
+                                .get("action")
+                                .and_then(|a| a.as_str())
+                                .unwrap_or("unknown");
 
-        consume_gas_amount(&mut execution_context, 700)?;
-        bytecode_pc += 1;
-        continue;
-    }
+                            let success = action == "return" || action == "stop";
 
-    println!(
-        "🔄 [STATICCALL RECURSIVE] Exécution de {} bytes de bytecode",
-        target_code.len()
-    );
+                            // ✅ Extraction améliorée du returndata
+                            let data = if action == "return" || action == "stop" {
+                                obj.get("data")
+                                    .and_then(|d| match d {
+                                        JsonValue::String(s) if s.starts_with("0x") => {
+                                            hex::decode(&s[2..]).ok()
+                                        }
+                                        JsonValue::Bool(b) => {
+                                            let mut bytes = [0u8; 32];
+                                            if *b {
+                                                bytes[31] = 1;
+                                            }
+                                            Some(bytes.to_vec())
+                                        }
+                                        JsonValue::Number(n) => {
+                                            let num_u64 = n.as_u64().unwrap_or(0);
+                                            let mut bytes = [0u8; 32];
+                                            u256::from(num_u64).to_big_endian(&mut bytes);
+                                            Some(bytes.to_vec())
+                                        }
+                                        _ => Some(vec![]), // STOP sans données
+                                    })
+                                    .unwrap_or_default()
+                            } else {
+                                vec![] // REVERT ou erreur
+                            };
 
-    // Sous-contexte (identique à CALL, value = 0 pour STATICCALL)
-    let mut sub_args = interpreter_args.clone();
-    sub_args.contract_address = to_address.clone();
-    sub_args.sender_address = interpreter_args.contract_address.clone();
-    sub_args.caller = interpreter_args.contract_address.clone();
-    sub_args.state_data = call_data.clone();
-    sub_args.value = u256::zero();
-    sub_args.gas_limit = gas;
-    sub_args.call_depth = interpreter_args.call_depth + u256::one();
-
-    if sub_args.call_depth > u256::from(1024) {
-        println!("🚨 [STATICCALL] Profondeur maximale atteinte (1024)");
-        execution_context.return_data = vec![];
-        evm_stack.push(u256::zero());
-        consume_gas_amount(&mut execution_context, 700)?;
-        bytecode_pc += 1;
-        continue;
-    }
-
-    // Appel récursif (exactement comme dans 0xf1)
-    let sub_result = execute_program(
-        Some(&target_code),
-        Some(stack_usage),
-        &[],
-        &call_data,
-        helpers,
-        allowed_memory,
-        ret_type,
-        exports,
-        &sub_args,
-        execution_context.storage_manager.clone(),
-        Some(execution_context.world_state.storage.clone()),
-        execution_context.on_create2_event.clone(),
-    );
-
-    let (call_success, return_data) = match sub_result {
-        Ok(val) => {
-            if let Some(obj) = val.as_object() {
-                let action = obj
-                    .get("action")
-                    .and_then(|a| a.as_str())
-                    .unwrap_or("unknown");
-
-                let success = action == "return" || action == "stop";
-
-                let data = if action == "return" || action == "stop" {
-                    obj.get("data")
-                        .and_then(|d| match d {
-                            JsonValue::String(s) if s.starts_with("0x") => hex::decode(&s[2..]).ok(),
-                            JsonValue::Bool(b) => {
-                                let mut bytes = [0u8; 32];
-                                if *b { bytes[31] = 1; }
-                                Some(bytes.to_vec())
-                            }
-                            JsonValue::Number(n) => {
-                                let num_u64 = n.as_u64().unwrap_or(0);
-                                let mut bytes = [0u8; 32];
-                                u256::from(num_u64).to_big_endian(&mut bytes);
-                                Some(bytes.to_vec())
-                            }
-                            _ => Some(vec![]),
-                        })
-                        .unwrap_or_default()
-                } else {
-                    vec![]
+                            (success, data)
+                        } else {
+                            (false, vec![])
+                        }
+                    }
+                    Err(e) => {
+                        println!("❌ [CALL ERROR] Sous-appel échoué : {:?}", e);
+                        (false, vec![])
+                    }
                 };
 
-                (success, data)
-            } else {
-                (false, vec![])
-            }
-        }
-        Err(e) => {
-            println!("❌ [STATICCALL ERROR] Sous-appel échoué : {:?}", e);
-            (false, vec![])
-        }
-    };
+                println!(
+                    "✅ [STATICCALL RETURN] success={}, returndata_len={}",
+                    call_success,
+                    return_data.len()
+                );
 
-    println!(
-        "✅ [STATICCALL RETURN] success={}, returndata_len={}",
-        call_success,
-        return_data.len()
-    );
+                // ✅ Écriture du returndata dans la mémoire du caller
+                let out_offset_usize = as_usize_or_fail(out_offset);
+                let out_size_usize = as_usize_or_fail(out_size);
 
-    // Copie du retour dans la mémoire du caller (identique à CALL)
-    let out_offset_usize = as_usize_or_fail(out_offset);
-    let out_size_usize = as_usize_or_fail(out_size);
+                if out_size_usize > 0 {
+                    if !resize_memory_ebpf(&mut global_mem, out_offset_usize, out_size_usize) {
+                        return Ok(halt_json_ebpf("Memory resize failed on CALL (output)"));
+                    }
 
-    if out_size_usize > 0 {
-        if !resize_memory_ebpf(&mut global_mem, out_offset_usize, out_size_usize) {
-            return Ok(halt_json_ebpf("Memory resize failed on STATICCALL (output)"));
-        }
+                    let copy_len = out_size_usize.min(return_data.len());
+                    for i in 0..copy_len {
+                        if out_offset_usize + i < global_mem.len() {
+                            global_mem[out_offset_usize + i] = return_data[i];
+                        }
+                    }
 
-        let copy_len = out_size_usize.min(return_data.len());
-        for i in 0..copy_len {
-            if out_offset_usize + i < global_mem.len() {
-                global_mem[out_offset_usize + i] = return_data[i];
-            }
-        }
+                    // ✅ Padding avec zéros si out_size > returndata
+                    for i in copy_len..out_size_usize {
+                        if out_offset_usize + i < global_mem.len() {
+                            global_mem[out_offset_usize + i] = 0;
+                        }
+                    }
+                }
 
-        for i in copy_len..out_size_usize {
-            if out_offset_usize + i < global_mem.len() {
-                global_mem[out_offset_usize + i] = 0;
-            }
-        }
-    }
+                // ✅ Sauvegarde du returndata pour RETURNDATACOPY/RETURNDATASIZE
+                execution_context.return_data = return_data;
 
-    execution_context.return_data = return_data;
+                // ✅ Push du status de succès sur la stack
+                evm_stack.push(if call_success {
+                    u256::one()
+                } else {
+                    u256::zero()
+                });
 
-    evm_stack.push(if call_success {
-        u256::one()
-    } else {
-        u256::zero()
-    });
-
-    consume_gas_amount(&mut execution_context, 700)?;
-    bytecode_pc += 1;
-}
+                consume_gas_amount(&mut execution_context, 700)?;
+            }  
             
             //___ 0xfd REVERT
             0xfd => {
