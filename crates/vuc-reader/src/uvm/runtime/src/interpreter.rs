@@ -1159,20 +1159,16 @@ pub fn execute_program(
         }
     }
 
-/// Helper resize_memory_ebpf - Compatible avec les anciens ET nouveaux appels
+/// resize_memory_ebpf - Version compatible avec les appels à 2 ET 3 arguments
 fn resize_memory_ebpf(mem: &mut Vec<u8>, a: usize, b: usize) -> bool {
     const MAX_MEM: usize = 16 * 1024 * 1024; // 16 MiB
 
     let new_size = if b == 0 {
-        // Cas où on a appelé avec (offset + size) comme premier argument après la mise à jour
+        // Cas où on a appelé avec (offset + size) comme premier argument
         a
     } else {
-        // Cas classique : (offset, size)
-        if let Some(end) = a.checked_add(b) {
-            end
-        } else {
-            return false;
-        }
+        // Cas normal : (offset, size)
+        a.saturating_add(b)
     };
 
     if new_size > MAX_MEM {
@@ -3432,7 +3428,7 @@ fn resize_memory_ebpf(mem: &mut Vec<u8>, a: usize, b: usize) -> bool {
         let out_size_usize = as_usize_saturated(out_size);
 
         // CORRECTION : resize avec 1 argument seulement
-        if resize_memory_ebpf(&mut global_mem, out_offset_usize + out_size_usize) {
+       if resize_memory_ebpf(&mut global_mem, out_offset_usize + out_size_usize, 0) {
             let copy_len = std::cmp::min(32, out_size_usize);
             global_mem[out_offset_usize..out_offset_usize + copy_len]
                 .copy_from_slice(&out32[32 - copy_len..]);
@@ -3472,7 +3468,7 @@ fn resize_memory_ebpf(mem: &mut Vec<u8>, a: usize, b: usize) -> bool {
         execution_context.return_data = vec![];
         let out_offset_usize = as_usize_saturated(out_offset);
         let out_size_usize = as_usize_saturated(out_size);
-        let _ = resize_memory_ebpf(&mut global_mem, out_offset_usize + out_size_usize);
+        let _ = resize_memory_ebpf(&mut global_mem, out_offset_usize + out_size_usize, 0);
         for i in 0..out_size_usize {
             if out_offset_usize + i < global_mem.len() {
                 global_mem[out_offset_usize + i] = 0;
@@ -3533,8 +3529,7 @@ fn resize_memory_ebpf(mem: &mut Vec<u8>, a: usize, b: usize) -> bool {
 
     let out_offset_usize = as_usize_saturated(out_offset);
     let out_size_usize = as_usize_saturated(out_size);
-    let _ = resize_memory_ebpf(&mut global_mem, out_offset_usize + out_size_usize);
-
+    let _ = resize_memory_ebpf(&mut global_mem, out_offset_usize + out_size_usize, 0);
     let copy_len = std::cmp::min(return_data.len(), out_size_usize);
     if copy_len > 0 {
         global_mem[out_offset_usize..out_offset_usize + copy_len]
