@@ -899,6 +899,13 @@ fn analyze_revert_context(data: &[u8], len: usize) -> (bool, String) {
     }
 }
 
+fn is_native_token_magic(addr: &str) -> bool {
+    let lower = addr.to_lowercase();
+    lower == "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" ||
+    lower == "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_lowercase() ||  // variante courante
+    lower == "0xeeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE".to_lowercase()
+}
+
 /// Encodage spécialisé pour adresses UIP-10
 fn encode_uip10_address_to_u64(addr: &str) -> u64 {
     let parts: Vec<&str> = addr.split('#').collect();
