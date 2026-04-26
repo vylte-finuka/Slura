@@ -3379,10 +3379,6 @@ pub fn execute_program(
                 let in_offset_usize = as_usize_or_fail(in_offset);
                 let in_size_usize = as_usize_or_fail(in_size);
 
-                if !resize_memory_ebpf(&mut global_mem, in_offset_usize, in_size_usize) {
-                    return Ok(halt_json_ebpf("Memory resize failed on CALL (input)"));
-                }
-
                 let call_data =
                     memory_slice_len(&global_mem, in_offset_usize, in_size_usize).to_vec();
 
