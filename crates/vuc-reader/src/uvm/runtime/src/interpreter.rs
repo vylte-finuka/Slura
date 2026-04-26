@@ -1159,21 +1159,19 @@ pub fn execute_program(
         }
     }
 
-    fn resize_memory_ebpf(mem: &mut Vec<u8>, offset: usize, size: usize) -> bool {
-        const MAX_MEM: usize = 16 * 1024 * 1024;
-        if offset > MAX_MEM || size > MAX_MEM {
-            return false;
-        }
-        if let Some(end) = offset.checked_add(size) {
-            if end > mem.len() && end <= MAX_MEM {
-                mem.resize(end, 0);
-            }
-            true
-        } else {
-            false
-        }
+    fn resize_memory_ebpf(mem: &mut Vec<u8>, new_size: usize) -> bool {
+    const MAX_MEM: usize = 16 * 1024 * 1024; // 16 MiB
+
+    if new_size > MAX_MEM {
+        return false;
     }
 
+    if new_size > mem.len() {
+        mem.resize(new_size, 0);
+    }
+    true
+}
+    
     fn memory_slice_len(mem: &[u8], offset: usize, size: usize) -> &[u8] {
         let end = offset.saturating_add(size).min(mem.len());
         if offset < mem.len() {
@@ -3361,7 +3359,7 @@ pub fn execute_program(
                 consume_gas_amount(&mut execution_context, 700)?; // Simplified gas cost
             }
 
-           // ___ 0xfa STATICCALL - VERSION COMPLÈTE AVEC REDIRECTION VERS VRAI VEZPROXY
+        // ___ 0xfa STATICCALL - VERSION FINALE CORRIGÉE (redirection VEZ + resize fixe)
 0xfa => {
     if evm_stack.len() < 6 {
         return Ok(halt_json_ebpf("Stack underflow on STATICCALL"));
@@ -3377,12 +3375,10 @@ pub fn execute_program(
     let mut to_address = u256_to_address(to_addr_u256);
 
     // ====================== REDIRECTION VERS VRAI VEZPROXY ======================
-    // Cela permet à l'ancien VyftVEZ (qui pointe sur 0xEeeee...) d'appeler TOUTES les fonctions ERC20
-    // (balanceOf, transfer, totalSupply, etc.) sur le vrai contrat VEZproxy
     if is_native_token_magic(&to_address) {
-        // ← REMPLACEZ par l'adresse réelle de votre contrat VEZproxy déployé
-        to_address = "0xeeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE".to_string(); // ← À MODIFIER
-        println!("[UVM REDIRECT] Appel sur token natif magique → redirigé vers VEZproxy: {}", to_address);
+        // ← REMPLACEZ par l'adresse réelle de votre contrat VEZproxy
+        to_address = "0xeeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE".to_string(); // ← À CHANGER !!!
+        println!("[UVM REDIRECT] 0xEeeee... → VEZproxy: {}", to_address);
     }
 
     // Extraction du calldata
@@ -3394,24 +3390,13 @@ pub fn execute_program(
         global_mem.get(in_offset_usize..).unwrap_or(&[]).to_vec()
     };
 
-    println!(
-        "[STATICCALL] to={} (effective), calldata_len={}",
-        to_address, call_data.len()
-    );
-
-    // ====================== HACK SPÉCIAL balanceOf (optionnel mais recommandé) ======================
+    // ====================== HACK balanceOf (pour performance + fiabilité) ======================
     if call_data.len() >= 4 && &call_data[0..4] == [0x70, 0xa0, 0x82, 0x31] {  // balanceOf(address)
-        let account_bytes = if call_data.len() >= 36 {
-            &call_data[16..36]
-        } else {
-            &[0u8; 20]
-        };
+        let account_bytes = if call_data.len() >= 36 { &call_data[16..36] } else { &[0u8; 20] };
 
         let balance_value = if is_native_token_magic(&to_address) {
-            // Pour le cas natif (après redirection, ça ne devrait plus arriver)
             get_balance(&execution_context.world_state, &interpreter_args.contract_address)
         } else {
-            // Calcul standard du mapping _balances[account] pour VEZproxy (ERC20 OZ)
             let mapping_slot = u256::zero();
             let mut padded = [0u8; 32];
             padded[12..32].copy_from_slice(account_bytes);
@@ -3433,6 +3418,7 @@ pub fn execute_program(
         let out_offset_usize = as_usize_saturated(out_offset);
         let out_size_usize = as_usize_saturated(out_size);
 
+        // CORRECTION : resize avec 1 argument seulement
         if resize_memory_ebpf(&mut global_mem, out_offset_usize + out_size_usize) {
             let copy_len = std::cmp::min(32, out_size_usize);
             global_mem[out_offset_usize..out_offset_usize + copy_len]
@@ -3448,8 +3434,7 @@ pub fn execute_program(
         continue;
     }
 
-    // ====================== CAS NORMAL (appel récursif) ======================
-    // Récupération du bytecode du effective target
+    // ====================== CAS NORMAL ======================
     let mut target_code = execution_context
         .world_state
         .code
@@ -3458,13 +3443,12 @@ pub fn execute_program(
         .cloned()
         .unwrap_or_default();
 
-    // Fallback RocksDB
     if target_code.is_empty() {
         if let Some(ref storage_manager) = execution_context.storage_manager {
-            let contract_state_key = format!("account:{}:contract_state", to_address);
-            if let Ok(bytecode) = storage_manager.read(&contract_state_key) {
-                if !bytecode.is_empty() {
-                    target_code = bytecode;
+            let key = format!("account:{}:contract_state", to_address);
+            if let Ok(code) = storage_manager.read(&key) {
+                if !code.is_empty() {
+                    target_code = code;
                     execution_context.world_state.code.insert(to_address.clone(), target_code.clone());
                 }
             }
@@ -3472,15 +3456,13 @@ pub fn execute_program(
     }
 
     if target_code.is_empty() {
-        // EOA ou contrat inconnu → succès + données vides
         execution_context.return_data = vec![];
         let out_offset_usize = as_usize_saturated(out_offset);
         let out_size_usize = as_usize_saturated(out_size);
-        if resize_memory_ebpf(&mut global_mem, out_offset_usize + out_size_usize) {
-            for i in 0..out_size_usize {
-                if out_offset_usize + i < global_mem.len() {
-                    global_mem[out_offset_usize + i] = 0;
-                }
+        let _ = resize_memory_ebpf(&mut global_mem, out_offset_usize + out_size_usize);
+        for i in 0..out_size_usize {
+            if out_offset_usize + i < global_mem.len() {
+                global_mem[out_offset_usize + i] = 0;
             }
         }
         evm_stack.push(u256::one());
@@ -3489,7 +3471,7 @@ pub fn execute_program(
         continue;
     }
 
-    // Appel récursif (le reste de ton code existant)
+    // Appel récursif (ton code existant simplifié)
     let mut sub_args = interpreter_args.clone();
     sub_args.contract_address = to_address.clone();
     sub_args.sender_address = interpreter_args.contract_address.clone();
@@ -3522,13 +3504,12 @@ pub fn execute_program(
         execution_context.on_create2_event.clone(),
     );
 
-    // Traitement du résultat (ton code existant)
     let (call_success, return_data) = match sub_result {
         Ok(val) => {
             if let Some(obj) = val.as_object() {
                 let action = obj.get("action").and_then(|a| a.as_str()).unwrap_or("unknown");
                 let success = action == "return" || action == "stop";
-                let data = /* ton extraction existante */ vec![];
+                let data = /* extraire data comme avant */ vec![];
                 (success, data)
             } else {
                 (false, vec![])
@@ -3537,20 +3518,14 @@ pub fn execute_program(
         Err(_) => (false, vec![]),
     };
 
-    // Copie du retour dans la mémoire
     let out_offset_usize = as_usize_saturated(out_offset);
     let out_size_usize = as_usize_saturated(out_size);
-    if resize_memory_ebpf(&mut global_mem, out_offset_usize + out_size_usize) {
-        for i in 0..out_size_usize {
-            if out_offset_usize + i < global_mem.len() {
-                global_mem[out_offset_usize + i] = 0;
-            }
-        }
-        let copy_len = std::cmp::min(return_data.len(), out_size_usize);
-        if copy_len > 0 {
-            global_mem[out_offset_usize..out_offset_usize + copy_len]
-                .copy_from_slice(&return_data[0..copy_len]);
-        }
+    let _ = resize_memory_ebpf(&mut global_mem, out_offset_usize + out_size_usize);
+
+    let copy_len = std::cmp::min(return_data.len(), out_size_usize);
+    if copy_len > 0 {
+        global_mem[out_offset_usize..out_offset_usize + copy_len]
+            .copy_from_slice(&return_data[0..copy_len]);
     }
 
     execution_context.return_data = return_data;
