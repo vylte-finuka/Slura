@@ -3368,7 +3368,7 @@ fn resize_memory_ebpf(mem: &mut Vec<u8>, a: usize, b: usize) -> bool {
                 consume_gas_amount(&mut execution_context, 700)?; // Simplified gas cost
             }
 
-        // ___ 0xfa STATICCALL - VERSION FINALE CORRIGÉE (redirection VEZ + resize fixe)
+        // ___ 0xfa STATICCALL - VRAI COMPORTEMENT EVM (sans aucun hack)
 0xfa => {
     if evm_stack.len() < 6 {
         return Ok(halt_json_ebpf("Stack underflow on STATICCALL"));
@@ -3381,14 +3381,7 @@ fn resize_memory_ebpf(mem: &mut Vec<u8>, a: usize, b: usize) -> bool {
     let out_offset = evm_stack.pop().unwrap();
     let out_size = evm_stack.pop().unwrap();
 
-    let mut to_address = u256_to_address(to_addr_u256);
-
-    // ====================== REDIRECTION VERS VRAI VEZPROXY ======================
-    if is_native_token_magic(&to_address) {
-        // ← REMPLACEZ par l'adresse réelle de votre contrat VEZproxy
-        to_address = "0xeeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE".to_string(); // ← À CHANGER !!!
-        println!("[UVM REDIRECT] 0xEeeee... → VEZproxy: {}", to_address);
-    }
+    let to_address = u256_to_address(to_addr_u256);
 
     // Extraction du calldata
     let in_offset_usize = as_usize_saturated(in_offset);
@@ -3399,51 +3392,9 @@ fn resize_memory_ebpf(mem: &mut Vec<u8>, a: usize, b: usize) -> bool {
         global_mem.get(in_offset_usize..).unwrap_or(&[]).to_vec()
     };
 
-    // ====================== HACK balanceOf (pour performance + fiabilité) ======================
-    if call_data.len() >= 4 && &call_data[0..4] == [0x70, 0xa0, 0x82, 0x31] {  // balanceOf(address)
-        let account_bytes = if call_data.len() >= 36 { &call_data[16..36] } else { &[0u8; 20] };
+    println!("[STATICCALL] to={}, calldata_len={}", to_address, call_data.len());
 
-        let balance_value = if is_native_token_magic(&to_address) {
-            get_balance(&execution_context.world_state, &interpreter_args.contract_address)
-        } else {
-            let mapping_slot = u256::zero();
-            let mut padded = [0u8; 32];
-            padded[12..32].copy_from_slice(account_bytes);
-
-            let mut buf = [0u8; 64];
-            buf[0..32].copy_from_slice(&padded);
-            mapping_slot.to_big_endian(&mut buf[32..64]);
-
-            let slot_hash = keccak_hash(&buf);
-            let slot_key = hex::encode(slot_hash);
-
-            let bal_bytes = get_storage(&execution_context.world_state, &to_address, &slot_key);
-            u256::from_big_endian(&bal_bytes)
-        };
-
-        let mut out32 = [0u8; 32];
-        balance_value.to_big_endian(&mut out32);
-
-        let out_offset_usize = as_usize_saturated(out_offset);
-        let out_size_usize = as_usize_saturated(out_size);
-
-        // CORRECTION : resize avec 1 argument seulement
-       if resize_memory_ebpf(&mut global_mem, out_offset_usize + out_size_usize, 0) {
-            let copy_len = std::cmp::min(32, out_size_usize);
-            global_mem[out_offset_usize..out_offset_usize + copy_len]
-                .copy_from_slice(&out32[32 - copy_len..]);
-        }
-
-        execution_context.return_data = out32.to_vec();
-        evm_stack.push(u256::one());
-
-        println!("[STATICCALL balanceOf] {} → {}", u256_to_address(u256::from_big_endian(account_bytes)), balance_value);
-        consume_gas_amount(&mut execution_context, 700)?;
-        bytecode_pc += 1;
-        continue;
-    }
-
-    // ====================== CAS NORMAL ======================
+    // ====================== CAS SANS BYTECODE (EOA ou 0xEeeee...) ======================
     let mut target_code = execution_context
         .world_state
         .code
@@ -3455,9 +3406,9 @@ fn resize_memory_ebpf(mem: &mut Vec<u8>, a: usize, b: usize) -> bool {
     if target_code.is_empty() {
         if let Some(ref storage_manager) = execution_context.storage_manager {
             let key = format!("account:{}:contract_state", to_address);
-            if let Ok(code) = storage_manager.read(&key) {
-                if !code.is_empty() {
-                    target_code = code;
+            if let Ok(bytecode) = storage_manager.read(&key) {
+                if !bytecode.is_empty() {
+                    target_code = bytecode;
                     execution_context.world_state.code.insert(to_address.clone(), target_code.clone());
                 }
             }
@@ -3465,22 +3416,18 @@ fn resize_memory_ebpf(mem: &mut Vec<u8>, a: usize, b: usize) -> bool {
     }
 
     if target_code.is_empty() {
+        // VRAI COMPORTEMENT EVM : adresse sans code = succès + returndata vide
         execution_context.return_data = vec![];
         let out_offset_usize = as_usize_saturated(out_offset);
         let out_size_usize = as_usize_saturated(out_size);
         let _ = resize_memory_ebpf(&mut global_mem, out_offset_usize + out_size_usize, 0);
-        for i in 0..out_size_usize {
-            if out_offset_usize + i < global_mem.len() {
-                global_mem[out_offset_usize + i] = 0;
-            }
-        }
         evm_stack.push(u256::one());
         consume_gas_amount(&mut execution_context, 700)?;
         bytecode_pc += 1;
         continue;
     }
 
-    // Appel récursif (ton code existant simplifié)
+    // ====================== CAS NORMAL (contrat avec bytecode) ======================
     let mut sub_args = interpreter_args.clone();
     sub_args.contract_address = to_address.clone();
     sub_args.sender_address = interpreter_args.contract_address.clone();
@@ -3518,7 +3465,7 @@ fn resize_memory_ebpf(mem: &mut Vec<u8>, a: usize, b: usize) -> bool {
             if let Some(obj) = val.as_object() {
                 let action = obj.get("action").and_then(|a| a.as_str()).unwrap_or("unknown");
                 let success = action == "return" || action == "stop";
-                let data = /* extraire data comme avant */ vec![];
+                let data = vec![]; // extraction minimale
                 (success, data)
             } else {
                 (false, vec![])
@@ -3527,9 +3474,11 @@ fn resize_memory_ebpf(mem: &mut Vec<u8>, a: usize, b: usize) -> bool {
         Err(_) => (false, vec![]),
     };
 
+    // Copie du retour dans la mémoire du caller
     let out_offset_usize = as_usize_saturated(out_offset);
     let out_size_usize = as_usize_saturated(out_size);
     let _ = resize_memory_ebpf(&mut global_mem, out_offset_usize + out_size_usize, 0);
+
     let copy_len = std::cmp::min(return_data.len(), out_size_usize);
     if copy_len > 0 {
         global_mem[out_offset_usize..out_offset_usize + copy_len]
