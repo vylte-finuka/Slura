@@ -3559,9 +3559,6 @@ pub fn execute_program(
                 let out_size_usize = as_usize_or_fail(out_size);
 
                 if out_size_usize > 0 {
-                    if !resize_memory_ebpf(&mut global_mem, out_offset_usize, out_size_usize) {
-                        return Ok(halt_json_ebpf("Memory resize failed on CALL (output)"));
-                    }
 
                     let copy_len = out_size_usize.min(return_data.len());
                     for i in 0..copy_len {
