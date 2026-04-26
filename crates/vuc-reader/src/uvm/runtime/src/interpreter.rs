@@ -1159,8 +1159,16 @@ pub fn execute_program(
         }
     }
 
-    fn resize_memory_ebpf(mem: &mut Vec<u8>, new_size: usize) -> bool {
+    /// Helper de redimensionnement mémoire - Version compatible avec tous les appels existants
+fn resize_memory_ebpf(mem: &mut Vec<u8>, offset: usize, size: usize) -> bool {
     const MAX_MEM: usize = 16 * 1024 * 1024; // 16 MiB
+
+    // Calcul de la taille maximale nécessaire
+    let new_size = if let Some(end) = offset.checked_add(size) {
+        end
+    } else {
+        return false;
+    };
 
     if new_size > MAX_MEM {
         return false;
