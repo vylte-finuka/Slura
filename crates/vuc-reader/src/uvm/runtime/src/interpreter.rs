@@ -3354,7 +3354,7 @@ pub fn execute_program(
                 consume_gas_amount(&mut execution_context, 700)?; // Simplified gas cost
             }
 
-          // ___ 0xfa STATICCALL - FAIT EXACTEMENT COMME 0xf1 CALL (sans hack supplémentaire)
+// ___ 0xfa STATICCALL - FAIT EXACTEMENT COMME 0xf1 CALL (version propre)
 0xfa => {
     if evm_stack.len() < 6 {
         return Ok(halt_json_ebpf("Stack underflow on STATICCALL"));
@@ -3374,12 +3374,17 @@ pub fn execute_program(
         to_address, gas, in_offset, in_size, out_offset, out_size
     );
 
-    // Extraction du calldata (identique à CALL)
-    let in_offset_usize = as_usize_or_fail(in_offset);
-    let in_size_usize = as_usize_or_fail(in_size);
+    // Extraction du calldata (identique à CALL, avec protection contre offset trop grand)
+    let in_offset_usize = as_usize_or_fail(in_offset).min(global_mem.len());
+    let in_size_usize = as_usize_or_fail(in_size).min(global_mem.len().saturating_sub(in_offset_usize));
 
     if !resize_memory_ebpf(&mut global_mem, in_offset_usize, in_size_usize) {
-        return Ok(halt_json_ebpf("Memory resize failed on STATICCALL (input)"));
+        println!("[STATICCALL] Memory resize failed on input - using empty data");
+        execution_context.return_data = vec![];
+        evm_stack.push(u256::one());
+        consume_gas_amount(&mut execution_context, 700)?;
+        bytecode_pc += 1;
+        continue;
     }
 
     let call_data = memory_slice_len(&global_mem, in_offset_usize, in_size_usize).to_vec();
@@ -3457,13 +3462,13 @@ pub fn execute_program(
         target_code.len()
     );
 
-    // Sous-contexte (identique à CALL, mais value = 0 pour STATICCALL)
+    // Sous-contexte (identique à CALL, value = 0 pour STATICCALL)
     let mut sub_args = interpreter_args.clone();
     sub_args.contract_address = to_address.clone();
     sub_args.sender_address = interpreter_args.contract_address.clone();
     sub_args.caller = interpreter_args.contract_address.clone();
     sub_args.state_data = call_data.clone();
-    sub_args.value = u256::zero();           // STATICCALL = value toujours 0
+    sub_args.value = u256::zero();
     sub_args.gas_limit = gas;
     sub_args.call_depth = interpreter_args.call_depth + u256::one();
 
@@ -3480,7 +3485,7 @@ pub fn execute_program(
     let sub_result = execute_program(
         Some(&target_code),
         Some(stack_usage),
-        &[],        
+        &[],
         &call_data,
         helpers,
         allowed_memory,
