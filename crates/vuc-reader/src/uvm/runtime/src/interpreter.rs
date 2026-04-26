@@ -1159,15 +1159,20 @@ pub fn execute_program(
         }
     }
 
-    /// Helper de redimensionnement mémoire - Version compatible avec tous les appels existants
-fn resize_memory_ebpf(mem: &mut Vec<u8>, offset: usize, size: usize) -> bool {
+/// Helper resize_memory_ebpf - Compatible avec les anciens ET nouveaux appels
+fn resize_memory_ebpf(mem: &mut Vec<u8>, a: usize, b: usize) -> bool {
     const MAX_MEM: usize = 16 * 1024 * 1024; // 16 MiB
 
-    // Calcul de la taille maximale nécessaire
-    let new_size = if let Some(end) = offset.checked_add(size) {
-        end
+    let new_size = if b == 0 {
+        // Cas où on a appelé avec (offset + size) comme premier argument après la mise à jour
+        a
     } else {
-        return false;
+        // Cas classique : (offset, size)
+        if let Some(end) = a.checked_add(b) {
+            end
+        } else {
+            return false;
+        }
     };
 
     if new_size > MAX_MEM {
@@ -1178,7 +1183,7 @@ fn resize_memory_ebpf(mem: &mut Vec<u8>, offset: usize, size: usize) -> bool {
         mem.resize(new_size, 0);
     }
     true
-}
+}    
     
     fn memory_slice_len(mem: &[u8], offset: usize, size: usize) -> &[u8] {
         let end = offset.saturating_add(size).min(mem.len());
