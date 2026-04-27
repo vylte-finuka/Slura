@@ -2293,13 +2293,40 @@ pub fn execute_program(
                 }
                 let key = evm_stack.pop().unwrap();
                 let key_hex = format!("{:064x}", key);
-                let value_bytes = get_storage(
+                let mut value_bytes = get_storage(
                     &execution_context.world_state,
                     &interpreter_args.contract_address,
                     &key_hex,
                 );
-                let value = u256::from_big_endian(&value_bytes);
 
+                // ✅ Fallback RocksDB : si le slot est absent du world_state (sous-contrat cross-TX),
+                // on tente de le charger depuis la base de données persistante
+                if value_bytes == vec![0u8; 32] {
+                    if let Some(ref sm) = execution_context.storage_manager {
+                        let rocksdb_key = format!("storage:{}:{}", 
+                        interpreter_args.contract_address, key_hex);
+                        if let Ok(db_bytes) = sm.read(&rocksdb_key) {
+                            if !db_bytes.is_empty() && db_bytes != vec![0u8; 32] {
+                                println!(
+                                    "🗄️ [SLOAD FALLBACK] RocksDB hit: storage:{}:{} → 0x{}",
+                                    interpreter_args.contract_address,
+                                    key_hex,
+                                    hex::encode(&db_bytes)
+                                );
+                                // Mise en cache dans world_state pour éviter les lectures répétées
+                                set_storage(
+                                    &mut execution_context.world_state,
+                                    &interpreter_args.contract_address,
+                                    &key_hex,
+                                    db_bytes.clone(),
+                                );
+                                value_bytes = db_bytes;
+                            }
+                        }
+                    }
+                }
+
+                let value = u256::from_big_endian(&value_bytes);
                 evm_stack.push(value);
                 println!("🗄️ [SLOAD] storage[{}] = {}", key, value);
                 consume_gas_amount(&mut execution_context, 100)?; // Assume warm
@@ -2933,7 +2960,7 @@ pub fn execute_program(
                 );
 
                 // ✅ Extraction du returndata avec gestion robuste
-                let (call_success, return_data) = match sub_result {
+                let (call_success, return_data, sub_storage_writes) = match sub_result {
                     Ok(val) => {
                         if let Some(obj) = val.as_object() {
                             let action = obj
@@ -2976,16 +3003,57 @@ pub fn execute_program(
                                 vec![] // REVERT ou erreur
                             };
 
-                            (success, data)
+                            // ✅ Extraction des SSTORE du sous-contrat (persistance cross-contract)
+                            let mut sub_writes: Vec<(String, Vec<u8>)> = vec![];
+                            if success {
+                                if let Some(storage_obj) = obj.get("storage").and_then(|v| v.as_object()) {
+                                    for (slot, val_json) in storage_obj {
+                                        let bytes = match val_json {
+                                            JsonValue::String(s) if s.starts_with("0x") => {
+                                                hex::decode(&s[2..]).unwrap_or_else(|_| vec![0u8; 32])
+                                            }
+                                            JsonValue::Number(n) => {
+                                                let mut b = [0u8; 32];
+                                                u256::from(n.as_u64().unwrap_or(0)).to_big_endian(&mut b);
+                                                b.to_vec()
+                                            }
+                                            _ => vec![0u8; 32],
+                                        };
+                                        sub_writes.push((slot.clone(), bytes));
+                                    }
+                                }
+                            }
+
+                            (success, data, sub_writes)
                         } else {
-                            (false, vec![])
+                            (false, vec![], vec![])
                         }
                     }
                     Err(e) => {
                         println!("❌ [CALL ERROR] Sous-appel échoué : {:?}", e);
-                        (false, vec![])
+                        (false, vec![], vec![])
                     }
                 };
+
+                // ✅ Persistance des SSTORE du sous-contrat dans world_state ET RocksDB
+                if call_success && !sub_storage_writes.is_empty() {
+                    println!("💾 [CALL] Merge {} slots SSTORE → {}", sub_storage_writes.len(), to_address);
+                    for (slot, bytes) in &sub_storage_writes {
+                        // 1. Mise à jour in-memory (world_state du caller)
+                        set_storage(
+                            &mut execution_context.world_state,
+                            &to_address,
+                            slot,
+                            bytes.clone(),
+                        );
+                        // 2. Persistance directe dans RocksDB
+                        if let Some(ref sm) = execution_context.storage_manager {
+                            let rocksdb_key = format!("storage:{}:{}", to_address, slot);
+                            let _ = sm.write(&rocksdb_key, bytes);
+                            println!("   → RocksDB storage:{}:{} → 0x{}", to_address, slot, hex::encode(bytes));
+                        }
+                    }
+                }
 
                 println!(
                     "✅ [CALL RETURN] success={}, returndata_len={}",
@@ -3368,7 +3436,7 @@ pub fn execute_program(
                     execution_context.on_create2_event.clone(),
                 );
 
-                let (call_success, return_data) = match sub_result {
+                let (call_success, return_data, delegatecall_storage_writes) = match sub_result {
                     Ok(val) => {
                         if let Some(obj) = val.as_object() {
                             let action = obj
@@ -3406,16 +3474,50 @@ pub fn execute_program(
                             } else {
                                 vec![]
                             };
-                            (success, data)
+                            // ✅ DELEGATECALL: récupère les SSTORE (sous l'adresse du caller)
+                            let mut dc_writes: Vec<(String, Vec<u8>)> = vec![];
+                            if success {
+                                if let Some(storage_obj) = obj.get("storage").and_then(|v| v.as_object()) {
+                                    for (slot, val_json) in storage_obj {
+                                        let bytes = match val_json {
+                                            JsonValue::String(s) if s.starts_with("0x") => {
+                                                hex::decode(&s[2..]).unwrap_or_else(|_| vec![0u8; 32])
+                                            }
+                                            JsonValue::Number(n) => {
+                                                let mut b = [0u8; 32];
+                                                u256::from(n.as_u64().unwrap_or(0)).to_big_endian(&mut b);
+                                                b.to_vec()
+                                            }
+                                            _ => vec![0u8; 32],
+                                        };
+                                        dc_writes.push((slot.clone(), bytes));
+                                    }
+                                }
+                            }
+                            (success, data, dc_writes)
                         } else {
-                            (false, vec![])
+                            (false, vec![], vec![])
                         }
                     }
                     Err(e) => {
                         println!("❌ [DELEGATECALL ERROR] {:?}", e);
-                        (false, vec![])
+                        (false, vec![], vec![])
                     }
                 };
+
+                // ✅ Merge des SSTORE DELEGATECALL dans temp_storage_writes du caller
+                if call_success && !delegatecall_storage_writes.is_empty() {
+                    println!("💾 [DELEGATECALL] Merge {} slots SSTORE → caller storage", delegatecall_storage_writes.len());
+                    for (slot, bytes) in &delegatecall_storage_writes {
+                        temp_storage_writes.insert(slot.clone(), bytes.clone());
+                        set_storage(
+                            &mut execution_context.world_state,
+                            &interpreter_args.contract_address,
+                            slot,
+                            bytes.clone(),
+                        );
+                    }
+                }
 
                 println!(
                     "✅ [DELEGATECALL RETURN] success={}, returndata_len={}",
