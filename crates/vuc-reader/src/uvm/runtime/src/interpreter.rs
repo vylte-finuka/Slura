@@ -1008,6 +1008,12 @@ pub fn ss7_metadata_process(
     return_value
 }
 
+fn is_native_token_magic(addr: &str) -> bool {
+    let lower = addr.to_ascii_lowercase();
+    lower == "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" ||
+    lower == "0xeeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE".to_ascii_lowercase()
+}
+
 /// ✅ Encodage d'adresse vers u64
 fn encode_address_to_u64(addr: &str) -> u64 {
     use std::collections::hash_map::DefaultHasher;
