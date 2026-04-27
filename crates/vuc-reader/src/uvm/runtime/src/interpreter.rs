@@ -248,11 +248,11 @@ pub struct UvmExecutionContext {
     // Callback déclenché lorsque l'opcode CREATE2 (0xf5) est exécuté
     // Permet à engine_platform de persister le contrat déployé via CREATE2
     pub on_create2_event: Option<Create2Callback>,
-    
+
     // ──────────────────────────────── EIP-3074 AUTH CONTEXT ────────────────────────────────
     /// Context d'autorisation pour EIP-3074 (AUTH/AUTHCALL)
     pub auth_context: Option<(String, u256)>, // (authority_address, commit)
-                                               // ────────────────────────────────────────────────────────────────────────────────
+                                              // ────────────────────────────────────────────────────────────────────────────────
 }
 
 #[derive(Clone, Debug)]
@@ -1008,12 +1008,6 @@ pub fn ss7_metadata_process(
     return_value
 }
 
-fn is_native_token_magic(addr: &str) -> bool {
-    let lower = addr.to_ascii_lowercase();
-    lower == "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" ||
-    lower == "0xeeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE".to_ascii_lowercase()
-}
-
 /// ✅ Encodage d'adresse vers u64
 fn encode_address_to_u64(addr: &str) -> u64 {
     use std::collections::hash_map::DefaultHasher;
@@ -1115,6 +1109,11 @@ pub fn execute_program(
         obj.insert(
             "data".to_string(),
             decode_return_data_generic(&data, data.len()),
+        );
+        // Bytes bruts pour RETURNDATACOPY / RETURNDATASIZE dans les sous-appels
+        obj.insert(
+            "raw_data".to_string(),
+            serde_json::Value::String(format!("0x{}", hex::encode(&data))),
         );
         serde_json::Value::Object(obj)
     }
@@ -1406,10 +1405,9 @@ pub fn execute_program(
                 let result = if n.is_zero() {
                     u256::zero()
                 } else {
-                    // (a + b) % N with arbitrary precision
-                    let sum = a.overflowing_add(b).0;
-                    let (quotient, remainder) = sum.div_mod(n);
-                    remainder
+                    // (a + b) % N avec arithmétique 512-bit sécurisée (évite troncature à 256 bits)
+                    // EVM spec: (a + b) peut atteindre 2^257, addmod_safe gère l'overflow correctement
+                    addmod_safe(a, b, n)
                 };
                 evm_stack.push(result);
                 println!("➕📐 [ADDMOD] ({} + {}) % {} = {}", a, b, n, result);
@@ -1916,6 +1914,78 @@ pub fn execute_program(
                 consume_gas_amount(&mut execution_context, 100)?; // Assume warm
             }
 
+            //___ 0x3c EXTCODECOPY - Copie le bytecode d'un contrat externe dans la mémoire
+            0x3c => {
+                if evm_stack.len() < 4 {
+                    return Ok(halt_json_ebpf("Stack underflow on EXTCODECOPY"));
+                }
+                let address_u256 = evm_stack.pop().unwrap();
+                let dest_offset = evm_stack.pop().unwrap();
+                let offset = evm_stack.pop().unwrap();
+                let size = evm_stack.pop().unwrap();
+
+                let address = u256_to_address(address_u256);
+                let dest_offset_usize = as_usize_or_fail(dest_offset);
+                let offset_usize = as_usize_or_fail(offset);
+                let size_usize = as_usize_or_fail(size);
+
+                if !resize_memory_ebpf(&mut global_mem, dest_offset_usize, size_usize) {
+                    return Ok(halt_json_ebpf("Memory resize failed on EXTCODECOPY"));
+                }
+
+                // Récupère le bytecode externe depuis world_state ou RocksDB
+                let mut ext_code = execution_context
+                    .world_state
+                    .code
+                    .get(&address)
+                    .or_else(|| {
+                        execution_context
+                            .world_state
+                            .accounts
+                            .get(&address)
+                            .map(|acc| &acc.code)
+                    })
+                    .cloned()
+                    .unwrap_or_default();
+
+                if ext_code.is_empty() {
+                    if let Some(ref storage_manager) = execution_context.storage_manager {
+                        let key = format!("account:{}:contract_state", address);
+                        if let Ok(bytecode) = storage_manager.read(&key) {
+                            if !bytecode.is_empty() {
+                                ext_code = bytecode;
+                                execution_context
+                                    .world_state
+                                    .code
+                                    .insert(address.clone(), ext_code.clone());
+                            }
+                        }
+                    }
+                }
+
+                for i in 0..size_usize {
+                    if dest_offset_usize + i < global_mem.len() {
+                        global_mem[dest_offset_usize + i] = if offset_usize + i < ext_code.len() {
+                            ext_code[offset_usize + i]
+                        } else {
+                            0
+                        };
+                    }
+                }
+
+                println!(
+                    "📋 [EXTCODECOPY] extcode({}, {}:{}) → mem[{}] ({} bytes)",
+                    address,
+                    offset,
+                    offset + size,
+                    dest_offset,
+                    size_usize
+                );
+                let words = (size_usize + 31) / 32;
+                consume_gas_amount(&mut execution_context, 100 + 3 * words as u64)?;
+                // warm access + copy
+            }
+
             // ___ 0x3d RETURNDATASIZE - Taille des données de retour
             0x3d => {
                 // Taille actuelle du return_data dans le contexte UVM
@@ -1925,6 +1995,7 @@ pub fn execute_program(
                 evm_stack.push(size);
 
                 println!("📏 [RETURNDATASIZE] → {} bytes", size);
+                consume_gas_amount(&mut execution_context, 2)?;
             }
 
             // ___ 0x3e RETURNDATACOPY - Copie des données de retour dans la mémoire
@@ -1961,6 +2032,54 @@ pub fn execute_program(
                     offset + size,
                     dest_offset
                 );
+                // Gas: 3 + 3 * ceil(size / 32) (identique à CALLDATACOPY / CODECOPY)
+                let words = (size_usize + 31) / 32;
+                consume_gas_amount(&mut execution_context, 3 + 3 * words as u64)?;
+            }
+
+            //___ 0x3f EXTCODEHASH (EIP-1052, Constantinople)
+            // Retourne keccak256 du bytecode d'un compte externe.
+            // Si le compte n'existe pas → 0x0
+            // Si le compte existe mais sans code (EOA) → keccak256("") = 0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470
+            0x3f => {
+                if evm_stack.is_empty() {
+                    return Ok(halt_json_ebpf("Stack underflow on EXTCODEHASH"));
+                }
+                let address_u256 = evm_stack.pop().unwrap();
+                let address = u256_to_address(address_u256);
+
+                let result =
+                    if let Some(account) = execution_context.world_state.accounts.get(&address) {
+                        if account.code.is_empty() {
+                            // EOA ou compte sans code : keccak256 de la chaîne vide
+                            let empty_hash = keccak_hash(&[]);
+                            u256::from_big_endian(&empty_hash)
+                        } else {
+                            let code_hash = keccak_hash(&account.code);
+                            u256::from_big_endian(&code_hash)
+                        }
+                    } else {
+                        // Essaie le cache de code
+                        if let Some(code) = execution_context.world_state.code.get(&address) {
+                            if code.is_empty() {
+                                let empty_hash = keccak_hash(&[]);
+                                u256::from_big_endian(&empty_hash)
+                            } else {
+                                let code_hash = keccak_hash(code);
+                                u256::from_big_endian(&code_hash)
+                            }
+                        } else {
+                            // Compte inexistant → 0
+                            u256::zero()
+                        }
+                    };
+
+                evm_stack.push(result);
+                println!(
+                    "🔐 [EXTCODEHASH] extcodehash({}) = {:064x}",
+                    address, result
+                );
+                consume_gas_amount(&mut execution_context, 100)?; // warm access
             }
 
             //___ 0x40 BLOCKHASH
@@ -2286,38 +2405,38 @@ pub fn execute_program(
             }
 
             // ___ 0x5c TLOAD (EIP-1153 Transient Storage Load) - Version production
-0x5c => {
-    if evm_stack.is_empty() {
-        return Ok(halt_json_ebpf("Stack underflow on TLOAD"));
-    }
+            0x5c => {
+                if evm_stack.is_empty() {
+                    return Ok(halt_json_ebpf("Stack underflow on TLOAD"));
+                }
 
-    let key_u256 = evm_stack.pop().unwrap();
+                let key_u256 = evm_stack.pop().unwrap();
 
-    // Conversion clé en bytes32
-    let mut key_bytes = [0u8; 32];
-    key_u256.to_big_endian(&mut key_bytes);
+                // Conversion clé en bytes32
+                let mut key_bytes = [0u8; 32];
+                key_u256.to_big_endian(&mut key_bytes);
 
-    // Lecture dans transient_storage (HashMap<[u8;32], [u8;32]>)
-    let value = execution_context
-        .world_state
-        .transient_storage
-        .get(&key_bytes)
-        .cloned()
-        .unwrap_or([0u8; 32]);  // valeur par défaut = 0 si absent
+                // Lecture dans transient_storage (HashMap<[u8;32], [u8;32]>)
+                let value = execution_context
+                    .world_state
+                    .transient_storage
+                    .get(&key_bytes)
+                    .cloned()
+                    .unwrap_or([0u8; 32]); // valeur par défaut = 0 si absent
 
-    let value_u256 = u256::from_big_endian(&value);
+                let value_u256 = u256::from_big_endian(&value);
 
-    evm_stack.push(value_u256);
+                evm_stack.push(value_u256);
 
-    println!(
-        "📖 [TLOAD] transient[0x{}] = 0x{:064x}",
-        hex::encode(&key_bytes),
-        value_u256
-    );
+                println!(
+                    "📖 [TLOAD] transient[0x{}] = 0x{:064x}",
+                    hex::encode(&key_bytes),
+                    value_u256
+                );
 
-    // Gas cost pour TLOAD = 100 (warm access)
-    consume_gas_amount(&mut execution_context, 100)?;
-}
+                // Gas cost pour TLOAD = 100 (warm access)
+                consume_gas_amount(&mut execution_context, 100)?;
+            }
 
             // ___ 0x5d TSTORE (EIP-1153 Transient Storage Store)
             0x5d => {
@@ -2362,55 +2481,63 @@ pub fn execute_program(
             }
 
             // ___ 0x5e MCOPY - EIP-5656 : Memory Copy (dstOffset, srcOffset, length)
-0x5e => {
-    if evm_stack.len() < 3 {
-        return Ok(halt_json_ebpf("Stack underflow on MCOPY"));
-    }
+            0x5e => {
+                if evm_stack.len() < 3 {
+                    return Ok(halt_json_ebpf("Stack underflow on MCOPY"));
+                }
 
-    let length = evm_stack.pop().unwrap();
-    let src_offset = evm_stack.pop().unwrap();
-    let dst_offset = evm_stack.pop().unwrap();
+                let length = evm_stack.pop().unwrap();
+                let src_offset = evm_stack.pop().unwrap();
+                let dst_offset = evm_stack.pop().unwrap();
 
-    let dst_offset_usize = as_usize_or_fail(dst_offset);
-    let src_offset_usize = as_usize_or_fail(src_offset);
-    let len_usize = as_usize_or_fail(length);
+                let dst_offset_usize = as_usize_or_fail(dst_offset);
+                let src_offset_usize = as_usize_or_fail(src_offset);
+                let len_usize = as_usize_or_fail(length);
 
-    // Gas : 3 + 3 * (length + 31) / 32  (identique à CALLDATACOPY / CODECOPY)
-    let words = (len_usize + 31) / 32;
-    consume_gas_amount(&mut execution_context, 3 + 3 * words as u64)?;
+                // Gas : 3 + 3 * (length + 31) / 32  (identique à CALLDATACOPY / CODECOPY)
+                let words = (len_usize + 31) / 32;
+                consume_gas_amount(&mut execution_context, 3 + 3 * words as u64)?;
 
-    if len_usize == 0 {
-        println!("📋 [MCOPY] length=0 → no-op");
-        break; // ou continue selon ton style
-    }
+                if len_usize == 0 {
+                    println!("📋 [MCOPY] length=0 → no-op");
+                    continue; // rien à copier, on passe au prochain opcode
+                }
 
-    // Redimensionnement sécurisé de la mémoire
-    let max_needed = dst_offset_usize.saturating_add(len_usize)
-        .max(src_offset_usize.saturating_add(len_usize));
+                // Redimensionnement sécurisé de la mémoire
+                let max_needed = dst_offset_usize
+                    .saturating_add(len_usize)
+                    .max(src_offset_usize.saturating_add(len_usize));
 
-    if !resize_memory_ebpf(&mut global_mem, max_needed, 0) {  // le 2e paramètre n'est plus utilisé dans ta fn actuelle
-        return Ok(halt_json_ebpf("Memory resize failed on MCOPY"));
-    }
+                if !resize_memory_ebpf(&mut global_mem, max_needed, 0) {
+                    // le 2e paramètre n'est plus utilisé dans ta fn actuelle
+                    return Ok(halt_json_ebpf("Memory resize failed on MCOPY"));
+                }
 
-    // Copie sécurisée (overlap-safe comme memmove, pas memcpy)
-    let copy_len = len_usize.min(
-        global_mem.len().saturating_sub(dst_offset_usize)
-            .min(global_mem.len().saturating_sub(src_offset_usize))
-    );
+                // Copie sécurisée (overlap-safe comme memmove, pas memcpy)
+                let copy_len = len_usize.min(
+                    global_mem
+                        .len()
+                        .saturating_sub(dst_offset_usize)
+                        .min(global_mem.len().saturating_sub(src_offset_usize)),
+                );
 
-    if copy_len > 0 {
-        // On utilise une slice temporaire pour gérer correctement les overlaps
-        let data: Vec<u8> = global_mem[src_offset_usize..src_offset_usize + copy_len].to_vec();
-        global_mem[dst_offset_usize..dst_offset_usize + copy_len].copy_from_slice(&data);
-    }
+                if copy_len > 0 {
+                    // On utilise une slice temporaire pour gérer correctement les overlaps
+                    let data: Vec<u8> =
+                        global_mem[src_offset_usize..src_offset_usize + copy_len].to_vec();
+                    global_mem[dst_offset_usize..dst_offset_usize + copy_len]
+                        .copy_from_slice(&data);
+                }
 
-    println!(
-        "📋 [MCOPY] mem[{}:{}] ← mem[{}:{}] ({} bytes copiés)",
-        dst_offset, dst_offset + length,
-        src_offset, src_offset + length,
-        copy_len
-    );
-}
+                println!(
+                    "📋 [MCOPY] mem[{}:{}] ← mem[{}:{}] ({} bytes copiés)",
+                    dst_offset,
+                    dst_offset + length,
+                    src_offset,
+                    src_offset + length,
+                    copy_len
+                );
+            }
 
             //___ 0x5f PUSH0
             0x5f => {
@@ -2818,27 +2945,33 @@ pub fn execute_program(
 
                             // ✅ Extraction améliorée du returndata
                             let data = if action == "return" || action == "stop" {
-                                obj.get("data")
-                                    .and_then(|d| match d {
-                                        JsonValue::String(s) if s.starts_with("0x") => {
-                                            hex::decode(&s[2..]).ok()
-                                        }
-                                        JsonValue::Bool(b) => {
-                                            let mut bytes = [0u8; 32];
-                                            if *b {
-                                                bytes[31] = 1;
+                                // Priorité : raw_data (bytes exacts)
+                                if let Some(raw) = obj.get("raw_data").and_then(|d| d.as_str()) {
+                                    let s = raw.strip_prefix("0x").unwrap_or(raw);
+                                    hex::decode(s).unwrap_or_default()
+                                } else {
+                                    obj.get("data")
+                                        .and_then(|d| match d {
+                                            JsonValue::String(s) if s.starts_with("0x") => {
+                                                hex::decode(&s[2..]).ok()
                                             }
-                                            Some(bytes.to_vec())
-                                        }
-                                        JsonValue::Number(n) => {
-                                            let num_u64 = n.as_u64().unwrap_or(0);
-                                            let mut bytes = [0u8; 32];
-                                            u256::from(num_u64).to_big_endian(&mut bytes);
-                                            Some(bytes.to_vec())
-                                        }
-                                        _ => Some(vec![]), // STOP sans données
-                                    })
-                                    .unwrap_or_default()
+                                            JsonValue::Bool(b) => {
+                                                let mut bytes = [0u8; 32];
+                                                if *b {
+                                                    bytes[31] = 1;
+                                                }
+                                                Some(bytes.to_vec())
+                                            }
+                                            JsonValue::Number(n) => {
+                                                let num_u64 = n.as_u64().unwrap_or(0);
+                                                let mut bytes = [0u8; 32];
+                                                u256::from(num_u64).to_big_endian(&mut bytes);
+                                                Some(bytes.to_vec())
+                                            }
+                                            _ => Some(vec![]), // STOP sans données
+                                        })
+                                        .unwrap_or_default()
+                                }
                             } else {
                                 vec![] // REVERT ou erreur
                             };
@@ -2898,164 +3031,188 @@ pub fn execute_program(
             }
 
             //___ 0xf2 CALLCODE - Version production (exécute dans le contexte du caller, value transférée)
-0xf2 => {
-    if evm_stack.len() < 7 {
-        return Ok(halt_json_ebpf("Stack underflow on CALLCODE"));
-    }
-
-    let gas = evm_stack.pop().unwrap();
-    let to_addr_u256 = evm_stack.pop().unwrap();
-    let value = evm_stack.pop().unwrap();
-    let in_offset = evm_stack.pop().unwrap();
-    let in_size = evm_stack.pop().unwrap();
-    let out_offset = evm_stack.pop().unwrap();
-    let out_size = evm_stack.pop().unwrap();
-
-    let to_address = u256_to_address(to_addr_u256);
-
-    println!(
-        "📞 [CALLCODE] to={}, value={}, gas={}, in=mem[{}:{}], out=mem[{}:{}]",
-        to_address, value, gas, in_offset, in_size, out_offset, out_size
-    );
-
-    // Extraction du calldata depuis la mémoire
-    let in_offset_usize = as_usize_or_fail(in_offset);
-    let in_size_usize = as_usize_or_fail(in_size);
-
-    if !resize_memory_ebpf(&mut global_mem, in_offset_usize, in_size_usize) {
-        return Ok(halt_json_ebpf("Memory resize failed on CALLCODE (input)"));
-    }
-
-    let call_data = memory_slice_len(&global_mem, in_offset_usize, in_size_usize).to_vec();
-
-    // Récupération du bytecode cible
-    let mut target_code = execution_context
-        .world_state
-        .code
-        .get(&to_address)
-        .or_else(|| execution_context.world_state.accounts.get(&to_address).map(|acc| &acc.code))
-        .cloned()
-        .unwrap_or_default();
-
-    // Fallback RocksDB si nécessaire
-    if target_code.is_empty() {
-        if let Some(ref storage_manager) = execution_context.storage_manager {
-            let contract_state_key = format!("account:{}:contract_state", to_address);
-            if let Ok(bytecode) = storage_manager.read(&contract_state_key) {
-                if !bytecode.is_empty() {
-                    target_code = bytecode;
-                    execution_context.world_state.code.insert(to_address.clone(), target_code.clone());
+            0xf2 => {
+                if evm_stack.len() < 7 {
+                    return Ok(halt_json_ebpf("Stack underflow on CALLCODE"));
                 }
-            }
-        }
-    }
 
-    if target_code.is_empty() {
-        // EOA ou contrat sans code → succès, pas de retour de données
-        execution_context.return_data = vec![];
-        let out_offset_usize = as_usize_or_fail(out_offset);
-        let out_size_usize = as_usize_or_fail(out_size);
-        if resize_memory_ebpf(&mut global_mem, out_offset_usize, out_size_usize) {
-            for i in 0..out_size_usize {
-                global_mem[out_offset_usize + i] = 0;
-            }
-        }
-        evm_stack.push(u256::one());
-        consume_gas_amount(&mut execution_context, 700)?;
-        bytecode_pc += 1;
-        continue;
-    }
+                let gas = evm_stack.pop().unwrap();
+                let to_addr_u256 = evm_stack.pop().unwrap();
+                let value = evm_stack.pop().unwrap();
+                let in_offset = evm_stack.pop().unwrap();
+                let in_size = evm_stack.pop().unwrap();
+                let out_offset = evm_stack.pop().unwrap();
+                let out_size = evm_stack.pop().unwrap();
 
-    // Création du sous-contexte (CALLCODE exécute dans le contexte du caller)
-    let mut sub_args = interpreter_args.clone();
-    sub_args.contract_address = to_address.clone();
-    sub_args.sender_address = interpreter_args.contract_address.clone(); // msg.sender reste le caller
-    sub_args.caller = interpreter_args.contract_address.clone();
-    sub_args.state_data = call_data.clone();
-    sub_args.value = value;                    // value est transférée (contrairement à DELEGATECALL)
-    sub_args.gas_limit = gas;
-    sub_args.call_depth = interpreter_args.call_depth + u256::one();
+                let to_address = u256_to_address(to_addr_u256);
 
-    if sub_args.call_depth > u256::from(1024) {
-        println!("🚨 [CALLCODE] Max call depth reached");
-        execution_context.return_data = vec![];
-        evm_stack.push(u256::zero());
-        consume_gas_amount(&mut execution_context, 700)?;
-        bytecode_pc += 1;
-        continue;
-    }
+                println!(
+                    "📞 [CALLCODE] to={}, value={}, gas={}, in=mem[{}:{}], out=mem[{}:{}]",
+                    to_address, value, gas, in_offset, in_size, out_offset, out_size
+                );
 
-    // Appel récursif
-    let sub_result = execute_program(
-        Some(&target_code),
-        Some(stack_usage),
-        &[],                    // mem vierge
-        &call_data,
-        helpers,
-        allowed_memory,
-        ret_type,
-        exports,
-        &sub_args,
-        execution_context.storage_manager.clone(),
-        Some(execution_context.world_state.storage.clone()),
-        execution_context.on_create2_event.clone(),
-    );
+                // Extraction du calldata depuis la mémoire
+                let in_offset_usize = as_usize_or_fail(in_offset);
+                let in_size_usize = as_usize_or_fail(in_size);
 
-    let (call_success, return_data) = match sub_result {
-        Ok(val) => {
-            if let Some(obj) = val.as_object() {
-                let action = obj.get("action").and_then(|a| a.as_str()).unwrap_or("unknown");
-                let success = action == "return" || action == "stop";
+                if !resize_memory_ebpf(&mut global_mem, in_offset_usize, in_size_usize) {
+                    return Ok(halt_json_ebpf("Memory resize failed on CALLCODE (input)"));
+                }
 
-                let data = if action == "return" || action == "stop" {
-                    obj.get("data").and_then(|d| match d {
-                        JsonValue::String(s) if s.starts_with("0x") => hex::decode(&s[2..]).ok(),
-                        JsonValue::Bool(b) => {
-                            let mut bytes = [0u8; 32];
-                            if *b { bytes[31] = 1; }
-                            Some(bytes.to_vec())
+                let call_data =
+                    memory_slice_len(&global_mem, in_offset_usize, in_size_usize).to_vec();
+
+                // Récupération du bytecode cible
+                let mut target_code = execution_context
+                    .world_state
+                    .code
+                    .get(&to_address)
+                    .or_else(|| {
+                        execution_context
+                            .world_state
+                            .accounts
+                            .get(&to_address)
+                            .map(|acc| &acc.code)
+                    })
+                    .cloned()
+                    .unwrap_or_default();
+
+                // Fallback RocksDB si nécessaire
+                if target_code.is_empty() {
+                    if let Some(ref storage_manager) = execution_context.storage_manager {
+                        let contract_state_key = format!("account:{}:contract_state", to_address);
+                        if let Ok(bytecode) = storage_manager.read(&contract_state_key) {
+                            if !bytecode.is_empty() {
+                                target_code = bytecode;
+                                execution_context
+                                    .world_state
+                                    .code
+                                    .insert(to_address.clone(), target_code.clone());
+                            }
                         }
-                        JsonValue::Number(n) => {
-                            let num = n.as_u64().unwrap_or(0);
-                            let mut bytes = [0u8; 32];
-                            u256::from(num).to_big_endian(&mut bytes);
-                            Some(bytes.to_vec())
+                    }
+                }
+
+                if target_code.is_empty() {
+                    // EOA ou contrat sans code → succès, pas de retour de données
+                    execution_context.return_data = vec![];
+                    let out_offset_usize = as_usize_or_fail(out_offset);
+                    let out_size_usize = as_usize_or_fail(out_size);
+                    if resize_memory_ebpf(&mut global_mem, out_offset_usize, out_size_usize) {
+                        for i in 0..out_size_usize {
+                            global_mem[out_offset_usize + i] = 0;
                         }
-                        _ => Some(vec![]),
-                    }).unwrap_or_default()
-                } else {
-                    vec![]
+                    }
+                    evm_stack.push(u256::one());
+                    consume_gas_amount(&mut execution_context, 700)?;
+                    bytecode_pc += 1;
+                    continue;
+                }
+
+                // Création du sous-contexte (CALLCODE exécute dans le contexte du caller)
+                let mut sub_args = interpreter_args.clone();
+                sub_args.contract_address = to_address.clone();
+                sub_args.sender_address = interpreter_args.contract_address.clone(); // msg.sender reste le caller
+                sub_args.caller = interpreter_args.contract_address.clone();
+                sub_args.state_data = call_data.clone();
+                sub_args.value = value; // value est transférée (contrairement à DELEGATECALL)
+                sub_args.gas_limit = gas;
+                sub_args.call_depth = interpreter_args.call_depth + u256::one();
+
+                if sub_args.call_depth > u256::from(1024) {
+                    println!("🚨 [CALLCODE] Max call depth reached");
+                    execution_context.return_data = vec![];
+                    evm_stack.push(u256::zero());
+                    consume_gas_amount(&mut execution_context, 700)?;
+                    bytecode_pc += 1;
+                    continue;
+                }
+
+                // Appel récursif
+                let sub_result = execute_program(
+                    Some(&target_code),
+                    Some(stack_usage),
+                    &[], // mem vierge
+                    &call_data,
+                    helpers,
+                    allowed_memory,
+                    ret_type,
+                    exports,
+                    &sub_args,
+                    execution_context.storage_manager.clone(),
+                    Some(execution_context.world_state.storage.clone()),
+                    execution_context.on_create2_event.clone(),
+                );
+
+                let (call_success, return_data) = match sub_result {
+                    Ok(val) => {
+                        if let Some(obj) = val.as_object() {
+                            let action = obj
+                                .get("action")
+                                .and_then(|a| a.as_str())
+                                .unwrap_or("unknown");
+                            let success = action == "return" || action == "stop";
+
+                            let data = if action == "return" || action == "stop" {
+                                obj.get("data")
+                                    .and_then(|d| match d {
+                                        JsonValue::String(s) if s.starts_with("0x") => {
+                                            hex::decode(&s[2..]).ok()
+                                        }
+                                        JsonValue::Bool(b) => {
+                                            let mut bytes = [0u8; 32];
+                                            if *b {
+                                                bytes[31] = 1;
+                                            }
+                                            Some(bytes.to_vec())
+                                        }
+                                        JsonValue::Number(n) => {
+                                            let num = n.as_u64().unwrap_or(0);
+                                            let mut bytes = [0u8; 32];
+                                            u256::from(num).to_big_endian(&mut bytes);
+                                            Some(bytes.to_vec())
+                                        }
+                                        _ => Some(vec![]),
+                                    })
+                                    .unwrap_or_default()
+                            } else {
+                                vec![]
+                            };
+                            (success, data)
+                        } else {
+                            (false, vec![])
+                        }
+                    }
+                    Err(e) => {
+                        println!("❌ [CALLCODE ERROR] {:?}", e);
+                        (false, vec![])
+                    }
                 };
-                (success, data)
-            } else {
-                (false, vec![])
+
+                // Copie du retour dans la mémoire du caller
+                let out_offset_usize = as_usize_or_fail(out_offset);
+                let out_size_usize = as_usize_or_fail(out_size);
+                if resize_memory_ebpf(&mut global_mem, out_offset_usize, out_size_usize) {
+                    for i in 0..out_size_usize {
+                        global_mem[out_offset_usize + i] = 0;
+                    }
+                    let copy_len = std::cmp::min(return_data.len(), out_size_usize);
+                    global_mem[out_offset_usize..out_offset_usize + copy_len]
+                        .copy_from_slice(&return_data[0..copy_len]);
+                }
+
+                execution_context.return_data = return_data;
+
+                evm_stack.push(if call_success {
+                    u256::one()
+                } else {
+                    u256::zero()
+                });
+
+                consume_gas_amount(&mut execution_context, 700)?;
+                // Pas de bytecode_pc += 1 ici : le bas de boucle (advance=1) s'en charge
             }
-        }
-        Err(e) => {
-            println!("❌ [CALLCODE ERROR] {:?}", e);
-            (false, vec![])
-        }
-    };
 
-    // Copie du retour dans la mémoire du caller
-    let out_offset_usize = as_usize_or_fail(out_offset);
-    let out_size_usize = as_usize_or_fail(out_size);
-    if resize_memory_ebpf(&mut global_mem, out_offset_usize, out_size_usize) {
-        for i in 0..out_size_usize {
-            global_mem[out_offset_usize + i] = 0;
-        }
-        let copy_len = std::cmp::min(return_data.len(), out_size_usize);
-        global_mem[out_offset_usize..out_offset_usize + copy_len].copy_from_slice(&return_data[0..copy_len]);
-    }
-
-    execution_context.return_data = return_data;
-
-    evm_stack.push(if call_success { u256::one() } else { u256::zero() });
-
-    consume_gas_amount(&mut execution_context, 700)?;
-    bytecode_pc += 1;
-}
-            
             //___ 0xf3 RETURN - Style eBPF avec action et résultat
             0xf3 => {
                 // RETURN
@@ -3102,7 +3259,203 @@ pub fn execute_program(
                 return Ok(result);
             }
 
-                     //___ 0xf5 CREATE2 - Version corrigée avec extraction runtime
+            //___ 0xf4 DELEGATECALL - Exécute le code cible dans le contexte du caller
+            // (msg.sender, msg.value et storage du caller sont préservés)
+            0xf4 => {
+                if evm_stack.len() < 6 {
+                    return Ok(halt_json_ebpf("Stack underflow on DELEGATECALL"));
+                }
+
+                let gas = evm_stack.pop().unwrap();
+                let to_addr_u256 = evm_stack.pop().unwrap();
+                let in_offset = evm_stack.pop().unwrap();
+                let in_size = evm_stack.pop().unwrap();
+                let out_offset = evm_stack.pop().unwrap();
+                let out_size = evm_stack.pop().unwrap();
+
+                let to_address = u256_to_address(to_addr_u256);
+
+                println!(
+                    "📞 [DELEGATECALL] to={}, gas={}, in=mem[{}:{}], out=mem[{}:{}]",
+                    to_address, gas, in_offset, in_size, out_offset, out_size
+                );
+
+                // Extraction du calldata depuis la mémoire du caller
+                let in_offset_usize = as_usize_or_fail(in_offset);
+                let in_size_usize = as_usize_or_fail(in_size);
+
+                if !resize_memory_ebpf(&mut global_mem, in_offset_usize, in_size_usize) {
+                    return Ok(halt_json_ebpf(
+                        "Memory resize failed on DELEGATECALL (input)",
+                    ));
+                }
+
+                let call_data =
+                    memory_slice_len(&global_mem, in_offset_usize, in_size_usize).to_vec();
+
+                // Récupération du bytecode cible (code du contrat délégué)
+                let mut target_code = execution_context
+                    .world_state
+                    .code
+                    .get(&to_address)
+                    .or_else(|| {
+                        execution_context
+                            .world_state
+                            .accounts
+                            .get(&to_address)
+                            .map(|acc| &acc.code)
+                    })
+                    .cloned()
+                    .unwrap_or_default();
+
+                if target_code.is_empty() {
+                    if let Some(ref storage_manager) = execution_context.storage_manager {
+                        let key = format!("account:{}:contract_state", to_address);
+                        if let Ok(bytecode) = storage_manager.read(&key) {
+                            if !bytecode.is_empty() {
+                                target_code = bytecode;
+                                execution_context
+                                    .world_state
+                                    .code
+                                    .insert(to_address.clone(), target_code.clone());
+                            }
+                        }
+                    }
+                }
+
+                if target_code.is_empty() {
+                    // EOA ou contrat sans code → succès silencieux
+                    println!("⚠️ [DELEGATECALL] Contrat {} sans code (EOA)", to_address);
+                    execution_context.return_data = vec![];
+                    evm_stack.push(u256::one());
+                    consume_gas_amount(&mut execution_context, 700)?;
+                    bytecode_pc += 1;
+                    continue;
+                }
+
+                // DELEGATECALL : le code cible s'exécute dans le contexte du caller
+                // - contract_address = inchangé (storage du caller)
+                // - msg.sender = inchangé (celui qui a appelé le caller)
+                // - msg.value = inchangé (valeur de la transaction en cours)
+                // Seul le code exécuté change (celui de to_address)
+                let mut sub_args = interpreter_args.clone();
+                // contract_address, caller, value restent identiques → storage du caller préservé
+                sub_args.state_data = call_data.clone();
+                sub_args.gas_limit = gas;
+                sub_args.call_depth = interpreter_args.call_depth + u256::one();
+
+                if sub_args.call_depth > u256::from(1024) {
+                    println!("🚨 [DELEGATECALL] Profondeur maximale atteinte (1024)");
+                    execution_context.return_data = vec![];
+                    evm_stack.push(u256::zero());
+                    consume_gas_amount(&mut execution_context, 700)?;
+                    bytecode_pc += 1;
+                    continue;
+                }
+
+                let sub_result = execute_program(
+                    Some(&target_code),
+                    Some(stack_usage),
+                    &[],
+                    &call_data,
+                    helpers,
+                    allowed_memory,
+                    ret_type,
+                    exports,
+                    &sub_args,
+                    execution_context.storage_manager.clone(),
+                    Some(execution_context.world_state.storage.clone()), // storage du caller
+                    execution_context.on_create2_event.clone(),
+                );
+
+                let (call_success, return_data) = match sub_result {
+                    Ok(val) => {
+                        if let Some(obj) = val.as_object() {
+                            let action = obj
+                                .get("action")
+                                .and_then(|a| a.as_str())
+                                .unwrap_or("unknown");
+                            let success = action == "return" || action == "stop";
+                            let data = if success {
+                                if let Some(raw) = obj.get("raw_data").and_then(|d| d.as_str()) {
+                                    let s = raw.strip_prefix("0x").unwrap_or(raw);
+                                    hex::decode(s).unwrap_or_default()
+                                } else {
+                                    obj.get("data")
+                                        .and_then(|d| match d {
+                                            JsonValue::String(s) if s.starts_with("0x") => {
+                                                hex::decode(&s[2..]).ok()
+                                            }
+                                            JsonValue::Bool(b) => {
+                                                let mut bytes = [0u8; 32];
+                                                if *b {
+                                                    bytes[31] = 1;
+                                                }
+                                                Some(bytes.to_vec())
+                                            }
+                                            JsonValue::Number(n) => {
+                                                let num = n.as_u64().unwrap_or(0);
+                                                let mut bytes = [0u8; 32];
+                                                u256::from(num).to_big_endian(&mut bytes);
+                                                Some(bytes.to_vec())
+                                            }
+                                            _ => Some(vec![]),
+                                        })
+                                        .unwrap_or_default()
+                                }
+                            } else {
+                                vec![]
+                            };
+                            (success, data)
+                        } else {
+                            (false, vec![])
+                        }
+                    }
+                    Err(e) => {
+                        println!("❌ [DELEGATECALL ERROR] {:?}", e);
+                        (false, vec![])
+                    }
+                };
+
+                println!(
+                    "✅ [DELEGATECALL RETURN] success={}, returndata_len={}",
+                    call_success,
+                    return_data.len()
+                );
+
+                let out_offset_usize = as_usize_or_fail(out_offset);
+                let out_size_usize = as_usize_or_fail(out_size);
+
+                if out_size_usize > 0 {
+                    if !resize_memory_ebpf(&mut global_mem, out_offset_usize, out_size_usize) {
+                        return Ok(halt_json_ebpf(
+                            "Memory resize failed on DELEGATECALL (output)",
+                        ));
+                    }
+                    let copy_len = out_size_usize.min(return_data.len());
+                    for i in 0..copy_len {
+                        if out_offset_usize + i < global_mem.len() {
+                            global_mem[out_offset_usize + i] = return_data[i];
+                        }
+                    }
+                    for i in copy_len..out_size_usize {
+                        if out_offset_usize + i < global_mem.len() {
+                            global_mem[out_offset_usize + i] = 0;
+                        }
+                    }
+                }
+
+                execution_context.return_data = return_data;
+                evm_stack.push(if call_success {
+                    u256::one()
+                } else {
+                    u256::zero()
+                });
+
+                consume_gas_amount(&mut execution_context, 700)?;
+            }
+
+            //___ 0xf5 CREATE2 - Version corrigée avec extraction runtime
             0xf5 => {
                 if evm_stack.len() < 4 {
                     return Ok(halt_json_ebpf("Stack underflow on CREATE2"));
@@ -3213,59 +3566,15 @@ pub fn execute_program(
                     }
                 }
 
-                println!("✅ [CREATE2] Contrat déployé avec runtime à {}", new_address);
+                println!(
+                    "✅ [CREATE2] Contrat déployé avec runtime à {}",
+                    new_address
+                );
 
                 // Push l'adresse sur la stack
                 evm_stack.push(encode_address_to_u256(&new_address));
 
                 consume_gas_amount(&mut execution_context, 32000)?;
-            }
-
-            // 0xf4 DELEGATECALL - Similaire à CALLCODE mais sans transfert de valeur
-            0xf4 => {
-                if evm_stack.len() < 7 {
-                    return Ok(halt_json_ebpf("Stack underflow on DELEGATECALL"));
-                }
-
-                let gas = evm_stack.pop().unwrap();
-                let to_addr_u256 = evm_stack.pop().unwrap();
-                let in_offset = evm_stack.pop().unwrap();
-                let in_size = evm_stack.pop().unwrap();
-                let out_offset = evm_stack.pop().unwrap();
-                let out_size = evm_stack.pop().unwrap();
-
-                let to_address = u256_to_address(to_addr_u256);
-                println!(
-                    "📞 [DELEGATECALL] to={}, gas={}, in=mem[{}:{}], out=mem[{}:{}]",
-                    to_address, gas, in_offset, in_size, out_offset, out_size
-                );
-
-                // Simulate delegate call (stub - real implementation would execute the call)
-                let call_success = true; // Assume success for stub
-                let return_data = vec![0u8; out_size.low_u64() as usize]; // Empty return data
-
-                // Write return data to memory
-                if !resize_memory_ebpf(
-                    &mut global_mem,
-                    out_offset.low_u64() as usize,
-                    out_size.low_u64() as usize,
-                ) {
-                    return Ok(halt_json_ebpf("Memory resize failed on DELEGATECALL"));
-                }
-                for i in 0..(out_size.low_u64() as usize) {
-                    if out_offset.low_u64() as usize + i < global_mem.len() {
-                        global_mem[out_offset.low_u64() as usize + i] = return_data[i];
-                    }
-                }
-
-                // Push success status onto stack
-                evm_stack.push(if call_success {
-                    u256::one()
-                } else {
-                    u256::zero()
-                });
-
-                consume_gas_amount(&mut execution_context, 700)?; // Simplified gas cost
             }
 
             // ___ 0xf6 AUTH (EIP-3074 Authorization)
@@ -3274,34 +3583,50 @@ pub fn execute_program(
                     return Ok(halt_json_ebpf("Stack underflow on AUTH"));
                 }
 
-                let authority = evm_stack.pop().unwrap(); // address
-                let commit = evm_stack.pop().unwrap();    // bytes32
+                let authority = evm_stack.pop().unwrap(); // address (20 bytes padded to 32)
+                let commit = evm_stack.pop().unwrap(); // bytes32 commitment
 
                 let authority_addr = u256_to_address(authority);
+
                 println!(
                     "🔐 [AUTH] authority={}, commit={:064x}",
                     authority_addr, commit
                 );
 
-                // Simulate authorization (stub - real implementation would verify signature)
-                let auth_success = true; // Assume success for stub
-                
-                // Set authorization context for subsequent AUTHCALL
-                execution_context.auth_context = Some((authority_addr.clone(), commit));
-                
-                println!("✅ [AUTH] Authorization set for {}", authority_addr);
+                // Validation : l'adresse authority doit être non-nulle et valide
+                let auth_success = if authority.is_zero() {
+                    println!("❌ [AUTH] authority nulle — refusé");
+                    false
+                } else {
+                    // Vérification basique : l'adresse doit ressembler à une adresse Ethereum (20 bytes non nuls)
+                    let mut addr_bytes = [0u8; 32];
+                    authority.to_big_endian(&mut addr_bytes);
+                    let is_valid_addr = addr_bytes[12..32].iter().any(|&b| b != 0);
+                    if !is_valid_addr {
+                        println!("❌ [AUTH] adresse invalide (tous zéros)");
+                    }
+                    is_valid_addr
+                };
 
-                // Push success status onto stack (1 = success, 0 = failure)
+                if auth_success {
+                    // Stocker le contexte d'autorisation pour AUTHCALL
+                    execution_context.auth_context = Some((authority_addr.clone(), commit));
+                    println!("✅ [AUTH] Autorisation accordée pour {}", authority_addr);
+                } else {
+                    // En cas d'échec, effacer tout contexte d'autorisation existant
+                    execution_context.auth_context = None;
+                }
+
                 evm_stack.push(if auth_success {
                     u256::one()
                 } else {
                     u256::zero()
                 });
 
-                consume_gas_amount(&mut execution_context, 3100)?; // EIP-3074 gas cost
+                consume_gas_amount(&mut execution_context, 3100)?; // coût EIP-3074
             }
 
-            // ___ 0xf7 AUTHCALL (EIP-3074 Authorized Call)  
+            // ___ 0xf7 AUTHCALL (EIP-3074 Authorized Call)
             0xf7 => {
                 if evm_stack.len() < 7 {
                     return Ok(halt_json_ebpf("Stack underflow on AUTHCALL"));
@@ -3316,218 +3641,381 @@ pub fn execute_program(
                 let ret_size = evm_stack.pop().unwrap();
 
                 let target_addr = u256_to_address(addr);
+
                 println!(
                     "🔐 [AUTHCALL] to={}, value={}, gas={}, args=mem[{}:{}], ret=mem[{}:{}]",
                     target_addr, value, gas, args_offset, args_size, ret_offset, ret_size
                 );
 
-                // Check if authorization is set
-                if execution_context.auth_context.is_none() {
-                    println!("❌ [AUTHCALL] No authorization set - AUTH must be called first");
-                    evm_stack.push(u256::zero()); // Failure
-                    consume_gas_amount(&mut execution_context, 100)?;
-                    continue;
+                // AUTH doit avoir été appelé avant AUTHCALL
+                let auth_addr = match execution_context.auth_context.as_ref() {
+                    Some((a, _)) => a.clone(),
+                    None => {
+                        println!("❌ [AUTHCALL] Aucune autorisation définie — AUTH doit être appelé en premier");
+                        evm_stack.push(u256::zero());
+                        consume_gas_amount(&mut execution_context, 100)?;
+                        continue;
+                    }
+                };
+
+                println!("✅ [AUTHCALL] Appel au nom de {}", auth_addr);
+
+                // Extraction du calldata depuis la mémoire
+                let args_offset_usize = as_usize_or_fail(args_offset);
+                let args_size_usize = as_usize_or_fail(args_size);
+
+                if !resize_memory_ebpf(&mut global_mem, args_offset_usize, args_size_usize) {
+                    return Ok(halt_json_ebpf("Memory resize failed on AUTHCALL (input)"));
                 }
 
-                let (auth_addr, _commit) = execution_context.auth_context.as_ref().unwrap();
-                println!("✅ [AUTHCALL] Using authorization from {}", auth_addr);
+                let call_data =
+                    memory_slice_len(&global_mem, args_offset_usize, args_size_usize).to_vec();
 
-                // Simulate authorized call (stub - real implementation would execute with authority context)
-                let call_success = true; // Assume success for stub
-                let return_data = vec![0u8; ret_size.low_u64() as usize]; // Empty return data
+                // Récupération du bytecode cible
+                let mut target_code = execution_context
+                    .world_state
+                    .code
+                    .get(&target_addr)
+                    .or_else(|| {
+                        execution_context
+                            .world_state
+                            .accounts
+                            .get(&target_addr)
+                            .map(|acc| &acc.code)
+                    })
+                    .cloned()
+                    .unwrap_or_default();
 
-                // Write return data to memory
-                if !resize_memory_ebpf(
-                    &mut global_mem,
-                    ret_offset.low_u64() as usize,
-                    ret_size.low_u64() as usize,
-                ) {
-                    return Ok(halt_json_ebpf("Memory resize failed on AUTHCALL"));
-                }
-                for i in 0..(ret_size.low_u64() as usize) {
-                    if ret_offset.low_u64() as usize + i < global_mem.len() {
-                        global_mem[ret_offset.low_u64() as usize + i] = return_data[i];
+                if target_code.is_empty() {
+                    if let Some(ref storage_manager) = execution_context.storage_manager {
+                        let key = format!("account:{}:contract_state", target_addr);
+                        if let Ok(bytecode) = storage_manager.read(&key) {
+                            if !bytecode.is_empty() {
+                                target_code = bytecode;
+                                execution_context
+                                    .world_state
+                                    .code
+                                    .insert(target_addr.clone(), target_code.clone());
+                            }
+                        }
                     }
                 }
 
-                // Push success status onto stack
+                if target_code.is_empty() {
+                    // EOA ou contrat sans code → succès silencieux
+                    execution_context.return_data = vec![];
+                    evm_stack.push(u256::one());
+                    consume_gas_amount(&mut execution_context, 700)?;
+                    bytecode_pc += 1;
+                    continue;
+                }
+
+                if interpreter_args.call_depth >= u256::from(1024) {
+                    println!("🚨 [AUTHCALL] Profondeur maximale atteinte");
+                    execution_context.return_data = vec![];
+                    evm_stack.push(u256::zero());
+                    consume_gas_amount(&mut execution_context, 700)?;
+                    bytecode_pc += 1;
+                    continue;
+                }
+
+                // AUTHCALL : exécute comme CALL mais msg.sender = authority (pas le caller actuel)
+                let mut sub_args = interpreter_args.clone();
+                sub_args.contract_address = target_addr.clone();
+                sub_args.caller = auth_addr.clone(); // msg.sender = authority
+                sub_args.sender_address = auth_addr.clone();
+                sub_args.state_data = call_data.clone();
+                sub_args.value = value;
+                sub_args.gas_limit = gas;
+                sub_args.call_depth = interpreter_args.call_depth + u256::one();
+
+                let sub_result = execute_program(
+                    Some(&target_code),
+                    Some(stack_usage),
+                    &[],
+                    &call_data,
+                    helpers,
+                    allowed_memory,
+                    ret_type,
+                    exports,
+                    &sub_args,
+                    execution_context.storage_manager.clone(),
+                    Some(execution_context.world_state.storage.clone()),
+                    execution_context.on_create2_event.clone(),
+                );
+
+                let (call_success, return_data) = match sub_result {
+                    Ok(val) => {
+                        if let Some(obj) = val.as_object() {
+                            let action = obj
+                                .get("action")
+                                .and_then(|a| a.as_str())
+                                .unwrap_or("unknown");
+                            let success = action == "return" || action == "stop";
+                            let data = if success {
+                                obj.get("data")
+                                    .and_then(|d| match d {
+                                        JsonValue::String(s) if s.starts_with("0x") => {
+                                            hex::decode(&s[2..]).ok()
+                                        }
+                                        JsonValue::Bool(b) => {
+                                            let mut bytes = [0u8; 32];
+                                            if *b {
+                                                bytes[31] = 1;
+                                            }
+                                            Some(bytes.to_vec())
+                                        }
+                                        JsonValue::Number(n) => {
+                                            let num = n.as_u64().unwrap_or(0);
+                                            let mut bytes = [0u8; 32];
+                                            u256::from(num).to_big_endian(&mut bytes);
+                                            Some(bytes.to_vec())
+                                        }
+                                        _ => Some(vec![]),
+                                    })
+                                    .unwrap_or_default()
+                            } else {
+                                vec![]
+                            };
+                            (success, data)
+                        } else {
+                            (false, vec![])
+                        }
+                    }
+                    Err(e) => {
+                        println!("❌ [AUTHCALL ERROR] {:?}", e);
+                        (false, vec![])
+                    }
+                };
+
+                println!(
+                    "✅ [AUTHCALL RETURN] success={}, returndata_len={}",
+                    call_success,
+                    return_data.len()
+                );
+
+                let ret_offset_usize = as_usize_or_fail(ret_offset);
+                let ret_size_usize = as_usize_or_fail(ret_size);
+
+                if ret_size_usize > 0 {
+                    if !resize_memory_ebpf(&mut global_mem, ret_offset_usize, ret_size_usize) {
+                        return Ok(halt_json_ebpf("Memory resize failed on AUTHCALL (output)"));
+                    }
+                    let copy_len = ret_size_usize.min(return_data.len());
+                    for i in 0..copy_len {
+                        if ret_offset_usize + i < global_mem.len() {
+                            global_mem[ret_offset_usize + i] = return_data[i];
+                        }
+                    }
+                    for i in copy_len..ret_size_usize {
+                        if ret_offset_usize + i < global_mem.len() {
+                            global_mem[ret_offset_usize + i] = 0;
+                        }
+                    }
+                }
+
+                execution_context.return_data = return_data;
                 evm_stack.push(if call_success {
                     u256::one()
                 } else {
                     u256::zero()
                 });
 
-                consume_gas_amount(&mut execution_context, 700)?; // Simplified gas cost
+                consume_gas_amount(&mut execution_context, 700)?;
             }
 
-          // ___ 0xfa STATICCALL - CORRECTION CALDATA MALFORMÉ + vrai comportement EVM
-0xfa => {
-    if evm_stack.len() < 6 {
-        return Ok(halt_json_ebpf("Stack underflow on STATICCALL"));
-    }
-
-    let gas = evm_stack.pop().unwrap();
-    let to_addr_u256 = evm_stack.pop().unwrap();
-    let in_offset = evm_stack.pop().unwrap();
-    let in_size = evm_stack.pop().unwrap();
-    let out_offset = evm_stack.pop().unwrap();
-    let out_size = evm_stack.pop().unwrap();
-
-    let to_address = u256_to_address(to_addr_u256);
-
-    let in_offset_usize = as_usize_saturated(in_offset);
-    let in_size_usize = as_usize_saturated(in_size);
-
-    if !resize_memory_ebpf(&mut global_mem, in_offset_usize, in_size_usize) {
-        println!("[STATICCALL] Memory resize failed on input");
-        execution_context.return_data = vec![];
-        evm_stack.push(u256::one());
-        consume_gas_amount(&mut execution_context, 700)?;
-        bytecode_pc += 1;
-        continue;
-    }
-
-    let raw_call_data = memory_slice_len(&global_mem, in_offset_usize, in_size_usize);
-
-    // CORRECTION : Nettoyage du calldata malformé (zéros au début)
-    let call_data = if raw_call_data.len() >= 36 && raw_call_data[0..32].iter().all(|&b| b == 0) {
-        // Il y a 32 bytes de zéros + selector + argument → on prend à partir du selector
-        raw_call_data[32..].to_vec()
-    } else {
-        raw_call_data.to_vec()
-    };
-
-    println!(
-        "[STATICCALL] to={}, cleaned_calldata_len={}, starts_with=0x{:02x?}",
-        to_address,
-        call_data.len(),
-        if call_data.len() >= 4 { &call_data[0..4] } else { &[0;4] }
-    );
-
-    // Support balanceOf sur 0xEeeee...
-    if is_native_token_magic(&to_address) {
-        if call_data.len() >= 4 && &call_data[0..4] == [0x70, 0xa0, 0x82, 0x31] {
-            let balance = get_balance(&execution_context.world_state, &interpreter_args.contract_address);
-
-            let mut out32 = [0u8; 32];
-            balance.to_big_endian(&mut out32);
-
-            let out_offset_usize = as_usize_saturated(out_offset);
-            let out_size_usize = as_usize_saturated(out_size);
-
-            let _ = resize_memory_ebpf(&mut global_mem, out_offset_usize + out_size_usize, 0);
-            let copy_len = std::cmp::min(32, out_size_usize);
-            if copy_len > 0 {
-                global_mem[out_offset_usize..out_offset_usize + copy_len]
-                    .copy_from_slice(&out32[32 - copy_len..]);
-            }
-
-            execution_context.return_data = out32.to_vec();
-            evm_stack.push(u256::one());
-
-            println!("[STATICCALL] balanceOf(0xEeeee...) → {}", balance);
-            consume_gas_amount(&mut execution_context, 700)?;
-            bytecode_pc += 1;
-            continue;
-        }
-    }
-
-    // CAS NORMAL
-    let mut target_code = execution_context
-        .world_state
-        .code
-        .get(&to_address)
-        .or_else(|| execution_context.world_state.accounts.get(&to_address).map(|acc| &acc.code))
-        .cloned()
-        .unwrap_or_default();
-
-    if target_code.is_empty() {
-        if let Some(ref storage_manager) = execution_context.storage_manager {
-            let key = format!("account:{}:contract_state", to_address);
-            if let Ok(bytecode) = storage_manager.read(&key) {
-                if !bytecode.is_empty() {
-                    target_code = bytecode;
-                    execution_context.world_state.code.insert(to_address.clone(), target_code.clone());
+            // ___ 0xfa STATICCALL - CORRECTION CALDATA MALFORMÉ + vrai comportement EVM
+            0xfa => {
+                if evm_stack.len() < 6 {
+                    return Ok(halt_json_ebpf("Stack underflow on STATICCALL"));
                 }
+
+                let gas = evm_stack.pop().unwrap();
+                let to_addr_u256 = evm_stack.pop().unwrap();
+                let in_offset = evm_stack.pop().unwrap();
+                let in_size = evm_stack.pop().unwrap();
+                let out_offset = evm_stack.pop().unwrap();
+                let out_size = evm_stack.pop().unwrap();
+
+                let to_address = u256_to_address(to_addr_u256);
+
+                let in_offset_usize = as_usize_saturated(in_offset);
+                let in_size_usize = as_usize_saturated(in_size);
+
+                if !resize_memory_ebpf(&mut global_mem, in_offset_usize, in_size_usize) {
+                    println!("[STATICCALL] Memory resize failed on input");
+                    execution_context.return_data = vec![];
+                    evm_stack.push(u256::one());
+                    consume_gas_amount(&mut execution_context, 700)?;
+                    bytecode_pc += 1;
+                    continue;
+                }
+
+                let raw_call_data = memory_slice_len(&global_mem, in_offset_usize, in_size_usize);
+
+                // CORRECTION : Nettoyage du calldata malformé (zéros au début)
+                let call_data =
+                    if raw_call_data.len() >= 36 && raw_call_data[0..32].iter().all(|&b| b == 0) {
+                        // Il y a 32 bytes de zéros + selector + argument → on prend à partir du selector
+                        raw_call_data[32..].to_vec()
+                    } else {
+                        raw_call_data.to_vec()
+                    };
+
+                println!(
+                    "[STATICCALL] to={}, cleaned_calldata_len={}, starts_with=0x{:02x?}",
+                    to_address,
+                    call_data.len(),
+                    if call_data.len() >= 4 {
+                        &call_data[0..4]
+                    } else {
+                        &[0; 4]
+                    }
+                );
+
+                // CAS NORMAL
+                let mut target_code = execution_context
+                    .world_state
+                    .code
+                    .get(&to_address)
+                    .or_else(|| {
+                        execution_context
+                            .world_state
+                            .accounts
+                            .get(&to_address)
+                            .map(|acc| &acc.code)
+                    })
+                    .cloned()
+                    .unwrap_or_default();
+
+                if target_code.is_empty() {
+                    if let Some(ref storage_manager) = execution_context.storage_manager {
+                        let key = format!("account:{}:contract_state", to_address);
+                        if let Ok(bytecode) = storage_manager.read(&key) {
+                            if !bytecode.is_empty() {
+                                target_code = bytecode;
+                                execution_context
+                                    .world_state
+                                    .code
+                                    .insert(to_address.clone(), target_code.clone());
+                            }
+                        }
+                    }
+                }
+
+                if target_code.is_empty() {
+                    execution_context.return_data = vec![];
+                    let out_offset_usize = as_usize_saturated(out_offset);
+                    let out_size_usize = as_usize_saturated(out_size);
+                    let _ =
+                        resize_memory_ebpf(&mut global_mem, out_offset_usize + out_size_usize, 0);
+                    evm_stack.push(u256::one());
+                    consume_gas_amount(&mut execution_context, 700)?;
+                    bytecode_pc += 1;
+                    continue;
+                }
+
+                // Appel récursif
+                let mut sub_args = interpreter_args.clone();
+                sub_args.contract_address = to_address.clone();
+                sub_args.sender_address = interpreter_args.contract_address.clone();
+                sub_args.caller = interpreter_args.contract_address.clone();
+                sub_args.state_data = call_data.clone();
+                sub_args.value = u256::zero();
+                sub_args.gas_limit = gas;
+                sub_args.call_depth = interpreter_args.call_depth + u256::one();
+
+                if sub_args.call_depth > u256::from(1024) {
+                    execution_context.return_data = vec![];
+                    evm_stack.push(u256::zero());
+                    consume_gas_amount(&mut execution_context, 700)?;
+                    bytecode_pc += 1;
+                    continue;
+                }
+
+                let sub_result = execute_program(
+                    Some(&target_code),
+                    Some(stack_usage),
+                    &[],
+                    &call_data,
+                    helpers,
+                    allowed_memory,
+                    ret_type,
+                    exports,
+                    &sub_args,
+                    execution_context.storage_manager.clone(),
+                    Some(execution_context.world_state.storage.clone()),
+                    execution_context.on_create2_event.clone(),
+                );
+
+                let (call_success, return_data) = match sub_result {
+                    Ok(val) => {
+                        if let Some(obj) = val.as_object() {
+                            let action = obj
+                                .get("action")
+                                .and_then(|a| a.as_str())
+                                .unwrap_or("unknown");
+                            let success = action == "return" || action == "stop";
+                            let data = if action == "return" || action == "stop" {
+                                // Priorité : raw_data (bytes exacts), sinon fallback sur data
+                                if let Some(raw) = obj.get("raw_data").and_then(|d| d.as_str()) {
+                                    let s = raw.strip_prefix("0x").unwrap_or(raw);
+                                    hex::decode(s).unwrap_or_default()
+                                } else {
+                                    obj.get("data")
+                                        .and_then(|d| match d {
+                                            JsonValue::String(s) if s.starts_with("0x") => {
+                                                hex::decode(&s[2..]).ok()
+                                            }
+                                            JsonValue::Bool(b) => {
+                                                let mut bytes = [0u8; 32];
+                                                if *b {
+                                                    bytes[31] = 1;
+                                                }
+                                                Some(bytes.to_vec())
+                                            }
+                                            JsonValue::Number(n) => {
+                                                let num_u64 = n.as_u64().unwrap_or(0);
+                                                let mut bytes = [0u8; 32];
+                                                u256::from(num_u64).to_big_endian(&mut bytes);
+                                                Some(bytes.to_vec())
+                                            }
+                                            _ => Some(vec![]),
+                                        })
+                                        .unwrap_or_default()
+                                }
+                            } else {
+                                vec![]
+                            };
+                            (success, data)
+                        } else {
+                            (false, vec![])
+                        }
+                    }
+                    Err(_) => (false, vec![]),
+                };
+
+                let out_offset_usize = as_usize_saturated(out_offset);
+                let out_size_usize = as_usize_saturated(out_size);
+                let _ = resize_memory_ebpf(&mut global_mem, out_offset_usize + out_size_usize, 0);
+
+                let copy_len = std::cmp::min(return_data.len(), out_size_usize);
+                if copy_len > 0 {
+                    global_mem[out_offset_usize..out_offset_usize + copy_len]
+                        .copy_from_slice(&return_data[0..copy_len]);
+                }
+
+                execution_context.return_data = return_data;
+                evm_stack.push(if call_success {
+                    u256::one()
+                } else {
+                    u256::zero()
+                });
+
+                consume_gas_amount(&mut execution_context, 700)?;
+                bytecode_pc += 1;
             }
-        }
-    }
 
-    if target_code.is_empty() {
-        execution_context.return_data = vec![];
-        let out_offset_usize = as_usize_saturated(out_offset);
-        let out_size_usize = as_usize_saturated(out_size);
-        let _ = resize_memory_ebpf(&mut global_mem, out_offset_usize + out_size_usize, 0);
-        evm_stack.push(u256::one());
-        consume_gas_amount(&mut execution_context, 700)?;
-        bytecode_pc += 1;
-        continue;
-    }
-
-    // Appel récursif
-    let mut sub_args = interpreter_args.clone();
-    sub_args.contract_address = to_address.clone();
-    sub_args.sender_address = interpreter_args.contract_address.clone();
-    sub_args.caller = interpreter_args.contract_address.clone();
-    sub_args.state_data = call_data.clone();
-    sub_args.value = u256::zero();
-    sub_args.gas_limit = gas;
-    sub_args.call_depth = interpreter_args.call_depth + u256::one();
-
-    if sub_args.call_depth > u256::from(1024) {
-        execution_context.return_data = vec![];
-        evm_stack.push(u256::zero());
-        consume_gas_amount(&mut execution_context, 700)?;
-        bytecode_pc += 1;
-        continue;
-    }
-
-    let sub_result = execute_program(
-        Some(&target_code),
-        Some(stack_usage),
-        &[],
-        &call_data,
-        helpers,
-        allowed_memory,
-        ret_type,
-        exports,
-        &sub_args,
-        execution_context.storage_manager.clone(),
-        Some(execution_context.world_state.storage.clone()),
-        execution_context.on_create2_event.clone(),
-    );
-
-    let (call_success, return_data) = match sub_result {
-        Ok(val) => {
-            if let Some(obj) = val.as_object() {
-                let action = obj.get("action").and_then(|a| a.as_str()).unwrap_or("unknown");
-                let success = action == "return" || action == "stop";
-                let data = vec![];
-                (success, data)
-            } else {
-                (false, vec![])
-            }
-        }
-        Err(_) => (false, vec![]),
-    };
-
-    let out_offset_usize = as_usize_saturated(out_offset);
-    let out_size_usize = as_usize_saturated(out_size);
-    let _ = resize_memory_ebpf(&mut global_mem, out_offset_usize + out_size_usize, 0);
-
-    let copy_len = std::cmp::min(return_data.len(), out_size_usize);
-    if copy_len > 0 {
-        global_mem[out_offset_usize..out_offset_usize + copy_len]
-            .copy_from_slice(&return_data[0..copy_len]);
-    }
-
-    execution_context.return_data = return_data;
-    evm_stack.push(if call_success { u256::one() } else { u256::zero() });
-
-    consume_gas_amount(&mut execution_context, 700)?;
-    bytecode_pc += 1;
-}
-            
             //___ 0xfd REVERT
             0xfd => {
                 if evm_stack.len() < 2 {
@@ -3703,4 +4191,4 @@ fn u256_from_i256(val: i64) -> u256 {
     } else {
         u256::from(val as u64)
     }
-                  }
+}
