@@ -335,7 +335,9 @@ if let Some(slu_zk) = account.resources.get("slu_zk_address") {
                                 if let Err(e) = storage_manager.write(&module_key, &data_bytes) {
                                     eprintln!("⚠️ Échec sauvegarde module {}: {}", addr, e);
                                 } else {
-                                    println!("✅ Module persisté: {}", addr);
+                                    let eth_addr = &module.address;
+                                    let sluzk_addr = generate_slu_zk_address(eth_addr);
+                                    println!("✅ Module persisté: {} (ETH) | {} (SLUZK)", eth_addr, sluzk_addr);
                                 }
                             }
                         }
