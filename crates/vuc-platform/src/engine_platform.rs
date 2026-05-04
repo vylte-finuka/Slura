@@ -336,8 +336,15 @@ if let Some(slu_zk) = account.resources.get("slu_zk_address") {
                                     eprintln!("⚠️ Échec sauvegarde module {}: {}", addr, e);
                                 } else {
                                     let eth_addr = &module.address;
-                                    let sluzk_addr = generate_slu_zk_address(eth_addr);
-                                    println!("✅ Module persisté: {} (ETH) | {} (SLUZK)", eth_addr, sluzk_addr);
+                                    // Récupère la SLUZK depuis le compte associé (resources)
+                                    let sluzk_display = accounts_data
+                                        .get(eth_addr.as_str())
+                                        .and_then(|acc| acc.resources.get("slu_zk_address"))
+                                        .and_then(|v| v.as_str())
+                                        .filter(|s| !s.is_empty() && *s != eth_addr.as_str())
+                                        .map(|s| s.to_string())
+                                        .unwrap_or_else(|| "—".to_string());
+                                    println!("✅ Module persisté: {} (ETH) | {} (SLUZK)", eth_addr, sluzk_display);
                                 }
                             }
                         }
