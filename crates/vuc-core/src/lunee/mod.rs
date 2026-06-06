@@ -15,7 +15,7 @@ pub use hal_manager::HalManager;
 
 use uefi::prelude::*;
 use uefi::CStr16;
-use core::panic::PanicInfo;
+use std::core::panic::PanicInfo;
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
