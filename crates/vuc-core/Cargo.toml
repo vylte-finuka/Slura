@@ -4,11 +4,11 @@ version = "0.1.0"
 edition = { workspace = true }
 
 [dependencies]
-# === UEFI Core (obligatoire) ===
+# === UEFI Core ===
 uefi = { version = "0.32", features = ["alloc"] }
-uefi-services = "0.26.0"
+uefi-services = "0.28"
 
-# === Fixes pour bare-metal / UEFI ===
+# === Fixes obligatoires pour bare-metal ===
 getrandom = { version = "0.2", features = ["custom"] }
 hashbrown = { version = "0.14", features = ["ahash"] }
 
@@ -23,7 +23,7 @@ rand = { workspace = true, default-features = false, features = ["std_rng"] }
 sha2 = { workspace = true, default-features = false }
 md5 = { workspace = true, default-features = false }
 
-# === Temporairement désactivées (à réactiver plus tard) ===
+# === Désactivées pour le moment (réactive-les plus tard) ===
 # tokio = { workspace = true }
 # tracing = { workspace = true }
 # futures = { workspace = true }
@@ -43,11 +43,3 @@ panic = "abort"
 [features]
 default = ["full"]
 full = ["serde/derive"]
-# Forcer l'exclusion des crates réseau
-[patch.crates-io]
-socket2 = { version = "0.5", features = [] }  # version plus légère
-
-# Désactiver les features par défaut du workspace si besoin
-[workspace.dependencies.tokio]
-default-features = false
-features = []  # ou ce que tu veux vraiment
