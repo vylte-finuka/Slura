@@ -4,30 +4,30 @@ version = "0.1.0"
 edition = { workspace = true }
 
 [dependencies]
-# === Core UEFI ===
+# === UEFI Core (obligatoire) ===
 uefi = { version = "0.32", features = ["alloc"] }
-uefi-services = "0.26.0"
+uefi-services = "0.28"
 
-# === Fixes obligatoires pour UEFI ===
+# === Fixes pour bare-metal / UEFI ===
 getrandom = { version = "0.2", features = ["custom"] }
-hashbrown = { version = "0.14", features = ["ahash"] }   # remplace std::collections
+hashbrown = { version = "0.14", features = ["ahash"] }
 
-# === Tes crates internes (gardées) ===
+# === Tes crates internes ===
 vuc-types = { path = "../vuc-types" }
 vuc-events = { path = "../vuc-events" }
 vuc-common = { path = "../vuc-common" }
 
-# === Dépendances externes allégées (no_std) ===
+# === Dépendances allégées (no_std) ===
 serde = { workspace = true, default-features = false, features = ["derive"] }
 rand = { workspace = true, default-features = false, features = ["std_rng"] }
 sha2 = { workspace = true, default-features = false }
 md5 = { workspace = true, default-features = false }
 
-# Désactive temporairement les plus lourds (à réactiver plus tard avec scheduler)
+# === Temporairement désactivées (à réactiver plus tard) ===
 # tokio = { workspace = true }
 # tracing = { workspace = true }
 # futures = { workspace = true }
-# chrono = { workspace = true, default-features = false, features = ["alloc"] }  # si vraiment besoin
+# chrono = { workspace = true }
 
 [lib]
 name = "vuc_core"
