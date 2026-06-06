@@ -6,28 +6,27 @@ edition = { workspace = true }
 [dependencies]
 # === UEFI Core ===
 uefi = { version = "0.32", features = ["alloc"] }
-uefi-services = "0.26.0"
+uefi-services = "0.28"
 
-# === Fixes obligatoires pour bare-metal ===
+# === Fixes bare-metal obligatoires ===
 getrandom = { version = "0.2", features = ["custom"] }
 hashbrown = { version = "0.14", features = ["ahash"] }
 
-# === Tes crates internes ===
+# === Crates internes ===
 vuc-types = { path = "../vuc-types" }
 vuc-events = { path = "../vuc-events" }
 vuc-common = { path = "../vuc-common" }
 
-# === Dépendances allégées (no_std) ===
+# === Dépendances allégées ===
 serde = { workspace = true, default-features = false, features = ["derive"] }
 rand = { workspace = true, default-features = false, features = ["std_rng"] }
 sha2 = { workspace = true, default-features = false }
 md5 = { workspace = true, default-features = false }
 
-# === Désactivées pour le moment (réactive-les plus tard) ===
-# tokio = { workspace = true }
-# tracing = { workspace = true }
-# futures = { workspace = true }
-# chrono = { workspace = true }
+# === Bloquer les crates réseau ===
+tokio = { workspace = true, optional = true, default-features = false, features = [] }
+mio = { version = "1", default-features = false, features = [] }   # bloqué
+socket2 = { version = "0.5", default-features = false, features = [] }
 
 [lib]
 name = "vuc_core"
