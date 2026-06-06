@@ -4,26 +4,27 @@ version = "0.1.0"
 edition = { workspace = true }
 
 [dependencies]
-# === UEFI Core (tes versions exactes) ===
+# === UEFI uniquement ===
 uefi = { version = "0.32", features = ["alloc"] }
 uefi-services = "0.26.0"
 
-# === Fixes obligatoires pour UEFI / no_std ===
+# === Fixes bare-metal ===
 getrandom = { version = "0.2", features = ["custom"] }
 hashbrown = { version = "0.14", features = ["ahash"] }
 
-# === Crates internes ===
+# === Crates internes (désactive temporairement celles qui posent problème) ===
 vuc-types = { path = "../vuc-types" }
-vuc-events = { path = "../vuc-events" }
 vuc-common = { path = "../vuc-common" }
+# vuc-events = { path = "../vuc-events" }        # ← commente si problème
+# fastcrypto = { workspace = true }               # ← commente si problème
 
-# === Dépendances minimales no_std ===
+# === Minimal no_std ===
 serde = { workspace = true, default-features = false, features = ["derive"] }
 rand = { workspace = true, default-features = false, features = ["std_rng"] }
 sha2 = { workspace = true, default-features = false }
 md5 = { workspace = true, default-features = false }
 
-# === Bloquage des crates qui causent les erreurs (réseau / mio / socket2) ===
+# === Blocage total des crates réseau ===
 tokio = { workspace = true, optional = true, default-features = false, features = [] }
 mio = { version = "0.8", default-features = false, features = [] }
 socket2 = { version = "0.5", default-features = false, features = [] }
