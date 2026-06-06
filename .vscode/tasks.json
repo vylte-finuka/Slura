@@ -1,0 +1,208 @@
+{
+    "version": "2.0.0",
+    "windows": {
+        "options": {
+            "shell": {
+                "executable": "C:\\Windows\\System32\\cmd.exe",
+                "args": [ "/C" ]
+            }
+        }
+    },
+
+    "tasks": [
+        // -------------------------------------------------
+        // 1️⃣  Compilation du wrapper C++ (efi_manager.cpp) avec clang (MSYS2)
+        // -------------------------------------------------
+        {
+            "label": "clang: compile efi_manager.cpp",
+            "type": "process",
+            "command": "D:/VisualS/VC/Tools/Llvm/x64/bin/clang.exe",
+            "args": [
+                "-c",
+                "-std=c++23",
+                "-Wall",
+                "-Wextra",
+                "-O2",
+                "-g",
+                "-I", "D:/msys2/ucrt64/include",
+                "-I", "D:/VisualS/VC/Tools/Llvm/x64/lib/clang/22/include",
+                // … (autres -I…) …
+                "efi_manager.cpp",
+                "-o", "efi_manager.obj"
+            ],
+            "options": { "cwd": "${workspaceFolder}/slr_clk_bt/x64/amd64" },
+            "group": "build",
+            "problemMatcher": [ "$msCompile" ]
+        },
+
+        // -------------------------------------------------
+        // 2️⃣  Linkage → boot.efi (UEFI application) avec lld-link
+        // -------------------------------------------------
+        {
+            "label": "lld-link: create boot.efi",
+            "type": "process",
+            "command": "D:/VisualS/VC/Tools/Llvm/x64/bin/lld-link.exe",
+            "args": [
+                "/NOLOGO",
+                "/DLL",
+                "/MACHINE:X64",
+                "efi_manager.obj",
+                "/OUT:boot.efi",
+                "/SUBSYSTEM:EFI_APPLICATION",
+                "/ENTRY:EfiInitialize"
+            ],
+            "options": { "cwd": "${workspaceFolder}/slr_clk_bt/x64/amd64" },
+            "dependsOn": [ "clang: compile efi_manager.cpp" ],
+            "group": "build",
+            "problemMatcher": [ "$msLink" ]
+        },
+
+        // -------------------------------------------------
+        // 3️⃣  Création de l’image FAT32 contenant BOOTX64.EFI
+        // -------------------------------------------------
+        {
+            "label": "make: esp image (FAT32)",
+            "type": "process",
+            "command": "C:\\Windows\\System32\\cmd.exe",
+            "args": [
+                "/c",
+                "mkdir esp && mkdir esp\\EFI && mkdir esp\\EFI\\BOOT && copy boot.efi esp\\EFI\\BOOT\\BOOTX64.EFI"
+            ],
+            "options": { "cwd": "${workspaceFolder}/slr_clk_bt/x64/amd64" },
+            "dependsOn": [ "lld-link: create boot.efi" ],
+            "group": "none",
+            "problemMatcher": []
+        },
+
+        // -------------------------------------------------
+        // 4️⃣  Lancement du test sous VMware (Workstation / Player)
+        // -------------------------------------------------
+        {
+            "label": "vmware: run UEFI test",
+            "type": "process",
+            "command": "C:\\Program Files (x86)\\VMware\\VMware Workstation\\vmrun.exe",
+            "args": [
+                "-T", "ws",
+                "start",
+                "${workspaceFolder}/VyftUEFI.vmx",
+                "nogui"
+            ],
+            "options": { "cwd": "${workspaceFolder}" },
+            "dependsOn": [ "make: esp image (FAT32)" ],
+            "group": { "kind": "test", "isDefault": true },
+            "problemMatcher": []
+        },
+
+        // -------------------------------------------------
+        // 5️⃣  Compilation GPU (HIP) avec clang++ – off‑loading
+        // -------------------------------------------------
+        {
+            "label": "clang++: compile GPU (HIP) – efi_manager.cpp",
+            "type": "process",
+            "command": "D:/VisualS/VC/Tools/Llvm/x64/bin/clang++.exe",
+            "args": [
+                "-nogpuinc",
+                "efi_manager.cpp",
+                "-o", "efi_manager_gpu.obj"
+            ],
+            "options": { "cwd": "${workspaceFolder}/slr_clk_bt/x64/amd64" },
+            "group": "build",
+            "problemMatcher": [ "$msCompile" ]
+        },
+
+        // -------------------------------------------------
+        // 6️⃣  Linkage final (CPU + GPU) → boot.efi
+        // -------------------------------------------------
+        {
+            "label": "lld-link: create boot.efi (with GPU obj)",
+            "type": "process",
+            "command": "D:/VisualS/VC/Tools/Llvm/x64/bin/lld-link.exe",
+            "args": [
+                "/NOLOGO",
+                "/DLL",
+                "/MACHINE:X64",
+                "efi_manager.obj",
+                "efi_manager_gpu.obj",
+                "/OUT:boot.efi",
+                "/SUBSYSTEM:EFI_APPLICATION",
+                "/ENTRY:EfiInitialize"
+            ],
+            "options": { "cwd": "${workspaceFolder}/slr_clk_bt/x64/amd64" },
+            "dependsOn": [
+                "clang: compile efi_manager.cpp",
+                "clang++: compile GPU (HIP) – efi_manager.cpp"
+            ],
+            "group": "build",
+            "problemMatcher": [ "$msLink" ]
+        },
+
+        // -------------------------------------------------
+        // 7️⃣  Création de l’image ISO contenant BOOTX64.EFI
+        // -------------------------------------------------
+        {
+            "label": "make: esp ISO (FAT32)",
+            "type": "process",
+            "command": "C:\\Windows\\System32\\cmd.exe",
+            "args": [
+                "/c",
+                "mkdir esp_iso && mkdir esp_iso\\EFI && mkdir esp_iso\\EFI\\BOOT && copy boot.efi esp_iso\\EFI\\BOOT\\BOOTX64.EFI && oscdimg -lESP -m -o -u2 -udfver102 esp_iso esp.iso"
+            ],
+            "options": { "cwd": "${workspaceFolder}/slr_clk_bt/x64/amd64" },
+            "dependsOn": [ "lld-link: create boot.efi" ],
+            "group": "none",
+            "problemMatcher": []
+        },
+
+        // -------------------------------------------------
+        // 9️⃣  Compilation / exécution du simulateur d’EFI
+        // -------------------------------------------------
+        {
+            "label": "host: build & run EFI simulation",
+            "type": "process",
+            "command": "D:/VisualS/VC/Tools/Llvm/x64/bin/clang++.exe",
+            "args": [
+                "-std=c++23",
+                "-Wall",
+                "-Wextra",
+                "-O2",
+                "-g",
+                "host_test.cpp",
+                "efi_manager.cpp",          // votre wrapper C++
+                "booter.asm",               // l’asm (il sera assemblé séparément)
+                "-o", "host_efi_sim.exe"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/slr_clk_bt/x64/amd64"
+            },
+            "dependsOn": [
+                "lld-link: create boot.efi"   // assure que le .efi existe déjà (facultatif)
+            ],
+            "group": {
+                "kind": "test",
+                "isDefault": true
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true
+            },
+            "problemMatcher": [ "$msCompile" ]
+        },
+        {
+            "label": "host: run EFI simulation",
+            "type": "process",
+            "command": "${workspaceFolder}/slr_clk_bt/x64/amd64/host_efi_sim.exe",
+            "options": {
+                "cwd": "${workspaceFolder}/slr_clk_bt/x64/amd64"
+            },
+            "dependsOn": [ "host: build & run EFI simulation" ],
+            "group": "test",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true
+            },
+            "problemMatcher": []
+        }
+    ]
+}
