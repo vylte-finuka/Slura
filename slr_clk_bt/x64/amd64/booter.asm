@@ -112,22 +112,9 @@ efi_runtime_services  dq 0
 ; -----------------------------------------------------------------
 _efi_entry:
     ; RDI = ImageHandle, RSI = SystemTable (convention Microsoft x64)
-    ; UEFI spécifie RCX = ImageHandle, RDX = SystemTable
+    ; UEFI spécifie RCX = ImageHandle, RDX = SystemTable, R8 = BootServices (non garanti)
     mov rcx, rdi
     mov rdx, rsi
-
-    ; -------------------------------------------------
-    ; Magic marker – indique à GDB où l’image est chargée
-    ; -------------------------------------------------
-    MAGIC_ADDR    EQU 0x500                ; adresse RAM libre (page 0)
-    MAGIC_VALUE   EQU 0xDEADBEEF
-
-    lea rax, [_text_start]            ; rax = base de l’image en mémoire
-
-    ; Écriture du marker (4 bytes) + adresse 64 bits (2 dwords)
-    mov dword [MAGIC_ADDR], MAGIC_VALUE
-    mov dword [MAGIC_ADDR+4], eax      ; partie basse de l’adresse
-    mov dword [MAGIC_ADDR+8], edx      ; partie haute (0 sur x86‑64)
 
     ; -------------------------------------------------
     ; Export des pointeurs pour le code C++
@@ -137,6 +124,7 @@ _efi_entry:
     mov [efi_boot_services], rax
     mov rax, [rdx + 0x5C]                           ; RuntimeServices* (offset 0x5C)
     mov [efi_runtime_services], rax
+
     ; -------------------------------------------------
     ; Vérification de la signature SystemTable (IBI)
     ; -------------------------------------------------
