@@ -43,3 +43,11 @@ panic = "abort"
 [features]
 default = ["full"]
 full = ["serde/derive"]
+# Forcer l'exclusion des crates réseau
+[patch.crates-io]
+socket2 = { version = "0.5", features = [] }  # version plus légère
+
+# Désactiver les features par défaut du workspace si besoin
+[workspace.dependencies.tokio]
+default-features = false
+features = []  # ou ce que tu veux vraiment
