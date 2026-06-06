@@ -1,5 +1,6 @@
 use ethers::types::U256;
 use ethers::utils::keccak256;
+#[cfg(feature = "std")]
 use jsonrpsee::Methods;
 use jsonrpsee_server::Server;
 use tokio::sync::{Mutex, mpsc, broadcast}; // Ajoute broadcast
@@ -50,6 +51,7 @@ use vuc_storage::storing_access::RocksDBManagerImpl;
 use vuc_storage::storing_access::RocksDBManager;
 use reth_trie::{root::state_root, TrieAccount};
 use jsonrpsee_server::{RpcModule, HttpBody};
+#[cfg(feature = "std")]
 use tower_http::cors::{Any, CorsLayer};
 use vuc_tx::slurachain_vm::SlurachainVm;
 use uvm_runtime::lib::BTreeMap;
