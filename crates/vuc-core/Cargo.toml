@@ -21,8 +21,15 @@ rand = { workspace = true }
 uefi = { version = "0.32", features = ["alloc"] }
 uefi-services = "0.26.0"
 
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+
 [lib]
 name = "vuc_core"
+crate-type = ["staticlib"]
 path = "src/lib.rs"
 
 [features]
