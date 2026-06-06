@@ -52,7 +52,3 @@ primitive-types = { version = "0.12", default-features = false }
 rayon           = "1.5.2"
 smallvec        = { version = "1.8.0", default-features = false }
 uvm-runtime     = { path = "crates/vuc-reader/src/uvm/runtime" }
-
-# Force getrandom en mode bare-metal pour le target UEFI
-[patch.crates-io]
-getrandom = { version = "0.2", features = ["rdrand"] }
