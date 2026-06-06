@@ -11,7 +11,7 @@
 
 use crate::lunee::{RessourcesManager, HalManager};
 use uefi::prelude::*;
-use uefi::Status;
+use uefi::{CStr16, Status};
 
 #[derive(Default)]
 pub struct KernelRuntime {
