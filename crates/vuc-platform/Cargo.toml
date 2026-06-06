@@ -78,15 +78,8 @@ ethers              = { version = "2.0.14",     default-features = false, option
 local-ip-address    = { version = "0.5",        default-features = false, optional = true }
 rayon               = { workspace = true,       default-features = false, optional = true }
 futures-util        = { version = "0.3.31",     default-features = false, optional = true }
-tracing-subscriber  = { version = "0.2.15",     default-features = false, optional = true }
-
-[[bin]]
-name = "vuc-platform"
-path = "src/engine_platform.rs"
-
-[package.metadata]
-license     = "Vylte-finuka"
-description = "Vyft slurachain smart contract platform."hex          = "0.4"
+tracing-subscriber  = { version = "0.2.15",    default-features = false, optional = true }
+"hex          = "0.4"
 chrono       = { workspace = true, features = ["serde"] }
 tracing      = { workspace = true }
 rand_chacha  = { workspace = true }
@@ -131,6 +124,14 @@ local-ip-address = { version = "0.5",  optional = true }
 rayon            = { workspace = true, optional = true }
 futures-util     = { version = "0.3.31", optional = true }
 tracing-subscriber = { version = "0.2.15", optional = true }
+
+[[bin]]
+name = "vuc-platform"
+path = "src/engine_platform.rs"
+
+[package.metadata]
+license     = "Vylte-finuka"
+description = "Vyft slurachain smart contract platform.
 
 [[bin]]
 name = "vuc-platform"
