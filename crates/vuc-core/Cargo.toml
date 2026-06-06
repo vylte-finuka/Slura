@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = { workspace = true }
 
 [dependencies]
+alloc = { version = "1.0", optional = true, package = "rustc-std-workspace-alloc" }
 tokio = { workspace = true }
 serde = { workspace = true }
 tracing = { workspace = true }
@@ -17,6 +18,8 @@ vuc-common = { path = "../vuc-common" }
 fastcrypto = { workspace = true }
 sha2 = { workspace = true }
 rand = { workspace = true }
+uefi = { version = "0.32", features = ["alloc"] }
+uefi-services = "0.26.0"
 
 [lib]
 name = "vuc_core"
