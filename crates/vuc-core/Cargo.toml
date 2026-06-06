@@ -6,7 +6,7 @@ edition = { workspace = true }
 [dependencies]
 # === UEFI Core (obligatoire) ===
 uefi = { version = "0.32", features = ["alloc"] }
-uefi-services = "0.28"
+uefi-services = "0.26.0"
 
 # === Fixes pour bare-metal / UEFI ===
 getrandom = { version = "0.2", features = ["custom"] }
