@@ -8,7 +8,6 @@ default  = ["std"]
 std      = [
     "tokio/full",
     "serde/derive",
-    "fastcrypto",
     "rand",
     "chrono",
     "hashbrown/default",
@@ -33,7 +32,6 @@ serde      = { workspace = true, default-features = false }
 
 # ── Std seulement ─────────────────────────────────────────
 tokio      = { workspace = true, optional = true }
-fastcrypto = { workspace = true, optional = true }
 rand       = { workspace = true, optional = true }
 chrono     = { workspace = true, optional = true }
 tracing    = { workspace = true, optional = true }
