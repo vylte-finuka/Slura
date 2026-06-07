@@ -1,0 +1,13 @@
+[package]
+name    = "lunee-ker"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+vuc-core      = { path = "..",      default-features = false, features = ["kernel"] }
+uefi          = { version = "0.32", features = ["alloc"] }
+uefi-services = "0.24.0"
+
+[[bin]]
+name = "lunee-ker"
+path = "src/main.rs"
