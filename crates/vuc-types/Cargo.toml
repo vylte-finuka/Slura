@@ -1,17 +1,17 @@
 [package]
-name = "vuc-types"
+name    = "vuc-types"
 version = "0.0.1"
 edition = { workspace = true }
 
 [dependencies]
-serde = { workspace = true, features = ["derive"] }
-base64 = { workspace = true }
-bincode = "2.0.1"
+serde   = { workspace = true, default-features = false, features = ["derive"] }
+base64  = { workspace = true, default-features = false }
+bincode = { version = "2.0.1", default-features = false }
 
 [lib]
 name = "vuc_types"
 path = "src/lib.rs"
 
 [package.metadata]
-license = "Vylte-finuka"
+license     = "Vylte-finuka"
 description = "Vyft slurachain definitions and types."
