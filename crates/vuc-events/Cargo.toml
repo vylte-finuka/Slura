@@ -1,25 +1,37 @@
 [package]
-name = "vuc-events"
+name    = "vuc-storage"
 version = "0.1.0"
 edition = { workspace = true }
 
+[features]
+default = ["std"]
+std     = [
+    "tokio/full",
+    "futures",
+    "async-trait",
+    "rocksdb",
+]
+
 [dependencies]
-tokio = { workspace = true, features = ["full"] }
-serde = { workspace = true, features = ["derive"] }
-tracing = { workspace = true }
-futures = { workspace = true}
-md5 = { workspace = true }
-hashbrown = { workspace = true }
-chrono = { workspace = true, features = ["serde"] }
+# ── Toujours présents ──────────────────────────────────────
+serde       = { version = "1.0",    default-features = false, features = ["derive"] }
+serde_json  = { workspace = true,   default-features = false }
+anyhow      = { workspace = true,   default-features = false }
+bincode     = { version = "2.0.1",  default-features = false }
+bytes       = { version = "1.2.1",  default-features = false }
+sha2        = { version = "0.10",   default-features = false }
+merkletree  = { version = "0.23.0", default-features = false }
+
+# ── Std seulement ─────────────────────────────────────────
+tokio       = { version = "1",      default-features = false, optional = true }
+futures     = { version = "0.3.31", default-features = false, optional = true }
+async-trait = { version = "0.1",    default-features = false, optional = true }
+rocksdb     = { version = "0.24.0", default-features = false, optional = true }
 
 [lib]
-name = "vuc_events"
+name = "vuc_storage"
 path = "src/lib.rs"
 
-[features]
-default = ["full"]
-full = ["tokio/full", "serde/derive"]
-
 [package.metadata]
-license = "Vylte-finuka"
-description = "Vyft slurachain event onchain library."
+license     = "Vylte-finuka"
+description = "Vyft slurachain database provider."
