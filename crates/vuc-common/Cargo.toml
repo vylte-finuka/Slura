@@ -1,16 +1,20 @@
 [package]
-name = "vuc-common"
+name    = "vuc-common"
 version = "0.0.1"
 edition = { workspace = true }
 
+[features]
+default = ["std"]
+std     = ["tokio/full", "tracing"]
+
 [dependencies]
-tokio = { workspace = true }
-tracing = { workspace = true }
+tokio  = { workspace = true, default-features = false, optional = true }
+tracing = { workspace = true, default-features = false, optional = true }
 
 [lib]
 name = "vuc_common"
 path = "src/lib.rs"
 
 [package.metadata]
-license = "Vylte-finuka"
+license     = "Vylte-finuka"
 description = "Vyft slurachain Common Utilities."
