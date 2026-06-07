@@ -3,139 +3,68 @@ name = "vuc-platform"
 version = "0.1.0"
 edition = { workspace = true }
 
-[features]
-default  = ["std"]
-std      = [
-    "tokio/full",
-    "tower-http",
-    "tower",
-    "hyper",
-    "jsonrpsee",
-    "jsonrpsee-server",
-    "jsonrpsee-types",
-    "jsonrpsee-http-client",
-    "ethers",
-    "local-ip-address",
-    "rayon",
-    "futures-util",
-    "tracing-subscriber",
-]
-safe_mode = []
-
 [dependencies]
-# ── Toujours présents ──────────────────────────────────────
-vuc-core        = { path = "../vuc-core",    default-features = false, features = ["std"] }
-vuc-tx          = { path = "../vuc-tx",      default-features = false }
-vuc-types       = { path = "../vuc-types",   default-features = false }
-vuc-storage     = { path = "../vuc-storage", default-features = false }
-vuc-events      = { path = "../vuc-events",  default-features = false }
-uvm-runtime     = { workspace = true,        default-features = false }
-serde           = { workspace = true,        default-features = false, features = ["derive"] }
-serde_json      = { workspace = true,        default-features = false }
-bcs             = { workspace = true,        default-features = false }
-anyhow          = { version = "1.0.98",      default-features = false }
-hex             = { version = "0.4",         default-features = false }
-chrono          = { workspace = true,        default-features = false, features = ["serde"] }
-tracing         = { workspace = true,        default-features = false }
-rand_chacha     = { workspace = true,        default-features = false }
-rand            = { workspace = true,        default-features = false }
-num-traits      = { workspace = true,        default-features = false }
-hashbrown       = { workspace = true,        default-features = false }
-futures         = { workspace = true,        default-features = false }
-prometheus      = { workspace = true,        default-features = false }
-fastcrypto      = { workspace = true,        default-features = false }
-bincode         = { workspace = true,        default-features = false }
-sha3            = { workspace = true,        default-features = false }
-base64          = { workspace = true,        default-features = false }
-lazy_static     = { workspace = true,        default-features = false }
-clap            = { version = "4.5",         default-features = false, features = ["derive"] }
-ipnetwork       = { version = "0.20",        default-features = false }
-miniz_oxide     = { version = "0.9.0",       default-features = false }
-percent-encoding = { version = "2.3.1",      default-features = false }
-k256            = { version = "0.13.4",      default-features = false }
-sha_256         = { version = "1.0.1",       default-features = false }
-base64-url      = { version = "3.0.2",       default-features = false }
-rlp             = { version = "0.5.2",       default-features = false }
-typenum         = { version = "1.19.0",      default-features = false }
-dotenv          = { version = "0.15",        default-features = false }
-alloy-primitives = { version = "1.4.1",      default-features = false }
-tiny-keccak     = { version = "2.0.2",       default-features = false }
-num_cpus        = { version = "1.17.0",      default-features = false }
-primitive-types = { workspace = true,        default-features = false }
-reth-trie       = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.9.1", package = "reth-trie",       default-features = false }
-reth-primitives = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.9.1", package = "reth-primitives", default-features = false }
-
-# ── Std seulement (réseau, async, HTTP) ───────────────────
-tokio               = { workspace = true,       default-features = false, optional = true }
-tower               = { version = "0.5",        default-features = false, optional = true }
-hyper               = { version = "1.5",        default-features = false, optional = true }
-tower-http          = { version = "0.6",        default-features = false, optional = true, features = ["cors", "compression-full", "sensitive-headers", "trace", "timeout"] }
-jsonrpsee           = { version = "0.26",       default-features = false, optional = true, features = ["server", "http-client", "ws-client", "macros", "client-ws-transport-tls"] }
-jsonrpsee-server    = { workspace = true,       default-features = false, optional = true }
-jsonrpsee-types     = { workspace = true,       default-features = false, optional = true }
-jsonrpsee-http-client = { version = "0.26.0",  default-features = false, optional = true }
-ethers              = { version = "2.0.14",     default-features = false, optional = true }
-local-ip-address    = { version = "0.5",        default-features = false, optional = true }
-rayon               = { workspace = true,       default-features = false, optional = true }
-futures-util        = { version = "0.3.31",     default-features = false, optional = true }
-tracing-subscriber  = { version = "0.2.15",     default-features = false, optional = true }
-
-[[bin]]
-name = "vuc-platform"
-path = "src/engine_platform.rs"
-
-[package.metadata]
-license     = "Vylte-finuka"
-description = "Vyft slurachain smart contract platform."hex          = "0.4"
-chrono       = { workspace = true, features = ["serde"] }
-tracing      = { workspace = true }
-rand_chacha  = { workspace = true }
-rand         = { workspace = true }
-num-traits   = { workspace = true }
-hashbrown    = { workspace = true }
-futures      = { workspace = true }
-prometheus   = { workspace = true }
-fastcrypto   = { workspace = true }
-bincode      = { workspace = true }
-sha3         = { workspace = true }
-base64       = { workspace = true }
-lazy_static  = { workspace = true }
-clap         = { version = "4.5", features = ["derive"] }
-ipnetwork    = "0.20"
-miniz_oxide  = "0.9.0"
+tokio = { workspace = true, features = ["full"] }
+serde = { workspace = true, features = ["derive"] }
+bcs = { workspace = true }
+anyhow = "1.0.98"
+hex = "0.4"
+chrono = { workspace = true, features = ["serde"] }
+tracing-subscriber = "0.2.15"
+tracing = { workspace = true }
+rand_chacha = { workspace = true }
+clap = { version = "4.5", features = ["derive"] }
+ipnetwork = "0.20"
+local-ip-address = "0.5"
+miniz_oxide = "0.9.0"
+rand = { workspace = true }
+num-traits = { workspace = true }
 percent-encoding = "2.3.1"
-k256         = "0.13.4"
-sha_256      = "1.0.1"
-base64-url   = "3.0.2"
-rlp          = "0.5.2"
-typenum      = "1.19.0"
-dotenv       = "0.15"
-alloy-primitives = "1.4.1"
-tiny-keccak  = "2.0.2"
-num_cpus     = "1.17.0"
-primitive-types = { workspace = true }
-reth-trie    = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.9.1", package = "reth-trie" }
+hashbrown = { workspace = true }
+futures = { workspace = true }
+prometheus = { workspace = true }
+serde_json = { workspace = true }
+jsonrpsee-types = { workspace = true }
+jsonrpsee-server = { workspace = true }
+rayon = { workspace = true }
+vuc-tx = { path = "../vuc-tx" }
+vuc-core = { path = "../vuc-core" }
+vuc-types = { path = "../vuc-types" }
+vuc-storage = { path = "../vuc-storage" }
+vuc-events = { path = "../vuc-events" }
+fastcrypto = { workspace = true }
+bincode = { workspace = true }
+sha3 = { workspace = true }
+uvm-runtime = { workspace = true }
+reth-trie = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.9.1", package = "reth-trie" }
 reth-primitives = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.9.1", package = "reth-primitives" }
-
-# ── Std seulement (réseau, async, HTTP) ───────────────────
-tokio            = { workspace = true, optional = true }
-tower            = { version = "0.5",  optional = true }
-hyper            = { version = "1.5",  optional = true }
-tower-http       = { version = "0.6",  optional = true, features = ["cors", "compression-full", "sensitive-headers", "trace", "timeout"] }
-jsonrpsee        = { version = "0.26", optional = true, features = ["server", "http-client", "ws-client", "macros", "client-ws-transport-tls"] }
-jsonrpsee-server = { workspace = true, optional = true }
-jsonrpsee-types  = { workspace = true, optional = true }
-jsonrpsee-http-client = { version = "0.26.0", optional = true }
-ethers           = { version = "2.0.14", optional = true }
-local-ip-address = { version = "0.5",  optional = true }
-rayon            = { workspace = true, optional = true }
-futures-util     = { version = "0.3.31", optional = true }
-tracing-subscriber = { version = "0.2.15", optional = true }
+base64.workspace = true
+lazy_static.workspace = true
+futures-util = "0.3.31"
+k256 = "0.13.4"
+sha_256 = "1.0.1"
+base64-url = "3.0.2"
+rlp = "0.5.2"
+typenum = "1.19.0"
+dotenv = "0.15"
+ethers = "2.0.14"
+alloy-primitives = "1.4.1"
+tiny-keccak = "2.0.2"
+num_cpus = "1.17.0"
+jsonrpsee-http-client = "0.26.0"
+primitive-types = { workspace = true }
+jsonrpsee = { version = "0.26", features = ["server", "http-client", "ws-client", "macros", "client-ws-transport-tls"] }
+tower = "0.5"
+hyper = "1.5"
+tower-http = { version = "0.6", features = ["cors", "compression-full", "sensitive-headers", "trace", "timeout"] }
 
 [[bin]]
 name = "vuc-platform"
 path = "src/engine_platform.rs"
 
 [package.metadata]
-license     = "Vylte-finuka"
+license = "Vylte-finuka"
 description = "Vyft slurachain smart contract platform."
+
+[features]
+safe_mode = []
