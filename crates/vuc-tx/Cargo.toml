@@ -1,57 +1,77 @@
 [package]
-name = "vuc-tx"
+name    = "vuc-tx"
 version = "0.0.1"
 edition = { workspace = true }
 
-[dependencies]
-tokio = { workspace = true }
-serde = { workspace = true, features = ["derive"] }
-anyhow = { workspace = true }
-base64 = { workspace = true }
-hashbrown = { workspace = true }
-log = { workspace = true }
-bcs = { workspace = true }
-bstr = "1.12.0"
-triomphe = "0.1.14"
-sys-info = "0.9"
-serde_derive = { workspace = true }
-fastcrypto = { workspace = true }
-rand = { workspace = true }
-prometheus = { workspace = true }
-serde_json = { workspace = true }
-tracing = { workspace = true }
-md5 = { workspace = true }
-smallvec = { workspace = true }
-rayon = {workspace = true }
-sha3 = { workspace = true }
-bytes = { workspace = true }
-vuc-core = { path = "../vuc-core" }
-vuc-types = { path = "../vuc-types" }
-vuc-storage = { path = "../vuc-storage" }
-uvm-runtime = { workspace = true }
-lazy_static.workspace = true
-libloading = "0.8.9"
-hex = "0.4"
-ethabi = "18.0.0"
-reth-trie = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.9.1", package = "reth-trie" }
-reth-primitives-traits = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.9.1", package = "reth-primitives-traits" }
-primitive-types = { workspace = true }
-sha2 = "0.10"
-merkletree = "0.23.0"
-tiny-keccak = "2.0.2"
-alloy-primitives = "1.4.1"
-chrono.workspace = true
-rlp = "0.5.2"
-crossbeam = "0.8.4"
-dashmap = "6.1.0"
-futures.workspace = true
-reth-trie-common = "0.0.0"
+[features]
+default = ["std"]
+std     = [
+    "tokio/full",
+    "tracing",
+    "rayon",
+    "fastcrypto",
+    "prometheus",
+    "sys-info",
+    "reth-trie",
+    "reth-primitives-traits",
+    "crossbeam",
+    "dashmap",
+    "futures",
+    "vuc-storage",
+    "uvm-runtime",
+]
 
+[dependencies]
+# ── Toujours présents ──────────────────────────────────────
+vuc-core    = { path = "../vuc-core",    default-features = false }
+vuc-types   = { path = "../vuc-types",   default-features = false }
+serde       = { workspace = true,        default-features = false, features = ["derive"] }
+serde_derive = { workspace = true,       default-features = false }
+serde_json  = { workspace = true,        default-features = false }
+anyhow      = { workspace = true,        default-features = false }
+base64      = { workspace = true,        default-features = false }
+hashbrown   = { workspace = true,        default-features = false }
+log         = { workspace = true,        default-features = false }
+bcs         = { workspace = true,        default-features = false }
+bstr        = { version = "1.12.0",      default-features = false }
+triomphe    = { version = "0.1.14",      default-features = false }
+rand        = { workspace = true,        default-features = false }
+md5         = { workspace = true,        default-features = false }
+smallvec    = { workspace = true,        default-features = false }
+sha3        = { workspace = true,        default-features = false }
+sha2        = { version = "0.10",        default-features = false }
+bytes       = { workspace = true,        default-features = false }
+hex         = { version = "0.4",         default-features = false }
+ethabi      = { version = "18.0.0",      default-features = false }
+primitive-types = { workspace = true,    default-features = false }
+tiny-keccak = { version = "2.0.2",      default-features = false }
+alloy-primitives = { version = "1.4.1", default-features = false }
+chrono      = { workspace = true,        default-features = false }
+rlp         = { version = "0.5.2",       default-features = false }
+merkletree  = { version = "0.23.0",      default-features = false }
+lazy_static = { workspace = true,        default-features = false }
+libloading  = { version = "0.8.9",       default-features = false }
+
+# ── Std seulement ─────────────────────────────────────────
+tokio       = { workspace = true,        default-features = false, optional = true }
+tracing     = { workspace = true,        default-features = false, optional = true }
+rayon       = { workspace = true,        default-features = false, optional = true }
+fastcrypto  = { workspace = true,        default-features = false, optional = true }
+prometheus  = { workspace = true,        default-features = false, optional = true }
+sys-info    = { version = "0.9",         default-features = false, optional = true }
+crossbeam   = { version = "0.8.4",       default-features = false, optional = true }
+dashmap     = { version = "6.1.0",       default-features = false, optional = true }
+futures     = { workspace = true,        default-features = false, optional = true }
+vuc-storage = { path = "../vuc-storage", default-features = false, optional = true }
+uvm-runtime = { workspace = true,        default-features = false, optional = true }
+reth-trie   = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.9.1", package = "reth-trie",               default-features = false, optional = true }
+reth-primitives-traits = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.9.1", package = "reth-primitives-traits", default-features = false, optional = true }
+reth-trie-common = { version = "0.0.0",  default-features = false, optional = true }
 
 [lib]
 name = "vuc_tx"
 path = "src/lib.rs"
 
 [package.metadata]
-license = "Vylte-finuka"
+license     = "Vylte-finuka"
 description = "Vyft slurachain transactions service."
