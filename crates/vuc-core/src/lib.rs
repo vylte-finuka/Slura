@@ -11,6 +11,3 @@ pub use vuc_common::async_once_cell::AsyncOnceCell;
 
 #[cfg(feature = "std")]
 pub mod service;
-
-#[cfg(feature = "kernel")]
-pub mod lunee;

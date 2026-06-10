@@ -54,14 +54,23 @@ _pe_header:
 
 ; SECTION .text
 section .text
+default rel                ; use RIP‑relative addressing for symbols
 text_start:
+
+; Déclarations externes – doivent précéder leur utilisation.
+extern efi_system_table
+extern efi_boot_services
+extern efi_runtime_services
+extern load_options
+extern EfiInitialize   ; wrapper defined in efi_manager.cpp
 
 global _efi_entry
 global RustEfiEntry
 global EfiInitialize
 
 _efi_entry:
-    mov [efi_system_table], rdx
+    ; Stocker le pointeur SystemTable dans la variable C++.
+    mov [rel efi_system_table], rdx
 
     ; Désactiver watchdog
     mov rax, [rdx + 0x60]
@@ -72,15 +81,16 @@ _efi_entry:
     xor r9, r9
     call rax
 
-    ; Appel au wrapper
+    ; Appel au wrapper (initialisation du kernel Rust)
     mov rcx, rdi
     mov rdx, rsi
     call EfiInitialize
 
+    ; Après l'initialisation, on boucle indéfiniment.
     hlt
     jmp $
 
-efi_system_table     dq 0
+; (extern declarations moved to the top of the .text section)
 
 text_end:
 

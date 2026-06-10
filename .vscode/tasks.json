@@ -11,10 +11,48 @@
 
     "tasks": [
         // -------------------------------------------------
+        // 0️⃣  Build the Rust UEFI kernel (lunee-ker) for the target
+        // -------------------------------------------------
+        {
+            "label": "1️⃣ cargo: build lunee-ker",
+            "type": "process",
+            "command": "cargo",
+            "args": [
+                "build",
+                "-p",
+                "lunee-ker",
+                "--target",
+                "x86_64-unknown-uefi",
+                "--release"
+            ],
+            "options": { "cwd": "${workspaceFolder}" },
+            "group": "build",
+            "problemMatcher": ["$rustc"]
+        },
+        // -------------------------------------------------
+        // 0️⃣➊  Copy the built .efi to the expected location for the bootloader
+        // -------------------------------------------------
+        {
+            "label": "2️⃣ copy: lunee-ker.efi",
+            "type": "process",
+            "command": "cmd",
+            "args": [
+                "/c",
+                "copy",
+                "${workspaceFolder}\\target\\x86_64-unknown-uefi\\release\\lunee-ker.efi",
+                "${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\boot.efi",
+                "/Y"
+            ],
+            "options": { "cwd": "${workspaceFolder}" },
+            "dependsOn": ["lld-link: create boot.efi", "cargo: build lunee-ker"],
+            "group": "build",
+            "problemMatcher": []
+        },
+        // -------------------------------------------------
         // 1️⃣  Compilation du wrapper C++ (efi_manager.cpp) avec clang (MSYS2)
         // -------------------------------------------------
         {
-            "label": "clang: compile efi_manager.cpp",
+            "label": "3️⃣ clang: compile efi_manager.cpp",
             "type": "process",
             "command": "D:/VisualS/VC/Tools/Llvm/x64/bin/clang.exe",
             "args": [
@@ -39,29 +77,31 @@
         // 2️⃣  Linkage → boot.efi (UEFI application) avec lld-link
         // -------------------------------------------------
         {
-            "label": "lld-link: create boot.efi",
+            "label": "4️⃣ lld-link: create boot.efi",
             "type": "process",
             "command": "D:/VisualS/VC/Tools/Llvm/x64/bin/lld-link.exe",
             "args": [
                 "/NOLOGO",
                 "/DLL",
                 "/MACHINE:X64",
+                "booter.obj",
                 "efi_manager.obj",
+                "/WHOLEARCHIVE:${workspaceFolder}\\target\\x86_64-unknown-uefi\\release\\liblunee_ker.a",
                 "/OUT:boot.efi",
                 "/SUBSYSTEM:EFI_APPLICATION",
-                "/ENTRY:EfiInitialize"
+                "/ENTRY:_efi_entry"
             ],
             "options": { "cwd": "${workspaceFolder}/slr_clk_bt/x64/amd64" },
             "dependsOn": [ "clang: compile efi_manager.cpp" ],
             "group": "build",
-            "problemMatcher": [ "$msLink" ]
+            "problemMatcher": []
         },
 
         // -------------------------------------------------
         // 3️⃣  Création de l’image FAT32 contenant BOOTX64.EFI
         // -------------------------------------------------
         {
-            "label": "make: esp image (FAT32)",
+            "label": "5️⃣ make: esp image (FAT32)",
             "type": "process",
             "command": "C:\\Windows\\System32\\cmd.exe",
             "args": [
@@ -69,7 +109,7 @@
                 "mkdir esp && mkdir esp\\EFI && mkdir esp\\EFI\\BOOT && copy boot.efi esp\\EFI\\BOOT\\BOOTX64.EFI"
             ],
             "options": { "cwd": "${workspaceFolder}/slr_clk_bt/x64/amd64" },
-            "dependsOn": [ "lld-link: create boot.efi" ],
+        "dependsOn": [ "copy: lunee-ker.efi" ],
             "group": "none",
             "problemMatcher": []
         },
@@ -78,7 +118,7 @@
         // 4️⃣  Lancement du test sous VMware (Workstation / Player)
         // -------------------------------------------------
         {
-            "label": "vmware: run UEFI test",
+            "label": "6️⃣ vmware: run UEFI test",
             "type": "process",
             "command": "C:\\Program Files (x86)\\VMware\\VMware Workstation\\vmrun.exe",
             "args": [
@@ -97,7 +137,7 @@
         // 5️⃣  Compilation GPU (HIP) avec clang++ – off‑loading
         // -------------------------------------------------
         {
-            "label": "clang++: compile GPU (HIP) – efi_manager.cpp",
+            "label": "7️⃣ clang++: compile GPU (HIP) – efi_manager.cpp",
             "type": "process",
             "command": "D:/VisualS/VC/Tools/Llvm/x64/bin/clang++.exe",
             "args": [
@@ -114,7 +154,7 @@
         // 6️⃣  Linkage final (CPU + GPU) → boot.efi
         // -------------------------------------------------
         {
-            "label": "lld-link: create boot.efi (with GPU obj)",
+            "label": "8️⃣ lld-link: create boot.efi (with GPU obj)",
             "type": "process",
             "command": "D:/VisualS/VC/Tools/Llvm/x64/bin/lld-link.exe",
             "args": [
@@ -133,14 +173,14 @@
                 "clang++: compile GPU (HIP) – efi_manager.cpp"
             ],
             "group": "build",
-            "problemMatcher": [ "$msLink" ]
+            "problemMatcher": []
         },
 
         // -------------------------------------------------
         // 7️⃣  Création de l’image ISO contenant BOOTX64.EFI
         // -------------------------------------------------
         {
-            "label": "make: esp ISO (FAT32)",
+            "label": "9️⃣ make: esp ISO (FAT32)",
             "type": "process",
             "command": "C:\\Windows\\System32\\cmd.exe",
             "args": [
@@ -148,7 +188,7 @@
                 "mkdir esp_iso && mkdir esp_iso\\EFI && mkdir esp_iso\\EFI\\BOOT && copy boot.efi esp_iso\\EFI\\BOOT\\BOOTX64.EFI && oscdimg -lESP -m -o -u2 -udfver102 esp_iso esp.iso"
             ],
             "options": { "cwd": "${workspaceFolder}/slr_clk_bt/x64/amd64" },
-            "dependsOn": [ "lld-link: create boot.efi" ],
+        "dependsOn": [ "copy: lunee-ker.efi" ],
             "group": "none",
             "problemMatcher": []
         },
@@ -157,7 +197,7 @@
         // 9️⃣  Compilation / exécution du simulateur d’EFI
         // -------------------------------------------------
         {
-            "label": "host: build & run EFI simulation",
+            "label": "🔟 host: build & run EFI simulation",
             "type": "process",
             "command": "D:/VisualS/VC/Tools/Llvm/x64/bin/clang++.exe",
             "args": [
@@ -189,7 +229,7 @@
             "problemMatcher": [ "$msCompile" ]
         },
         {
-            "label": "host: run EFI simulation",
+            "label": "1️⃣1️⃣ host: run EFI simulation",
             "type": "process",
             "command": "${workspaceFolder}/slr_clk_bt/x64/amd64/host_efi_sim.exe",
             "options": {
@@ -202,6 +242,22 @@
                 "panel": "shared",
                 "clear": true
             },
+            "problemMatcher": []
+        },
+        // -------------------------------------------------
+        // 1️⃣➊  Assemblage du bootloader (booter.asm) avec nasm
+        // -------------------------------------------------
+        {
+            "label": "2️⃣ nasm: assemble booter.asm",
+            "type": "process",
+            "command": "nasm",
+            "args": [
+                "-f", "win64",
+                "-o", "booter.obj",
+                "booter.asm"
+            ],
+            "options": { "cwd": "${workspaceFolder}/slr_clk_bt/x64/amd64" },
+            "group": "build",
             "problemMatcher": []
         }
     ]

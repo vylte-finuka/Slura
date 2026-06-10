@@ -1,13 +1,24 @@
 [package]
-name    = "lunee-ker"
+name = "lunee-ker"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-vuc-core      = { path = "..",      default-features = false, features = ["kernel"] }
-uefi          = { version = "0.32", features = ["alloc"] }
+heapless = "0.9.3"
+
+# Dépendances UEFI (nécessaires au kernel)
+uefi          = { version = "0.27.0",  default-features = false, features = ["alloc"] }
 uefi-services = "0.24.0"
 
 [[bin]]
 name = "lunee-ker"
 path = "src/main.rs"
+
+# ── Pas de feature std ici ──
+[features]
+default = []          # aucune feature activée par défaut
+# (aucune feature `with_socket2` ou similaire – tout est désactivé)
+
+[lib]
+name = "lunee_ker"
+crate-type = ["staticlib"]
