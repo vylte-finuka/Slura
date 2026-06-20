@@ -1,0 +1,37 @@
+# --------------------------------------------------------------
+# Maraset – manifest du package *.slul* pour Slura OS
+# --------------------------------------------------------------
+
+package:
+  name: base***SluGpu
+  version: 1.0.0
+  build: 20260616-01
+
+metadata:
+  target: arm64
+  bundle: slul
+  attributes:
+    SRID: SRID_slugpu_001
+    Marav: 0.1 build 06260912-dev
+    description: |
+      Template de pilote SLUL écrit en Maratine.
+      Cycle de vie APrevent (OnPowerOn / OnPowerOff / OnSuspend / OnResume).
+      Initialise le pipeline graphique via DrvAPIInterCon.
+    slura_min: 1
+    slura_max: 5.0
+
+dependencies:
+  basecon:
+    base***example***APrevent: 1.0.0
+    base***example***OEntry: 1.0.0
+
+resources:
+  - path: RAbstractallowing.xml
+    type: xml
+    description: "Règles d'autorisation abstraites pour le sandbox Slura."
+
+scripts:
+  postinstall: |
+    #!/usr/bin/env bash
+    echo "Installation du driver ${package.name} version ${package.version}"
+    slura-reg add --srid ${metadata.attributes.SRID}

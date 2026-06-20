@@ -1,0 +1,76 @@
+//===================================================================
+//  TemplateView.mara – Vue racine de HelloSlura
+//  Projet : HelloSlura.marep
+//  Auteur : Vyft Ltd
+//  Licence : Proprietary – 2026
+//  Description :
+//      Vue principale qui orchestre HelloWorld et gère les entrées
+//      clavier (ESC = quitter) et pointeur via DrvAPIInterCon.
+//      Sur x64 (UEFI QEMU/VMware) : clavier uniquement.
+//      Sur ARM64 (Exynos W1000)   : tactile via PointerGetBtn.
+//===================================================================
+
+#base <std***core***self***[ ComponentView, RenderContext ]>;
+#base <std***io***MaraIO>;
+#base <MaratineKit>;
+
+rel op TemplateView: <[string ComponentView]>t [
+
+    var _ctx:       <string> = "";
+    var _running:   <bool>   = true;
+
+    // ── Create ────────────────────────────────────────────────────────────
+    rel op Create: [ctx string] [
+        _ctx = ctx;
+        log: "TemplateView: initialisation de la vue Hello Slura";
+
+        // Délègue le dessin initial au composant HelloWorld
+        let _: <string> = <HelloWorld***Create>(ctx);
+
+        log: "TemplateView: vue prête — ESC pour quitter";
+        ret ctx;
+    ];
+
+    // ── Render ────────────────────────────────────────────────────────────
+    // Appelé dans la boucle principale de LAPrevent.
+    // Retourne 1 si l'utilisateur demande à quitter (ESC / bouton retour).
+    rel op Render: [view string, ctx string] [
+        // Flush GPU
+        let gpuResult: <i32> = <DrvAPIInterCon***GpuFlushRenderContext***>(ctx);
+        if (gpuResult != 0) [
+            log: "TemplateView: erreur rendu – " + gpuResult;
+            ret gpuResult;
+        ];
+
+        // ── Lecture clavier (non bloquant) ─────────────────────────────
+        let key: <i32> = <DrvAPIInterCon***KeyboardPoll***>();
+        if (key != 0) [
+            // ESC : ScanCode 0x0017 dans les bits 31-16
+            let scanCode: <i32> = (key >> 16) & 0xFFFF;
+            if (scanCode == 0x0017) [
+                log: "TemplateView: ESC reçu — fermeture de l'application";
+                ret 1;
+            ];
+            log: "TemplateView: touche " + key;
+        ];
+
+        // ── Lecture pointeur (non bloquant) ────────────────────────────
+        let ptrState: <i32> = <DrvAPIInterCon***PointerGetState***>();
+        if (ptrState != 0) [
+            let btn: <i32> = ptrState & 0xFF;
+            // Appui long (bit 1) = fermeture (comportement montre)
+            if (btn & 2 != 0) [
+                log: "TemplateView: appui long détecté — fermeture";
+                ret 1;
+            ];
+        ];
+
+        ret 0;
+    ];
+
+    // ── Destroy ───────────────────────────────────────────────────────────
+    rel cl Destroy: [view string, ctx string] [
+        let _: <i32> = <MaratineKit***RenderContext***Detach>(ctx, view);
+        ret 0;
+    ];
+];

@@ -1,0 +1,92 @@
+//===================================================================
+//  HelloWorld.mara – Composant Hello Slura !
+//  Projet : HelloSlura.marep
+//  Auteur : Vyft Ltd
+//  Licence : Proprietary – 2026
+//  Description :
+//      Premier composant Maratine fonctionnel sur Slura OS.
+//      Affiche le titre "Hello Slura !" centré sur fond bleu nuit,
+//      la version du kernel Lunée et un pied de page Vyft Ltd.
+//      Utilise GpuDrawText via DrvAPIInterCon (driver SluGpu).
+//===================================================================
+
+#base <std***core***self***[ ComponentView, RenderContext, TextLabel ]>;
+#base <MaratineKit>;
+
+rel op HelloWorld: <[string ComponentView]>t [
+
+    var message:  <string> = "Hello Slura !";
+    var kernelV:  <string> = "Lunee Kernel v0.1  |  Maratine 1.0";
+    var footer:   <string> = "Vyft Ltd  --  2026";
+    var bgColor:  <i32>    = 0x001A1A2E;   // bleu nuit (BGR)
+    var fgTitle:  <i32>    = 0x00FFE0E0;   // blanc chaud
+    var fgSub:    <i32>    = 0x00AAAACC;   // gris-bleu
+    var fgFooter: <i32>    = 0x00445566;   // gris sombre
+
+    // ── Create ────────────────────────────────────────────────────────────
+    // Dessine directement sur le framebuffer via GpuDrawText (bitmap 8×16).
+    // Rendu immédiat : pas de RenderContext intermédiaire ici.
+    rel op Create: [ctx string] [
+        log: "HelloWorld: Create()";
+
+        let w: <i32> = <DrvAPIInterCon***GpuGetWidth***>();
+        let h: <i32> = <DrvAPIInterCon***GpuGetHeight***>();
+
+        // Fond plein écran
+        let _: <i32> = <DrvAPIInterCon***GpuFill***>(bgColor);
+
+        // ── Ligne de séparation horizontale (accent) ───────────────────
+        let lineY: <i32> = h / 2 - 36;
+        let _: <i32> = <DrvAPIInterCon***GpuDrawRect***>(w / 4, lineY, w / 2, 2, 0x00334466);
+
+        // ── Titre "Hello Slura !" ──────────────────────────────────────
+        // Glyphe 8 px large × 16 px haut — 13 caractères → 104 px
+        let titleW: <i32> = 13 * 8;
+        let titleX: <i32> = (w - titleW) / 2;
+        let titleY: <i32> = h / 2 - 24;
+        let _: <i32> = <DrvAPIInterCon***GpuDrawText***>(titleX, titleY, message, fgTitle, bgColor);
+
+        // ── Sous-titre kernel ──────────────────────────────────────────
+        let subW: <i32> = 35 * 8;
+        let subX: <i32> = (w - subW) / 2;
+        let subY: <i32> = h / 2 + 4;
+        let _: <i32> = <DrvAPIInterCon***GpuDrawText***>(subX, subY, kernelV, fgSub, bgColor);
+
+        // ── Ligne séparation basse ─────────────────────────────────────
+        let line2Y: <i32> = h / 2 + 28;
+        let _: <i32> = <DrvAPIInterCon***GpuDrawRect***>(w / 4, line2Y, w / 2, 1, 0x00334466);
+
+        // ── Pied de page ───────────────────────────────────────────────
+        let ftW: <i32> = 18 * 8;
+        let ftX: <i32> = (w - ftW) / 2;
+        let ftY: <i32> = h / 2 + 38;
+        let _: <i32> = <DrvAPIInterCon***GpuDrawText***>(ftX, ftY, footer, fgFooter, bgColor);
+
+        // Attache un TextLabel pour le cycle RenderContext
+        let label: <[string TextLabel]> = <MaratineKit***UI***TextLabel***New>(
+            message, "#FFE0E0", "#001A1A2E"
+        );
+        let _: <i32> = <MaratineKit***UI***TextLabel***SetAlign>(label, "center");
+        let _: <i32> = <MaratineKit***UI***TextLabel***SetFontSize>(label, 24);
+        let _: <i32> = <MaratineKit***RenderContext***Attach>(ctx, label);
+
+        log: "HelloWorld: *** Hello Slura ! ***";
+        ret label;
+    ];
+
+    // ── Render ────────────────────────────────────────────────────────────
+    rel op Render: [view string, ctx string] [
+        let gpuResult: <i32> = <DrvAPIInterCon***GpuFlushRenderContext***>(ctx);
+        if (gpuResult != 0) [
+            log: "HelloWorld: erreur rendu – " + gpuResult;
+            ret gpuResult;
+        ];
+        ret 0;
+    ];
+
+    // ── Destroy ───────────────────────────────────────────────────────────
+    rel cl Destroy: [view string, ctx string] [
+        let _: <i32> = <MaratineKit***RenderContext***Detach>(ctx, view);
+        ret 0;
+    ];
+];

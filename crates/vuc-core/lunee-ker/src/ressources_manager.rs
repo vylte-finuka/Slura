@@ -5,8 +5,7 @@
 //! Gestionnaire de ressources du kernel Lunee.
 
 use crate::hal_manager::HalManager;
-use uefi::prelude::*;
-use uefi::Status;
+use uefi::{Handle, prelude::*, Status};
 
 #[derive(Debug, Default, Clone)]
 pub struct RessourcesManager {
@@ -16,8 +15,11 @@ pub struct RessourcesManager {
 impl RessourcesManager {
     pub fn new() -> Self { Self::default() }
 
-    pub fn init_hardware(&mut self, st: &mut SystemTable<Boot>) -> Result<(), Status> {
-        // Convert the generic uefi::Error into a Status value expected by the kernel.
-        self.hal_manager.manage_device(st).map_err(|e| e.status())
+    pub fn init_hardware(
+        &mut self,
+        st:           &mut SystemTable<Boot>,
+        image_handle: Handle,
+    ) -> Result<(), Status> {
+        self.hal_manager.manage_device(st, image_handle).map_err(|e| e.status())
     }
 }

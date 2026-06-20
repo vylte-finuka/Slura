@@ -1,0 +1,106 @@
+//===================================================================
+//  GpuImpl.mara – Implémentations GOP framebuffer
+//  Projet : SluGpu.slul
+//  Auteur : Vyft Ltd
+//  Licence : Proprietary – 2026
+//  Description :
+//      Fonctions publiques (rel op) du sous-système GPU.
+//      Déclarées rel op pour être accessibles depuis APrevent.mara
+//      (même bundle) ET enregistrées dans DrvAPIInterCon pour les
+//      apps .marep.
+//      Format pixel : BGR(A) 32 bits (mode GOP PixelBgrReserved8BitPerColor).
+//===================================================================
+
+#base <std***ComTpe***SlulFrmt***DrvManSpec>;
+
+// ── État global du framebuffer ────────────────────────────────────────────────
+var gGop:    <ptr> = 0;
+var gFbBase: <ptr> = 0;
+var gWidth:  <i32> = 0;
+var gHeight: <i32> = 0;
+var gStride: <i32> = 0;
+
+// ── Initialisation ─────────────────────────────────────────────────────────────
+
+rel op GpuInitImpl: [gop ptr] [
+    gGop    = gop;
+    gFbBase = <DrvManSpec***GopGetFrameBuffer***>(gop);
+    gWidth  = <DrvManSpec***GopGetWidth***>(gop);
+    gHeight = <DrvManSpec***GopGetHeight***>(gop);
+    gStride = <DrvManSpec***GopGetPixelsPerScanLine***>(gop);
+    ret 0;
+];
+
+rel op GpuGetWidthImpl:  [] [ ret gWidth;  ];
+rel op GpuGetHeightImpl: [] [ ret gHeight; ];
+
+// ── Remplissage écran ──────────────────────────────────────────────────────────
+
+rel op GpuFillImpl: [color i32] [
+    var n: <i64> = gStride * gHeight;
+    var p: <ptr> = gFbBase;
+    loop (n > 0) [
+        <DrvManSpec***PtrWrite32***>(p, color);
+        p = p + 4;
+        n = n - 1;
+    ];
+    ret 0;
+];
+
+// ── Rectangle ─────────────────────────────────────────────────────────────────
+
+rel op GpuDrawRectImpl: [x i32, y i32, w i32, h i32, color i32] [
+    var row: <i32> = 0;
+    loop (row < h) [
+        var col: <i32> = 0;
+        loop (col < w) [
+            let off: <i32> = ((y + row) * gStride + (x + col)) * 4;
+            <DrvManSpec***PtrWrite32***>(gFbBase + off, color);
+            col = col + 1;
+        ];
+        row = row + 1;
+    ];
+    ret 0;
+];
+
+// ── Texte bitmap 8×16 ─────────────────────────────────────────────────────────
+// Chaque glyphe = 16 octets de bits, 1 bit par pixel, MSB à gauche.
+// La table de glyphes est fournie par DrvManSpec***GetBitmapFont8x16***.
+
+rel op GpuDrawTextImpl: [x i32, y i32, text string, fg i32, bg i32] [
+    let glyphs: <ptr> = <DrvManSpec***GetBitmapFont8x16***>();
+    var cx:  <i32>   = x;
+    var i:   <i32>   = 0;
+    let len: <i32>   = <DrvManSpec***StrLen***>(text);
+
+    loop (i < len) [
+        let ch:   <i32> = <DrvManSpec***StrCharAt***>(text, i);
+        let base: <ptr> = glyphs + ch * 16;
+        var row:  <i32> = 0;
+        loop (row < 16) [
+            let bits: <i32> = <DrvManSpec***PtrRead8***>(base + row);
+            var bit:  <i32> = 7;
+            loop (bit >= 0) [
+                let px:  <i32> = 0;
+                if ((bits >> bit) & 1 == 1) [
+                    px = fg;
+                ] else [
+                    px = bg;
+                ];
+                let off: <i32> = ((y + row) * gStride + (cx + (7 - bit))) * 4;
+                <DrvManSpec***PtrWrite32***>(gFbBase + off, px);
+                bit = bit - 1;
+            ];
+            row = row + 1;
+        ];
+        cx = cx + 8;
+        i  = i  + 1;
+    ];
+    ret 0;
+];
+
+// ── Flush (GOP linéaire = pas de blit nécessaire) ─────────────────────────────
+
+rel op GpuFlushImpl: [ctx string] [
+    ret 0;
+];

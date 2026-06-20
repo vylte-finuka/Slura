@@ -1,0 +1,94 @@
+//===================================================================
+//  APrevent.mara – Cycle de vie du driver GPU SluGpu
+//  Projet : SluGpu.slul
+//  Auteur : Vyft Ltd
+//  Licence : Proprietary – 2026
+//  Description :
+//      Localise le protocole UEFI GOP, initialise le framebuffer
+//      linéaire et enregistre les 7 symboles GPU dans le bus
+//      DrvAPIInterCon pour que les apps .marep puissent les utiliser.
+//===================================================================
+
+#base <std***ComTpe***SlulFrmt***[ MathSafety, DrvManSpec ]>;
+#base <MaratineKit>;
+#base <MaratineKit***CycleActivity>;
+#base <std***ComTpe***SlulFrmt***DrvAPIInterCon>;
+
+rel op APrevent: <[string CycleActivity]>t [
+
+    var Architecture: <string> = "";
+
+    // ── OnPowerOn ──────────────────────────────────────────────────────────
+    // Appelé par OEntry après la vérification de sécurité.
+    rel op OnPowerOn: [arch string] [
+        Architecture = arch;
+        log: "SluGpu: démarrage pilote GOP framebuffer";
+
+        let drvResult: <i32> = self***onDriverInit();
+        if (drvResult != 0) [
+            log: "SluGpu: onDriverInit échoué – code " + drvResult;
+            ret drvResult;
+        ];
+
+        log: "SluGpu: pilote prêt";
+        ret 0;
+    ];
+
+    // ── onDriverInit ───────────────────────────────────────────────────────
+    // Localise GOP, initialise l'état framebuffer, enregistre les symboles.
+    rel cl onDriverInit: [] [
+        // 1. Localiser le protocole UEFI EFI_GRAPHICS_OUTPUT_PROTOCOL
+        let gop: <ptr> = <DrvManSpec***UefiLocate***GfxOutput***>();
+        if (gop == 0) [
+            log: "SluGpu: protocole GOP introuvable";
+            ret 1;
+        ];
+
+        // 2. Initialiser l'état interne du framebuffer (largeur, hauteur, base, stride)
+        let initResult: <i32> = <GpuInitImpl***>(gop);
+        if (initResult != 0) [
+            log: "SluGpu: échec initialisation framebuffer";
+            ret initResult;
+        ];
+
+        let w: <i32> = <GpuGetWidthImpl***>();
+        let h: <i32> = <GpuGetHeightImpl***>();
+        log: "SluGpu: framebuffer " + w + "x" + h;
+
+        // 3. Enregistrer les 7 symboles dans le bus DrvAPIInterCon
+        //    Les apps .marep les appellent via <DrvAPIInterCon***GpuXxx***>(...)
+        let _: <i32> = <DrvAPIInterCon***Register***>("GpuInit",               GpuInitImpl);
+        let _: <i32> = <DrvAPIInterCon***Register***>("GpuFill",               GpuFillImpl);
+        let _: <i32> = <DrvAPIInterCon***Register***>("GpuDrawRect",           GpuDrawRectImpl);
+        let _: <i32> = <DrvAPIInterCon***Register***>("GpuDrawText",           GpuDrawTextImpl);
+        let _: <i32> = <DrvAPIInterCon***Register***>("GpuFlushRenderContext", GpuFlushImpl);
+        let _: <i32> = <DrvAPIInterCon***Register***>("GpuGetWidth",           GpuGetWidthImpl);
+        let _: <i32> = <DrvAPIInterCon***Register***>("GpuGetHeight",          GpuGetHeightImpl);
+
+        log: "SluGpu: 7 symboles GPU enregistrés dans DrvAPIInterCon";
+        ret 0;
+    ];
+
+    // ── OnPowerOff ─────────────────────────────────────────────────────────
+    rel op OnPowerOff: [] [
+        let _: <i32> = <DrvAPIInterCon***Unregister***>("GpuInit");
+        let _: <i32> = <DrvAPIInterCon***Unregister***>("GpuFill");
+        let _: <i32> = <DrvAPIInterCon***Unregister***>("GpuDrawRect");
+        let _: <i32> = <DrvAPIInterCon***Unregister***>("GpuDrawText");
+        let _: <i32> = <DrvAPIInterCon***Unregister***>("GpuFlushRenderContext");
+        let _: <i32> = <DrvAPIInterCon***Unregister***>("GpuGetWidth");
+        let _: <i32> = <DrvAPIInterCon***Unregister***>("GpuGetHeight");
+        log: "SluGpu: pilote arrêté, symboles désenregistrés";
+        ret 0;
+    ];
+
+    rel op OnSuspend: [] [
+        log: "SluGpu: suspension";
+        ret 0;
+    ];
+
+    rel op OnResume: [] [
+        log: "SluGpu: reprise";
+        ret 0;
+    ];
+];

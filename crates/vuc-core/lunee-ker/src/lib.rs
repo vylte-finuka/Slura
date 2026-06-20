@@ -1,4 +1,4 @@
-//! Point d’entrée du module kernel Lunee (binaire).
+//! Point d'entrée du module kernel Lunee (bibliothèque statique).
 
 #![no_std]
 #![no_main]
@@ -8,13 +8,11 @@ extern crate alloc;
 pub mod kernel_runtime;
 pub mod ressources_manager;
 pub mod hal_manager;
+pub mod bundle_loader;
 
 use uefi::{entry, CStr16, Status, Handle, table::{Boot, SystemTable}};
 use crate::kernel_runtime::KernelRuntime;
 
-// ---------------------------------------------------------------------
-//  UEFI entry point (called by the Rust wrapper)
-// ---------------------------------------------------------------------
 #[entry]
 fn efi_main(image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
 	uefi_services::init(&mut system_table).unwrap();
@@ -31,20 +29,19 @@ fn efi_main(image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status
 		loop {}
 	}
 
-	let stdout = system_table.stdout();
-	stdout.output_string(CStr16::from_u16_with_nul(&[
+	system_table.stdout().output_string(CStr16::from_u16_with_nul(&[
 		0x003D,0x003D,0x003D,0x0020,0x0053,0x006C,0x0075,0x0072,0x0061,0x0020,
 		0x004C,0x0075,0x006E,0x00E9,0x0065,0x0020,0x004B,0x0065,0x0072,0x006E,
 		0x0065,0x006C,0x0020,0x0076,0x0030,0x002E,0x0031,0x0020,0x003D,0x003D,
 		0x003D,0x000D,0x000A,0x0000,
 	]).unwrap()).unwrap();
 
+	runtime.maratine_phase(&mut system_table, image_handle);
+
 	loop { system_table.boot_services().stall(1_000_000); }
 }
 
-// ---------------------------------------------------------------------
-//  C‑ABI wrapper expected by the C++ bootloader
-// ---------------------------------------------------------------------
+// ── C-ABI wrapper attendu par le bootloader C++ ───────────────────────────────
 use core::ffi::c_void;
 
 #[no_mangle]
@@ -55,7 +52,6 @@ pub extern "C" fn RustEfiEntry(
 	system_table: *mut c_void,
 	_load_options: *mut c_void,
 ) -> bool {
-	// SAFETY: pointers are provided by the bootloader and are valid.
 	let image_handle = unsafe { Handle::from_ptr(image_handle) }.expect("Invalid ImageHandle");
 	let system_table = unsafe { &mut *(system_table as *mut SystemTable<Boot>) };
 	let system_table_owned = unsafe { core::ptr::read(system_table) };
@@ -63,6 +59,5 @@ pub extern "C" fn RustEfiEntry(
 	status.is_success()
 }
 
-// Prevent the linker from discarding the symbol.
 #[used]
 static KEEP_RUST_EFI_ENTRY: extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> bool = RustEfiEntry;

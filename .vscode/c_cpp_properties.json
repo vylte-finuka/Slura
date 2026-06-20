@@ -1,36 +1,23 @@
 {
     "configurations": [
         {
-            "name": "Win32‑MSYS2",
+            "name": "Win32",
             "includePath": [
-                "D:/msys2/ucrt64/include",
-                "D:/VisualS/VC/Tools/MSVC/14.44.35207/include",
-                "D:/VisualS/VC/Tools/Llvm/lib/clang/19/include",
-                "${workspaceFolder}/**"
+                "${workspaceFolder}/**",
+                "D:/msys64/ucrt64/include",
+                "D:/msys64/ucrt64/include/c++/15.2.0",
+                "D:/msys64/ucrt64/include/c++/15.2.0/x86_64-w64-mingw32",
+                "${workspaceFolder}/slr_clk_bt/x64/amd64",
             ],
             "defines": [
                 "_DEBUG",
                 "UNICODE",
                 "_UNICODE"
             ],
-            "compilerPath": "‪D:\\VisualS\\VC\\Tools\\MSVC\\14.44.35207\\bin\\HostX64\\x64\\cl.exe",
+            "windowsSdkVersion": "10.0.26100.0",
+            "compilerPath": "D:/VisualS/VC/Tools/MSVC/14.51.36231/bin/Hostx64/x64/cl.exe",
             "cStandard": "c17",
             "cppStandard": "c++23",
-            "intelliSenseMode": "windows-clang-x64"
-        },
-        {
-            "name": "Visual Studio 2026",
-            "includePath": [
-                "${workspaceFolder}/**"
-            ],
-            "defines": [
-                "_DEBUG",
-                "UNICODE",
-                "_UNICODE"
-            ],
-            "compilerPath": "D:\\VisualS\\VC\\Tools\\Llvm\\x64\\bin\\clang.exe",
-            "cStandard": "c17",
-            "cppStandard": "c++17",
             "intelliSenseMode": "windows-msvc-x64"
         }
     ],

@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<RAbstractallowing xmlns="http://vyft.com/schema/abstractallowing" version="1.0">
+    <!-- Package metadata -------------------------------------------------- -->
+    <Metadata>
+        <PackageName>com.slul.driver</PackageName>
+        <SRID>SRID_sluldriver_001</SRID>
+        <FrameworkVersion>1.2.0</FrameworkVersion>
+        <Target>arm64</Target>
+        <Description>Template de pilote SLUL pour Slura OS.</Description>
+    </Metadata>
+
+    <!-- Permissions ------------------------------------------------------- -->
+    <Permissions>
+        <!-- Accès réseau autorisé vers les services Vyft -->
+        <Permission name="network" description="Autorise les connexions HTTP/HTTPS vers vyft.com et ses sous‑domaines.">
+            <AllowedHosts>
+                <Host>vyft.com</Host>
+                <Host>api.vyft.com</Host>
+                <Host>*.vyft.com</Host>
+            </AllowedHosts>
+        </Permission>
+
+        <!-- Accès au système de fichiers en lecture seule pour les ressources -->
+        <Permission name="filesystem.read" description="Lecture des ressources embarquées du bundle .marep.">
+            <AllowedPaths>
+                <Path>/resources/</Path>
+                <Path>/config/</Path>
+            </AllowedPaths>
+        </Permission>
+
+        <!-- Accès aux capteurs du dispositif (exemple : caméra, microphone) -->
+        <Permission name="device.camera" description="Autorise l’accès à la caméra pour le rendu UI.">
+            <Required>true</Required>
+        </Permission>
+        <Permission name="device.microphone" description="Autorise l’accès au microphone si l’application le demande.">
+            <Required>false</Required>
+        </Permission>
+
+        <!-- Autorisation d’utiliser le moteur graphique MaraGrphAPI -->
+        <Permission name="graphics.maragraphapi" description="Permet l’utilisation de l’API graphique native de Slura.">
+            <Version>3.4.0</Version>
+        </Permission>
+    </Permissions>
+
+    <!-- Optional: déclarations de capacités supplémentaires ---------------- -->
+    <Capabilities>
+        <Capability name="background.execution" description="Autorise l’exécution en arrière‑plan pendant les notifications.">
+            <Enabled>true</Enabled>
+        </Capability>
+        <Capability name="push.notifications" description="Autorise la réception de notifications push via vyft.com.">
+            <Enabled>true</Enabled>
+        </Capability>
+        <!-- Permission spécifique au driver APrevent (format SLUL) -->
+        <Capability name="driver.aprevent" description="Autorise le module APrevent à accéder aux ressources système nécessaires au driver.">
+            <Enabled>true</Enabled>
+        </Capability>
+    </Capabilities>
+</RAbstractallowing>

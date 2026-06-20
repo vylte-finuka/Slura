@@ -1,0 +1,36 @@
+//===================================================================
+//  MouseImpl.mara – Implémentations pointeur UEFI
+//  Projet : SluKeyMouse.slul
+//  Auteur : Vyft Ltd
+//  Licence : Proprietary – 2026
+//  Description :
+//      DrvManSpec tente d'abord EFI_ABSOLUTE_POINTER_PROTOCOL (écran
+//      tactile, Exynos W1000) puis EFI_SIMPLE_POINTER_PROTOCOL
+//      (souris USB/PS2, trackpad) en fallback.
+//
+//  Coordonnées normalisées après PtrGetStateImpl :
+//    X : 0 … ScreenWidth  - 1
+//    Y : 0 … ScreenHeight - 1
+//
+//  PtrGetBtnImpl : bitmask
+//    bit 0 = clic gauche / tap simple
+//    bit 1 = clic droit  / appui long (500 ms)
+//===================================================================
+
+#base <std***ComTpe***SlulFrmt***DrvManSpec>;
+
+var gPtrX:   <i32> = 0;
+var gPtrY:   <i32> = 0;
+var gPtrBtn: <i32> = 0;
+
+rel op PtrGetStateImpl: [] [
+    let raw: <i32> = <DrvManSpec***UefiPointerGetState***>();
+    gPtrX   = (raw >> 20) & 0xFFF;
+    gPtrY   = (raw >> 8)  & 0xFFF;
+    gPtrBtn = raw & 0xFF;
+    ret raw;
+];
+
+rel op PtrGetXImpl:   [] [ let _: <i32> = <PtrGetStateImpl***>(); ret gPtrX;   ];
+rel op PtrGetYImpl:   [] [ let _: <i32> = <PtrGetStateImpl***>(); ret gPtrY;   ];
+rel op PtrGetBtnImpl: [] [ let _: <i32> = <PtrGetStateImpl***>(); ret gPtrBtn; ];

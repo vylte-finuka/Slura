@@ -14,7 +14,7 @@
 use core::{arch::x86_64::{__cpuid, __cpuid_count}, fmt::Write};
 use uefi::prelude::*;
 use uefi::proto::console::text::Output;
-use uefi::Status;
+use uefi::{Handle, Status};
 
 /// Configuration d’un device.
 #[derive(Debug, Clone)]
@@ -175,14 +175,18 @@ impl HalManager {
     }
 
     /// API publique : détecte le hardware, charge les drivers et met à jour les champs d’état.
-    pub fn manage_device(&mut self, st: &mut SystemTable<Boot>) -> uefi::Result<()> {
+    pub fn manage_device(
+        &mut self,
+        st:           &mut SystemTable<Boot>,
+        image_handle: Handle,
+    ) -> uefi::Result<()> {
         if self.detect_devices() {
             self.device_state = true;
             self.log(st, "Hardware detected and initialized successfully.");
         } else {
             self.log(st, "No compatible hardware found.");
         }
-        self.load_drivers(st)?;
+        self.load_drivers(st, image_handle)?;
         Ok(())
     }
 
@@ -199,9 +203,10 @@ impl HalManager {
     // -----------------------------------------------------------------
     //  Chargement des drivers – version factice (écrit sur stdout)
     // -----------------------------------------------------------------
-    fn load_drivers(&self, st: &mut SystemTable<Boot>) -> uefi::Result<()> {
-        let stdout = st.stdout();
-        let _ = stdout.write_str("Loading dummy drivers…\r\n");
+    fn load_drivers(&self, st: &mut SystemTable<Boot>, image_handle: Handle) -> uefi::Result<()> {
+        use crate::bundle_loader::slul_loader;
+        let count = slul_loader::load_drivers(st, image_handle);
+        self.log(st, if count > 0 { "[HAL] Maratine drivers loaded." } else { "[HAL] No .slul drivers found." });
         Ok(())
     }
 
