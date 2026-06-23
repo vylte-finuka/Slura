@@ -101,8 +101,16 @@ pub fn render_marep_screen(st: &mut SystemTable<Boot>, image_handle: Handle) {
     // Ouvrir GOP
     let handles = match st.boot_services().find_handles::<GraphicsOutput>() {
         Ok(h) if !h.is_empty() => h,
-        _ => return,
+        Ok(_) => {
+            let _ = st.stdout().write_str("[MARATINE] GOP: aucun handle — VGA absent (ajoutez -device VGA)\r\n");
+            return;
+        },
+        Err(_) => {
+            let _ = st.stdout().write_str("[MARATINE] GOP: find_handles echoue\r\n");
+            return;
+        },
     };
+    let _ = st.stdout().write_str("[MARATINE] GOP: handle trouve, ouverture...\r\n");
     let mut gop = match unsafe {
         st.boot_services().open_protocol::<GraphicsOutput>(
             OpenProtocolParams { handle: handles[0], agent: image_handle, controller: None },
@@ -117,6 +125,7 @@ pub fn render_marep_screen(st: &mut SystemTable<Boot>, image_handle: Handle) {
     let fb     = gop.frame_buffer().as_mut_ptr() as *mut u32;
 
     let ctx = ovc_exec::ExecCtx { fb, width: w as i32, height: h as i32, stride };
+    let log_res = alloc::format!("[MARATINE] GOP: {}x{} stride={}\r\n", w, h, stride);
 
     // Couleurs HelloWorld.ovc converties au format GOP
     let bg   = col(0x001A1A2E, fmt);
@@ -183,6 +192,10 @@ pub fn render_marep_screen(st: &mut SystemTable<Boot>, image_handle: Handle) {
 
     // GOP fermé ici — framebuffer VRAM persiste à l'écran.
     drop(gop);
+
+    // Log résolution (après drop pour éviter le conflit d'emprunt)
+    let _ = st.stdout().write_str(&log_res);
+    let _ = st.stdout().write_str("[MARATINE] Rendu HelloSlura OK — ESC pour quitter\r\n");
 
     // ── Boucle événement : ESC pour quitter ───────────────────────────────────
     use uefi::proto::console::text::{Key, ScanCode};
