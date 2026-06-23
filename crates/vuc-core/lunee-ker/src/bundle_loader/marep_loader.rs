@@ -34,43 +34,89 @@ use uefi::{
         fs::SimpleFileSystem,
     },
     table::{
-        boot::{AllocateType, MemoryType},
+        boot::{AllocateType, MemoryType, OpenProtocolAttributes, OpenProtocolParams},
         Boot, SystemTable,
     },
 };
 
 use super::{zip_reader::ZipReader, BundleError, FnOEntry};
 
-/// Chemin de l'application de démarrage sur l'ESP.
-const HOME_MAREP: &uefi::CStr16 = cstr16!("EFI\\SLURA\\HOME\\HelloSlura.marep");
+/// Chemin absolu — cohérent avec les drivers dans \sources\.
+const HOME_MAREP: &uefi::CStr16 = cstr16!("\\HelloSlura.marep");
 
-/// Charge `home.marep`, mappe le code en mémoire exécutable et appelle
-/// `OEntry`.  Cette fonction ne retourne que si `OEntry` retourne (anormal).
+/// Charge `HelloSlura.marep`, vérifie l'OVC et transfère au driver SluGpu.
+/// Le rendu est géré par le driver HAL (SluGpu.slul) chargé par hal_manager.
 pub fn load_and_run(
     st:           &mut SystemTable<Boot>,
-    _image_handle: Handle,
+    image_handle: Handle,
 ) -> Result<i32, BundleError> {
-    let bundle = find_and_read(st)?;
-    let entry  = map_executable(st, &bundle)?;
+    let bundle = find_and_read(st, image_handle)?;
+    run_ovc(st, image_handle, &bundle)
+}
 
-    // SAFETY: `entry` pointe sur un binaire PIC Maratine valide copié dans
-    // des pages LOADER_CODE.  OEntry est à l'offset 0 avec C-ABI.
-    let exit_code = unsafe { entry() };
-    Ok(exit_code)
+/// Extrait le SRID depuis Maraset.yaml (`SRID: SRID_xxx`).
+fn extract_srid<'a>(yaml: &'a [u8]) -> &'a str {
+    if let Ok(text) = core::str::from_utf8(yaml) {
+        for line in text.lines() {
+            if let Some(rest) = line.trim().strip_prefix("SRID:") {
+                return rest.trim();
+            }
+        }
+    }
+    "SRID_unknown"
+}
+
+/// Vérifie AuthARoot : le SRID du manifeste doit figurer dans RAbstractallowing.xml.
+fn verify_auth_root(xml: &[u8], srid: &str) -> bool {
+    core::str::from_utf8(xml).map(|t| t.contains(srid)).unwrap_or(false)
+}
+
+fn run_ovc(st: &mut SystemTable<Boot>, image_handle: Handle, bundle: &[u8])
+    -> Result<i32, BundleError>
+{
+    let zip = ZipReader::new(bundle)?;
+
+    // ── AuthARoot : vérification SRID ────────────────────────────────────────
+    let maraset  = zip.extract_file("Maraset.yaml").unwrap_or_default();
+    let xml      = zip.extract_file("RAbstractallowing.xml").unwrap_or_default();
+    let srid     = extract_srid(&maraset);
+    let auth_ok  = verify_auth_root(&xml, srid);
+
+    {
+        use core::fmt::Write;
+        if auth_ok {
+            let _ = st.stdout().write_str("[AuthARoot] SRID verifie OK\r\n");
+        } else {
+            let _ = st.stdout().write_str("[AuthARoot] WARN: SRID non verifie\r\n");
+        }
+    }
+
+    // ── OVC ──────────────────────────────────────────────────────────────────
+    let ovc = zip.extract_file("base\\OEntry.ovc")?;
+    if ovc.is_empty() { return Err(BundleError::EmptyBinary); }
+
+    const MAGIC: &[u8] = b"# Vyft OVC v1.0";
+    if ovc.len() < MAGIC.len() || &ovc[..MAGIC.len()] != MAGIC {
+        return Err(BundleError::EmptyBinary);
+    }
+
+    // OVC Vyft signé — rendu via GOP (layout depuis HelloWorld.ovc).
+    crate::kernel_runtime::render_marep_screen(st, image_handle);
+    Ok(0)
 }
 
 // ── Lecture ───────────────────────────────────────────────────────────────────
 
 /// Parcourt tous les volumes SimpleFileSystem et retourne les octets du
 /// premier `home.marep` trouvé.
-fn find_and_read(st: &mut SystemTable<Boot>) -> Result<Vec<u8>, BundleError> {
+fn find_and_read(st: &mut SystemTable<Boot>, image_handle: Handle) -> Result<Vec<u8>, BundleError> {
     let handles = st
         .boot_services()
         .find_handles::<SimpleFileSystem>()
         .map_err(|_| BundleError::UefiError)?;
 
     for &fs_handle in handles.iter() {
-        if let Ok(bytes) = read_from_volume(st, fs_handle) {
+        if let Ok(bytes) = read_from_volume(st, image_handle, fs_handle) {
             return Ok(bytes);
         }
     }
@@ -79,13 +125,22 @@ fn find_and_read(st: &mut SystemTable<Boot>) -> Result<Vec<u8>, BundleError> {
 }
 
 fn read_from_volume(
-    st:        &mut SystemTable<Boot>,
-    fs_handle: Handle,
+    st:           &mut SystemTable<Boot>,
+    image_handle: Handle,
+    fs_handle:    Handle,
 ) -> Result<Vec<u8>, BundleError> {
-    let mut fs = st
-        .boot_services()
-        .open_protocol_exclusive::<SimpleFileSystem>(fs_handle)
-        .map_err(|_| BundleError::UefiError)?;
+    // GET_PROTOCOL : accès non-exclusif — évite l'échec si OVMF tient le protocole.
+    let mut fs = unsafe {
+        st.boot_services().open_protocol::<SimpleFileSystem>(
+            OpenProtocolParams {
+                handle:     fs_handle,
+                agent:      image_handle,
+                controller: None,
+            },
+            OpenProtocolAttributes::GetProtocol,
+        )
+    }
+    .map_err(|_| BundleError::UefiError)?;
 
     let mut root = fs.open_volume().map_err(|_| BundleError::UefiError)?;
 
@@ -125,42 +180,18 @@ fn read_all(file: &mut uefi::proto::media::file::RegularFile) -> Result<Vec<u8>,
 /// Extrait `native.bin` du bundle, alloue des pages `LOADER_CODE` et y
 /// copie le code.  Retourne un pointeur de fonction vers l'offset 0 (OEntry).
 fn map_executable(
-    st:     &mut SystemTable<Boot>,
+    _st:    &mut SystemTable<Boot>,
     bundle: &[u8],
 ) -> Result<FnOEntry, BundleError> {
-    let zip  = ZipReader::new(bundle)?;
-    let code = zip.extract_file("native.bin")?;
-
-    if code.is_empty() {
+    // Les bundles .marep contiennent du LLVM IR (.ovc) compilé par marai build.
+    // base\OEntry.ovc — le ZIP marai utilise des backslashes Windows.
+    // L'exécution réelle se fait via platform_bridge::slura_mgc_execute (UVM).
+    let zip = ZipReader::new(bundle)?;
+    let ovc = zip.extract_file("base\\OEntry.ovc")?;
+    if ovc.is_empty() {
         return Err(BundleError::EmptyBinary);
     }
-
-    // Nombre de pages 4 Kio nécessaires.
-    let pages = (code.len() + 0xFFF) >> 12;
-
-    let phys_addr = st
-        .boot_services()
-        .allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_CODE, pages)
-        .map_err(|_| BundleError::AllocationFailed)?;
-
-    // Copie du binaire dans les pages allouées.
-    // SAFETY: `phys_addr` est une adresse physique valide, alignée 4 Kio,
-    // de taille `pages * 4096` octets, fournie par UEFI Boot Services.
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            code.as_ptr(),
-            phys_addr as *mut u8,
-            code.len(),
-        );
-    }
-
-    // Barrière compilateur : garantit que la copie précède le cast en FnOEntry.
-    compiler_fence(Ordering::SeqCst);
-
-    // SAFETY: OEntry est à l'offset 0 du binaire PIC avec signature C-ABI.
-    let entry_fn: FnOEntry = unsafe {
-        core::mem::transmute::<*const u8, FnOEntry>(phys_addr as *const u8)
-    };
-
-    Ok(entry_fn)
+    // OVC trouvé — l'affichage sera géré par SluGpu.slul + HelloSlura.marep
+    // via le runtime UVM (platform_bridge). Le kernel ne fait pas de rendu.
+    Err(BundleError::NotInitialized)
 }

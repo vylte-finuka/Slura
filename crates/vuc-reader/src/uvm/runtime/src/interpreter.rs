@@ -6,19 +6,25 @@
 use crate::ebpf;
 use crate::lib::*;
 use crate::stack::StackUsage;
-use chrono;
 use core::ops::Range;
 use hashbrown::HashSet;
 use primitive_types::U256 as u256;
 use serde_json::json;
 use serde_json::Value as JsonValue;
 use sha3::{Digest, Keccak256};
-use std::hash::{DefaultHasher, Hash, Hasher};
-use std::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
+#[cfg(not(feature = "std"))]
+use alloc::sync::Arc;
+#[cfg(feature = "std")]
 use std::sync::Arc;
-use std::sync::LazyLock;
 use tracing::{info, warn};
+#[cfg(feature = "storage")]
 use vuc_storage::storing_access::RocksDBManager;
+#[cfg(not(feature = "storage"))]
+pub trait RocksDBManager: core::marker::Send + Sync {
+    fn read(&self, key: &str) -> Result<Vec<u8>, String>;
+    fn write(&self, key: &str, value: &[u8]) -> Result<(), String>;
+}
 
 #[derive(Clone, Debug)]
 pub struct BlockInfo {
@@ -33,12 +39,8 @@ pub struct BlockInfo {
     pub prev_randao: [u8; 32], // EIP-4399 (added for compatibility)
 }
 
-static SS7_CALL_COUNT: LazyLock<AtomicU64> = LazyLock::new(|| AtomicU64::new(0));
-
-static SS7_BY_TYPE: LazyLock<[AtomicU64; 256]> = LazyLock::new(|| {
-    let mut arr: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
-    arr
-});
+static SS7_CALL_COUNT: AtomicU64 = AtomicU64::new(0);
+static SS7_BY_TYPE: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
 
 /// ✅ NOUVEAU: Décodage de tout le storage final en map slot -> heuristique décodée
 fn decode_storage_map(storage: &HashMap<String, Vec<u8>>) -> serde_json::Map<String, JsonValue> {
@@ -906,10 +908,12 @@ fn encode_uip10_address_to_u64(addr: &str) -> u64 {
         let branch = parts[0];
         let identifier = parts[1];
 
-        let mut hasher = DefaultHasher::new();
-        branch.hash(&mut hasher);
-        identifier.hash(&mut hasher);
-        hasher.finish()
+        let mut h: u64 = 14695981039346656037u64;
+        for b in branch.bytes().chain(core::iter::once(b'#')).chain(identifier.bytes()) {
+            h ^= b as u64;
+            h = h.wrapping_mul(1099511628211);
+        }
+        h
     } else {
         encode_address_to_u64(addr)
     }
@@ -1010,12 +1014,12 @@ pub fn ss7_metadata_process(
 
 /// ✅ Encodage d'adresse vers u64
 fn encode_address_to_u64(addr: &str) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let mut hasher = DefaultHasher::new();
-    addr.hash(&mut hasher);
-    hasher.finish()
+    let mut h: u64 = 14695981039346656037u64;
+    for b in addr.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(1099511628211);
+    }
+    h
 }
 
 pub fn execute_program(

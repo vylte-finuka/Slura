@@ -57,9 +57,9 @@ rel op TemplateView: <[string ComponentView]>t [
         // ── Lecture pointeur (non bloquant) ────────────────────────────
         let ptrState: <i32> = <DrvAPIInterCon***PointerGetState***>();
         if (ptrState != 0) [
-            let btn: <i32> = ptrState & 0xFF;
-            // Appui long (bit 1) = fermeture (comportement montre)
-            if (btn & 2 != 0) [
+            let btn: <i32>      = ptrState & 0xFF;
+            let longPress: <i32> = btn & 2;
+            if (longPress > 0) [
                 log: "TemplateView: appui long détecté — fermeture";
                 ret 1;
             ];

@@ -65,3 +65,7 @@ extern "C" bool EfiInitialize(void* ImageHandle, void* SystemTable)
     slr_clk_bt::EfiManager manager;
     return manager.Initialize(ImageHandle, SystemTable);
 }
+
+// Les symboles slura_mgc_execute, slura_engine_rpc_* sont fournis par
+// vuc_platform.lib (vuc-platform compilé en staticlib) et liés via lld-link.
+// Voir tâche VS Code "cargo: build vuc-platform lib" + "4️⃣ lld-link: create slr_clk_bt.efi".

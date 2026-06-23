@@ -1,0 +1,342 @@
+//===================================================================
+//  TtfParser.mara – Parseur sfnt universel (TTF / OTF / WOFF / WOFF2)
+//  Projet : SluFontConf.slul
+//  Auteur : Vyft Ltd
+//  Licence : Proprietary – 2026
+//  Description :
+//      Détecte le format du flux entrant via WoffReader, puis
+//      analyse le sfnt résultant :
+//        - TTF (0x00010000, 'true') → tables glyf/loca + TrueType outlines
+//        - OTF ('OTTO')             → table CFF  + Type 2 charstrings (OtfCff)
+//      Tables communes : head, hhea, cmap (format 4), hmtx, maxp.
+//===================================================================
+
+#base <std***fs***MaraFS>;
+#base <std***ComTpe***SlulFrmt***DrvManSpec>;
+#base <MaratineKit>;
+
+// ── Codes de retour ───────────────────────────────────────────────────────────
+
+
+// Format détecté
+
+
+// ── État interne du parseur ───────────────────────────────────────────────────
+
+
+// Offsets des tables clés (0 = table absente)
+
+// Métriques extraites de head/hhea
+
+// ── Primitives de lecture big-endian ─────────────────────────────────────────
+
+// Lit un octet à l'offset absolu dans <DrvManSpec***TtfGetData***>()
+rel cl _r8: [off i32] [
+    if (<DrvManSpec***TtfGetData***>() == 0 || off < 0 || off >= <DrvManSpec***TtfScratchGet***>(100)) [ ret 0; ];
+    ret <DrvAPIInterCon***MemRead8***>(<DrvManSpec***TtfGetData***>(), off);
+];
+
+// Lit un uint16 big-endian
+rel cl _r16: [off i32] [
+    let hi: <i32> = _r8(off);
+    let lo: <i32> = _r8(off + 1);
+    ret (hi * 256) + lo;
+];
+
+// Lit un uint32 big-endian
+rel cl _r32: [off i32] [
+    let b0: <i32> = _r8(off);
+    let b1: <i32> = _r8(off + 1);
+    let b2: <i32> = _r8(off + 2);
+    let b3: <i32> = _r8(off + 3);
+    ret (b0 * 16777216) + (b1 * 65536) + (b2 * 256) + b3;
+];
+
+// Lit un tag de 4 caractères ASCII (entier big-endian)
+rel cl _rtag: [off i32] [
+    ret _r32(off);
+];
+
+// ── Parseur Offset Table ──────────────────────────────────────────────────────
+
+// Offset Table TrueType (12 octets) :
+//   [0..3]  sfVersion  (0x00010000 = TrueType, 0x4F54544F = CFF/OTF)
+//   [4..5]  numTables
+//   [6..7]  searchRange
+//   [8..9]  entrySelector
+//   [10..11] rangeShift
+rel cl _parseOffsetTable: [] [
+    let version: <i32> = _r32(0);
+    // 0x00010000 = TrueType, 0x74727565 = 'true', 0x74797031 = 'typ1'
+    if (version != 65536 && version != 1953658213 && version != 1954115377) [
+        log: "TtfParser: sfVersion invalide – " + version;
+        ret -2;
+    ];
+    <DrvManSpec***TtfScratchSet***>(101, _r16(4));
+    log: "TtfParser: " + <DrvManSpec***TtfScratchGet***>(101) + " tables TTF";
+    ret 0;
+];
+
+// ── Parseur Table Directory ───────────────────────────────────────────────────
+
+// Chaque entrée de Table Directory (16 octets) :
+//   [0..3]  tag (4 caractères ASCII)
+//   [4..7]  checksum
+//   [8..11] offset
+//   [12..15] length
+
+// Tags des tables requises (ASCII big-endian) :
+//   head = 0x68656164, hhea = 0x68686561
+//   cmap = 0x636D6170, loca = 0x6C6F6361
+//   glyf = 0x676C7966, hmtx = 0x686D7478
+//   maxp = 0x6D617870
+
+
+rel cl _parseTableDirectory: [] [
+    var i: <i32> = 0;
+    loop (i < <DrvManSpec***TtfScratchGet***>(101)) [
+        let entryOff: <i32> = 12 + (i * 16);
+        let tag:      <i32> = _rtag(entryOff);
+        let offset:   <i32> = _r32(entryOff + 8);
+
+        if (tag == 1751474532) [ <DrvManSpec***TtfScratchSet***>(102, offset); ];
+        if (tag == 1751672161) [ <DrvManSpec***TtfScratchSet***>(103, offset); ];
+        if (tag == 1668112752) [ <DrvManSpec***TtfScratchSet***>(104, offset); ];
+        if (tag == 1818452577) [ <DrvManSpec***TtfScratchSet***>(105, offset); ];
+        if (tag == 1735162214) [ <DrvManSpec***TtfScratchSet***>(106, offset); ];
+        if (tag == 1752003704) [ <DrvManSpec***TtfScratchSet***>(107, offset); ];
+        if (tag == 1835104368) [ <DrvManSpec***TtfScratchSet***>(108, offset); ];
+        if (tag == 1128678432)  [
+            <DrvManSpec***TtfScratchSet***>(117, offset);
+            <DrvManSpec***TtfScratchSet***>(118, _r32(entryOff + 12));
+        ];
+
+        i = i + 1;
+    ];
+
+    if (<DrvManSpec***TtfScratchGet***>(102) == 0 || <DrvManSpec***TtfScratchGet***>(104) == 0) [
+        log: "TtfParser: tables head/cmap manquantes";
+        ret -3;
+    ];
+    // OTF : CFF présent, pas de glyf/loca
+    if (<DrvManSpec***TtfScratchGet***>(117) > 0) [
+        <DrvManSpec***TtfScratchSet***>(116, 2);
+        log: "TtfParser: format OTF (CFF)";
+        ret 0;
+    ];
+    // TTF : glyf + loca requis
+    if (<DrvManSpec***TtfScratchGet***>(106) == 0) [
+        log: "TtfParser: table glyf manquante";
+        ret -3;
+    ];
+    <DrvManSpec***TtfScratchSet***>(116, 1);
+    log: "TtfParser: format TTF (glyf/loca)";
+    ret 0;
+];
+
+// ── Parseur table head ────────────────────────────────────────────────────────
+
+// head (54 octets minimum) :
+//   [18..19] unitsPerEm
+//   [50..51] indexToLocFormat (0=short, 1=long)
+
+rel cl _parseHead: [] [
+    if (<DrvManSpec***TtfScratchGet***>(102) == 0) [ ret -3; ];
+    <DrvManSpec***TtfScratchSet***>(109, _r16(<DrvManSpec***TtfScratchGet***>(102) + 18));
+    <DrvManSpec***TtfScratchSet***>(113, _r16(<DrvManSpec***TtfScratchGet***>(102) + 50));
+    log: "TtfParser: unitsPerEm=" + <DrvManSpec***TtfScratchGet***>(109) + " locaFormat=" + <DrvManSpec***TtfScratchGet***>(113);
+    ret 0;
+];
+
+// ── Parseur table hhea ────────────────────────────────────────────────────────
+
+// hhea (36 octets) :
+//   [4..5]  ascender  (int16)
+//   [6..7]  descender (int16, négatif)
+//   [8..9]  lineGap   (int16)
+
+rel cl _parseHhea: [] [
+    if (<DrvManSpec***TtfScratchGet***>(103) == 0) [ ret -3; ];
+    <DrvManSpec***TtfScratchSet***>(110, _r16(<DrvManSpec***TtfScratchGet***>(103) + 4));
+    <DrvManSpec***TtfScratchSet***>(111, _r16(<DrvManSpec***TtfScratchGet***>(103) + 6));
+    <DrvManSpec***TtfScratchSet***>(112, _r16(<DrvManSpec***TtfScratchGet***>(103) + 8));
+    ret 0;
+];
+
+// ── Parseur table maxp ────────────────────────────────────────────────────────
+
+// maxp [4..5] = numGlyphs
+rel cl _parseMaxp: [] [
+    if (<DrvManSpec***TtfScratchGet***>(108) == 0) [ ret -3; ];
+    <DrvManSpec***TtfScratchSet***>(114, _r16(<DrvManSpec***TtfScratchGet***>(108) + 4));
+    log: "TtfParser: numGlyphs=" + <DrvManSpec***TtfScratchGet***>(114);
+    ret 0;
+];
+
+// ── cmap : Unicode → Glyph ID ─────────────────────────────────────────────────
+
+// Cherche le sous-tableau cmap format 4 (platformID=3 encodingID=1, Windows Unicode BMP)
+// Retourne l'offset absolu du sous-tableau format 4, ou 0 si introuvable.
+rel cl _findCmapFormat4: [] [
+    if (<DrvManSpec***TtfScratchGet***>(104) == 0) [ ret 0; ];
+    let version:   <i32> = _r16(<DrvManSpec***TtfScratchGet***>(104));
+    let numSubtab: <i32> = _r16(<DrvManSpec***TtfScratchGet***>(104) + 2);
+    var i: <i32> = 0;
+    loop (i < numSubtab) [
+        let recOff:    <i32> = <DrvManSpec***TtfScratchGet***>(104) + 4 + (i * 8);
+        let platformID: <i32> = _r16(recOff);
+        let encodingID: <i32> = _r16(recOff + 2);
+        let subOffset:  <i32> = _r32(recOff + 4);
+        let absOff:     <i32> = <DrvManSpec***TtfScratchGet***>(104) + subOffset;
+        let fmt:        <i32> = _r16(absOff);
+        // platformID=3 encodingID=1 format=4 → Windows Unicode BMP
+        if (platformID == 3 && encodingID == 1 && fmt == 4) [
+            ret absOff;
+        ];
+        i = i + 1;
+    ];
+    // Fallback : platformID=0 (Unicode) format=4
+    i = 0;
+    loop (i < numSubtab) [
+        let recOff:     <i32> = <DrvManSpec***TtfScratchGet***>(104) + 4 + (i * 8);
+        let platformID: <i32> = _r16(recOff);
+        let subOffset:  <i32> = _r32(recOff + 4);
+        let absOff:     <i32> = <DrvManSpec***TtfScratchGet***>(104) + subOffset;
+        let fmt:        <i32> = _r16(absOff);
+        if (platformID == 0 && fmt == 4) [
+            ret absOff;
+        ];
+        i = i + 1;
+    ];
+    ret 0;
+];
+
+// Cherche un glyphID dans un sous-tableau cmap format 4.
+// Retourne le glyphID (0 = .notdef si introuvable).
+rel op GetGlyphId: [codepoint i32] [
+    let cmapOff: <i32> = _findCmapFormat4();
+    if (cmapOff == 0) [ ret 0; ];
+
+    let segCount: <i32> = _r16(cmapOff + 6) / 2;
+    let endBase:  <i32> = cmapOff + 14;
+    let startBase: <i32> = endBase + (segCount * 2) + 2;
+    let deltaBase: <i32> = startBase + (segCount * 2);
+    let rangeBase: <i32> = deltaBase + (segCount * 2);
+
+    var seg: <i32> = 0;
+    loop (seg < segCount) [
+        let endCode:   <i32> = _r16(endBase   + seg * 2);
+        let startCode: <i32> = _r16(startBase + seg * 2);
+        let delta:     <i32> = _r16(deltaBase + seg * 2);
+        let rangeOff:  <i32> = _r16(rangeBase + seg * 2);
+
+        if (codepoint >= startCode && codepoint <= endCode) [
+            if (rangeOff == 0) [
+                ret (codepoint + delta) & 0xFFFF;
+            ];
+            let glyphOff: <i32> = rangeBase + seg * 2 + rangeOff
+                                + (codepoint - startCode) * 2;
+            let gid: <i32> = _r16(glyphOff);
+            if (gid != 0) [
+                ret (gid + delta) & 0xFFFF;
+            ];
+            ret 0;
+        ];
+        seg = seg + 1;
+    ];
+    ret 0;
+];
+
+// ── loca : Glyph ID → offset dans glyf ───────────────────────────────────────
+
+rel op GetGlyfOffset: [glyphId i32] [
+    if (<DrvManSpec***TtfScratchGet***>(105) == 0 || <DrvManSpec***TtfScratchGet***>(106) == 0) [ ret -1; ];
+    if (glyphId < 0 || glyphId >= <DrvManSpec***TtfScratchGet***>(114)) [ ret -1; ];
+
+    if (<DrvManSpec***TtfScratchGet***>(113) == 0) [
+        // Format court : offsets en uint16 × 2
+        let lo: <i32> = _r16(<DrvManSpec***TtfScratchGet***>(105) + glyphId * 2) * 2;
+        let hi: <i32> = _r16(<DrvManSpec***TtfScratchGet***>(105) + (glyphId + 1) * 2) * 2;
+        if (lo == hi) [ ret -1; ];  // glyphe vide
+        ret <DrvManSpec***TtfScratchGet***>(106) + lo;
+    ];
+    // Format long : offsets en uint32
+    let lo: <i32> = _r32(<DrvManSpec***TtfScratchGet***>(105) + glyphId * 4);
+    let hi: <i32> = _r32(<DrvManSpec***TtfScratchGet***>(105) + (glyphId + 1) * 4);
+    if (lo == hi) [ ret -1; ];
+    ret <DrvManSpec***TtfScratchGet***>(106) + lo;
+];
+
+// ── hmtx : avance horizontale d'un glyphe ────────────────────────────────────
+
+// hmtx : pour glyphId < numberOfHMetrics :
+//   [glyphId * 4]     = advanceWidth (uint16)
+//   [glyphId * 4 + 2] = leftSideBearing (int16)
+// Pour glyphId >= numberOfHMetrics : advanceWidth = dernier hmtx, LSB variable
+
+
+rel cl _loadNumHMetrics: [] [
+    if (<DrvManSpec***TtfScratchGet***>(103) == 0) [ ret 0; ];
+    <DrvManSpec***TtfScratchSet***>(115, _r16(<DrvManSpec***TtfScratchGet***>(103) + 34));
+];
+
+rel op GetAdvanceWidth: [glyphId i32] [
+    if (<DrvManSpec***TtfScratchGet***>(107) == 0) [ ret <DrvManSpec***TtfScratchGet***>(109) / 2; ];
+    var idx: <i32> = glyphId;
+    if (idx >= <DrvManSpec***TtfScratchGet***>(115)) [ idx = <DrvManSpec***TtfScratchGet***>(115) - 1; ];
+    ret _r16(<DrvManSpec***TtfScratchGet***>(107) + idx * 4);
+];
+
+// ── API publique ──────────────────────────────────────────────────────────────
+
+// Load : détecte le format via WoffReader, décompresse si besoin,
+// puis parse les tables sfnt résultantes.
+// Supporte : TTF, OTF, WOFF (TTF ou OTF encapsulé), WOFF2.
+rel op Load: [data ptr, size i32] [
+    if (data == 0 || size <= 0) [ ret -1; ];
+
+    // Décoder via WoffReader (WOFF → sfnt, OTF/TTF natif → passthrough)
+    var sfntSize: <i32> = 0;
+    let sfnt: <ptr> = <std***core***self***WoffReader***Decode>(data, size);
+    sfntSize = <std***core***self***WoffReader***GetDecodedSize()>;
+    if (sfnt == 0 || sfntSize <= 0) [
+        log: "TtfParser: format non reconnu";
+        ret -2;
+    ];
+
+    <DrvManSpec***TtfGetData***>() = sfnt;
+    <DrvManSpec***TtfScratchSet***>(100, sfntSize);
+
+    let r: <i32> = _parseOffsetTable();
+    if (r != 0) [ ret r; ];
+
+    let r2: <i32> = _parseTableDirectory();
+    if (r2 != 0) [ ret r2; ];
+
+    _parseHead();
+    _parseHhea();
+    _parseMaxp();
+    _loadNumHMetrics();
+
+    // Pour OTF : initialiser le parseur CFF
+    if (<DrvManSpec***TtfScratchGet***>(116) == 2 && <DrvManSpec***TtfScratchGet***>(117) > 0) [
+        let cffResult: <i32> = <std***core***self***OtfCff***Load>(sfnt, <DrvManSpec***TtfScratchGet***>(117), <DrvManSpec***TtfScratchGet***>(118));
+        if (cffResult != 0) [
+            log: "TtfParser: echec init CFF – code " + cffResult;
+            ret cffResult;
+        ];
+    ];
+
+    log: "TtfParser: parse complet OK (format=" + <DrvManSpec***TtfScratchGet***>(116) + ")";
+    ret 0;
+];
+
+rel op GetFontFormat: [] [ ret <DrvManSpec***TtfScratchGet***>(116); ];
+
+rel op GetUnitsPerEm: [] [ ret <DrvManSpec***TtfScratchGet***>(109); ];
+rel op GetAscender:   [] [ ret <DrvManSpec***TtfScratchGet***>(110);   ];
+rel op GetDescender:  [] [ ret <DrvManSpec***TtfScratchGet***>(111);  ];
+rel op GetLineGap:    [] [ ret <DrvManSpec***TtfScratchGet***>(112);    ];
+rel op GetNumGlyphs:  [] [ ret <DrvManSpec***TtfScratchGet***>(114);  ];
+rel op GetData:       [] [ ret <DrvManSpec***TtfGetData***>();    ];
+rel op GetSize:       [] [ ret <DrvManSpec***TtfScratchGet***>(100);    ];

@@ -1,0 +1,24 @@
+# ── Configuration Cargo pour Slura OS ─────────────────────────────────────────
+#
+# Résout :
+#   LNK1181 "impossible d'ouvrir kernel32.lib"
+#   cl.exe exit code 2 (ring/fastcrypto — headers Windows SDK introuvables)
+#
+# Variables d'environnement pour le toolchain MSVC 14.51.36231 + SDK 10.0.26100.0
+
+[env]
+# Headers C/C++ — MSVC + Windows SDK (um, ucrt, shared)
+INCLUDE = "D:\\VisualS\\VC\\Tools\\MSVC\\14.51.36231\\include;C:\\Program Files (x86)\\Windows Kits\\10\\Include\\10.0.26100.0\\ucrt;C:\\Program Files (x86)\\Windows Kits\\10\\Include\\10.0.26100.0\\um;C:\\Program Files (x86)\\Windows Kits\\10\\Include\\10.0.26100.0\\shared"
+
+# Bibliothèques — MSVC CRT + Windows SDK (um, ucrt)
+LIB = "D:\\VisualS\\VC\\Tools\\MSVC\\14.51.36231\\lib\\x64;C:\\Program Files (x86)\\Windows Kits\\10\\Lib\\10.0.26100.0\\um\\x64;C:\\Program Files (x86)\\Windows Kits\\10\\Lib\\10.0.26100.0\\ucrt\\x64"
+
+[target.x86_64-pc-windows-msvc]
+rustflags = [
+    "-L", "C:\\Program Files (x86)\\Windows Kits\\10\\Lib\\10.0.26100.0\\um\\x64",
+    "-L", "C:\\Program Files (x86)\\Windows Kits\\10\\Lib\\10.0.26100.0\\ucrt\\x64",
+    "-L", "D:\\VisualS\\VC\\Tools\\MSVC\\14.51.36231\\lib\\x64",
+]
+
+[target.x86_64-unknown-uefi]
+# Pas de linker MSVC pour la cible UEFI — Rust cross-compile avec rust-lld.

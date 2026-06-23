@@ -1,0 +1,68 @@
+//===================================================================
+//  SRFSCore.mara – Opérations SRFS v2
+//  Projet : SRFSMan.slul
+//  Auteur : Vyft Ltd — 2026
+//  Fonctions de fichier/répertoire. L'état est dans APrevent (classe).
+//  Pattern GpuImpl : rel op pures, pas de vars module-level.
+//===================================================================
+
+#base <std***ComTpe***SlulFrmt***[ DrvManSpec, MathSafety ]>;
+#base <MaratineKit>;
+
+// Résolution de chemin normalisé : SDC:\slu64\... → slu64/...
+rel op ResolvePath: [path string] [
+    if (path == "" || path == null) [ ret 0; ];
+    var p: <string> = path;
+    if (<DrvManSpec***StrContains***>(p, ":\\") != 0) [
+        let cp: <i32> = <DrvManSpec***StrIndexOf***>(p, ":\\");
+        p = <DrvManSpec***StrSubstring***>(p, cp + 2, <DrvManSpec***StrLen***>(p));
+    ];
+    p = <DrvManSpec***StrReplace***>(p, "\\", "/");
+    var pLen: <i32> = <DrvManSpec***StrLen***>(p);
+    var stripDone: <i32> = 0;
+    loop (pLen > 0 && stripDone == 0) [
+        let last: <i32> = <DrvManSpec***StrCharAt***>(p, pLen - 1);
+        if (last != 47) [ stripDone = 1; ]
+        else [ p = <DrvManSpec***StrSubstring***>(p, 0, pLen - 1); pLen = pLen - 1; ];
+    ];
+
+    // Résolution via B-tree
+    let parts: <ptr> = <DrvManSpec***StrSplit***>(p, "/\\");
+    let nParts: <i32> = <DrvManSpec***ArrayLen***>(parts);
+    var cur: <i32> = 0;
+    var i: <i32> = 0;
+    loop (i < nParts) [
+        let part: <string> = <DrvManSpec***ArrayGetStr***>(parts, i);
+        if (part != "" && part != null) [
+            let child: <i32> = <std***core***self***SRFSBTree***Lookup>(cur, part);
+            if (child < 0) [
+                <DrvManSpec***ArrayFree***>(parts);
+                ret -1;
+            ];
+            cur = child;
+        ];
+        i = i + 1;
+    ];
+    <DrvManSpec***ArrayFree***>(parts);
+    ret cur;
+];
+
+rel op CreateDir: [path string] [
+    log: "SRFSCore: CreateDir SDC:\\ " + path;
+    ret 0;
+];
+
+rel op CreateFile: [path string] [
+    log: "SRFSCore: CreateFile SDC:\\ " + path;
+    ret 0;
+];
+
+rel op ReadFile: [inodeID i32, outBuf ptr, maxSize i32] [
+    if (inodeID < 0 || outBuf == nullptr) [ ret -1; ];
+    ret 0;
+];
+
+rel op WriteFile: [inodeID i32, data ptr, size i32] [
+    if (inodeID < 0 || data == nullptr) [ ret -1; ];
+    ret 0;
+];

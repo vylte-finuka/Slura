@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<RAbstractallowing xmlns="http://vyft.com/schema/abstractallowing" version="1.0">
+    <Metadata>
+        <PackageName>com.slul.srfsman</PackageName>
+        <SRID>SRID_srfsman_001</SRID>
+        <FrameworkVersion>1.0.0</FrameworkVersion>
+        <Target>arm64</Target>
+        <Description>Driver Slura File System (SRFS) — gestion de partition SDC:.</Description>
+    </Metadata>
+    <Permissions>
+        <Permission name="disk.blockio" description="Accès Block I/O UEFI pour lecture/écriture de blocs.">
+            <Required>true</Required>
+        </Permission>
+        <Permission name="filesystem.full" description="Lecture, écriture, création de fichiers et répertoires sur SDC:.">
+            <Required>true</Required>
+        </Permission>
+        <Permission name="memory.alloc" description="Allocation heap pour buffers de blocs et bitmap.">
+            <Required>true</Required>
+            <MaxBytes>16777216</MaxBytes>
+        </Permission>
+        <Permission name="mountpoint.register" description="Enregistrement du point de montage SDC: dans le registry Slura.">
+            <Required>true</Required>
+        </Permission>
+    </Permissions>
+    <Capabilities>
+        <Capability name="driver.aprevent" description="Cycle de vie APrevent."><Enabled>true</Enabled></Capability>
+        <Capability name="filesystem.srfs"  description="Format SRFS v1 — superblock, inodes, bitmap, journalisation."><Enabled>true</Enabled></Capability>
+        <Capability name="filesystem.format" description="Formatage de partition SRFS vierge."><Enabled>true</Enabled></Capability>
+    </Capabilities>
+</RAbstractallowing>

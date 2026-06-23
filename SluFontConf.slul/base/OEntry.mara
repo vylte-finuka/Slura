@@ -1,0 +1,34 @@
+//===================================================================
+//  OEntry.mara – Point d'entrée du bundle SLUL (driver)
+//  Projet : SluFontConf.slul
+//  Auteur : Vyft Ltd
+//  Licence : Proprietary – 2026
+//  Description :
+//      Initialise le bundle SLUL (pilote de polices).
+//      Obtient le PID, charge la racine driver, vérifie AuthARoot
+//      et démarre FontConf via APrevent::OnPowerOn.
+//===================================================================
+
+#base <std***core***self***[ RegistrationRoot, CaseComponentActivity ]>;
+#base <MaratineKit>;
+#include <std***gcc***arch***[ ArchitectureInfo ]>;
+
+// OEntry – point d'entrée privé du bundle SLUL
+rel cl OEntry: <[string RegistrationRoot]>t [
+
+    let ObtProcess: <[string PIDActivity]> = <MaratineKit***PIDActivity***ObtInfo>;
+    let PAccess: <[string AuthARoot]>       = <MaratineKit***AuthARoot>;
+
+    let SyncActivity: <[string CaseComponentActivity]> = ObtProcess(<MaratineKit***RenRoot>);
+
+    let RenderRoot: <[string RegistrationRoot***[ SRIDAtt, KeyReg, PAccessAuth ]]> =
+        PAccess(SyncActivity);
+
+    // Détection d'architecture cible
+    let ArchInfo: <[string ArchitectureInfo]> = <gcc***archInfo***()>;
+    log: ArchInfo;
+
+    let Architecture: <string> = ArchInfo;
+    let DrvMain: <i32> = <std***core***self***APrevent***OnPowerOn>(Architecture);
+    ret DrvMain;
+];

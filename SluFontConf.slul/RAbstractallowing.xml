@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<RAbstractallowing xmlns="http://vyft.com/schema/abstractallowing" version="1.0">
+
+    <!-- Package metadata -->
+    <Metadata>
+        <PackageName>com.slul.slufontconf</PackageName>
+        <SRID>SRID_slufontconf_001</SRID>
+        <FrameworkVersion>1.0.0</FrameworkVersion>
+        <Target>arm64</Target>
+        <Description>Driver de polices TrueType pour Slura OS — brsonomasemibold.ttf.</Description>
+    </Metadata>
+
+    <!-- Permissions -->
+    <Permissions>
+
+        <!-- Accès en lecture aux polices système -->
+        <Permission name="filesystem.read"
+                    description="Lecture du fichier TTF depuis C:\assets\fonts\.">
+            <AllowedPaths>
+                <Path>C:\assets\fonts\</Path>
+                <Path>C:\assets\</Path>
+            </AllowedPaths>
+        </Permission>
+
+        <!-- Accès mémoire pour le parseur TTF et le rastériseur -->
+        <Permission name="memory.alloc"
+                    description="Allocation heap pour données TTF et bitmaps de glyphes.">
+            <Required>true</Required>
+            <MaxBytes>8388608</MaxBytes>
+        </Permission>
+
+        <!-- Accès au framebuffer GOP pour le rendu des glyphes -->
+        <Permission name="graphics.framebuffer"
+                    description="Écriture dans le framebuffer GOP via DrvManSpec.">
+            <Required>true</Required>
+        </Permission>
+
+        <!-- Accès DrvAPIInterCon pour les fonctions font -->
+        <Permission name="driver.drvapi"
+                    description="Enregistrement des hooks FontLoad, FontGetDefault, FontGetHeight.">
+            <Required>true</Required>
+        </Permission>
+
+    </Permissions>
+
+    <!-- Capacités -->
+    <Capabilities>
+        <Capability name="driver.aprevent"
+                    description="Cycle de vie APrevent (OnPowerOn/Off/Suspend/Resume).">
+            <Enabled>true</Enabled>
+        </Capability>
+        <Capability name="font.truetype"
+                    description="Parseur TTF natif : cmap format 4, glyf, loca, hhea, hmtx.">
+            <Enabled>true</Enabled>
+        </Capability>
+        <Capability name="font.rasterizer"
+                    description="Rastériseur de glyphes scanline avec anti-aliasing 1-bit.">
+            <Enabled>true</Enabled>
+        </Capability>
+    </Capabilities>
+
+</RAbstractallowing>

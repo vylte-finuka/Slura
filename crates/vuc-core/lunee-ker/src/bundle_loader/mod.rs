@@ -42,6 +42,10 @@ pub enum BundleError {
     AllocationFailed,
     /// Le binaire natif extrait du bundle est vide.
     EmptyBinary,
+    /// Le runtime UVM n'est pas encore disponible (stub UEFI = -2).
+    NotInitialized,
+    /// execute_program a retourné un code d'erreur négatif.
+    ExecutionFailed(i32),
 }
 
 // ── Signatures C-ABI des entry-points Maratine ───────────────────────────────

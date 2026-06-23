@@ -1,0 +1,32 @@
+# Maraset – manifest SRFSMan.slul
+
+package:
+  name: base***SRFSMan
+  version: 1.0.0
+  build: 20260623-01
+
+metadata:
+  target: arm64
+  bundle: slul
+  attributes:
+    SRID: SRID_srfsman_001
+    Marav: 0.1 build 06260912-dev
+    description: |
+      Driver Slura File System (SRFS) pour Slura OS.
+      Monte la partition SRFS sur SDC:, expose l'arborescence
+        SDC:/slu64/assets/fonts/
+        SDC:/slu64/DrivRequirment/
+      Fournit CreateFile, CreateDir, ReadFile, WriteFile, ResolvePath
+      via DrvAPIInterCon. SRFSFormat initialise les nouvelles partitions.
+    slura_min: 1
+    slura_max: 5.0
+
+dependencies:
+  basecon:
+    base***example***APrevent: 1.0.0
+    base***example***OEntry:   1.0.0
+
+resources:
+  - path: RAbstractallowing.xml
+    type: xml
+    description: "Permissions driver SRFS."

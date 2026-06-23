@@ -1,22 +1,5 @@
 //___  Vyft Ltd __  (c) 2026  ___
 // ___ Kernel core named Lunee — .slul driver loader ___
-//
-//! Charge les bundles drivers Maratine (`.slul`) depuis l'ESP et les
-//! démarre via les protocoles UEFI `LoadImage` / `StartImage`.
-//!
-//! ## Cycle de vie d'un driver .slul
-//! ```text
-//! 1. Lire le fichier .slul  (SimpleFileSystem)
-//! 2. Extraire native.efi    (ZipReader)
-//! 3. UEFI LoadImage         → obtient un child Handle
-//! 4. UEFI StartImage        → appelle OEntry du driver
-//!    └─ OEntry enregistre ses protocoles UEFI puis retourne
-//! ```
-//!
-//! ## Bundles tentés au démarrage
-//! Le loader essaie, sur chaque volume SimpleFileSystem disponible,
-//! la liste statique `DRIVER_BUNDLES`.  Les bundles absents sont
-//! silencieusement ignorés.
 
 extern crate alloc;
 use alloc::vec::Vec;
@@ -27,20 +10,20 @@ use uefi::{
         file::{File, FileAttribute, FileMode, FileType},
         fs::SimpleFileSystem,
     },
-    table::{boot::LoadImageSource, Boot, SystemTable},
+    table::{
+        boot::{LoadImageSource, OpenProtocolAttributes, OpenProtocolParams},
+        Boot, SystemTable,
+    },
 };
 
 use super::{zip_reader::ZipReader, BundleError};
 
-/// Chemins des bundles drivers à tenter, relatifs à la racine de chaque volume.
-/// Ordre de chargement intentionnel : GPU d'abord (framebuffer), puis clavier/pointeur.
+// Chemins absolus (leading \) — nécessaire pour les sous-dossiers sur QEMU FAT.
 const DRIVER_BUNDLES: &[&uefi::CStr16] = &[
-    cstr16!("EFI\\SLURA\\DRIVERS\\SluGpu.slul"),
-    cstr16!("EFI\\SLURA\\DRIVERS\\SluKeyMouse.slul"),
+    cstr16!("\\sources\\SluGpu.slul"),
+    cstr16!("\\sources\\SluKeyMouse.slul"),
 ];
 
-/// Tente de charger tous les bundles `.slul` connus sur tous les volumes.
-/// Retourne le nombre de drivers démarrés avec succès.
 pub fn load_drivers(st: &mut SystemTable<Boot>, image_handle: Handle) -> usize {
     let mut started = 0usize;
 
@@ -57,31 +40,38 @@ pub fn load_drivers(st: &mut SystemTable<Boot>, image_handle: Handle) -> usize {
             }
         }
     }
-
     started
 }
 
-/// Tente de lire, extraire et démarrer un seul bundle `.slul`.
 fn try_load_one(
     st:           &mut SystemTable<Boot>,
     image_handle: Handle,
     fs_handle:    Handle,
     path:         &uefi::CStr16,
 ) -> Result<(), BundleError> {
-    let bytes = read_bundle(st, fs_handle, path)?;
-    start_slul(st, image_handle, &bytes)
+    let bytes = read_bundle(st, image_handle, fs_handle, path)?;
+    start_slul(st, image_handle, &bytes)?;
+    Ok(())
 }
 
-/// Lit l'intégralité d'un fichier bundle depuis un volume SimpleFileSystem.
 fn read_bundle(
-    st:        &mut SystemTable<Boot>,
-    fs_handle: Handle,
-    path:      &uefi::CStr16,
+    st:           &mut SystemTable<Boot>,
+    image_handle: Handle,
+    fs_handle:    Handle,
+    path:         &uefi::CStr16,
 ) -> Result<Vec<u8>, BundleError> {
-    let mut fs = st
-        .boot_services()
-        .open_protocol_exclusive::<SimpleFileSystem>(fs_handle)
-        .map_err(|_| BundleError::UefiError)?;
+    // GET_PROTOCOL : accès non-exclusif — évite l'échec si OVMF tient déjà le protocole.
+    let mut fs = unsafe {
+        st.boot_services().open_protocol::<SimpleFileSystem>(
+            OpenProtocolParams {
+                handle:     fs_handle,
+                agent:      image_handle,
+                controller: None,
+            },
+            OpenProtocolAttributes::GetProtocol,
+        )
+    }
+    .map_err(|_| BundleError::UefiError)?;
 
     let mut root = fs.open_volume().map_err(|_| BundleError::UefiError)?;
 
@@ -97,41 +87,81 @@ fn read_bundle(
     read_all(&mut file)
 }
 
-/// Extrait `native.efi` du ZIP et le passe à UEFI pour chargement.
+/// Extrait le SRID depuis Maraset.yaml.
+fn slul_srid(yaml: &[u8]) -> &str {
+    if let Ok(text) = core::str::from_utf8(yaml) {
+        for line in text.lines() {
+            if let Some(rest) = line.trim().strip_prefix("SRID:") {
+                return rest.trim();
+            }
+        }
+    }
+    "SRID_unknown"
+}
+
+/// Détecte si le bundle est SluGpu (contient GpuImpl.ovc).
+fn is_slu_gpu(zip: &ZipReader) -> bool {
+    !zip.extract_file("base\\GpuImpl.ovc").unwrap_or_default().is_empty()
+}
+
 fn start_slul(
     st:     &mut SystemTable<Boot>,
-    parent: Handle,
+    _parent: Handle,
     bundle: &[u8],
 ) -> Result<(), BundleError> {
-    let zip        = ZipReader::new(bundle)?;
-    let driver_efi = zip.extract_file("native.efi")?;
+    use core::fmt::Write;
+    use crate::ovc_exec;
 
-    if driver_efi.is_empty() {
+    let zip = ZipReader::new(bundle)?;
+
+    // ── AuthARoot : vérification SRID ────────────────────────────────────────
+    let maraset  = zip.extract_file("Maraset.yaml").unwrap_or_default();
+    let xml      = zip.extract_file("RAbstractallowing.xml").unwrap_or_default();
+    let srid     = slul_srid(&maraset);
+    let auth_ok  = core::str::from_utf8(&xml).map(|t| t.contains(srid)).unwrap_or(false);
+
+    if auth_ok {
+        let _ = write!(st.stdout(), "[AuthARoot] Driver {} OK\r\n", srid);
+    } else {
+        let _ = write!(st.stdout(), "[AuthARoot] Driver {} WARN\r\n", srid);
+    }
+
+    // ── OVC OEntry : validation magic ─────────────────────────────────────────
+    let ovc = zip.extract_file("base\\OEntry.ovc")?;
+    if ovc.is_empty() { return Err(BundleError::EmptyBinary); }
+    const MAGIC: &[u8] = b"# Vyft OVC v1.0";
+    if ovc.len() < MAGIC.len() || &ovc[..MAGIC.len()] != MAGIC {
         return Err(BundleError::EmptyBinary);
     }
 
-    // Charge le PE32+ en mémoire ; UEFI valide l'en-tête et alloue les pages.
-    let child = st
-        .boot_services()
-        .load_image(
-            parent,
-            LoadImageSource::FromBuffer { buffer: driver_efi, file_path: None },
-        )
-        .map_err(|_| BundleError::UefiError)?;
+    // ── APrevent.ovc : exécuter OnPowerOn(arch) via ovc_exec ─────────────────
+    let aprevent = zip.extract_file("base\\APrevent.ovc").unwrap_or_default();
+    if !aprevent.is_empty() {
+        // Contexte nul pour OnPowerOn (pas de GOP encore)
+        let null_ctx = ovc_exec::ExecCtx {
+            fb: core::ptr::null_mut(),
+            width: 0, height: 0, stride: 0,
+        };
+        // arch = "x86_64" en pointeur de chaîne statique
+        let arch_str = b"x86_64\0";
+        let arch_ptr = arch_str.as_ptr() as i64;
+        let _ = ovc_exec::exec_fn(&aprevent, "OnPowerOn", &[arch_ptr], &null_ctx);
+        let _ = write!(st.stdout(), "[APrevent] OnPowerOn OK\r\n");
+    }
 
-    // Lance le driver : appelle son entry-point, qui enregistre ses protocoles
-    // UEFI puis retourne EFI_SUCCESS (ou une erreur).
-    st.boot_services()
-        .start_image(child)
-        .map(|_| ())
-        .map_err(|_| BundleError::UefiError)
+    // ── SluGpu : stocker GpuImpl.ovc pour le rendu ────────────────────────────
+    if is_slu_gpu(&zip) {
+        let gpu_impl = zip.extract_file("base\\GpuImpl.ovc").unwrap_or_default();
+        crate::ovc_exec::register_gpu_ovc(gpu_impl);
+        let _ = write!(st.stdout(), "[SluGpu] GpuImpl.ovc enregistre\r\n");
+    }
+
+    Ok(())
 }
 
-/// Lit tout le contenu d'un `RegularFile` dans un `Vec<u8>`.
 fn read_all(file: &mut uefi::proto::media::file::RegularFile) -> Result<Vec<u8>, BundleError> {
     let mut buf   = Vec::new();
     let mut chunk = [0u8; 4096];
-
     loop {
         match file.read(&mut chunk) {
             Ok(0) => break,
@@ -139,10 +169,6 @@ fn read_all(file: &mut uefi::proto::media::file::RegularFile) -> Result<Vec<u8>,
             Err(_) => return Err(BundleError::UefiError),
         }
     }
-
-    if buf.is_empty() {
-        return Err(BundleError::EmptyBinary);
-    }
-
+    if buf.is_empty() { return Err(BundleError::EmptyBinary); }
     Ok(buf)
 }

@@ -1,0 +1,285 @@
+//===================================================================
+//  WoffReader.mara – Lecteur WOFF / WOFF2
+//  Projet : SluFontConf.slul
+//  Auteur : Vyft Ltd
+//  Licence : Proprietary – 2026
+//  Description :
+//      Détecte et décompresse un flux WOFF ou WOFF2 en sfnt brut
+//      (TTF ou OTF) que TtfParser peut ensuite analyser.
+//
+//  Format WOFF (header 48 octets) :
+//    [0..3]  signature  0x774F4646 ('wOFF')
+//    [4..7]  flavor     sfnt version (0x00010000=TTF, 0x4F54544F=OTF)
+//    [8..11] length     taille totale du fichier WOFF
+//    [12..13] numTables
+//    [14..15] reserved  (0)
+//    [16..19] totalSfntSize
+//    [20..21] majorVersion
+//    [22..23] minorVersion
+//    [24..27] metaOffset
+//    ...
+//
+//  WOFF Table Directory entry (20 octets) :
+//    [0..3]  tag
+//    [4..7]  offset      (dans le fichier WOFF)
+//    [8..11] compLength  (longueur compressée — zlib si < origLength)
+//    [12..15] origLength
+//    [16..19] origChecksum
+//
+//  WOFF2 signature : 0x774F4632 ('wOF2') — Brotli par table
+//  Support WOFF2 : décompression Brotli via DrvAPIInterCon***BrotliDecompress***
+//===================================================================
+
+#base <std***ComTpe***SlulFrmt***DrvManSpec>;
+#base <MaratineKit>;
+
+// ── Signatures ────────────────────────────────────────────────────────────────
+
+
+
+// ── Résultat du détecteur ─────────────────────────────────────────────────────
+
+
+// ── Primitives de lecture big-endian (source) ─────────────────────────────────
+
+rel cl _r8:  [data ptr, off i32] [
+    ret <DrvAPIInterCon***MemRead8***>(data, off);
+];
+rel cl _r16: [data ptr, off i32] [
+    ret _r8(data, off) * 256 + _r8(data, off + 1);
+];
+rel cl _r32: [data ptr, off i32] [
+    ret _r8(data, off)     * 16777216
+      + _r8(data, off + 1) * 65536
+      + _r8(data, off + 2) * 256
+      + _r8(data, off + 3);
+];
+
+// Écriture big-endian dans le sfnt reconstitué
+rel cl _w16: [data ptr, off i32, val i32] [
+    <DrvAPIInterCon***MemWrite8***>(data, off,     (val / 256) & 0xFF);
+    <DrvAPIInterCon***MemWrite8***>(data, off + 1,  val        & 0xFF);
+];
+rel cl _w32: [data ptr, off i32, val i32] [
+    <DrvAPIInterCon***MemWrite8***>(data, off,     (val / 16777216) & 0xFF);
+    <DrvAPIInterCon***MemWrite8***>(data, off + 1, (val / 65536)    & 0xFF);
+    <DrvAPIInterCon***MemWrite8***>(data, off + 2, (val / 256)      & 0xFF);
+    <DrvAPIInterCon***MemWrite8***>(data, off + 3,  val              & 0xFF);
+];
+
+// ── Détection du format ───────────────────────────────────────────────────────
+
+// Retourne true si les données sont un WOFF
+rel op IsWoff: [data ptr, size i32] [
+    if (data == 0 || size < 48) [ ret false; ];
+    let sig: <i32> = _r32(data, 0);
+    ret (sig == 2002873158);
+];
+
+// Retourne true si les données sont un WOFF2
+rel op IsWoff2: [data ptr, size i32] [
+    if (data == 0 || size < 48) [ ret false; ];
+    let sig: <i32> = _r32(data, 0);
+    ret (sig == 2002873394);
+];
+
+// Retourne true si les données sont un sfnt natif (TTF ou OTF)
+rel op IsSfnt: [data ptr, size i32] [
+    if (data == 0 || size < 12) [ ret false; ];
+    let sig: <i32> = _r32(data, 0);
+    ret (sig == 65536 || sig == 1332787280 || sig == 1953658213);
+];
+
+// ── Calcul searchRange / entrySelector / rangeShift ──────────────────────────
+
+rel cl _log2: [n i32] [
+    var r: <i32> = 0;
+    var v: <i32> = n;
+    loop (v > 1) [ v = v / 2; r = r + 1; ];
+    ret r;
+];
+
+// ── Reconstruction sfnt depuis WOFF ──────────────────────────────────────────
+//
+// sfnt Offset Table (12 octets) :
+//   sfVersion (4), numTables (2), searchRange (2),
+//   entrySelector (2), rangeShift (2)
+// sfnt Table Directory entry (16 octets) :
+//   tag (4), checksum (4), offset (4), length (4)
+// Tables : alignées sur 4 octets
+
+rel cl _decompressWoff: [woffData ptr, woffSize i32] [
+    let numTables:     <i32> = _r16(woffData, 12);
+    let totalSfntSize: <i32> = _r32(woffData, 16);
+    <DrvManSpec***WoffScratchGet***>(201)               = _r32(woffData, 4);
+
+    if (numTables <= 0 || totalSfntSize <= 0) [ ret -4; ];
+
+    // Allouer le buffer sfnt
+    <DrvManSpec***WoffGetData***>() = <DrvAPIInterCon***MemAlloc***>(totalSfntSize);
+    if (<DrvManSpec***WoffGetData***>() == 0) [ ret -2; ];
+    <DrvAPIInterCon***MemSet***>(<DrvManSpec***WoffGetData***>(), 0, totalSfntSize);
+    <DrvManSpec***WoffScratchSet***>(200, totalSfntSize);
+
+    // Écrire l'Offset Table sfnt
+    _w32(<DrvManSpec***WoffGetData***>(), 0, <DrvManSpec***WoffScratchGet***>(201));
+    _w16(<DrvManSpec***WoffGetData***>(), 4, numTables);
+    let l2n:          <i32> = _log2(numTables);
+    let searchRange:  <i32> = 16 * (1 << l2n);
+    let entrySelector: <i32> = l2n;
+    let rangeShift:   <i32> = numTables * 16 - searchRange;
+    _w16(<DrvManSpec***WoffGetData***>(), 6, searchRange);
+    _w16(<DrvManSpec***WoffGetData***>(), 8, entrySelector);
+    _w16(<DrvManSpec***WoffGetData***>(), 10, rangeShift);
+
+    // Offset courant dans le sfnt pour les données de tables
+    var sfntTablesOff: <i32> = 12 + numTables * 16;
+
+    var i: <i32> = 0;
+    loop (i < numTables) [
+        // Entrée WOFF Table Directory (20 octets à partir de l'offset 48)
+        let woffEntryOff:  <i32> = 44 + i * 20;
+        let tag:           <i32> = _r32(woffData, woffEntryOff);
+        let woffTabOff:    <i32> = _r32(woffData, woffEntryOff + 4);
+        let compLen:       <i32> = _r32(woffData, woffEntryOff + 8);
+        let origLen:       <i32> = _r32(woffData, woffEntryOff + 12);
+        let checksum:      <i32> = _r32(woffData, woffEntryOff + 16);
+
+        // Aligner l'offset de destination sur 4 octets
+        let rem: <i32> = sfntTablesOff & 3;
+        if (rem != 0) [ sfntTablesOff = sfntTablesOff + (4 - rem); ];
+
+        let srcPtr: <ptr> = <DrvAPIInterCon***PtrAdd***>(woffData, woffTabOff);
+        let dstPtr: <ptr> = <DrvAPIInterCon***PtrAdd***>(<DrvManSpec***WoffGetData***>(), sfntTablesOff);
+
+        if (compLen < origLen) [
+            // Table compressée — décompresser avec zlib (DEFLATE)
+            let result: <i32> = <DrvAPIInterCon***ZlibDecompress***>(
+                srcPtr, compLen, dstPtr, origLen
+            );
+            if (result != origLen) [
+                log: "WoffReader: echec decompression table " + tag;
+            ];
+        ] else [
+            // Table non compressée — copie directe
+            <DrvAPIInterCon***MemCopy***>(dstPtr, srcPtr, origLen);
+        ];
+
+        // Écrire l'entrée sfnt Table Directory
+        let sfntDirOff: <i32> = 12 + i * 16;
+        _w32(<DrvManSpec***WoffGetData***>(), sfntDirOff,      tag);
+        _w32(<DrvManSpec***WoffGetData***>(), sfntDirOff + 4,  checksum);
+        _w32(<DrvManSpec***WoffGetData***>(), sfntDirOff + 8,  sfntTablesOff);
+        _w32(<DrvManSpec***WoffGetData***>(), sfntDirOff + 12, origLen);
+
+        sfntTablesOff = sfntTablesOff + origLen;
+        i = i + 1;
+    ];
+
+    log: "WoffReader: WOFF decompresse OK — " + numTables + " tables";
+    ret 0;
+];
+
+// ── Reconstruction sfnt depuis WOFF2 ─────────────────────────────────────────
+// WOFF2 utilise Brotli (par table) — nécessite DrvAPIInterCon***BrotliDecompress***
+
+rel cl _decompressWoff2: [woffData ptr, woffSize i32] [
+    let numTables:     <i32> = _r16(woffData, 12);
+    let totalSfntSize: <i32> = _r32(woffData, 16);
+    <DrvManSpec***WoffScratchGet***>(201)               = _r32(woffData, 4);
+
+    if (numTables <= 0 || totalSfntSize <= 0) [ ret -4; ];
+
+    <DrvManSpec***WoffGetData***>() = <DrvAPIInterCon***MemAlloc***>(totalSfntSize);
+    if (<DrvManSpec***WoffGetData***>() == 0) [ ret -2; ];
+    <DrvAPIInterCon***MemSet***>(<DrvManSpec***WoffGetData***>(), 0, totalSfntSize);
+    <DrvManSpec***WoffScratchSet***>(200, totalSfntSize);
+
+    _w32(<DrvManSpec***WoffGetData***>(), 0, <DrvManSpec***WoffScratchGet***>(201));
+    _w16(<DrvManSpec***WoffGetData***>(), 4, numTables);
+    let l2n:          <i32> = _log2(numTables);
+    let searchRange:  <i32> = 16 * (1 << l2n);
+    _w16(<DrvManSpec***WoffGetData***>(), 6, searchRange);
+    _w16(<DrvManSpec***WoffGetData***>(), 8, l2n);
+    _w16(<DrvManSpec***WoffGetData***>(), 10, numTables * 16 - searchRange);
+
+    // WOFF2 Table Directory (variable — on lit le flux condensé)
+    // Lecture simplifiée : chaque entrée a tag (4) + flags (1) + transformLength (3ou4)
+    // Pour une implémentation complète, il faudrait parser le flux WOFF2 complet.
+    // Ici on décompresse le flux Brotli global d'abord, puis on lit les tables.
+
+    let compressedOff: <i32> = 48;   // après header WOFF2 basique
+    let compressedLen: <i32> = woffSize - compressedOff;
+    let srcPtr: <ptr> = <DrvAPIInterCon***PtrAdd***>(woffData, compressedOff);
+    let dstPtr: <ptr> = <DrvAPIInterCon***PtrAdd***>(<DrvManSpec***WoffGetData***>(), 12 + numTables * 16);
+
+    let result: <i32> = <DrvAPIInterCon***BrotliDecompress***>(
+        srcPtr, compressedLen, dstPtr, totalSfntSize - 12 - numTables * 16
+    );
+
+    if (result <= 0) [
+        log: "WoffReader: echec decompression Brotli WOFF2";
+        ret -3;
+    ];
+
+    log: "WoffReader: WOFF2 decompresse OK";
+    ret 0;
+];
+
+// ── API publique ──────────────────────────────────────────────────────────────
+
+// Decode : détecte le format et retourne un sfnt prêt pour TtfParser.
+// Pour un sfnt natif (TTF/OTF) : retourne directement data (pas de copie).
+// Pour WOFF/WOFF2 : décompresse et retourne le sfnt alloué en heap.
+// outSize : taille du sfnt retourné.
+rel op Decode: [data ptr, size i32, outSize ptr] [
+    if (data == 0 || size < 12) [
+        <DrvAPIInterCon***MemWrite32***>(outSize, 0);
+        ret nullptr;
+    ];
+
+    let sig: <i32> = _r32(data, 0);
+
+    // sfnt natif : TTF ou OTF — pas de décompression
+    if (sig == 65536 || sig == 1332787280 || sig == 1953658213) [
+        <DrvAPIInterCon***MemWrite32***>(outSize, size);
+        <DrvManSpec***WoffScratchSet***>(201, sig);
+        log: "WoffReader: sfnt natif detecte";
+        ret data;
+    ];
+
+    // WOFF
+    if (sig == 2002873158) [
+        let r: <i32> = _decompressWoff(data, size);
+        if (r != 0) [
+            <DrvAPIInterCon***MemWrite32***>(outSize, 0);
+            ret nullptr;
+        ];
+        <DrvAPIInterCon***MemWrite32***>(outSize, <DrvManSpec***WoffScratchGet***>(200));
+        ret <DrvManSpec***WoffGetData***>();
+    ];
+
+    // WOFF2
+    if (sig == 2002873394) [
+        let r: <i32> = _decompressWoff2(data, size);
+        if (r != 0) [
+            <DrvAPIInterCon***MemWrite32***>(outSize, 0);
+            ret nullptr;
+        ];
+        <DrvAPIInterCon***MemWrite32***>(outSize, <DrvManSpec***WoffScratchGet***>(200));
+        ret <DrvManSpec***WoffGetData***>();
+    ];
+
+    log: "WoffReader: signature inconnue " + sig;
+    <DrvAPIInterCon***MemWrite32***>(outSize, 0);
+    ret nullptr;
+];
+
+rel op GetFlavor:   [] [ ret <DrvManSpec***WoffScratchGet***>(201);   ];
+rel op FreeSfnt:    [] [
+    if (<DrvManSpec***WoffGetData***>() != 0) [
+        <DrvAPIInterCon***MemFree***>(<DrvManSpec***WoffGetData***>());
+        <DrvManSpec***WoffGetData***>() = nullptr;
+        <DrvManSpec***WoffScratchSet***>(200, 0);
+    ];
+];

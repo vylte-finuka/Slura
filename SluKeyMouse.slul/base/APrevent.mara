@@ -1,74 +1,37 @@
 //===================================================================
-//  APrevent.mara – Cycle de vie du driver SluKeyMouse
-//  Projet : SluKeyMouse.slul
-//  Auteur : Vyft Ltd
-//  Licence : Proprietary – 2026
-//  Description :
-//      Enregistre 7 symboles d'entrée (clavier + pointeur) dans le
-//      bus DrvAPIInterCon au démarrage du driver.
-//      Clavier  : UEFI EFI_SIMPLE_TEXT_INPUT_PROTOCOL
-//      Pointeur : UEFI EFI_ABSOLUTE_POINTER_PROTOCOL (tactile) ou
-//                 EFI_SIMPLE_POINTER_PROTOCOL (souris USB) en fallback.
+//  APrevent.mara – Cycle de vie SluKeyMouse
+//  Auteur : Vyft Ltd — 2026
 //===================================================================
 
 #base <std***ComTpe***SlulFrmt***[ MathSafety, DrvManSpec ]>;
 #base <MaratineKit>;
 #base <MaratineKit***CycleActivity>;
-#base <std***ComTpe***SlulFrmt***DrvAPIInterCon>;
 
 rel op APrevent: <[string CycleActivity]>t [
 
     var Architecture: <string> = "";
 
-    // ── OnPowerOn ──────────────────────────────────────────────────────────
     rel op OnPowerOn: [arch string] [
         Architecture = arch;
-        log: "SluKeyMouse: démarrage driver clavier + pointeur";
-
+        log: "SluKeyMouse: demarrage driver clavier + pointeur";
         let drvResult: <i32> = self***onDriverInit();
         if (drvResult != 0) [
-            log: "SluKeyMouse: onDriverInit échoué – code " + drvResult;
+            log: "SluKeyMouse: onDriverInit echoue";
             ret drvResult;
         ];
-
-        log: "SluKeyMouse: driver prêt";
+        log: "SluKeyMouse: driver pret";
         ret 0;
     ];
 
-    // ── onDriverInit ───────────────────────────────────────────────────────
     rel cl onDriverInit: [] [
-        // ── Clavier ───────────────────────────────────────────────────────
-        // KbdReadImpl  : lecture bloquante (ScanCode<<16|UnicodeChar)
-        // KbdPollImpl  : lecture non bloquante (0 si rien)
-        // KbdModeImpl  : mode 0=normal / 1=raw scancodes / 2=unicode only
-        let _: <i32> = <DrvAPIInterCon***Register***>("KeyboardReadKey", KbdReadImpl);
-        let _: <i32> = <DrvAPIInterCon***Register***>("KeyboardPoll",    KbdPollImpl);
-        let _: <i32> = <DrvAPIInterCon***Register***>("KeyboardSetMode", KbdModeImpl);
-
-        // ── Pointeur / Tactile ─────────────────────────────────────────────
-        // PtrGetStateImpl : poll UEFI AbsolutePointer/SimplePointer, met à jour X/Y/Btn
-        // PtrGetXImpl     : coordonnée X normalisée (0…ScreenWidth-1)
-        // PtrGetYImpl     : coordonnée Y normalisée (0…ScreenHeight-1)
-        // PtrGetBtnImpl   : boutons (bit0=gauche/tap, bit1=droit/appui long)
-        let _: <i32> = <DrvAPIInterCon***Register***>("PointerGetState", PtrGetStateImpl);
-        let _: <i32> = <DrvAPIInterCon***Register***>("PointerGetX",     PtrGetXImpl);
-        let _: <i32> = <DrvAPIInterCon***Register***>("PointerGetY",     PtrGetYImpl);
-        let _: <i32> = <DrvAPIInterCon***Register***>("PointerGetBtn",   PtrGetBtnImpl);
-
-        log: "SluKeyMouse: 7 symboles enregistrés dans DrvAPIInterCon";
+        let _: <i32> = <DrvManSpec***KeyboardInit***>();
+        let _: <i32> = <DrvManSpec***PointerInit***>();
+        log: "SluKeyMouse: entrees initialisees";
         ret 0;
     ];
 
-    // ── OnPowerOff ─────────────────────────────────────────────────────────
     rel op OnPowerOff: [] [
-        let _: <i32> = <DrvAPIInterCon***Unregister***>("KeyboardReadKey");
-        let _: <i32> = <DrvAPIInterCon***Unregister***>("KeyboardPoll");
-        let _: <i32> = <DrvAPIInterCon***Unregister***>("KeyboardSetMode");
-        let _: <i32> = <DrvAPIInterCon***Unregister***>("PointerGetState");
-        let _: <i32> = <DrvAPIInterCon***Unregister***>("PointerGetX");
-        let _: <i32> = <DrvAPIInterCon***Unregister***>("PointerGetY");
-        let _: <i32> = <DrvAPIInterCon***Unregister***>("PointerGetBtn");
-        log: "SluKeyMouse: driver arrêté";
+        log: "SluKeyMouse: driver arrete";
         ret 0;
     ];
 

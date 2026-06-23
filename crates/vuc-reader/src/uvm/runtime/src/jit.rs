@@ -1040,7 +1040,8 @@ impl<'a> JitMemory<'a> {
                 return Err(Error::from(std::io::ErrorKind::OutOfMemory));
             }
 
-            // Protect it.
+            // Protect it (Unix only — not available on UEFI/bare-metal).
+            #[cfg(unix)]
             libc::mprotect(ptr.cast(), size, libc::PROT_EXEC | libc::PROT_WRITE);
 
             // Convert to a slice.

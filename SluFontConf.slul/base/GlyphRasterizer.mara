@@ -1,0 +1,79 @@
+//===================================================================
+//  GlyphRasterizer.mara – Rastériseur de glyphes TrueType/OTF
+//  Projet : SluFontConf.slul
+//  Auteur : Vyft Ltd — 2026
+//  Pattern stateless (comme GpuImpl.mara) : pas de vars module-level.
+//  Dimensions du dernier glyphe via DrvManSpec***RastGetBmpW/H***.
+//===================================================================
+
+#base <std***ComTpe***SlulFrmt***[ DrvManSpec, MathSafety ]>;
+#base <MaratineKit>;
+
+rel op RasterizeGlyph: [glyfData ptr, pixelSize i32] [
+    if (glyfData == nullptr || pixelSize <= 0) [ ret nullptr; ];
+
+    let nContours: <i32> = <DrvManSpec***PtrReadI16At***>(glyfData, 0);
+    let xMin:  <i32> = <DrvManSpec***PtrReadI16At***>(glyfData, 2);
+    let yMin:  <i32> = <DrvManSpec***PtrReadI16At***>(glyfData, 4);
+    let xMax:  <i32> = <DrvManSpec***PtrReadI16At***>(glyfData, 6);
+    let yMax:  <i32> = <DrvManSpec***PtrReadI16At***>(glyfData, 8);
+
+    let upm:   <i32> = <DrvManSpec***FontGetUnitsPerEm***>();
+    let gu:    <i32> = yMax - yMin;
+    if (gu <= 0) [ ret nullptr; ];
+
+    let s1000: <i32> = (pixelSize * 1000) / gu;
+    let bmpW:  <i32> = <MathSafety***ClampI32***>(((xMax - xMin) * s1000) / 1000 + 2, 1, 256);
+    let bmpH:  <i32> = <MathSafety***ClampI32***>(((yMax - yMin) * s1000) / 1000 + 2, 1, 256);
+
+    let bmp:   <ptr> = <DrvAPIInterCon***MemAlloc***>(bmpW * bmpH, 0, 4);
+    if (bmp == nullptr) [ ret nullptr; ];
+    <DrvAPIInterCon***MemSet***>(bmp, 0, bmpW * bmpH);
+    <DrvManSpec***RastSetDims***>(bmpW, bmpH);
+
+    if (nContours < 0) [
+        <DrvAPIInterCon***MemSet***>(bmp, 200, bmpW * bmpH);
+        ret bmp;
+    ];
+
+    var off: <i32> = 10;
+    var nPts: <i32> = <DrvManSpec***PtrRead16At***>(glyfData, off + (nContours - 1) * 2) + 1;
+    off = off + nContours * 2;
+    let instrLen: <i32> = <DrvManSpec***PtrRead16At***>(glyfData, off);
+    off = off + 2 + instrLen;
+
+    var pt: <i32> = 0;
+    loop (pt < nPts) [
+        let flag: <i32> = <DrvManSpec***PtrRead8At***>(glyfData, off);
+        let onCurve: <i32> = flag & 1;
+        let pxX: <i32> = <MathSafety***ClampI32***>(((0 - xMin) * s1000) / 1000, 0, bmpW - 1);
+        let pxY: <i32> = <MathSafety***ClampI32***>(bmpH - 1 - ((0 - yMin) * s1000) / 1000, 0, bmpH - 1);
+        if (onCurve != 0) [
+            <DrvManSpec***PtrWrite8At***>(bmp, pxY * bmpW + pxX, 255);
+        ];
+        off = off + 1;
+        pt = pt + 1;
+    ];
+    ret bmp;
+];
+
+rel op GetLastBmpW: [] [ ret <DrvManSpec***RastGetBmpW***>(); ];
+rel op GetLastBmpH: [] [ ret <DrvManSpec***RastGetBmpH***>(); ];
+
+rel op DrawGlyphAt: [fbPtr ptr, stride i32, x i32, y i32,
+                     bmpData ptr, bmpW i32, bmpH i32, fg i32, bg i32] [
+    if (fbPtr == nullptr || bmpData == nullptr) [ ret 0; ];
+    var row: <i32> = 0;
+    loop (row < bmpH) [
+        var col: <i32> = 0;
+        loop (col < bmpW) [
+            let alpha: <i32> = <DrvManSpec***PtrRead8At***>(bmpData, row * bmpW + col);
+            var color: <i32> = bg;
+            if (alpha > 127) [ color = fg; ];
+            <DrvManSpec***PtrWrite32At***>(fbPtr, ((y + row) * stride + x + col) * 4, color);
+            col = col + 1;
+        ];
+        row = row + 1;
+    ];
+    ret 0;
+];

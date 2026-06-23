@@ -21,6 +21,7 @@
                 "build",
                 "-p",
                 "lunee-ker",
+                "--lib",
                 "--target",
                 "x86_64-unknown-uefi",
                 "--release"
@@ -33,18 +34,18 @@
         // 0️⃣➊  Copy the built .efi to the expected location for the bootloader
         // -------------------------------------------------
         {
-            "label": "2️⃣ copy: lunee-ker.efi",
+            "label": "2️⃣ copy: lunee-ker.efi → slr_clk_bt input",
             "type": "process",
             "command": "cmd",
             "args": [
                 "/c",
                 "copy",
                 "${workspaceFolder}\\target\\x86_64-unknown-uefi\\release\\lunee-ker.efi",
-                "${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\boot.efi",
+                "${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\lunee-ker.efi",
                 "/Y"
             ],
             "options": { "cwd": "${workspaceFolder}" },
-            "dependsOn": ["lld-link: create boot.efi", "cargo: build lunee-ker"],
+            "dependsOn": ["4️⃣ lld-link: create slr_clk_bt.efi", "1️⃣ cargo: build lunee-ker"],
             "group": "build",
             "problemMatcher": []
         },
@@ -80,10 +81,30 @@
         },
 
         // -------------------------------------------------
-        // 2️⃣  Linkage → boot.efi (UEFI application) avec lld-link
+        // Build vuc-platform en staticlib (fournit slura_mgc_execute, etc.)
+        // Les symboles platform_bridge sont liés depuis cette lib.
         // -------------------------------------------------
         {
-            "label": "4️⃣ lld-link: create boot.efi",
+            "label": "cargo: build vuc-platform lib",
+            "type": "process",
+            "command": "cargo",
+            "args": [
+                "build",
+                "-p", "vuc-platform",
+                "--lib",
+                "--target", "x86_64-pc-windows-msvc",
+                "--release"
+            ],
+            "options": { "cwd": "${workspaceFolder}" },
+            "group": "build",
+            "problemMatcher": ["$rustc"]
+        },
+        // -------------------------------------------------
+        // Linkage → slr_clk_bt.efi avec vuc-platform staticlib
+        // vuc_platform.lib fournit les symboles platform_bridge.
+        // -------------------------------------------------
+        {
+            "label": "4️⃣ lld-link: create slr_clk_bt.efi",
             "type": "process",
             "command": "D:/VisualS/VC/Tools/Llvm/x64/bin/lld-link.exe",
             "args": [
@@ -92,14 +113,62 @@
                 "booter.obj",
                 "efi_manager.obj",
                 "/WHOLEARCHIVE:${workspaceFolder}\\target\\x86_64-unknown-uefi\\release\\liblunee_ker.a",
-                "/OUT:boot.efi",
+                "/WHOLEARCHIVE:${workspaceFolder}\\target\\x86_64-pc-windows-msvc\\release\\libvuc_platform.a",
+                "/OUT:slr_clk_bt.efi",
                 "/SUBSYSTEM:EFI_APPLICATION",
-                "/ENTRY:efi_main",          // <-- le symbole exporté par le wrapper C++
-                "/ALIGN:0x1000",            // alignement page (recommandé)
-                "/IGNORE:4099"              // ignore warnings sur imports non résolus (UEFI)
+                "/ENTRY:efi_main",
+                "/ALIGN:0x1000",
+                "/IGNORE:4099",
+                "/IGNORE:4217"
             ],
             "options": { "cwd": "${workspaceFolder}/slr_clk_bt/x64/amd64" },
-            "dependsOn": [ "clang: compile efi_manager.cpp" ],
+            "dependsOn": [
+                "3️⃣ clang: compile efi_manager.cpp",
+                "cargo: build vuc-platform lib"
+            ],
+            "group": "build",
+            "problemMatcher": []
+        },
+        // -----------------------------------------------------------------
+        // Compilation du sélecteur de démarrage → BOOTX64.EFI
+        // Rôle : équivalent de bootmgfw.efi — affiche un menu et charge
+        //        \slr_clk_bt.efi (le bootloader Slura réel).
+        // -----------------------------------------------------------------
+        {
+            "label": "clang: compile boot_selector.cpp",
+            "type": "process",
+            "command": "D:/VisualS/VC/Tools/Llvm/x64/bin/clang.exe",
+            "args": [
+                "-c",
+                "-std=c++23",
+                "-O2",
+                "-target", "x86_64-unknown-windows",
+                "-fno-stack-protector",
+                "-fshort-wchar",
+                "-mno-red-zone",
+                "boot_selector.cpp",
+                "-o", "boot_selector.obj"
+            ],
+            "options": { "cwd": "${workspaceFolder}/slr_clk_bt/x64/amd64" },
+            "group": "build",
+            "problemMatcher": [ "$msCompile" ]
+        },
+        {
+            "label": "lld-link: create BOOTX64.EFI (selector)",
+            "type": "process",
+            "command": "D:/VisualS/VC/Tools/Llvm/x64/bin/lld-link.exe",
+            "args": [
+                "/NOLOGO",
+                "/MACHINE:X64",
+                "boot_selector.obj",
+                "/OUT:BOOTX64.EFI",
+                "/SUBSYSTEM:EFI_APPLICATION",
+                "/ENTRY:efi_selector_main",
+                "/ALIGN:0x1000",
+                "/IGNORE:4099"
+            ],
+            "options": { "cwd": "${workspaceFolder}/slr_clk_bt/x64/amd64" },
+            "dependsOn": [ "clang: compile boot_selector.cpp" ],
             "group": "build",
             "problemMatcher": []
         },
@@ -107,16 +176,30 @@
         // -------------------------------------------------
         // 3️⃣  Création de l’image FAT32 contenant BOOTX64.EFI
         // -------------------------------------------------
+        // -----------------------------------------------------------------
+        // Structure ESP / ISO :
+        //
+        //   esp/
+        //   ├── slr_clk_bt.efi       ← bootloader Slura (à la racine, comme bootmgr.efi)
+        //   └── EFI/
+        //       └── BOOT/
+        //           └── BOOTX64.EFI  ← sélecteur UEFI (charge \slr_clk_bt.efi)
+        //
+        // UEFI charge BOOTX64.EFI → menu → LoadImage(\slr_clk_bt.efi) → kernel Lunée
+        // -----------------------------------------------------------------
         {
             "label": "5️⃣ make: esp image (FAT32)",
             "type": "process",
             "command": "C:\\Windows\\System32\\cmd.exe",
             "args": [
                 "/c",
-                "mkdir esp && mkdir esp\\EFI && mkdir esp\\EFI\\BOOT && copy boot.efi esp\\EFI\\BOOT\\BOOTX64.EFI"
+                "mkdir esp 2>nul & mkdir esp\\EFI 2>nul & mkdir esp\\EFI\\BOOT 2>nul & copy /Y BOOTX64.EFI esp\\EFI\\BOOT\\BOOTX64.EFI & copy /Y slr_clk_bt.efi esp\\slr_clk_bt.efi"
             ],
             "options": { "cwd": "${workspaceFolder}/slr_clk_bt/x64/amd64" },
-        "dependsOn": [ "copy: lunee-ker.efi" ],
+            "dependsOn": [
+                "2️⃣ copy: lunee-ker.efi → slr_clk_bt input",
+                "lld-link: create BOOTX64.EFI (selector)"
+            ],
             "group": "none",
             "problemMatcher": []
         },
@@ -261,8 +344,8 @@
         {
             "label": "marai new: SluGpu.slul",
             "type": "process",
-            "command": "marai",
-            "args": [ "new", "SluGpu.slul", "--arch", "x64" ],
+            "command": "powershell.exe",
+            "args": [ "-NoProfile", "-Command", "marai new SluGpu.slul" ],
             "options": { "cwd": "${workspaceFolder}" },
             "group": "none",
             "presentation": { "reveal": "always", "panel": "shared" },
@@ -271,8 +354,8 @@
         {
             "label": "marai new: SluKeyMouse.slul",
             "type": "process",
-            "command": "marai",
-            "args": [ "new", "SluKeyMouse.slul", "--arch", "x64" ],
+            "command": "powershell.exe",
+            "args": [ "-NoProfile", "-Command", "marai new SluKeyMouse.slul" ],
             "options": { "cwd": "${workspaceFolder}" },
             "group": "none",
             "presentation": { "reveal": "always", "panel": "shared" },
@@ -280,15 +363,25 @@
         },
 
         // -----------------------------------------------------------------
-        // Prépare les dossiers SLURA dans l'ESP
+        // Prépare la structure ISO (calquée sur Windows) :
+        //
+        //   esp/
+        //   ├── slr_clk_bt.efi       ← bootloader à la racine (comme bootmgr.efi)
+        //   ├── HelloSlura.marep     ← application à la racine (comme setup.exe)
+        //   ├── sources/
+        //   │   ├── SluGpu.slul      ← drivers (comme \sources\ dans l'ISO Windows)
+        //   │   └── SluKeyMouse.slul
+        //   └── EFI/
+        //       └── BOOT/
+        //           └── BOOTX64.EFI  ← sélecteur UEFI (comme bootmgfw.efi)
         // -----------------------------------------------------------------
         {
-            "label": "make: ESP SLURA dirs",
+            "label": "make: ESP sources dir",
             "type": "process",
             "command": "cmd",
             "args": [
                 "/c",
-                "mkdir \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\EFI\\SLURA\\DRIVERS\" 2>nul & mkdir \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\EFI\\SLURA\\HOME\" 2>nul"
+                "mkdir \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\sources\" 2>nul & exit /b 0"
             ],
             "options": { "cwd": "${workspaceFolder}" },
             "group": "build",
@@ -296,22 +389,18 @@
         },
 
         // -----------------------------------------------------------------
-        // Build des drivers .slul — sortie directe dans l'ESP
-        // marai build <projet> -O --arch=x64
-        //             --out-dir <esp>/EFI/SLURA/DRIVERS
+        // Build drivers → esp\sources\  (comme \sources\ dans l'ISO Windows)
         // -----------------------------------------------------------------
         {
             "label": "marai build: SluGpu.slul",
             "type": "process",
-            "command": "marai",
+            "command": "powershell.exe",
             "args": [
-                "build", "SluGpu.slul",
-                "-O",
-                "--arch=x64",
-                "--out-dir=${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\EFI\\SLURA\\DRIVERS"
+                "-NoProfile", "-Command",
+                "marai build SluGpu.slul -O --arch=x64 \"--out-dir=${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\sources\""
             ],
             "options": { "cwd": "${workspaceFolder}" },
-            "dependsOn": [ "make: ESP SLURA dirs" ],
+            "dependsOn": [ "make: ESP sources dir" ],
             "group": "build",
             "presentation": { "reveal": "always", "panel": "shared" },
             "problemMatcher": []
@@ -319,15 +408,13 @@
         {
             "label": "marai build: SluKeyMouse.slul",
             "type": "process",
-            "command": "marai",
+            "command": "powershell.exe",
             "args": [
-                "build", "SluKeyMouse.slul",
-                "-O",
-                "--arch=x64",
-                "--out-dir=${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\EFI\\SLURA\\DRIVERS"
+                "-NoProfile", "-Command",
+                "marai build SluKeyMouse.slul -O --arch=x64 \"--out-dir=${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\sources\""
             ],
             "options": { "cwd": "${workspaceFolder}" },
-            "dependsOn": [ "make: ESP SLURA dirs" ],
+            "dependsOn": [ "make: ESP sources dir" ],
             "group": "build",
             "presentation": { "reveal": "always", "panel": "shared" },
             "problemMatcher": []
@@ -335,15 +422,13 @@
         {
             "label": "marai build: HelloSlura.marep",
             "type": "process",
-            "command": "marai",
+            "command": "powershell.exe",
             "args": [
-                "build", "HelloSlura.marep",
-                "-O",
-                "--arch=x64",
-                "--out-dir=${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\EFI\\SLURA\\HOME"
+                "-NoProfile", "-Command",
+                "marai build HelloSlura.marep -O --arch=x64 \"--out-dir=${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\""
             ],
             "options": { "cwd": "${workspaceFolder}" },
-            "dependsOn": [ "make: ESP SLURA dirs" ],
+            "dependsOn": [ "make: ESP sources dir" ],
             "group": "build",
             "presentation": { "reveal": "always", "panel": "shared" },
             "problemMatcher": []
@@ -356,8 +441,8 @@
         {
             "label": "marai check: HelloSlura.marep",
             "type": "process",
-            "command": "marai",
-            "args": [ "check", "HelloSlura.marep", "-O", "--json" ],
+            "command": "powershell.exe",
+            "args": [ "-NoProfile", "-Command", "marai check HelloSlura.marep -O --json" ],
             "options": { "cwd": "${workspaceFolder}" },
             "group": "test",
             "presentation": { "reveal": "always", "panel": "shared", "clear": true },
@@ -366,8 +451,8 @@
         {
             "label": "marai check: SluGpu.slul",
             "type": "process",
-            "command": "marai",
-            "args": [ "check", "SluGpu.slul", "-O", "--json" ],
+            "command": "powershell.exe",
+            "args": [ "-NoProfile", "-Command", "marai check SluGpu.slul -O --json" ],
             "options": { "cwd": "${workspaceFolder}" },
             "group": "test",
             "presentation": { "reveal": "always", "panel": "shared", "clear": true },
@@ -376,66 +461,67 @@
         {
             "label": "marai check: SluKeyMouse.slul",
             "type": "process",
-            "command": "marai",
-            "args": [ "check", "SluKeyMouse.slul", "-O", "--json" ],
+            "command": "powershell.exe",
+            "args": [ "-NoProfile", "-Command", "marai check SluKeyMouse.slul -O --json" ],
             "options": { "cwd": "${workspaceFolder}" },
             "group": "test",
             "presentation": { "reveal": "always", "panel": "shared", "clear": true },
             "problemMatcher": []
         },
+        // ── Build all drivers (tâche parallèle rapide) ─────────────────────────
         {
-            "label": "🔍 marai audit: all drivers",
+            "label": "🔨 build all drivers",
             "dependsOn": [
-                "marai check: SluGpu.slul",
-                "marai check: SluKeyMouse.slul",
-                "marai check: HelloSlura.marep"
+                "marai build: SluGpu.slul",
+                "marai build: SluKeyMouse.slul",
+                "marai build: SluFontConf.slul",
+                "marai build: SRFSMan.slul",
+                "marai build: HelloSlura.marep"
             ],
-            "group": "test",
+            "dependsOrder": "parallel",
+            "group": "build",
             "problemMatcher": []
         },
 
         // -----------------------------------------------------------------
-        // Packaging SLIN — Slura Image Neutral
+        // SLIN — Slura Image Neutral  (≡ sources\install.wim / install.esd)
         // =================================================================
-        // Format SLIN : équivalent WIM/ESD pour Slura OS.
+        // Le SLIN est l'IMAGE SYSTÈME de Slura OS, pas une copie de l'ESP.
+        // Il se place dans esp\sources\install.slin (comme install.wim).
         //
-        // Structure du booter.slin :
+        // Structure finale de l'ISO :
+        //   esp\sources\install.slin   ← image OS  (VIDE pour l'instant)
+        //   esp\sources\SluGpu.slul    ← drivers
+        //   esp\sources\SluKeyMouse.slul
+        //   esp\HelloSlura.marep       ← app racine
+        //   esp\slr_clk_bt.efi         ← bootloader
+        //   esp\EFI\BOOT\BOOTX64.EFI   ← sélecteur
+        //
+        // ⚠️  PLACEHOLDER — install.slin est vide car Slura OS n'a pas
+        //     encore d'image système complète.
+        //     Sera rempli quand le système de fichiers Slura sera défini :
+        //       - Maratine runtime (.mar)
+        //       - Bundles système (.slul + .marep de base)
+        //       - Registre SRID
+        //
+        // Format SLIN futur :
         //   [4 B]  Magic      "SLIN"
         //   [4 B]  Version    0x00010000
-        //   [4 B]  Flags      0x00000001 = bootable
-        //   [XML]  Manifest   OS / kernel / build / arch
-        //   [data] Sections   ESP capturé (BOOTX64.EFI + SluGpu + SluKeyMouse)
-        //
-        // Commande : marai image create
-        //   --source  répertoire ESP à capturer
-        //   --output  fichier .slin de sortie
-        //   --os      nom de l'OS  (métadonnée manifest)
-        //   --kernel  nom du kernel
-        //   --version version de build
-        //   --arch    architecture cible
-        //   --format  slin  (format Slura Image Neutral)
+        //   [4 B]  Flags      0x00000001 = bootable | 0x00000002 = compressed
+        //   [XML]  Manifest   OS / kernel / build / arch / index list
+        //   [data] Index 1 → image système Slura OS (filesystem capturé)
         // -----------------------------------------------------------------
         {
-            "label": "marai image: create booter.slin",
+            "label": "marai image: create install.slin (placeholder)",
             "type": "process",
-            "command": "marai",
+            "command": "powershell.exe",
             "args": [
-                "image", "create",
-                "--source",  "${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp",
-                "--output",  "${workspaceFolder}\\booter.slin",
-                "--os",      "SluraOS",
-                "--kernel",  "Lunee",
-                "--version", "0.1.0",
-                "--arch",    "x64",
-                "--format",  "slin"
+                "-NoProfile", "-Command",
+                "marai slin init \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\sources\\install.slin\" --name \"Slura OS\" --os-version \"1.0.0\" --arch arm64"
             ],
             "options": { "cwd": "${workspaceFolder}" },
-            "dependsOn": [
-                "5️⃣ make: esp image (FAT32)",
-                "marai build: SluGpu.slul",
-                "marai build: SluKeyMouse.slul"
-            ],
-            "group": "build",
+            "dependsOn": [ "make: ESP sources dir" ],
+            "group": "none",
             "presentation": { "reveal": "always", "panel": "shared" },
             "problemMatcher": []
         },
@@ -445,16 +531,15 @@
         // =================================================================
         // Structure interne identique à l'ESP et au SLIN :
         //
-        //   booter.iso
+        //   booter.iso  (structure calquée sur Windows ISO)
+        //   ├── slr_clk_bt.efi          ← bootloader Slura (comme bootmgr.efi)
+        //   ├── HelloSlura.marep        ← application (comme setup.exe)
+        //   ├── sources/
+        //   │   ├── SluGpu.slul         ← drivers (comme \sources\install.wim)
+        //   │   └── SluKeyMouse.slul
         //   └── EFI/
-        //       ├── BOOT/
-        //       │   └── BOOTX64.EFI          ← kernel Lunee
-        //       └── SLURA/
-        //           ├── DRIVERS/
-        //           │   ├── SluGpu.slul
-        //           │   └── SluKeyMouse.slul
-        //           └── HOME/
-        //               └── home.marep
+        //       └── BOOT/
+        //           └── BOOTX64.EFI     ← sélecteur UEFI (comme EFI\BOOT\bootmgfw.efi)
         //
         // Outil : mkisofs (MSYS2 — pacman -S mkisofs)
         //   -R              Rock Ridge (noms longs Linux)
@@ -470,17 +555,223 @@
         // Utilisation VMware :
         //   ajouter booter.iso comme lecteur CD/DVD dans la VM
         // -----------------------------------------------------------------
+        // =================================================================
+        // MARATINE — Drivers supplémentaires
+        // SluFontConf.slul (polices TTF/OTF/WOFF) · SRFSMan.slul (SRFS)
+        // =================================================================
+
+        // -----------------------------------------------------------------
+        // Initialisation (une seule fois)
+        // -----------------------------------------------------------------
+        {
+            "label": "marai new: SluFontConf.slul",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": [ "-NoProfile", "-Command", "marai new SluFontConf.slul" ],
+            "options": { "cwd": "${workspaceFolder}" },
+            "group": "none",
+            "presentation": { "reveal": "always", "panel": "shared" },
+            "problemMatcher": []
+        },
+        {
+            "label": "marai new: SRFSMan.slul",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": [ "-NoProfile", "-Command", "marai new SRFSMan.slul" ],
+            "options": { "cwd": "${workspaceFolder}" },
+            "group": "none",
+            "presentation": { "reveal": "always", "panel": "shared" },
+            "problemMatcher": []
+        },
+
+        // -----------------------------------------------------------------
+        // Build drivers → esp\sources\
+        // -----------------------------------------------------------------
+        {
+            "label": "marai build: SluFontConf.slul",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": [
+                "-NoProfile", "-Command",
+                "marai build SluFontConf.slul -O --arch=x64 \"--out-dir=${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\sources\""
+            ],
+            "options": { "cwd": "${workspaceFolder}" },
+            "dependsOn": [ "make: ESP sources dir" ],
+            "group": "build",
+            "presentation": { "reveal": "always", "panel": "shared" },
+            "problemMatcher": []
+        },
+        {
+            "label": "marai build: SRFSMan.slul",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": [
+                "-NoProfile", "-Command",
+                "marai build SRFSMan.slul -O --arch=x64 \"--out-dir=${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\sources\""
+            ],
+            "options": { "cwd": "${workspaceFolder}" },
+            "dependsOn": [ "make: ESP sources dir" ],
+            "group": "build",
+            "presentation": { "reveal": "always", "panel": "shared" },
+            "problemMatcher": []
+        },
+
+        // -----------------------------------------------------------------
+        // Préparation de l'arborescence ESP étendue :
+        //   esp/boot/font/                  ← driver polices accessible au boot
+        //   esp/SDC/slu64/assets/fonts/     ← police TTF sur SRFS simulé
+        //   esp/SDC/slu64/DrivRequirment/   ← tous les drivers SRFS
+        // -----------------------------------------------------------------
+        {
+            "label": "make: ESP boot/font dir",
+            "type": "process",
+            "command": "cmd",
+            "args": [
+                "/c",
+                "mkdir \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\boot\" 2>nul & mkdir \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\boot\\font\" 2>nul & exit /b 0"
+            ],
+            "options": { "cwd": "${workspaceFolder}" },
+            "group": "build",
+            "problemMatcher": []
+        },
+        {
+            "label": "make: SRFS dirs",
+            "type": "process",
+            "command": "cmd",
+            "args": [
+                "/c",
+                "mkdir \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\SDC\" 2>nul & mkdir \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\SDC\\slu64\" 2>nul & mkdir \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\SDC\\slu64\\assets\" 2>nul & mkdir \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\SDC\\slu64\\assets\\fonts\" 2>nul & mkdir \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\SDC\\slu64\\DrivRequirment\" 2>nul & exit /b 0"
+            ],
+            "options": { "cwd": "${workspaceFolder}" },
+            "group": "build",
+            "problemMatcher": []
+        },
+
+        // -----------------------------------------------------------------
+        // Copie SluFontConf.slul → esp/boot/font/
+        // -----------------------------------------------------------------
+        {
+            "label": "copy: SluFontConf.slul → boot/font",
+            "type": "process",
+            "command": "cmd",
+            "args": [
+                "/c",
+                "copy /Y \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\sources\\SluFontConf.slul\" \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\boot\\font\\SluFontConf.slul\""
+            ],
+            "options": { "cwd": "${workspaceFolder}" },
+            "dependsOn": [ "marai build: SluFontConf.slul", "make: ESP boot/font dir" ],
+            "group": "build",
+            "problemMatcher": []
+        },
+
+        // -----------------------------------------------------------------
+        // Copie police brsonomasemibold.ttf → SDC/slu64/assets/fonts/
+        // -----------------------------------------------------------------
+        {
+            "label": "copy: brsonomasemibold.ttf → SRFS assets",
+            "type": "process",
+            "command": "cmd",
+            "args": [
+                "/c",
+                "copy /Y \"${workspaceFolder}\\slura_disk_part_installation\\assets\\fonts\\brsonomasemibold.ttf\" \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\SDC\\slu64\\assets\\fonts\\brsonomasemibold.ttf\""
+            ],
+            "options": { "cwd": "${workspaceFolder}" },
+            "dependsOn": [ "make: SRFS dirs" ],
+            "group": "build",
+            "problemMatcher": []
+        },
+
+        // -----------------------------------------------------------------
+        // Copie tous les drivers → SDC/slu64/DrivRequirment/
+        // -----------------------------------------------------------------
+        {
+            "label": "copy: all drivers → SRFS DrivRequirment",
+            "type": "process",
+            "command": "cmd",
+            "args": [
+                "/c",
+                "copy /Y \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\sources\\SluGpu.slul\" \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\SDC\\slu64\\DrivRequirment\\SluGpu.slul\" & copy /Y \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\sources\\SluKeyMouse.slul\" \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\SDC\\slu64\\DrivRequirment\\SluKeyMouse.slul\" & copy /Y \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\sources\\SluFontConf.slul\" \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\SDC\\slu64\\DrivRequirment\\SluFontConf.slul\" & copy /Y \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\sources\\SRFSMan.slul\" \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\SDC\\slu64\\DrivRequirment\\SRFSMan.slul\""
+            ],
+            "options": { "cwd": "${workspaceFolder}" },
+            "dependsOn": [
+                "marai build: SluGpu.slul",
+                "marai build: SluKeyMouse.slul",
+                "marai build: SluFontConf.slul",
+                "marai build: SRFSMan.slul",
+                "make: SRFS dirs"
+            ],
+            "group": "build",
+            "problemMatcher": []
+        },
+
+        // -----------------------------------------------------------------
+        // Audit qualité SluFontConf + SRFSMan
+        // -----------------------------------------------------------------
+        {
+            "label": "marai check: SluFontConf.slul",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": [ "-NoProfile", "-Command", "marai check SluFontConf.slul -O --json" ],
+            "options": { "cwd": "${workspaceFolder}" },
+            "group": "test",
+            "presentation": { "reveal": "always", "panel": "shared", "clear": true },
+            "problemMatcher": []
+        },
+        {
+            "label": "marai check: SRFSMan.slul",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": [ "-NoProfile", "-Command", "marai check SRFSMan.slul -O --json" ],
+            "options": { "cwd": "${workspaceFolder}" },
+            "group": "test",
+            "presentation": { "reveal": "always", "panel": "shared", "clear": true },
+            "problemMatcher": []
+        },
+        {
+            "label": "🔍 marai audit: all drivers",
+            "dependsOn": [
+                "marai check: SluGpu.slul",
+                "marai check: SluKeyMouse.slul",
+                "marai check: HelloSlura.marep",
+                "marai check: SluFontConf.slul",
+                "marai check: SRFSMan.slul"
+            ],
+            "group": "test",
+            "problemMatcher": []
+        },
+
+        // -----------------------------------------------------------------
+        // ISO bootable UEFI — booter.iso (structure étendue avec SRFS)
+        //
+        //   booter.iso
+        //   ├── slr_clk_bt.efi
+        //   ├── HelloSlura.marep
+        //   ├── boot/
+        //   │   └── font/
+        //   │       └── SluFontConf.slul    ← driver polices boot
+        //   ├── sources/
+        //   │   ├── SluGpu.slul
+        //   │   ├── SluKeyMouse.slul
+        //   │   ├── SluFontConf.slul
+        //   │   └── SRFSMan.slul
+        //   ├── SDC/                        ← SRFS simulé dans l'ISO
+        //   │   └── slu64/
+        //   │       ├── assets/fonts/
+        //   │       │   └── brsonomasemibold.ttf
+        //   │       └── DrivRequirment/
+        //   │           ├── SluGpu.slul
+        //   │           ├── SluKeyMouse.slul
+        //   │           ├── SluFontConf.slul
+        //   │           └── SRFSMan.slul
+        //   └── EFI/BOOT/BOOTX64.EFI
+        // -----------------------------------------------------------------
         {
             "label": "make: booter.iso",
             "type": "process",
             "command": "mkisofs",
             "args": [
                 "-o",  "${workspaceFolder}\\booter.iso",
-                "-R",
-                "-J",
-                "-d",
-                "-N",
-                "-joliet-long",
+                "-R", "-J", "-d", "-N", "-joliet-long",
                 "-eltorito-alt-boot",
                 "-e", "EFI/BOOT/BOOTX64.EFI",
                 "-no-emul-boot",
@@ -491,7 +782,13 @@
                 "5️⃣ make: esp image (FAT32)",
                 "marai build: SluGpu.slul",
                 "marai build: SluKeyMouse.slul",
-                "marai build: HelloSlura.marep"
+                "marai build: HelloSlura.marep",
+                "marai build: SluFontConf.slul",
+                "marai build: SRFSMan.slul",
+                "copy: SluFontConf.slul → boot/font",
+                "copy: brsonomasemibold.ttf → SRFS assets",
+                "copy: all drivers → SRFS DrivRequirment",
+                "marai image: create install.slin (placeholder)"
             ],
             "group": "build",
             "presentation": { "reveal": "always", "panel": "shared" },
@@ -500,14 +797,13 @@
 
         // -----------------------------------------------------------------
         // Pipeline complet Slura OS
-        // kernel Rust + drivers Maratine + app + SLIN + ISO + VMware
+        // kernel Rust + tous les drivers Maratine + SRFS + polices + ISO
         // -----------------------------------------------------------------
         {
-            "label": "🚀 Full Slura build (kernel + drivers + SLIN + ISO)",
+            "label": "🚀 Full Slura build (kernel + drivers + ISO)",
             "dependsOn": [
-                "marai image: create booter.slin",
                 "make: booter.iso",
-                "6️⃣ vmware: run UEFI test"
+                "marai image: create install.slin (placeholder)"
             ],
             "group": { "kind": "build", "isDefault": true },
             "problemMatcher": []

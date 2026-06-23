@@ -1,0 +1,84 @@
+//===================================================================
+//  APrevent.mara – Cycle de vie + état police SluFontConf
+//  Projet : SluFontConf.slul
+//  Auteur : Vyft Ltd — 2026
+//  L'état de la police (fontPtr, fontSize) est stocké comme vars
+//  de classe — pattern prouvé par DrvInstance.mara.
+//===================================================================
+
+#base <std***ComTpe***SlulFrmt***[ MathSafety, DrvManSpec ]>;
+#base <MaratineKit>;
+#base <MaratineKit***CycleActivity>;
+
+rel op APrevent: <[string CycleActivity]>t [
+
+    var Architecture: <string> = "";
+    var _fontPtr:     <ptr>    = nullptr;
+    var _fontSize:    <i32>    = 0;
+    var _fontReady:   <i32>    = 0;
+
+    // ── Cycle de vie ──────────────────────────────────────────────────────────
+
+    rel op OnPowerOn: [arch string] [
+        Architecture = arch;
+        log: "SluFontConf: demarrage driver polices TrueType/OTF/WOFF";
+        let r: <i32> = self***onDriverInit();
+        if (r != 0) [
+            log: "SluFontConf: onDriverInit echoue – code " + r;
+            ret r;
+        ];
+        log: "SluFontConf: driver pret";
+        ret 0;
+    ];
+
+    rel cl onDriverInit: [] [
+        let path: <string> = "SDC:\\slu64\\assets\\fonts\\brsonomasemibold.ttf";
+        let size: <i32> = <DrvManSpec***FSGetSize***>(path);
+        if (size <= 0) [
+            log: "SluFontConf: police introuvable – " + path;
+            ret -1;
+        ];
+        let buf: <ptr> = <DrvAPIInterCon***MemAlloc***>(size, 0, 4);
+        if (buf == nullptr) [
+            log: "SluFontConf: allocation echouee";
+            ret -2;
+        ];
+        let r: <i32> = <DrvManSpec***FSRead***>(path, buf, size);
+        if (r != size) [
+            <DrvAPIInterCon***MemFree***>(buf, 0);
+            log: "SluFontConf: lecture echouee";
+            ret -3;
+        ];
+        _fontPtr   = buf;
+        _fontSize  = size;
+        _fontReady = 1;
+        log: "SluFontConf: brsonomasemibold.ttf charge (" + size + " octets)";
+        ret 0;
+    ];
+
+    rel op OnPowerOff: [] [
+        if (_fontPtr != nullptr) [
+            <DrvAPIInterCon***MemFree***>(_fontPtr, 0);
+            _fontPtr   = nullptr;
+            _fontSize  = 0;
+            _fontReady = 0;
+        ];
+        log: "SluFontConf: driver arrete";
+        ret 0;
+    ];
+
+    rel op OnSuspend: [] [ log: "SluFontConf: suspension"; ret 0; ];
+    rel op OnResume:  [] [ log: "SluFontConf: reprise";    ret 0; ];
+
+    // ── API police ────────────────────────────────────────────────────────────
+
+    rel op GetFontPtr:  [] [ ret _fontPtr;   ];
+    rel op GetFontSize: [] [ ret _fontSize;  ];
+    rel op IsReady:     [] [ ret _fontReady; ];
+
+    rel op DrvFontGetDefault: [] [
+        ret _fontPtr;
+    ];
+
+    rel op DrvFontGetHeight: [fontHandle i32] [ ret 16; ];
+];

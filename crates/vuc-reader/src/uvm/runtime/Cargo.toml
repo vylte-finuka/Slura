@@ -40,18 +40,16 @@ cranelift-frontend = { version = "0.99", optional = true }
 cranelift-jit = { version = "0.99", optional = true }
 cranelift-native = { version = "0.99", optional = true }
 cranelift-module = { version = "0.99", optional = true }
-chrono.workspace = true
 hashbrown = { version = "0.15", features = ["serde"] }
 sha3.workspace = true
-hex.workspace = true
+hex = { workspace = true, features = ["alloc"] }
 rand.workspace = true
 i256 = "0.2.3"
-tracing.workspace = true
+tracing    = { workspace = true }
+chrono     = { workspace = true }
 primitive-types = { workspace = true }
 goblin = "0.10.4"
 tiny-keccak = { version = "2.0.2", features = ["keccak"] }
-vuc-storage = { version = "0.1.0", path = "../../../../vuc-storage" }
-
 
 [dev-dependencies]
 libc = { version = "0.2" }
@@ -62,6 +60,7 @@ hex = { workspace = true }
 [features]
 default = ["std"]
 std = ["dep:time", "dep:libc", "combine/std"]
+storage = []
 cranelift = [
     "dep:cranelift-codegen",
     "dep:cranelift-frontend",

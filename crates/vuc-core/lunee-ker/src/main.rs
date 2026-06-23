@@ -7,6 +7,7 @@ pub(crate) mod kernel_runtime;
 pub mod hal_manager;
 mod ressources_manager;
 pub mod bundle_loader;
+pub mod platform_bridge;
 
 use uefi::{entry, CStr16, Status, Handle, table::{Boot, SystemTable}};
 use crate::kernel_runtime::KernelRuntime;

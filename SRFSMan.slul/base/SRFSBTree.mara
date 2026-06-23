@@ -1,0 +1,167 @@
+//===================================================================
+//  SRFSBTree.mara – B+ Tree SRFS v2 (pattern GpuImpl — sans vars module)
+//  Auteur : Vyft Ltd — 2026
+//  Pattern identique à GpuImpl.mara : pas de vars module-level,
+//  tout via DrvManSpec extension functions, valeurs littérales inline.
+//===================================================================
+
+#base <std***ComTpe***SlulFrmt***DrvManSpec>;
+#base <MaratineKit>;
+
+// Validation nom : tout sauf 0x00 et 0x2F '/'
+rel op ValidateName: [name string] [
+    if (name == "" || name == null) [ ret false; ];
+    let len: <i32> = <DrvManSpec***StrLen***>(name);
+    if (len == 0 || len > 32767) [ ret false; ];
+    var i: <i32> = 0;
+    loop (i < len) [
+        let b: <i32> = <DrvManSpec***StrCharAt***>(name, i);
+        if (b == 0 || b == 47) [ ret false; ];
+        i = i + 1;
+    ];
+    ret true;
+];
+
+// Lookup : cherche name dans l'arbre B+ enraciné à rootBlock.
+// Retourne InodeID (>=0) ou -1.
+// Structure nœud : [0..3]=magic 1112493381, [4..7]=type, [8..11]=count,
+//   [12..15]=maxKeys. Slots depuis offset 32, chacun 24 octets :
+//   [0..3]=inodeId, [8..11]=nameOff, [12..15]=nameLen, [16..23]=child.
+rel op Lookup: [rootBlock i32, name string] [
+    if (ValidateName(name) == false) [ ret -1; ];
+    let blockSize: <i32> = <DrvManSpec***DiskGetBlockSize***>();
+    let buf: <ptr> = <DrvAPIInterCon***MemAlloc***>(blockSize);
+    if (buf == nullptr) [ ret -1; ];
+
+    var cur:    <i32> = rootBlock;
+    var found:  <i32> = -1;
+
+    loop (cur > 0) [
+        let byteOff: <i32> = cur * blockSize;
+        let r: <i32> = <DrvManSpec***DiskRead***>(byteOff, buf, blockSize);
+        if (r != blockSize) [ cur = 0; ] else [
+            let magic: <i32> = <DrvManSpec***PtrRead32At***>(buf, 0);
+            if (magic != 1112493381) [ cur = 0; ] else [
+                let count: <i32> = <DrvManSpec***PtrRead32At***>(buf, 8);
+                var lo: <i32> = 0;
+                var hi: <i32> = count - 1;
+                var idx: <i32> = -1;
+                loop (lo <= hi) [
+                    let mid: <i32> = (lo + hi) / 2;
+                    let soff: <i32> = 32 + mid * 24;
+                    let noff: <i32> = <DrvManSpec***PtrRead32At***>(buf, soff + 8);
+                    let nlen: <i32> = <DrvManSpec***PtrRead32At***>(buf, soff + 12);
+                    let sptr: <ptr> = <DrvManSpec***PtrOffset***>(buf, noff);
+                    let ilen: <i32> = <DrvManSpec***StrLen***>(name);
+                    let cmpN: <i32> = <DrvManSpec***MinI32***>(nlen, ilen);
+                    let cmp:  <i32> = <DrvManSpec***MemNCmp***>(sptr, name, cmpN);
+                    var diff: <i32> = cmp;
+                    if (diff == 0) [ diff = nlen - ilen; ];
+                    if (diff == 0) [ idx = mid; lo = hi + 1; ];
+                    if (diff != 0) [
+                        if (diff < 0) [ lo = mid + 1; ]
+                        else          [ hi = mid - 1; ];
+                    ];
+                ];
+                if (idx >= 0) [
+                    let soff: <i32> = 32 + idx * 24;
+                    found = <DrvManSpec***PtrRead32At***>(buf, soff);
+                    cur = 0;
+                ] else [
+                    let nodeType: <i32> = <DrvManSpec***PtrRead32At***>(buf, 4);
+                    if (nodeType == 1) [
+                        let extraOff: <i32> = 32 + count * 24 + 16;
+                        cur = <DrvManSpec***PtrRead32At***>(buf, extraOff);
+                    ] else [
+                        cur = 0;
+                    ];
+                ];
+            ];
+        ];
+    ];
+    <DrvAPIInterCon***MemFree***>(buf);
+    ret found;
+];
+
+// Insert : ajoute (name, inodeId) dans la feuille rootBlock.
+rel op Insert: [rootBlock i32, name string, inodeId i32] [
+    if (ValidateName(name) == false) [ ret -4; ];
+    let blockSize: <i32> = <DrvManSpec***DiskGetBlockSize***>();
+    let buf: <ptr> = <DrvAPIInterCon***MemAlloc***>(blockSize);
+    if (buf == nullptr) [ ret -4; ];
+
+    let byteOff: <i32> = rootBlock * blockSize;
+    let r: <i32> = <DrvManSpec***DiskRead***>(byteOff, buf, blockSize);
+    if (r != blockSize) [ <DrvAPIInterCon***MemFree***>(buf); ret -4; ];
+
+    let count:   <i32> = <DrvManSpec***PtrRead32At***>(buf, 8);
+    let maxKeys: <i32> = <DrvManSpec***PtrRead32At***>(buf, 12);
+    if (count >= maxKeys) [ <DrvAPIInterCon***MemFree***>(buf); ret -2; ];
+
+    // Position d'insertion
+    var pos: <i32> = 0;
+    var done: <i32> = 0;
+    loop (pos < count && done == 0) [
+        let soff: <i32> = 32 + pos * 24;
+        let noff: <i32> = <DrvManSpec***PtrRead32At***>(buf, soff + 8);
+        let nlen: <i32> = <DrvManSpec***PtrRead32At***>(buf, soff + 12);
+        let sptr: <ptr> = <DrvManSpec***PtrOffset***>(buf, noff);
+        let ilen: <i32> = <DrvManSpec***StrLen***>(name);
+        let cmpN: <i32> = <DrvManSpec***MinI32***>(nlen, ilen);
+        let cmp:  <i32> = <DrvManSpec***MemNCmp***>(sptr, name, cmpN);
+        var diff: <i32> = cmp;
+        if (diff == 0) [ diff = nlen - ilen; ];
+        if (diff >= 0) [ done = 1; ] else [ pos = pos + 1; ];
+    ];
+
+    // Décaler slots
+    var k: <i32> = count - 1;
+    loop (k >= pos) [
+        let src: <ptr> = <DrvManSpec***PtrOffset***>(buf, 32 + k * 24);
+        let dst: <ptr> = <DrvManSpec***PtrOffset***>(buf, 32 + (k + 1) * 24);
+        <DrvManSpec***MemCopy***>(dst, src, 24);
+        k = k - 1;
+    ];
+
+    // Zone noms
+    let dataBase: <i32> = 32 + maxKeys * 24;
+    var nameArea: <i32> = dataBase;
+    var j: <i32> = 0;
+    loop (j < pos) [
+        nameArea = nameArea + <DrvManSpec***PtrRead32At***>(buf, 32 + j * 24 + 12) + 1;
+        j = j + 1;
+    ];
+    let nameLen: <i32> = <DrvManSpec***StrLen***>(name);
+    let nameDst: <ptr> = <DrvManSpec***PtrOffset***>(buf, nameArea);
+    <DrvManSpec***StrCopyN***>(nameDst, name, nameLen);
+
+    let nsoff: <i32> = 32 + pos * 24;
+    <DrvManSpec***PtrWrite32At***>(buf, nsoff,      inodeId);
+    <DrvManSpec***PtrWrite32At***>(buf, nsoff + 8,  nameArea);
+    <DrvManSpec***PtrWrite32At***>(buf, nsoff + 12, nameLen);
+    <DrvManSpec***PtrWrite32At***>(buf, nsoff + 16, 0);
+    <DrvManSpec***PtrWrite32At***>(buf, 8, count + 1);
+
+    let w: <i32> = <DrvManSpec***DiskWrite***>(byteOff, buf, blockSize);
+    <DrvAPIInterCon***MemFree***>(buf);
+    if (w != blockSize) [ ret -4; ];
+    ret 0;
+];
+
+// InitNode : crée un nœud B-tree vide sur le disque.
+rel op InitNode: [blockNum i32, nodeType i32] [
+    let blockSize: <i32> = <DrvManSpec***DiskGetBlockSize***>();
+    let buf: <ptr> = <DrvAPIInterCon***MemAlloc***>(blockSize);
+    if (buf == nullptr) [ ret -4; ];
+    <DrvAPIInterCon***MemSet***>(buf, 0, blockSize);
+    let maxKeys: <i32> = (blockSize - 32) / 28;
+    <DrvManSpec***PtrWrite32At***>(buf, 0,  1112493381);
+    <DrvManSpec***PtrWrite32At***>(buf, 4,  nodeType);
+    <DrvManSpec***PtrWrite32At***>(buf, 8,  0);
+    <DrvManSpec***PtrWrite32At***>(buf, 12, maxKeys);
+    let byteOff: <i32> = blockNum * blockSize;
+    let w: <i32> = <DrvManSpec***DiskWrite***>(byteOff, buf, blockSize);
+    <DrvAPIInterCon***MemFree***>(buf);
+    if (w != blockSize) [ ret -4; ];
+    ret 0;
+];

@@ -1,0 +1,413 @@
+//===================================================================
+//  OtfCff.mara – Parseur CFF (Compact Font Format) pour OpenType
+//  Projet : SluFontConf.slul
+//  Auteur : Vyft Ltd
+//  Licence : Proprietary – 2026
+//  Description :
+//      Analyse la table CFF d'un fichier OTF (sfVersion = 'OTTO').
+//      Structures CFF supportées :
+//        - Header (4 octets : major, minor, hdrSize, offSize)
+//        - Index (Name, Top DICT, String, Global Subr, Charstrings)
+//        - Top DICT : opérateurs 17 (CharStrings), 15 (charset),
+//                     18 (Private), 4 (Weight), 5 (FontBBox)
+//        - Charset : format 0 (glyphIDs[nGlyphs-1])
+//                    format 1 (ranges SID/count)
+//                    format 2 (ranges SID/count uint16)
+//        - Charstrings Type 2 : interpréteur de stack simplifié
+//          (rmoveto, hmoveto, vmoveto, rlineto, hlineto, vlineto,
+//           rrcurveto, hhcurveto, vvcurveto, endchar, return, callsubr)
+//      Le rastériseur reçoit les points via des callbacks vers
+//      GlyphRasterizer via DrvAPIInterCon.
+//===================================================================
+
+#base <std***ComTpe***SlulFrmt***DrvManSpec>;
+#base <MaratineKit>;
+
+// DrvManSpec extension functions pour l'etat CFF (stocke dans le kernel).
+// Equivalent de GopGetFrameBuffer pour SluGpu.
+// rel cl _r8/r16/r32 fetches cffBase via DrvManSpec***CffGetBase***.
+
+
+
+// ── Codes de retour ───────────────────────────────────────────────────────────
+
+
+// ── État interne ──────────────────────────────────────────────────────────────
+
+
+// ── Primitives de lecture ─────────────────────────────────────────────────────
+
+rel cl _r8:  [off i32] [ ret <DrvManSpec***PtrRead8At***>(<DrvManSpec***CffGetBase***>(), off); ];
+rel cl _r16: [off i32] [
+    ret _r8(off) * 256 + _r8(off + 1);
+];
+rel cl _r32: [off i32] [
+    ret _r8(off)     * 16777216
+      + _r8(off + 1) * 65536
+      + _r8(off + 2) * 256
+      + _r8(off + 3);
+];
+
+// Lit un offset de taille variable (offSize ∈ {1,2,3,4}) en big-endian
+rel cl _roff: [off i32, offSize i32] [
+    if (offSize == 1) [ ret _r8(off); ];
+    if (offSize == 2) [ ret _r16(off); ];
+    if (offSize == 3) [
+        ret _r8(off) * 65536
+          + _r8(off + 1) * 256
+          + _r8(off + 2);
+    ];
+    ret _r32(off);
+];
+
+// ── Parseur d'Index CFF ───────────────────────────────────────────────────────
+//
+// Index CFF :
+//   [0..1]  count    (uint16)
+//   [2]     offSize  (1..4)
+//   [3..3+(count+1)*offSize-1]  offsets (1-based)
+//   données
+// Si count == 0 : index vide (2 octets seulement)
+// Retourne la taille totale de l'index en octets.
+
+rel cl _indexSize: [baseOff i32] [
+    let count: <i32> = _r16(baseOff);
+    if (count == 0) [ ret 2; ];
+    let offSz:  <i32> = _r8(baseOff + 2);
+    let lastOff: <i32> = _roff(baseOff + 3 + count * offSz, offSz);
+    ret 3 + (count + 1) * offSz + lastOff - 1;
+];
+
+// Retourne l'offset absolu (dans _cffBase) du i-ième élément de l'index.
+rel cl _indexElemOff: [baseOff i32, i i32] [
+    let offSz:    <i32> = _r8(baseOff + 2);
+    let dataStart: <i32> = baseOff + 3 + (_r16(baseOff) + 1) * offSz;
+    let elemOff:  <i32> = _roff(baseOff + 3 + i * offSz, offSz);
+    ret dataStart + elemOff - 1;
+];
+
+rel cl _indexElemLen: [baseOff i32, i i32] [
+    let offSz: <i32> = _r8(baseOff + 2);
+    let off0:  <i32> = _roff(baseOff + 3 +  i    * offSz, offSz);
+    let off1:  <i32> = _roff(baseOff + 3 + (i+1) * offSz, offSz);
+    ret off1 - off0;
+];
+
+// ── Parseur Top DICT ──────────────────────────────────────────────────────────
+//
+// Opérateurs numériques CFF (encodage Type 2 DICT) :
+//   b0 ∈ [32..246] → val = b0 - 139
+//   b0 ∈ [247..250] → val = (b0-247)*256 + b1 + 108
+//   b0 ∈ [251..254] → val = -(b0-251)*256 - b1 - 108
+//   b0 == 28 → int16 big-endian
+//   b0 == 29 → int32 big-endian
+// Opérateurs CFF importants :
+//   15 = charset offset
+//   17 = CharStrings offset
+//   18 = Private (size, offset)
+
+rel cl _dictReadNum: [off i32] [
+    let b0: <i32> = _r8(off);
+    if (b0 >= 32 && b0 <= 246) [
+        <DrvManSpec***CffScratchSet***>(12, b0 - 139);
+        ret 1;
+    ];
+    if (b0 >= 247 && b0 <= 250) [
+        let b1: <i32> = _r8(off + 1);
+        <DrvManSpec***CffScratchSet***>(12, (b0 - 247) * 256 + b1 + 108);
+        ret 2;
+    ];
+    if (b0 >= 251 && b0 <= 254) [
+        let b1: <i32> = _r8(off + 1);
+        <DrvManSpec***CffScratchSet***>(12, 0 - ((b0 - 251) * 256 + b1 + 108));
+        ret 2;
+    ];
+    if (b0 == 28) [
+        <DrvManSpec***CffScratchSet***>(12, _r16(off + 1));
+        ret 3;
+    ];
+    if (b0 == 29) [
+        <DrvManSpec***CffScratchSet***>(12, _r32(off + 1));
+        ret 5;
+    ];
+    // Opérateur — ne consume pas
+    <DrvManSpec***CffScratchSet***>(12, 0);
+    ret 0;
+];
+
+
+rel cl _initStack: [] [ <DrvManSpec***CffScratchSet***>(11, 0); ];
+
+rel cl _push: [val i32] [
+    let sp: <i32> = <DrvManSpec***CffScratchGet***>(11);
+    if (sp >= 48) [ ret 0; ];
+    <DrvManSpec***CffScratchSet***>(13 + sp, val);
+    <DrvManSpec***CffScratchSet***>(11, sp + 1);
+    ret 0;
+];
+
+rel cl _pop: [] [
+    let sp2: <i32> = <DrvManSpec***CffScratchGet***>(11) - 1;
+    if (sp2 < 0) [ ret 0; ];
+    <DrvManSpec***CffScratchSet***>(11, sp2);
+    ret <DrvManSpec***CffScratchGet***>(13 + sp2);
+];
+
+rel cl _get: [i i32] [
+    if (i < 0 || i >= <DrvManSpec***CffScratchGet***>(11)) [ ret 0; ];
+    ret <DrvManSpec***CffScratchGet***>(13 + i);
+];
+
+// Parse un DICT CFF entre les offsets [start, end[
+rel cl _parseDict: [start i32, end i32, isTopDict bool] [
+    _initStack();
+    var off: <i32> = start;
+    loop (off < end) [
+        let b0: <i32> = _r8(off);
+
+        // Nombre
+        if ((b0 >= 28 && b0 <= 30) || b0 >= 32) [
+            let adv: <i32> = _dictReadNum(off);
+            var num: <i32> = <DrvManSpec***CffScratchGet***>(12);
+            if (adv > 0) [
+                _push(num);
+                off = off + adv;
+            ] else [
+                off = off + 1;  // opérateur inconnu
+            ];
+        ] else [
+            // Opérateur
+            var opcode: <i32> = b0;
+            var skip:   <i32> = 1;
+
+            if (b0 == 12) [  // opérateur deux octets (escape)
+                opcode = 1200 + _r8(off + 1);
+                skip = 2;
+            ];
+
+            if (isTopDict) [
+                // charset offset (op 15)
+                if (opcode == 15 && <DrvManSpec***CffScratchGet***>(11) >= 1) [
+                    // stocké dans TtfParser via callback
+                    let val: <i32> = _get(0);
+                    <DrvAPIInterCon***CffSetCharsetOff***>(val);
+                    <DrvManSpec***CffScratchSet***>(11, 0);
+                ];
+                // CharStrings offset (op 17)
+                if (opcode == 17 && <DrvManSpec***CffScratchGet***>(11) >= 1) [
+                    <DrvManSpec***CffScratchSet***>(1, _get(0));
+                    <DrvManSpec***CffScratchSet***>(11, 0);
+                ];
+                // Private DICT size + offset (op 18)
+                if (opcode == 18 && <DrvManSpec***CffScratchGet***>(11) >= 2) [
+                    <DrvManSpec***CffScratchSet***>(6, _get(0));
+                    <DrvManSpec***CffScratchSet***>(5, _get(1));
+                    <DrvManSpec***CffScratchSet***>(11, 0);
+                ];
+            ] else [
+                // Private DICT
+                // defaultWidthX (op 20)
+                if (opcode == 20 && <DrvManSpec***CffScratchGet***>(11) >= 1) [
+                    <DrvManSpec***CffScratchSet***>(7, _get(0)); <DrvManSpec***CffScratchSet***>(11, 0);
+                ];
+                // nominalWidthX (op 21)
+                if (opcode == 21 && <DrvManSpec***CffScratchGet***>(11) >= 1) [
+                    <DrvManSpec***CffScratchSet***>(8, _get(0)); <DrvManSpec***CffScratchSet***>(11, 0);
+                ];
+                // Subrs offset (op 19)
+                if (opcode == 19 && <DrvManSpec***CffScratchGet***>(11) >= 1) [
+                    <DrvManSpec***CffScratchGet***>(10) < DrvManSpec***CffScratchGet***>(5 + _get(0));
+                    <DrvManSpec***CffScratchSet***>(11, 0);
+                ];
+            ];
+
+            off = off + skip;
+            <DrvManSpec***CffScratchSet***>(11, 0);
+        ];
+    ];
+        
+];
+
+// ── Charstring Type 2 — interpréteur ─────────────────────────────────────────
+//
+// État du tracé courant — passé au GlyphRasterizer via callbacks
+
+rel cl _execCharstring: [data ptr, len i32] [
+    _initStack();
+    var off:   <i32> = 0;
+    var cx:    <i32> = 0;    // position courante x
+    var cy:    <i32> = 0;
+    var xMin:  <i32> = 32767;
+    var xMax:  <i32> = -32768;
+    var yMin:  <i32> = 32767;
+    var yMax:  <i32> = -32768;
+    var ended: <bool> = false;
+
+    loop (ended == 0 && off < len) [
+        let b0: <i32> = <DrvAPIInterCon***MemRead8***>(data, off);
+
+        // Nombre
+        if ((b0 >= 28 && b0 <= 30) || b0 >= 32) [
+            let adv: <i32> = _dictReadNum(off);
+            var num: <i32> = <DrvManSpec***CffScratchGet***>(12);
+            if (adv > 0) [ _push(num); off = off + adv; ]
+            else          [ off = off + 1; ];
+        ] else [
+            // Opérateur Type 2
+            var opcode: <i32> = b0;
+            var skip: <i32> = 1;
+            if (b0 == 12) [ opcode = 1200 + <DrvAPIInterCon***MemRead8***>(data, off + 1); skip = 2; ];
+            off = off + skip;
+
+            // rmoveto (21)
+            if (opcode == 21) [
+                let dy: <i32> = _pop();
+                let dx: <i32> = _pop();
+                cx = cx + dx; cy = cy + dy;
+                <DrvAPIInterCon***CffMoveTo***>(cx, cy);
+                <DrvManSpec***CffScratchSet***>(11, 0);
+            ];
+            // hmoveto (22)
+            if (opcode == 22) [
+                cx = cx + _pop();
+                <DrvAPIInterCon***CffMoveTo***>(cx, cy);
+                <DrvManSpec***CffScratchSet***>(11, 0);
+            ];
+            // vmoveto (4)
+            if (opcode == 4) [
+                cy = cy + _pop();
+                <DrvAPIInterCon***CffMoveTo***>(cx, cy);
+                <DrvManSpec***CffScratchSet***>(11, 0);
+            ];
+            // rlineto (5)
+            if (opcode == 5) [
+                var i: <i32> = 0;
+                loop (i + 1 < <DrvManSpec***CffScratchGet***>(11)) [
+                    cx = cx + _get(i);
+                    cy = cy + _get(i + 1);
+                    <DrvAPIInterCon***CffLineTo***>(cx, cy);
+                    i = i + 2;
+                ];
+                <DrvManSpec***CffScratchSet***>(11, 0);
+            ];
+            // hlineto (6) — alterne h/v
+            if (opcode == 6) [
+                var i: <i32> = 0;
+                loop (i < <DrvManSpec***CffScratchGet***>(11)) [
+                    if ((i & 1) == 0) [ cx = cx + _get(i); ]
+                    else              [ cy = cy + _get(i); ];
+                    <DrvAPIInterCon***CffLineTo***>(cx, cy);
+                    i = i + 1;
+                ];
+                <DrvManSpec***CffScratchSet***>(11, 0);
+            ];
+            // vlineto (7) — alterne v/h
+            if (opcode == 7) [
+                var i: <i32> = 0;
+                loop (i < <DrvManSpec***CffScratchGet***>(11)) [
+                    if ((i & 1) == 0) [ cy = cy + _get(i); ]
+                    else              [ cx = cx + _get(i); ];
+                    <DrvAPIInterCon***CffLineTo***>(cx, cy);
+                    i = i + 1;
+                ];
+                <DrvManSpec***CffScratchSet***>(11, 0);
+            ];
+            // rrcurveto (8) — groupes de 6 : dx1,dy1,dx2,dy2,dx3,dy3
+            if (opcode == 8) [
+                var i: <i32> = 0;
+                loop (i + 5 < <DrvManSpec***CffScratchGet***>(11)) [
+                    let cx1: <i32> = cx + _get(i);
+                    let cy1: <i32> = cy + _get(i + 1);
+                    let cx2: <i32> = cx1 + _get(i + 2);
+                    let cy2: <i32> = cy1 + _get(i + 3);
+                    cx = cx2 + _get(i + 4);
+                    cy = cy2 + _get(i + 5);
+                    <DrvAPIInterCon***CffCurveTo***>(cx1, cy1, cx2, cy2, cx, cy);
+                    i = i + 6;
+                ];
+                <DrvManSpec***CffScratchSet***>(11, 0);
+            ];
+            // endchar (14)
+            if (opcode == 14) [
+                ended = true;
+                <DrvAPIInterCon***CffEndChar***>();
+                <DrvManSpec***CffScratchSet***>(11, 0);
+            ];
+            // width implicite : si <DrvManSpec***CffScratchGet***>(11) > attendu avant rmoveto/hmoveto/vmoveto
+            // (géré par les opérateurs ci-dessus — on vide <DrvManSpec***CffScratchGet***>(11) en trop)
+        ];
+    ];
+        
+];
+
+// ── API publique ──────────────────────────────────────────────────────────────
+
+// Load : initialise le parseur CFF à partir de l'offset de la table CFF
+// dans le sfnt. cffOff = offset absolu dans le sfnt. cffLen = taille.
+rel op Load: [sfntData ptr, cffOff i32, cffLen i32] [
+    <DrvManSpec***CffSetBase***>(<DrvAPIInterCon***PtrAdd***>(sfntData, cffOff));
+    <DrvManSpec***CffSetSize***>(cffLen);
+    if (sfntData == nullptr || cffOff <= 0) [ ret -6; ];
+
+    // CFF Header (4 octets)
+    let major: <i32> = _r8(0);
+    if (major != 1 && major != 2) [
+        log: "OtfCff: version CFF inconnue " + major;
+        ret -1;
+    ];
+    let hdrSize: <i32> = _r8(2);
+
+    // Index Name (après header)
+    let nameIdxOff: <i32> = hdrSize;
+    let nameIdxSz:  <i32> = _indexSize(nameIdxOff);
+
+    // Index Top DICT (après Name Index)
+    let topDictOff: <i32> = nameIdxOff + nameIdxSz;
+    let topDictSz:  <i32> = _indexSize(topDictOff);
+
+    // Index String (après Top DICT)
+    let strIdxOff:  <i32> = topDictOff + topDictSz;
+    let strIdxSz:   <i32> = _indexSize(strIdxOff);
+
+    // Index Global Subr (après String)
+    <DrvManSpec***CffScratchSet***>(9, strIdxOff + strIdxSz);
+
+    // Lire le Top DICT du premier font
+    let tdElemOff: <i32> = _indexElemOff(topDictOff, 0);
+    let tdElemLen: <i32> = _indexElemLen(topDictOff, 0);
+    _parseDict(tdElemOff, tdElemOff + tdElemLen, true);
+
+    // Charstrings Index
+    if (<DrvManSpec***CffScratchGet***>(1) == 0) [
+        log: "OtfCff: pas d'index CharStrings";
+        ret -3;
+    ];
+    <DrvManSpec***CffScratchSet***>(2, _r16(<DrvManSpec***CffScratchGet***>(1)));
+    <DrvManSpec***CffScratchSet***>(3, _r8(<DrvManSpec***CffScratchGet***>(1) + 2));
+    <DrvManSpec***CffScratchGet***>(4) < DrvManSpec***CffScratchGet***>(1 + 3 + (<DrvManSpec***CffScratchGet***>(2) + 1) * <DrvManSpec***CffScratchGet***>(3));
+
+    // Lire le Private DICT
+    if (<DrvManSpec***CffScratchGet***>(5) > 0 && <DrvManSpec***CffScratchGet***>(6) > 0) [
+        _parseDict(<DrvManSpec***CffScratchGet***>(5), <DrvManSpec***CffScratchGet***>(5) + <DrvManSpec***CffScratchGet***>(6), false);
+    ];
+
+    log: "OtfCff: " + <DrvManSpec***CffScratchGet***>(2) + " charstrings, defaultWidth=" + <DrvManSpec***CffScratchGet***>(7);
+    ret 0;
+];
+
+// ExecGlyph : exécute le charstring d'un glyphe (glyphId).
+// Appelle les callbacks CffMoveTo/CffLineTo/CffCurveTo/CffEndChar.
+rel op ExecGlyph: [glyphId i32] [
+    if (glyphId < 0 || glyphId >= <DrvManSpec***CffScratchGet***>(2)) [ ret -5; ];
+    let elemOff: <i32> = _indexElemOff(<DrvManSpec***CffScratchGet***>(1), glyphId);
+    let elemLen: <i32> = _indexElemLen(<DrvManSpec***CffScratchGet***>(1), glyphId);
+    let dataPtr: <ptr> = <DrvAPIInterCon***PtrAdd***>(<DrvManSpec***CffGetBase***>(), elemOff);
+    var xMin: <i32> = 0; var yMin: <i32> = 0;
+    var xMax: <i32> = 0; var yMax: <i32> = 0;
+    _execCharstring(dataPtr, elemLen);
+    ret 0;
+];
+
+rel op GetCharStrCount: [] [ ret <DrvManSpec***CffScratchGet***>(2);   ];
+rel op GetDefaultWidth: [] [ ret <DrvManSpec***CffScratchGet***>(7);   ];
+rel op GetNominalWidth: [] [ ret <DrvManSpec***CffScratchGet***>(8);   ];

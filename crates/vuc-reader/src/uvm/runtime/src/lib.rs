@@ -37,8 +37,14 @@ use byteorder::{ByteOrder, LittleEndian};
 use core::ops::Range;
 use hashbrown::HashMap as HashBrownMap;
 use stack::{StackUsage, StackVerifier};
+#[cfg(not(feature = "std"))]
+use alloc::sync::Arc;
+#[cfg(feature = "std")]
 use std::sync::Arc;
+#[cfg(feature = "storage")]
 use vuc_storage::storing_access::RocksDBManager;
+#[cfg(not(feature = "storage"))]
+use crate::interpreter::RocksDBManager;
 
 mod asm_parser;
 pub mod assembler;
@@ -74,6 +80,7 @@ pub mod lib {
     pub use self::core::mem::ManuallyDrop;
     pub use self::core::ptr;
     pub use hashbrown::{HashMap, HashSet};
+    #[cfg(feature = "storage")]
     pub use vuc_storage::storing_access::RocksDBManagerImpl;
 
     #[cfg(feature = "std")]
@@ -131,7 +138,7 @@ pub type Verifier = fn(prog: &[u8]) -> Result<(), Error>;
 
 /// eBPF helper function.
 pub type Helper =
-    Box<dyn Fn(u64, u64, u64, u64, u64, u64, u64) -> u64 + std::marker::Send + Sync + 'static>;
+    Box<dyn Fn(u64, u64, u64, u64, u64, u64, u64) -> u64 + core::marker::Send + Sync + 'static>;
 
 /// eBPF stack usage calculator function.
 pub type StackUsageCalculator = fn(prog: &[u8], pc: usize, data: &mut dyn Any) -> u16;

@@ -1,0 +1,100 @@
+//===================================================================
+//  APrevent.mara – Cycle de vie + état SRFS SRFSMan
+//  Projet : SRFSMan.slul
+//  Auteur : Vyft Ltd — 2026
+//  L'état du filesystem (diskHandle, mounted, etc.) est stocké comme
+//  vars de classe — pattern DrvInstance.mara.
+//===================================================================
+
+#base <std***ComTpe***SlulFrmt***[ MathSafety, DrvManSpec ]>;
+#base <MaratineKit>;
+#base <MaratineKit***CycleActivity>;
+
+rel op APrevent: <[string CycleActivity]>t [
+
+    var Architecture: <string> = "";
+    var _diskHandle:  <ptr>    = nullptr;
+    var _mounted:     <i32>    = 0;
+    var _blockSize:   <i32>    = 32768;
+    var _freeBlocks:  <i32>    = 0;
+    var _totalBlocks: <i32>    = 0;
+    var _rootBlock:   <i32>    = 0;
+
+    rel op OnPowerOn: [arch string] [
+        Architecture = arch;
+        log: "SRFSMan: demarrage driver Slura File System";
+        let r: <i32> = self***onDriverInit();
+        if (r != 0) [
+            log: "SRFSMan: onDriverInit echoue – code " + r;
+            ret r;
+        ];
+        log: "SRFSMan: SDC:\\ monte OK";
+        ret 0;
+    ];
+
+    rel cl onDriverInit: [] [
+        let disk: <ptr> = <DrvManSpec***UefiLocateDisk***>();
+        if (disk == nullptr) [
+            log: "SRFSMan: protocole Block I/O introuvable";
+            ret 1;
+        ];
+        _diskHandle = disk;
+
+        // Lire le superblock (512 octets au bloc 0) pour vérifier le magic
+        let sbBuf: <ptr> = <DrvAPIInterCon***MemAlloc***>(512, 0, 4);
+        if (sbBuf == nullptr) [ ret 2; ];
+
+        let r: <i32> = <DrvManSpec***DiskRead***>(0, sbBuf, 512);
+        if (r < 512) [
+            <DrvAPIInterCon***MemFree***>(sbBuf, 0);
+            log: "SRFSMan: lecture superblock echouee";
+            ret 3;
+        ];
+
+        // Vérifier magic 'SRF2' = 0x53524632 = 1398361650
+        let magic: <i32> = <DrvManSpec***PtrRead32At***>(sbBuf, 0);
+        if (magic != 1398361650) [
+            <DrvAPIInterCon***MemFree***>(sbBuf, 0);
+            log: "SRFSMan: magic invalide – " + magic;
+            ret 4;
+        ];
+
+        _blockSize   = <DrvManSpec***PtrRead32At***>(sbBuf, 8);
+        _totalBlocks = <DrvManSpec***PtrRead32At***>(sbBuf, 12);
+        _freeBlocks  = <DrvManSpec***PtrRead32At***>(sbBuf, 16);
+        _rootBlock   = <DrvManSpec***PtrRead32At***>(sbBuf, 68);
+        _mounted     = 1;
+
+        <DrvAPIInterCon***MemFree***>(sbBuf, 0);
+
+        let regResult: <i32> = <DrvAPIInterCon***MountPointRegister***>("SDC:\\", disk);
+        if (regResult != 0) [
+            log: "SRFSMan: enregistrement SDC: echoue";
+        ];
+
+        log: "SRFSMan: SRFS v2 monte – " + _totalBlocks + " blocs de " + _blockSize + " octets";
+        log: "SRFSMan: " + _freeBlocks + " blocs libres";
+        ret 0;
+    ];
+
+    rel op OnPowerOff: [] [
+        if (_mounted != 0) [
+            _diskHandle = nullptr;
+            _mounted    = 0;
+        ];
+        log: "SRFSMan: SDC:\\ demonte";
+        ret 0;
+    ];
+
+    rel op OnSuspend: [] [ log: "SRFSMan: suspension"; ret 0; ];
+    rel op OnResume:  [] [ log: "SRFSMan: reprise";    ret 0; ];
+
+    // ── Accesseurs ────────────────────────────────────────────────────────────
+
+    rel op GetDiskHandle:  [] [ ret _diskHandle;  ];
+    rel op GetMounted:     [] [ ret _mounted;     ];
+    rel op GetBlockSize:   [] [ ret _blockSize;   ];
+    rel op GetFreeBlocks:  [] [ ret _freeBlocks;  ];
+    rel op GetTotalBlocks: [] [ ret _totalBlocks; ];
+    rel op GetRootBlock:   [] [ ret _rootBlock;   ];
+];

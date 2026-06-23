@@ -1,0 +1,89 @@
+//===================================================================
+//  SRFSFormat.mara – Formateur SRFS v2
+//  Projet : SRFSMan.slul
+//  Auteur : Vyft Ltd — 2026
+//===================================================================
+
+#base <std***ComTpe***SlulFrmt***DrvManSpec>;
+#base <MaratineKit>;
+#include "llvm/Support/raw_ostream.h"
+
+using namespace llvm;
+
+rel op Format: [diskHandle ptr, totalBytes i32, blockSzArg i32,
+                volumeName string, driveLetter string] [
+    if (diskHandle == nullptr || totalBytes < 1048576) [ ret -3; ];
+
+    var blkSz: <i32> = blockSzArg;
+    if (blkSz <= 0 || blkSz > 32768) [ blkSz = 32768; ];
+    var p2: <i32> = 4096;
+    loop (p2 < blkSz) [ p2 = p2 * 2; ];
+    blkSz = p2;
+
+    let totalBlocks: <i32> = totalBytes / blkSz;
+    let maxInodes:   <i32> = totalBlocks / 8;
+    let inodesPerBlk:<i32> = blkSz / 512;
+    let inodeTblSz:  <i32> = (maxInodes + inodesPerBlk - 1) / inodesPerBlk;
+    let dataStartBlk:<i32> = 3 + inodeTblSz + 1;
+    let freeBlocks:  <i32> = totalBlocks - dataStartBlk;
+    let rootTreeBlk: <i32> = 3 + inodeTblSz;
+
+    let buf: <ptr> = <DrvAPIInterCon***MemAlloc***>(blkSz, 0, 4);
+    if (buf == nullptr) [ ret -2; ];
+
+    <DrvAPIInterCon***MemSet***>(buf, 0, blkSz);
+    <DrvManSpec***PtrWrite32At***>(buf, 0,  1398361650);
+    <DrvManSpec***PtrWrite32At***>(buf, 4,  131072);
+    <DrvManSpec***PtrWrite32At***>(buf, 8,  blkSz);
+    <DrvManSpec***PtrWrite32At***>(buf, 12, totalBlocks);
+    <DrvManSpec***PtrWrite32At***>(buf, 16, freeBlocks);
+    <DrvManSpec***PtrWrite32At***>(buf, 28, 1);
+    <DrvManSpec***PtrWrite32At***>(buf, 36, 2);
+    <DrvManSpec***PtrWrite32At***>(buf, 44, 3);
+    <DrvManSpec***PtrWrite32At***>(buf, 52, maxInodes);
+    <DrvManSpec***PtrWrite32At***>(buf, 60, dataStartBlk);
+    <DrvManSpec***PtrWrite32At***>(buf, 68, rootTreeBlk);
+    <DrvManSpec***PtrWrite32At***>(buf, 112, 7);
+    let r0: <i32> = <DrvManSpec***DiskWrite***>(0, buf, 512);
+    if (r0 < 512) [ <DrvAPIInterCon***MemFree***>(buf, 0); ret -1; ];
+
+    <DrvAPIInterCon***MemSet***>(buf, 0, blkSz);
+    <DrvManSpec***PtrWrite8At***>(buf, 0, 1);
+    let r1: <i32> = <DrvManSpec***DiskWrite***>(blkSz, buf, blkSz);
+    if (r1 != blkSz) [ <DrvAPIInterCon***MemFree***>(buf, 0); ret -1; ];
+
+    <DrvAPIInterCon***MemSet***>(buf, 0, blkSz);
+    let r2: <i32> = <DrvManSpec***DiskWrite***>(blkSz * 2, buf, blkSz);
+    if (r2 != blkSz) [ <DrvAPIInterCon***MemFree***>(buf, 0); ret -1; ];
+
+    var b: <i32> = 3;
+    loop (b < 3 + inodeTblSz) [
+        <DrvAPIInterCon***MemSet***>(buf, 0, blkSz);
+        if (b == 3) [
+            <DrvManSpec***PtrWrite32At***>(buf, 8,  1);
+            <DrvManSpec***PtrWrite32At***>(buf, 56, rootTreeBlk);
+        ];
+        let rr: <i32> = <DrvManSpec***DiskWrite***>(b * blkSz, buf, blkSz);
+        if (rr != blkSz) [ <DrvAPIInterCon***MemFree***>(buf, 0); ret -1; ];
+        b = b + 1;
+    ];
+
+    <DrvAPIInterCon***MemSet***>(buf, 0, blkSz);
+    <DrvManSpec***PtrWrite32At***>(buf, 0,  1112493381);
+    <DrvManSpec***PtrWrite32At***>(buf, 12, (blkSz - 32) / 28);
+    let rrtb: <i32> = <DrvManSpec***DiskWrite***>(rootTreeBlk * blkSz, buf, blkSz);
+    if (rrtb != blkSz) [ <DrvAPIInterCon***MemFree***>(buf, 0); ret -1; ];
+
+    <DrvAPIInterCon***MemFree***>(buf, 0);
+    log: "SRFSFormat: SRFS v2 cree sur " + driveLetter;
+    ret 0;
+];
+
+rel op InitBaseStructure: [] [
+    let _: <i32> = <std***core***self***SRFSCore***CreateDir>("slu64");
+    let _: <i32> = <std***core***self***SRFSCore***CreateDir>("slu64/assets");
+    let _: <i32> = <std***core***self***SRFSCore***CreateDir>("slu64/assets/fonts");
+    let _: <i32> = <std***core***self***SRFSCore***CreateDir>("slu64/DrivRequirment");
+    log: "SRFSFormat: arborescence SDC:\\ initialisee";
+    ret 0;
+];

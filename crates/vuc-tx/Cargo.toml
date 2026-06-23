@@ -59,9 +59,9 @@ rayon       = { workspace = true,        default-features = false, optional = tr
 fastcrypto  = { workspace = true,        default-features = false, optional = true }
 prometheus  = { workspace = true,        default-features = false, optional = true }
 sys-info    = { version = "0.9",         default-features = false, optional = true }
-crossbeam   = { version = "0.8.4",       default-features = false, optional = true }
+crossbeam   = { version = "0.8.4",       default-features = false, features = ["std"], optional = true }
 dashmap     = { version = "6.1.0",       default-features = false, optional = true }
-futures     = { workspace = true,        default-features = false, optional = true }
+futures     = { workspace = true,        default-features = false, features = ["executor", "std"], optional = true }
 vuc-storage = { path = "../vuc-storage", default-features = false, optional = true }
 uvm-runtime = { workspace = true,        default-features = false, optional = true }
 reth-trie   = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.9.1", package = "reth-trie",               default-features = false, optional = true }

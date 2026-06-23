@@ -10,6 +10,13 @@ heapless = "0.9.3"
 uefi          = { version = "0.27.0",  default-features = false, features = ["alloc"] }
 uefi-services = "0.24.0"
 
+# Décompression DEFLATE pour les bundles Maratine (ZIP méthode 8)
+miniz_oxide   = { version = "0.7", default-features = false }
+
+# SHA-256 pour AuthARoot (no_std)
+sha2          = { workspace = true }
+
+
 [[bin]]
 name = "lunee-ker"
 path = "src/main.rs"

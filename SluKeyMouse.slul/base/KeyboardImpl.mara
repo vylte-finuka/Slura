@@ -1,31 +1,11 @@
 //===================================================================
-//  KeyboardImpl.mara – Implémentations clavier UEFI
-//  Projet : SluKeyMouse.slul
-//  Auteur : Vyft Ltd
-//  Licence : Proprietary – 2026
-//  Description :
-//      Fonctions rel op enregistrées dans DrvAPIInterCon par APrevent.
-//      DrvManSpec encapsule les appels UEFI SimpleTextInput(Ex).
-//
-//  Format de retour KbdReadImpl / KbdPollImpl :
-//    bits 31-16 : ScanCode UEFI  (touches spéciales : flèches, F1-F12, ESC…)
-//    bits 15-0  : UnicodeChar    (caractère imprimable, 0 si scan-code only)
-//
-//  ScanCodes courants :
-//    0x0001 = Haut    0x0002 = Bas    0x0003 = Droite  0x0004 = Gauche
-//    0x000F = F1      0x0017 = ESC    0x000D = Entrée  (Unicode 0x000D)
+//  KeyboardImpl.mara – Clavier UEFI (SluKeyMouse)
+//  Auteur : Vyft Ltd — 2026
+//  Noms = symboles exportés dans RAbstractallowing.xml
 //===================================================================
 
 #base <std***ComTpe***SlulFrmt***DrvManSpec>;
 
-rel op KbdReadImpl: [] [
-    ret <DrvManSpec***UefiReadKey***>();
-];
-
-rel op KbdPollImpl: [] [
-    ret <DrvManSpec***UefiPollKey***>();
-];
-
-rel op KbdModeImpl: [mode i32] [
-    ret <DrvManSpec***UefiSetKeyMode***>(mode);
-];
+rel op KeyboardReadKey: [] [ ret <DrvManSpec***UefiReadKey***>();          ];
+rel op KeyboardPoll:    [] [ ret <DrvManSpec***UefiPollKey***>();          ];
+rel op KeyboardSetMode: [mode i32] [ ret <DrvManSpec***UefiSetKeyMode***>(mode); ];

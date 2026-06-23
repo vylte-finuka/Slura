@@ -1187,11 +1187,11 @@ impl SlurachainVm {
     ) -> Result<Option<HashMap<String, HashMap<String, Vec<u8>>>>, String> {
         let accounts = futures::executor::block_on(self.state.accounts.read());
         if let Some(account) = accounts.get(contract_address) {
-            let mut storage = HashMap::new();
-            let mut contract_storage = HashMap::new();
+            let mut storage: HashMap<String, HashMap<String, Vec<u8>>> = HashMap::new();
+            let mut contract_storage: HashMap<String, Vec<u8>> = HashMap::new();
             // Convertit les resources en storage bytes
             for (key, value) in &account.resources {
-                let storage_bytes = self.convert_resource_to_storage_bytes(value);
+                let storage_bytes: Vec<u8> = self.convert_resource_to_storage_bytes(value);
                 contract_storage.insert(key.clone(), storage_bytes);
             }
             storage.insert(contract_address.to_string(), contract_storage);

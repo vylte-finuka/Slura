@@ -197,7 +197,7 @@ impl HalManager {
     fn detect_devices(&self) -> bool {
         let features = query_cpu_features();
         // Exemple très simplifié : on accepte tout CPU qui possède AVX.
-        (features & cpuid::AVX_BIT) != 0
+        (features & cpuid::SSE3_BIT) != 0 || (features & cpuid::AVX_BIT) != 0
     }
 
     // -----------------------------------------------------------------

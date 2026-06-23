@@ -9,6 +9,8 @@ pub mod kernel_runtime;
 pub mod ressources_manager;
 pub mod hal_manager;
 pub mod bundle_loader;
+pub mod platform_bridge;
+pub mod ovc_exec;
 
 use uefi::{entry, CStr16, Status, Handle, table::{Boot, SystemTable}};
 use crate::kernel_runtime::KernelRuntime;
