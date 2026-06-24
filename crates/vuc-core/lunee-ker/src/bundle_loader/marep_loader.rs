@@ -92,16 +92,44 @@ fn run_ovc(st: &mut SystemTable<Boot>, image_handle: Handle, bundle: &[u8])
     }
 
     // ── OVC ──────────────────────────────────────────────────────────────────
-    let ovc = zip.extract_file("base\\OEntry.ovc")?;
-    if ovc.is_empty() { return Err(BundleError::EmptyBinary); }
-
     const MAGIC: &[u8] = b"# Vyft OVC v1.0";
-    if ovc.len() < MAGIC.len() || &ovc[..MAGIC.len()] != MAGIC {
+
+    let oentry = zip.extract_file("base\\OEntry.ovc")?;
+    if oentry.is_empty() { return Err(BundleError::EmptyBinary); }
+    if oentry.len() < MAGIC.len() || &oentry[..MAGIC.len()] != MAGIC {
         return Err(BundleError::EmptyBinary);
     }
 
-    // OVC Vyft signé — rendu via GOP (layout depuis HelloWorld.ovc).
-    crate::kernel_runtime::render_marep_screen(st, image_handle);
+    // Découverte dynamique des OVC depuis le ZIP du marep.
+    // Le kernel ne connaît que "OEntry" comme point d'entrée universel.
+    // Les autres modules sont passés à exec_marep pour résolution cross-module.
+    // Les deux séparateurs sont essayés (ZIP Windows = \, ZIP Unix = /).
+    let ovc_names = ["OEntry", "HelloWorld", "LAPrevent", "TemplateView"];
+    let mut modules: alloc::vec::Vec<(&str, alloc::vec::Vec<u8>)> = alloc::vec::Vec::new();
+
+    for name in &ovc_names {
+        let bytes = {
+            let p = alloc::format!("base\\{}.ovc", name);
+            let b = zip.extract_file(&p).unwrap_or_default();
+            if !b.is_empty() { b } else {
+                let p2 = alloc::format!("base/{}.ovc", name);
+                zip.extract_file(&p2).unwrap_or_default()
+            }
+        };
+        if !bytes.is_empty() {
+            modules.push((name, bytes));
+        }
+    }
+
+    {
+        use core::fmt::Write;
+        let _ = write!(st.stdout(),
+            "[MARATINE] {} modules OVC charges\r\n", modules.len());
+    }
+
+    // Exécution via exec_marep — OEntry() est le seul point d'entrée.
+    // Aucun nom de fonction ou de module hardcodé dans ce code Rust.
+    crate::kernel_runtime::render_from_marep(st, image_handle, &modules);
     Ok(0)
 }
 

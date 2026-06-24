@@ -1,7 +1,9 @@
 [workspace]
 members = [
     "crates/vuc-core",
-    "crates/vuc-core/lunee-ker",   # ← ici
+    "crates/vuc-core/lunee-ker",
+    "crates/vuc-core/getrandom-uefi",
+    "crates/vuc-platform-uefi",
     "crates/vuc-events",
     "crates/vuc-types",
     "crates/vuc-common",
@@ -53,3 +55,9 @@ primitive-types = { version = "0.12", default-features = false }
 rayon           = "1.5.2"
 smallvec        = { version = "1.8.0", default-features = false }
 uvm-runtime     = { path = "crates/vuc-reader/src/uvm/runtime" }
+
+# getrandom ne supporte pas UEFI nativement.
+# Pour la cible x86_64-unknown-uefi, on force le backend "custom"
+# qui utilise le RNG EFI_RNG_PROTOCOL (enregistré depuis lunee-ker).
+[patch.crates-io]
+getrandom = { path = "crates/vuc-core/getrandom-uefi" }

@@ -22,6 +22,18 @@ use super::{zip_reader::ZipReader, BundleError};
 const DRIVER_BUNDLES: &[&uefi::CStr16] = &[
     cstr16!("\\sources\\SluGpu.slul"),
     cstr16!("\\sources\\SluKeyMouse.slul"),
+    cstr16!("\\sources\\SRFSMan.slul"),       // filesystem SDC:\ — avant SluFontConf
+    cstr16!("\\sources\\SluFontConf.slul"),   // lit police via DrvManSpec***FS***
+];
+
+/// Chemins SRFS (SDC:\) → chemins UEFI ESP correspondants.
+/// Le kernel pré-charge ces fichiers depuis l'ESP avant d'exécuter les OVC.
+/// SRFSMan.slul les sert via DrvManSpec***FSGetSize***  / DrvManSpec***FSRead***.
+const SRFS_FILES: &[(&str, &uefi::CStr16)] = &[
+    (
+        "SDC:\\slu64\\assets\\fonts\\brsonomasemibold.ttf",
+        cstr16!("\\SDC\\slu64\\assets\\fonts\\brsonomasemibold.ttf"),
+    ),
 ];
 
 pub fn load_drivers(st: &mut SystemTable<Boot>, image_handle: Handle) -> usize {
@@ -32,6 +44,16 @@ pub fn load_drivers(st: &mut SystemTable<Boot>, image_handle: Handle) -> usize {
         Err(_) => return 0,
     };
 
+    // Pré-charger les fichiers SRFS (SDC:\) depuis l'ESP
+    // avant que SluFontConf.slul ne tente DrvManSpec***FSGetSize***.
+    for &fs_handle in handles.iter() {
+        for &(srfs_path, uefi_path) in SRFS_FILES {
+            if let Some(data) = read_file(st, image_handle, fs_handle, uefi_path) {
+                crate::ovc_exec::srfs_register_file(srfs_path, data);
+            }
+        }
+    }
+
     for &fs_handle in handles.iter() {
         for &bundle_path in DRIVER_BUNDLES {
             match try_load_one(st, image_handle, fs_handle, bundle_path) {
@@ -41,6 +63,34 @@ pub fn load_drivers(st: &mut SystemTable<Boot>, image_handle: Handle) -> usize {
         }
     }
     started
+}
+
+/// Lit un fichier depuis l'ESP et retourne ses octets.
+fn read_file(
+    st:           &mut SystemTable<Boot>,
+    image_handle: Handle,
+    fs_handle:    Handle,
+    path:         &uefi::CStr16,
+) -> Option<Vec<u8>> {
+    let mut fs = unsafe {
+        st.boot_services().open_protocol::<SimpleFileSystem>(
+            OpenProtocolParams { handle: fs_handle, agent: image_handle, controller: None },
+            OpenProtocolAttributes::GetProtocol,
+        ).ok()?
+    };
+    let mut root = fs.open_volume().ok()?;
+    let fh = root.open(path, FileMode::Read, FileAttribute::empty()).ok()?;
+    let mut reg = match fh.into_type().ok()? {
+        FileType::Regular(r) => r,
+        _ => return None,
+    };
+    let mut info_buf = [0u8; 256];
+    let info: &uefi::proto::media::file::FileInfo = reg.get_info(&mut info_buf).ok()?;
+    let size = info.file_size() as usize;
+    if size == 0 { return None; }
+    let mut buf = alloc::vec![0u8; size];
+    reg.read(&mut buf).ok()?;
+    Some(buf)
 }
 
 fn try_load_one(
@@ -141,6 +191,7 @@ fn start_slul(
         let null_ctx = ovc_exec::ExecCtx {
             fb: core::ptr::null_mut(),
             width: 0, height: 0, stride: 0,
+            font: core::ptr::null(), font_len: 0,
         };
         // arch = "x86_64" en pointeur de chaîne statique
         let arch_str = b"x86_64\0";
@@ -149,11 +200,22 @@ fn start_slul(
         let _ = write!(st.stdout(), "[APrevent] OnPowerOn OK\r\n");
     }
 
-    // ── SluGpu : stocker GpuImpl.ovc pour le rendu ────────────────────────────
+    // ── SluGpu : stocker GpuImpl.ovc pour le rendu ───────────────────────────
     if is_slu_gpu(&zip) {
         let gpu_impl = zip.extract_file("base\\GpuImpl.ovc").unwrap_or_default();
         crate::ovc_exec::register_gpu_ovc(gpu_impl);
         let _ = write!(st.stdout(), "[SluGpu] GpuImpl.ovc enregistre\r\n");
+    }
+
+    // ── SluFontConf : stocker TtfParser + GlyphRasterizer pour rendu TTF ────
+    {
+        let ttf  = zip.extract_file("base\\TtfParser.ovc").unwrap_or_default();
+        let rast = zip.extract_file("base\\GlyphRasterizer.ovc").unwrap_or_default();
+        let woff = zip.extract_file("base\\WoffReader.ovc").unwrap_or_default();
+        if !ttf.is_empty() && !rast.is_empty() {
+            crate::ovc_exec::register_font_ovc(ttf, rast, woff);
+            let _ = write!(st.stdout(), "[SluFontConf] TtfParser+GlyphRasterizer+WoffReader enregistres\r\n");
+        }
     }
 
     Ok(())

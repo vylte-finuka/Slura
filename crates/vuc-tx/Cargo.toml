@@ -63,7 +63,7 @@ crossbeam   = { version = "0.8.4",       default-features = false, features = ["
 dashmap     = { version = "6.1.0",       default-features = false, optional = true }
 futures     = { workspace = true,        default-features = false, features = ["executor", "std"], optional = true }
 vuc-storage = { path = "../vuc-storage", default-features = false, optional = true }
-uvm-runtime = { workspace = true,        default-features = false, optional = true }
+uvm-runtime = { workspace = true,        default-features = false, optional = true, features = ["storage"] }
 reth-trie   = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.9.1", package = "reth-trie",               default-features = false, optional = true }
 reth-primitives-traits = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.9.1", package = "reth-primitives-traits", default-features = false, optional = true }
 reth-trie-common = { version = "0.0.0",  default-features = false, optional = true }

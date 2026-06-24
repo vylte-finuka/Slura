@@ -7,7 +7,7 @@
 //      Premier composant Maratine fonctionnel sur Slura OS.
 //      Affiche le titre "Hello Slura !" centré sur fond bleu nuit,
 //      la version du kernel Lunée et un pied de page Vyft Ltd.
-//      Utilise GpuDrawText via DrvAPIInterCon (driver SluGpu).
+//      Utilise GpuDrawTextFont via DrvAPIInterCon (SluGpu + SluFontConf).
 //===================================================================
 
 #base <std***core***self***[ ComponentView, RenderContext, TextLabel ]>;
@@ -24,50 +24,54 @@ rel op HelloWorld: <[string ComponentView]>t [
     var fgFooter: <i32>    = 0x00445566;   // gris sombre
 
     // ── Create ────────────────────────────────────────────────────────────
-    // Dessine directement sur le framebuffer via GpuDrawText (bitmap 8×16).
-    // Rendu immédiat : pas de RenderContext intermédiaire ici.
     rel op Create: [ctx string] [
         log: "HelloWorld: Create()";
 
         let w: <i32> = <DrvAPIInterCon***GpuGetWidth***>();
         let h: <i32> = <DrvAPIInterCon***GpuGetHeight***>();
 
+        // Charger la police TrueType via SluFontConf (SDC:\slu64\assets\fonts\)
+        let font: <ptr> = <DrvAPIInterCon***FontGetDefault***>();
+        log: "HelloWorld: police chargee";
+
         // Fond plein écran
         let _: <i32> = <DrvAPIInterCon***GpuFill***>(bgColor);
 
-        // ── Ligne de séparation horizontale (accent) ───────────────────
+        // ── Ligne de séparation horizontale supérieure ─────────────────
         let lineY: <i32> = h / 2 - 36;
         let _: <i32> = <DrvAPIInterCon***GpuDrawRect***>(w / 4, lineY, w / 2, 2, 0x00334466);
 
-        // ── Titre "Hello Slura !" ──────────────────────────────────────
-        // Glyphe 8 px large × 16 px haut — 13 caractères → 104 px
-        let titleW: <i32> = 13 * 8;
-        let titleX: <i32> = (w - titleW) / 2;
+        // ── Titre "Hello Slura !" (police TTF, taille 32) ─────────────
+        let titleX: <i32> = w / 4;
         let titleY: <i32> = h / 2 - 24;
-        let _: <i32> = <DrvAPIInterCon***GpuDrawText***>(titleX, titleY, message, fgTitle, bgColor);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFont***>(
+            titleX, titleY, message, fgTitle, bgColor, font, 32
+        );
 
-        // ── Sous-titre kernel ──────────────────────────────────────────
-        let subW: <i32> = 35 * 8;
-        let subX: <i32> = (w - subW) / 2;
+        // ── Sous-titre kernel (police TTF, taille 16) ─────────────────
+        let subX: <i32> = w / 4;
         let subY: <i32> = h / 2 + 4;
-        let _: <i32> = <DrvAPIInterCon***GpuDrawText***>(subX, subY, kernelV, fgSub, bgColor);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFont***>(
+            subX, subY, kernelV, fgSub, bgColor, font, 16
+        );
 
         // ── Ligne séparation basse ─────────────────────────────────────
         let line2Y: <i32> = h / 2 + 28;
         let _: <i32> = <DrvAPIInterCon***GpuDrawRect***>(w / 4, line2Y, w / 2, 1, 0x00334466);
 
-        // ── Pied de page ───────────────────────────────────────────────
-        let ftW: <i32> = 18 * 8;
-        let ftX: <i32> = (w - ftW) / 2;
+        // ── Pied de page (police TTF, taille 14) ──────────────────────
+        let ftX: <i32> = w / 4;
         let ftY: <i32> = h / 2 + 38;
-        let _: <i32> = <DrvAPIInterCon***GpuDrawText***>(ftX, ftY, footer, fgFooter, bgColor);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFont***>(
+            ftX, ftY, footer, fgFooter, bgColor, font, 14
+        );
 
         // Attache un TextLabel pour le cycle RenderContext
         let label: <[string TextLabel]> = <MaratineKit***UI***TextLabel***New>(
             message, "#FFE0E0", "#001A1A2E"
         );
         let _: <i32> = <MaratineKit***UI***TextLabel***SetAlign>(label, "center");
-        let _: <i32> = <MaratineKit***UI***TextLabel***SetFontSize>(label, 24);
+        let _: <i32> = <MaratineKit***UI***TextLabel***SetFontSize>(label, 32);
         let _: <i32> = <MaratineKit***RenderContext***Attach>(ctx, label);
 
         log: "HelloWorld: *** Hello Slura ! ***";

@@ -4,10 +4,10 @@ version     = "0.1.0"
 edition     = { workspace = true }
 
 [features]
-# ── Le crate ne fournit plus la partie kernel ──
-default = []          # aucune feature activée par défaut
-std     = []          # on désactive complètement la feature std (à activer explicitement)
-no_std  = []          # aucune dépendance std‑only – utile pour les dépendants
+default = []
+kernel  = []          # cible UEFI no_std (used by lunee-ker)
+std     = ["dep:tokio", "dep:tracing", "dep:rand", "dep:chrono", "dep:futures", "dep:md5"]
+no_std  = []
 
 [dependencies]
 # ── Dépendances toujours présentes (ne tirent pas std) ──

@@ -50,6 +50,7 @@ chrono     = { workspace = true }
 primitive-types = { workspace = true }
 goblin = "0.10.4"
 tiny-keccak = { version = "2.0.2", features = ["keccak"] }
+vuc-storage = { path = "../../../../vuc-storage", optional = true }
 
 [dev-dependencies]
 libc = { version = "0.2" }
@@ -60,7 +61,7 @@ hex = { workspace = true }
 [features]
 default = ["std"]
 std = ["dep:time", "dep:libc", "combine/std"]
-storage = []
+storage = ["dep:vuc-storage"]
 cranelift = [
     "dep:cranelift-codegen",
     "dep:cranelift-frontend",

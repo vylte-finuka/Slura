@@ -28,7 +28,7 @@ jsonrpsee-types = { workspace = true }
 jsonrpsee-server = { workspace = true }
 rayon = { workspace = true }
 vuc-tx = { path = "../vuc-tx" }
-vuc-core = { path = "../vuc-core" }
+vuc-core = { path = "../vuc-core", features = ["std"] }
 vuc-types = { path = "../vuc-types" }
 vuc-storage = { path = "../vuc-storage" }
 vuc-events = { path = "../vuc-events" }
@@ -58,13 +58,91 @@ tower = "0.5"
 hyper = "1.5"
 tower-http = { version = "0.6", features = ["cors", "compression-full", "sensitive-headers", "trace", "timeout"] }
 
+[lib]
+name       = "vuc_platform"
+crate-type = ["staticlib", "rlib"]
+path       = "src/lib.rs"
+
 [[bin]]
 name = "vuc-platform"
 path = "src/engine_platform.rs"
+
+# Binaire séparé chargé par lunee-ker via LoadImage après le boot UEFI.
+# Contient le full node SluraChain (tokio + jsonrpsee + blockchain).
+[[bin]]
+name = "vuc-platform-engine"
+path = "src/efi_entry.rs"
 
 [package.metadata]
 license = "Vylte-finuka"
 description = "Vyft slurachain smart contract platform."
 
 [features]
-safe_mode = []
+safe_mode    = []
+# Build no_std pour cible x86_64-unknown-uefi.
+# Toutes les dépendances std/tokio/jsonrpsee sont désactivées.
+# Seuls uefi + hashbrown + uvm-runtime (sans std) sont actifs.
+uefi-kernel  = [
+    "dep:uefi",
+    "dep:uefi-services",
+    "hashbrown/nightly",
+]
+
+[target.'cfg(not(target_os = "uefi"))'.dependencies]
+tokio             = { workspace = true,  features = ["full"] }
+serde             = { workspace = true,  features = ["derive"] }
+bcs               = { workspace = true }
+anyhow            = "1.0.98"
+hex               = "0.4"
+chrono            = { workspace = true,  features = ["serde"] }
+tracing-subscriber= "0.2.15"
+tracing           = { workspace = true }
+rand_chacha       = "0.9.0"
+clap              = { version = "4.5",   features = ["derive"] }
+ipnetwork         = "0.20"
+local-ip-address  = "0.5"
+miniz_oxide       = "0.9.0"
+rand              = { workspace = true }
+num-traits        = { workspace = true }
+percent-encoding  = "2.3.1"
+futures           = { workspace = true }
+prometheus        = { workspace = true }
+serde_json        = { workspace = true }
+jsonrpsee-types   = { workspace = true }
+jsonrpsee-server  = { workspace = true }
+rayon             = { workspace = true }
+vuc-tx            = { path = "../vuc-tx" }
+vuc-core          = { path = "../vuc-core",    features = ["std"] }
+vuc-types         = { path = "../vuc-types" }
+vuc-storage       = { path = "../vuc-storage" }
+vuc-events        = { path = "../vuc-events" }
+fastcrypto        = { workspace = true }
+bincode           = { workspace = true }
+sha3              = { workspace = true }
+uvm-runtime       = { workspace = true }
+reth-trie         = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.9.1", package = "reth-trie" }
+reth-primitives   = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.9.1", package = "reth-primitives" }
+base64            = { workspace = true }
+lazy_static       = { workspace = true }
+futures-util      = "0.3.31"
+k256              = "0.13.4"
+sha_256           = "1.0.1"
+base64-url        = "3.0.2"
+rlp               = "0.6.1"
+typenum           = "1.19.0"
+dotenv            = "0.15"
+ethers            = "2.0.14"
+alloy-primitives  = "1.4.1"
+tiny-keccak       = "2.0.2"
+num_cpus          = "1.17.0"
+jsonrpsee-http-client = "0.26.0"
+primitive-types   = { workspace = true }
+jsonrpsee         = { version = "0.26", features = ["server","http-client","ws-client","macros","client-ws-transport-tls"] }
+tower             = "0.5"
+hyper             = "1.5"
+tower-http        = { version = "0.6", features = ["cors","compression-full","sensitive-headers","trace","timeout"] }
+
+[target.'cfg(target_os = "uefi")'.dependencies]
+uefi              = { version = "0.33",  optional = true, features = ["alloc"] }
+uefi-services     = { version = "0.24",  optional = true }
+hashbrown         = { workspace = true,  default-features = false }
