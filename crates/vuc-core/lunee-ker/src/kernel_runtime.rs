@@ -44,7 +44,7 @@ impl KernelRuntime {
     }
 
     pub fn maratine_phase(&mut self, st: &mut SystemTable<Boot>, image_handle: Handle) {
-        let _ = st.stdout().write_str("[MARATINE] Searching for HelloSlura.marep...\r\n");
+        let _ = st.stdout().write_str("[MARATINE] Loading HelloSlura...\r\n");
         match marep_loader::load_and_run(st, image_handle) {
             Ok(code) => {
                 let _ = write!(st.stdout(), "[MARATINE] OEntry returned {}\r\n", code);
@@ -152,15 +152,14 @@ pub fn render_from_marep(
     // exec_marep — seul point d'entrée : OEntry.ovc
     let ret = ovc_exec::exec_marep(&mod_refs, &ctx);
 
-    // Garder GOP actif pendant l'affichage (30 secondes)
+    // Affichage permanent — stall UEFI en boucle (pas de spin_loop qui monopolise le CPU).
     core::mem::forget(gop);
-    st.boot_services().stall(10_000_000); // 10s
-
-    // Logs de diagnostic après le stall
     let (fills, rects, texts) = ovc_exec::gpu_counters();
-    let _ = write!(st.stdout(), "[MAREP] OEntry={} GpuFill={} DrawRect={} DrawText={}\r\n",
-                   ret, fills, rects, texts);
-    let _ = write!(st.stdout(), "[MARATINE] exec_marep: GOP {}x{} OK\r\n", w, h);
-    let _ = write!(st.stdout(), "[FONT] TTF {} octets charge\r\n", font_len);
+    let _ = write!(st.stdout(), "[RENDER] done GpuFill={} DrawRect={} DrawText={}\r\n",
+                   fills, rects, texts);
+    let _ = ret;
+    loop {
+        st.boot_services().stall(30_000_000); // 30s par cycle
+    }
 }
 

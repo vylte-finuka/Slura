@@ -240,10 +240,49 @@ rel op Decode: [data ptr, size i32, outSize ptr] [
 
     let sig: <i32> = _r32(data, 0);
 
+    // ── TTC (TrueType Collection) — 'ttcf' = 0x74746366 = 1953784678 ─────────
+    // Format TTC :
+    //   [0..3]  'ttcf' tag
+    //   [4..5]  majorVersion, [6..7] minorVersion
+    //   [8..11] numFonts (uint32 BE)
+    //   [12..] offsetTable[numFonts] — offset absolu de chaque font
+    // On charge toujours le premier font (index 0).
+    // Support multi-index prévu via WoffScratchGet/Set(210) comme collection_index.
+    if (sig == 1953784678) [
+        let numFonts: <i32> = _r32(data, 8);
+        if (numFonts <= 0) [
+            <DrvAPIInterCon***MemWrite32***>(outSize, 0);
+            ret nullptr;
+        ];
+        // Lire l'index de collection souhaité (0 par défaut)
+        var colIdx: <i32> = <DrvManSpec***WoffScratchGet***>(210);
+        if (colIdx < 0 || colIdx >= numFonts) [ colIdx = 0; ];
+        // Offset absolu dans le TTC pour ce font
+        let fontOffset: <i32> = _r32(data, 12 + colIdx * 4);
+        if (fontOffset < 0 || fontOffset >= size) [
+            <DrvAPIInterCon***MemWrite32***>(outSize, 0);
+            ret nullptr;
+        ];
+        // Le font est à data + fontOffset, taille = size - fontOffset
+        let faceData: <ptr> = <DrvAPIInterCon***PtrAdd***>(data, fontOffset);
+        let faceSize: <i32> = size - fontOffset;
+        <DrvAPIInterCon***MemWrite32***>(outSize, faceSize);
+        <DrvManSpec***WoffScratchSet***>(200, faceSize);
+        <DrvManSpec***WoffScratchSet***>(201, _r32(faceData, 0));
+        <DrvManSpec***TtfSetData***>(faceData);
+        <DrvManSpec***TtfScratchSet***>(100, faceSize);
+        log: "WoffReader: TTC detecte — " + numFonts + " fonts, index " + colIdx;
+        ret faceData;
+    ];
+
     // sfnt natif : TTF ou OTF — pas de décompression
     if (sig == 65536 || sig == 1332787280 || sig == 1953658213) [
         <DrvAPIInterCon***MemWrite32***>(outSize, size);
+        <DrvManSpec***WoffScratchSet***>(200, size);   // GetDecodedSize → size
         <DrvManSpec***WoffScratchSet***>(201, sig);
+        // Rendre les données disponibles via TtfGetData() pour TtfParser::Load
+        <DrvManSpec***TtfSetData***>(data);
+        <DrvManSpec***TtfScratchSet***>(100, size);    // taille pour _r8 bounds-check
         log: "WoffReader: sfnt natif detecte";
         ret data;
     ];
@@ -255,7 +294,10 @@ rel op Decode: [data ptr, size i32, outSize ptr] [
             <DrvAPIInterCon***MemWrite32***>(outSize, 0);
             ret nullptr;
         ];
-        <DrvAPIInterCon***MemWrite32***>(outSize, <DrvManSpec***WoffScratchGet***>(200));
+        let decodedSize: <i32> = <DrvManSpec***WoffScratchGet***>(200);
+        <DrvAPIInterCon***MemWrite32***>(outSize, decodedSize);
+        <DrvManSpec***TtfSetData***>(<DrvManSpec***WoffGetData***>());
+        <DrvManSpec***TtfScratchSet***>(100, decodedSize);
         ret <DrvManSpec***WoffGetData***>();
     ];
 
@@ -266,7 +308,10 @@ rel op Decode: [data ptr, size i32, outSize ptr] [
             <DrvAPIInterCon***MemWrite32***>(outSize, 0);
             ret nullptr;
         ];
-        <DrvAPIInterCon***MemWrite32***>(outSize, <DrvManSpec***WoffScratchGet***>(200));
+        let decodedSize: <i32> = <DrvManSpec***WoffScratchGet***>(200);
+        <DrvAPIInterCon***MemWrite32***>(outSize, decodedSize);
+        <DrvManSpec***TtfSetData***>(<DrvManSpec***WoffGetData***>());
+        <DrvManSpec***TtfScratchSet***>(100, decodedSize);
         ret <DrvManSpec***WoffGetData***>();
     ];
 
@@ -275,7 +320,9 @@ rel op Decode: [data ptr, size i32, outSize ptr] [
     ret nullptr;
 ];
 
-rel op GetFlavor:   [] [ ret <DrvManSpec***WoffScratchGet***>(201);   ];
+rel op GetFlavor:       [] [ ret <DrvManSpec***WoffScratchGet***>(201); ];
+rel op GetDecodedSize:  [] [ ret <DrvManSpec***WoffScratchGet***>(200); ];
+rel op GetSize:         [] [ ret <DrvManSpec***WoffScratchGet***>(200); ];
 rel op FreeSfnt:    [] [
     if (<DrvManSpec***WoffGetData***>() != 0) [
         <DrvAPIInterCon***MemFree***>(<DrvManSpec***WoffGetData***>());
