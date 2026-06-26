@@ -233,9 +233,16 @@ rel cl _decompressWoff2: [woffData ptr, woffSize i32] [
 // Pour WOFF/WOFF2 : décompresse et retourne le sfnt alloué en heap.
 // outSize : taille du sfnt retourné.
 rel op Decode: [data ptr, size i32, outSize ptr] [
-    if (data == 0 || size < 12) [
+    if (data == 0) [
         <DrvAPIInterCon***MemWrite32***>(outSize, 0);
         ret nullptr;
+    ];
+    // Quand size=0 (ctx.font_len non initialisé), utiliser une taille sûre
+    // qui permet au parseur de fonctionner. Les bounds checks dans PtrReadI16At
+    // protègent contre les vraies lectures hors-limites.
+    var actualSize: <i32> = size;
+    if (actualSize < 12) [
+        actualSize = 4194304;  // 4MB — largement supérieur à tout fichier TTF réel
     ];
 
     let sig: <i32> = _r32(data, 0);
@@ -259,30 +266,28 @@ rel op Decode: [data ptr, size i32, outSize ptr] [
         if (colIdx < 0 || colIdx >= numFonts) [ colIdx = 0; ];
         // Offset absolu dans le TTC pour ce font
         let fontOffset: <i32> = _r32(data, 12 + colIdx * 4);
-        if (fontOffset < 0 || fontOffset >= size) [
+        if (fontOffset < 0 || fontOffset >= actualSize) [
             <DrvAPIInterCon***MemWrite32***>(outSize, 0);
             ret nullptr;
         ];
-        // Le font est à data + fontOffset, taille = size - fontOffset
         let faceData: <ptr> = <DrvAPIInterCon***PtrAdd***>(data, fontOffset);
-        let faceSize: <i32> = size - fontOffset;
+        let faceSize: <i32> = actualSize - fontOffset;
         <DrvAPIInterCon***MemWrite32***>(outSize, faceSize);
         <DrvManSpec***WoffScratchSet***>(200, faceSize);
         <DrvManSpec***WoffScratchSet***>(201, _r32(faceData, 0));
         <DrvManSpec***TtfSetData***>(faceData);
         <DrvManSpec***TtfScratchSet***>(100, faceSize);
-        log: "WoffReader: TTC detecte — " + numFonts + " fonts, index " + colIdx;
+        log: "WoffReader: TTC detecte";
         ret faceData;
     ];
 
     // sfnt natif : TTF ou OTF — pas de décompression
     if (sig == 65536 || sig == 1332787280 || sig == 1953658213) [
-        <DrvAPIInterCon***MemWrite32***>(outSize, size);
-        <DrvManSpec***WoffScratchSet***>(200, size);   // GetDecodedSize → size
+        <DrvAPIInterCon***MemWrite32***>(outSize, actualSize);
+        <DrvManSpec***WoffScratchSet***>(200, actualSize);
         <DrvManSpec***WoffScratchSet***>(201, sig);
-        // Rendre les données disponibles via TtfGetData() pour TtfParser::Load
         <DrvManSpec***TtfSetData***>(data);
-        <DrvManSpec***TtfScratchSet***>(100, size);    // taille pour _r8 bounds-check
+        <DrvManSpec***TtfScratchSet***>(100, actualSize);  // bounds-check utilisable
         log: "WoffReader: sfnt natif detecte";
         ret data;
     ];

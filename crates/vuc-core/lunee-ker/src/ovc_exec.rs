@@ -19,12 +19,159 @@ static mut FONT_TTF_OVC:     Option<Vec<u8>> = None;
 static mut FONT_RAST_OVC:    Option<Vec<u8>> = None;
 static mut FONT_WOFF_OVC:    Option<Vec<u8>> = None;
 
-// ── Cache SRFS (SDC: → octets pré-chargés depuis l'ESP par slul_loader) ──────
-// Capacité fixe : 4 fichiers max pour éviter les allocations dynamiques en UEFI.
-static mut SRFS_CACHE: [Option<(&'static str, Vec<u8>)>; 4] = [None, None, None, None];
+// ── Cache SRFS (SDC: → octets chargés à la demande depuis l'ESP) ─────────────
+// Plus aucun fichier hardcodé dans slul_loader.
+// FontLoad(path) charge le fichier depuis l'ESP UEFI au premier appel.
+static mut SRFS_CACHE: [Option<(String, Vec<u8>)>; 4] = [None, None, None, None];
+
+// Handles UEFI pour le chargement à la demande — initialisés par render_from_marep
+static mut UEFI_ST_PTR:     *mut core::ffi::c_void = core::ptr::null_mut();
+static mut UEFI_IMG_HANDLE: usize = 0;
+
+/// Initialise les handles UEFI pour le chargement dynamique des assets.
+/// Appelé par kernel_runtime avant exec_marep.
+pub fn init_uefi_handles(st_ptr: *mut core::ffi::c_void, image_handle: usize) {
+    unsafe { UEFI_ST_PTR = st_ptr; UEFI_IMG_HANDLE = image_handle; }
+}
+
+/// Charge un fichier depuis l'ESP UEFI via le chemin SRFS `SDC:\...` à la demande.
+/// Utilise le SystemTable stocké par init_uefi_handles.
+fn srfs_load_on_demand(path_ptr: i64) -> i64 {
+    if path_ptr == 0 { return 0; }
+
+    serial_log(b"[FONT] uefi_read: ");
+    serial_log(b"\r\n");
+
+    // Extract the null-terminated string from the pointer
+    let c_str_ptr = path_ptr as *const u8;
+    let mut len = 0usize;
+    unsafe {
+        while *c_str_ptr.add(len) != 0 {
+            len += 1;
+            // Prevent infinite loop on invalid strings
+            if len > 256 {
+                break;
+            }
+        }
+    }
+    if len == 0 {
+        serial_log(b"[FONT] Empty path\r\n");
+        return 0;
+    }
+    let bytes = unsafe { core::slice::from_raw_parts(c_str_ptr, len) };
+    let rel = match core::str::from_utf8(bytes) {
+        Ok(s) => s,
+        Err(_) => {
+            serial_log(b"[FONT] Invalid UTF-8 in path\r\n");
+            return 0;
+        }
+    };
+
+    serial_log(b"[FONT] Path: ");
+    serial_log(rel.as_bytes());
+    serial_log(b"\r\n");
+
+    // Remove "SDC:" prefix if present
+    let path_after_sdc = if rel.to_ascii_uppercase().starts_with("SDC:") {
+        &rel[4..]
+    } else {
+        rel
+    };
+
+    // Skip any leading slash or backslash
+    let mut idx = 0usize;
+    while idx < path_after_sdc.len() && 
+          (path_after_sdc.as_bytes()[idx] == b'/' || path_after_sdc.as_bytes()[idx] == b'\\') {
+        idx += 1;
+    }
+    let uefi_rel = &path_after_sdc[idx..];
+
+    let st_raw = unsafe { UEFI_ST_PTR };
+    if st_raw.is_null() {
+        serial_log(b"[FONT] ST_PTR null! init_uefi_handles non appele\r\n");
+        return 0;
+    }
+
+    let data = match unsafe { srfs_uefi_read(st_raw, uefi_rel) } {
+        Some(d) => d,
+        None => {
+            serial_log(b"[FONT] FontLoad: fichier non trouve\r\n");
+            return 0;
+        }
+    };
+
+    // Register the loaded data in SRFS cache for future use
+    let key_owned = rel.to_string(); // Owned String for the key
+    unsafe {
+        srfs_register_file(key_owned, data);
+        // Find the pointer to the data we just registered
+        for slot in SRFS_CACHE.iter() {
+            if let Some((ref k, ref d)) = slot {
+                if k.as_str() == rel {
+                    return d.as_ptr() as i64;
+                }
+            }
+        }
+    }
+    // Fallback: should not happen if registration succeeded
+    0
+}
+
+/// Lit un fichier depuis l'ESP UEFI en utilisant SimpleFileSystem.
+unsafe fn srfs_uefi_read(st_raw: *mut core::ffi::c_void, rel_path: &str)
+    -> Option<alloc::vec::Vec<u8>>
+{
+    use uefi::table::{Boot, SystemTable};
+    use uefi::proto::media::{
+        file::{File, FileAttribute, FileMode, FileType},
+        fs::SimpleFileSystem,
+    };
+    use uefi::table::boot::{OpenProtocolAttributes, OpenProtocolParams};
+
+    let mut st: SystemTable<Boot> = SystemTable::from_ptr(st_raw)?;
+    // Build UCS-2 UEFI path.
+    // Mara emits "\\" (double backslash) per path separator in OVC string constants.
+    // Deduplicate consecutive separators to avoid "\\\path" → keep "\path".
+    let mut ucs2: alloc::vec::Vec<u16> = alloc::vec::Vec::with_capacity(rel_path.len() + 2);
+    ucs2.push(b'\\' as u16);  // mandatory leading separator
+    let mut last_sep = true;   // skip duplicate separators at start of rel_path
+    for b in rel_path.bytes() {
+        if b == b'\\' || b == b'/' {
+            if !last_sep { ucs2.push(b'\\' as u16); }
+            last_sep = true;
+        } else {
+            ucs2.push(b as u16);
+            last_sep = false;
+        }
+    }
+    ucs2.push(0u16);
+    let uefi_path = uefi::CStr16::from_u16_with_nul(&ucs2).ok()?;
+    let img = uefi::Handle::from_ptr(UEFI_IMG_HANDLE as *mut core::ffi::c_void)?;
+    let handles = st.boot_services().find_handles::<SimpleFileSystem>().ok()?;
+    for &fs_h in handles.iter() {
+        let mut fs = match st.boot_services().open_protocol::<SimpleFileSystem>(
+            OpenProtocolParams { handle: fs_h, agent: img, controller: None },
+            OpenProtocolAttributes::GetProtocol,
+        ) { Ok(f) => f, Err(_) => continue };
+        let mut root = match fs.open_volume() { Ok(r) => r, Err(_) => continue };
+        let fh = match root.open(uefi_path, FileMode::Read, FileAttribute::empty()) {
+            Ok(f) => f, Err(_) => continue };
+        let mut file = match fh.into_type() {
+            Ok(FileType::Regular(f)) => f, _ => continue };
+        let mut buf: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            match file.read(&mut chunk) {
+                Ok(0) => break, Ok(n) => buf.extend_from_slice(&chunk[..n]), Err(_) => break,
+            }
+        }
+        if !buf.is_empty() { return Some(buf); }
+    }
+    None
+}
 
 /// Enregistre un fichier SRFS (path = "SDC:\\...") depuis slul_loader.
-pub fn srfs_register_file(path: &'static str, data: Vec<u8>) {
+pub fn srfs_register_file(path: String, data: Vec<u8>) {
     unsafe {
         for slot in SRFS_CACHE.iter_mut() {
             if slot.is_none() {
@@ -55,9 +202,9 @@ fn srfs_find(path_ptr: i64) -> Option<&'static [u8]> {
     let req = unsafe { core::str::from_utf8(core::slice::from_raw_parts(p, len)).ok()? };
     unsafe {
         for slot in SRFS_CACHE.iter() {
-            if let Some((key, ref data)) = slot {
+            if let Some((ref key, ref data)) = slot {
                 // Comparer de façon case-insensitive (SDC: est Windows-style)
-                if keys_match(req, key) {
+                if keys_match(req, key.as_str()) {
                     return Some(data.as_slice());
                 }
             }
@@ -178,8 +325,8 @@ static mut RAST_H: u32 = 0;
 // Partagé entre Load / GetGlyphId / GetGlyfOffset car ces appels
 // passent par le dispatcher global, pas par les globals OVC.
 static mut TTF_DATA_PTR: i64 = 0;
-// Indices 0..199 = TtfScratch, 200..219 = WoffScratch
-static mut TTF_SCRATCH: [i64; 220] = [0i64; 220];
+static mut TTF_SCRATCH:  [i64; 200] = [0i64; 200];
+static mut WOFF_SCRATCH: [i64; 256] = [0i64; 256];
 
 // ── Disque virtuel SRFS (pour SRFSMan.slul) ───────────────────────────────────
 // Superblock SRFS v2 minimal : magic 'SRF2', blockSize=32768, rootBlock=3.
@@ -242,7 +389,7 @@ pub fn gpu_counters() -> (u32, u32, u32) {
     unsafe { (GPU_FILLS, GPU_RECTS, GPU_TEXTS) }
 }
 
-// ── Contexte d'exécution ──────────────────────────────────────────────────────
+// ── Contexte
 
 /// Contexte d'exécution pour un OVC — fourni par le kernel au moment du rendu.
 /// La police 8×16 est embarquée dans ovc_exec (FONT8X16), pas dans la struct.
@@ -347,81 +494,59 @@ fn parse_call_args(src: &str) -> Vec<String> {
     out
 }
 
-// ── Cache pour parse_string_consts ────────────────────────────────────────────
-// Critique : chaque appel à exec_marep_fn appelle parse_string_consts.
-// Sans cache : Box<[u8]> alloués pour chaque constante, jamais libérés (Box::into_raw).
-// Pour 2000 appels × 15 constantes × 20 bytes = 600KB de leak → OOM.
-// Box dans le cache garantit l'adresse heap stable même si la map externe rééquilibre.
-// OvcConsts : possède les chaînes allouées + expose leurs pointeurs.
-// Box<OvcConsts> dans le cache garantit l'adresse heap stable même si la map externe
-// se rééquilibre. Les Box<[u8]> dans _data gardent les chaînes vivantes pour toujours.
-struct OvcConsts {
-    pub ptrs: BTreeMap<String, i64>,
-    _data:    alloc::vec::Vec<alloc::boxed::Box<[u8]>>,
-}
-
-// Cache: OVC ptr → Box<OvcConsts> (adresse heap stable)
-static mut OVC_CONSTS_CACHE: Option<BTreeMap<usize, alloc::boxed::Box<OvcConsts>>> = None;
-
-fn cached_string_consts(ovc: &str) -> &'static BTreeMap<String, i64> {
-    let key = ovc.as_ptr() as usize;
-    unsafe {
-        let cache = OVC_CONSTS_CACHE.get_or_insert_with(BTreeMap::new);
-        if !cache.contains_key(&key) {
-            let mut ptrs: BTreeMap<String, i64> = BTreeMap::new();
-            let mut data: alloc::vec::Vec<alloc::boxed::Box<[u8]>> = alloc::vec::Vec::new();
-            for line in ovc.lines() {
-                let line = line.trim();
-                if !line.starts_with('@') { continue; }
-                let Some(eq) = line.find('=') else { continue };
-                let name = line[1..eq].trim().to_string();
-                let Some(cp) = line.find(" c\"") else { continue };
-                let after = &line[cp+3..];
-                let Some(ep) = after.find("\\00\"") else { continue };
-                let s = after[..ep].to_string();
-                let mut bytes = s.as_bytes().to_vec();
-                bytes.push(0u8);
-                let boxed: alloc::boxed::Box<[u8]> = bytes.into_boxed_slice();
-                let ptr = boxed.as_ptr() as i64;
-                data.push(boxed);
-                ptrs.insert(name, ptr);
-            }
-            cache.insert(key, alloc::boxed::Box::new(OvcConsts { ptrs, _data: data }));
-        }
-        // Box<OvcConsts> sur le heap → adresse stable → &'static BTreeMap valide
-        &cache.get(&key).unwrap().ptrs
-    }
-}
-
-
 // ── Parsing des constantes de chaîne : @N = ... c"text\00" ───────────────────
 
+fn parse_string_consts(ovc: &str) -> BTreeMap<String, i64> {
+    let mut map = BTreeMap::new();
+    for line in ovc.lines() {
+        let line = line.trim();
+        if !line.starts_with('@') { continue; }
+        let Some(eq) = line.find('=') else { continue };
+        let name = line[1..eq].trim().to_string();
+        // Cherche c"text\00"
+        let Some(cp) = line.find(" c\"") else { continue };
+        let after = &line[cp+3..];
+        let Some(ep) = after.find("\\00\"") else { continue };
+        let s: String = after[..ep].to_string();
+        // Stocker avec null-terminator pour GpuDrawText (loop cherche \0)
+        let mut bytes = s.as_bytes().to_vec();
+        bytes.push(0u8);
+        let boxed: alloc::boxed::Box<[u8]> = bytes.into_boxed_slice();
+        let ptr = alloc::boxed::Box::into_raw(boxed) as *const u8 as i64;
+        map.insert(name, ptr);
+    }
+    map
+}
+
+// ── Localisation d'une fonction ───────────────────────────────────────────────
 
 /// Retourne le corps d'une fonction `define ... @name(...) { ... }`.
-/// Utilise str::find (SIMD) — rapide sans cache, sans risque de collision de pointeurs.
 fn find_function<'a>(ovc: &'a str, name: &str) -> Option<&'a str> {
     let marker = alloc::format!("@{}(", name);
-    let mut search = 0usize;
-    while let Some(rel) = ovc[search..].find(marker.as_str()) {
-        let abs = search + rel;
-        let line_start = ovc[..abs].rfind('\n').map(|p| p + 1).unwrap_or(0);
-        let line_end   = ovc[abs..].find('\n').map(|p| abs + p).unwrap_or(ovc.len());
-        if ovc[line_start..line_end].contains("define ") {
-            let mut depth = 0i32;
-            for (i, c) in ovc[line_start..].char_indices() {
-                if c == '{' { depth += 1; }
-                if c == '}' {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Some(&ovc[line_start..line_start + i + 1]);
-                    }
+    let mut depth = 0i32;
+    let mut start = None;
+    for (i, c) in ovc.char_indices() {
+        if start.is_none() {
+            if ovc[i..].starts_with("define ") {
+                // Vérifier que @name( est sur LA MÊME LIGNE (pas dans le reste du fichier)
+                let line_end = ovc[i..].find('\n').map(|n| i + n).unwrap_or(ovc.len());
+                if ovc[i..line_end].contains(marker.as_str()) {
+                    start = Some(i);
+                }
+            }
+        } else {
+            if c == '{' { depth += 1; }
+            if c == '}' {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&ovc[start.unwrap()..i+1]);
                 }
             }
         }
-        search = abs + 1;
     }
     None
 }
+
 /// Extrait les noms de paramètres d'une définition de fonction.
 fn parse_def_args(func: &str) -> Vec<String> {
     let first_line = func.lines().next().unwrap_or("");
@@ -439,38 +564,56 @@ fn parse_def_args(func: &str) -> Vec<String> {
 
 // ── Parsing des blocs de base ─────────────────────────────────────────────────
 
-// Retourne les blocs avec des références vers le texte de func (zéro copie).
-// Remplace Vec<String> par Vec<&'a str> pour éviter les allocations répétées.
-fn parse_blocks<'a>(func: &'a str) -> BTreeMap<String, Vec<&'a str>> {
-    let mut blocks: BTreeMap<String, Vec<&'a str>> = BTreeMap::new();
+fn parse_blocks(func: &str) -> BTreeMap<String, Vec<String>> {
+    let mut blocks: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut cur = "entry".to_string();
     blocks.insert(cur.clone(), Vec::new());
 
+    let mut switch_buf: Option<String> = None;
     for line in func.lines().skip(1) {
         let t = line.trim();
         if t.is_empty() || t == "{" || t == "}" { continue; }
         if t.starts_with(';') { continue; }
-        if !t.starts_with('%') && !t.starts_with("store")
-            && !t.starts_with("br") && !t.starts_with("ret")
-        {
-            if let Some(colon) = t.find(':') {
-                let label_part = &t[..colon];
-                if !label_part.is_empty() && !label_part.contains(' ') {
-                    let label = label_part.to_string();
-                    cur = label.clone();
-                    blocks.entry(cur.clone()).or_insert_with(Vec::new);
-                    continue;
-                }
+
+        // Fusionner les instructions switch multi-lignes "switch ... [ ... ]"
+        if let Some(ref mut buf) = switch_buf {
+            buf.push(' ');
+            buf.push_str(t);
+            if t == "]" || t.ends_with(']') {
+                let done = buf.clone();
+                switch_buf = None;
+                if let Some(v) = blocks.get_mut(&cur) { v.push(done); }
             }
+            continue;
+        }
+        if t.starts_with("switch ") {
+            if t.ends_with(']') {
+                if let Some(v) = blocks.get_mut(&cur) { v.push(t.to_string()); }
+            } else {
+                switch_buf = Some(t.to_string());
+            }
+            continue;
+        }
+
+        // Supprimer le commentaire de fin de ligne avant le test de label
+        let t_nc = if let Some(sc) = t.find(';') { t[..sc].trim() } else { t };
+        if !t_nc.starts_with('%') && !t_nc.starts_with("store")
+            && !t_nc.starts_with("br") && !t_nc.starts_with("ret")
+            && t_nc.ends_with(':')
+        {
+            let label = t_nc.trim_end_matches(':').trim().to_string();
+            cur = label.clone();
+            blocks.entry(cur.clone()).or_insert_with(Vec::new);
+            continue;
         }
         if let Some(v) = blocks.get_mut(&cur) {
-            v.push(t);  // ← &'a str, pas de clone
+            v.push(t.to_string());
         }
     }
     blocks
 }
 
-// ── Exécution ─────────────────────────────────────────────────────────────────
+// ── Exécution ─────────────────
 
 pub fn exec_fn(
     ovc:     &[u8],
@@ -481,7 +624,7 @@ pub fn exec_fn(
     let text = core::str::from_utf8(ovc).unwrap_or("");
     if !text.starts_with("# Vyft OVC v1.0") { return -1; }
 
-    let consts = cached_string_consts(text);
+    let consts  = parse_string_consts(text);
     let func    = match find_function(text, fn_name) { Some(f) => f, None => return -1 };
     let arg_names = parse_def_args(func);
     let blocks  = parse_blocks(func);
@@ -502,7 +645,7 @@ pub fn exec_module(ovc: &[u8], fns: &[(&str, &[i64])], ctx: &ExecCtx) -> i64 {
     let text = core::str::from_utf8(ovc).unwrap_or("");
     if !text.starts_with("# Vyft OVC v1.0") { return -1; }
 
-    let consts = cached_string_consts(text);
+    let consts  = parse_string_consts(text);
     let mut globals: BTreeMap<String, i64> = BTreeMap::new();
     let mut last = 0i64;
 
@@ -560,10 +703,10 @@ pub fn exec_marep(
         if text.starts_with("# Vyft OVC v1.0") {
             // Fusionner les constantes de chaque module dans un espace global
             // (préfixées par le module pour éviter les collisions)
-            let _c = cached_string_consts(text);
-            for (k, v) in _c {
-                all_consts.insert(alloc::format!("{}::{}", name, k), *v);
-                all_consts.entry(k.clone()).or_insert(*v);
+            let c = parse_string_consts(text);
+            for (k, v) in c {
+                all_consts.insert(alloc::format!("{}::{}", name, k), v);
+                all_consts.entry(k).or_insert(v); // sans préfixe aussi
             }
             mod_texts.push((name, text));
         }
@@ -577,7 +720,8 @@ pub fn exec_marep(
     // Étape 1 : constructeurs des COMPOSANTS (pas OEntry)
     for (mod_name, mod_text) in &mod_texts {
         if mod_name.eq_ignore_ascii_case("OEntry") { continue; }
-        if find_function(mod_text, mod_name).is_some() {
+        let has_fn = find_function(mod_text, mod_name).is_some();
+        if has_fn {
             exec_marep_fn(
                 mod_name, mod_text, mod_name, &[],
                 &all_consts, &mut globals, ctx, &mod_texts, 0,
@@ -624,67 +768,22 @@ fn exec_marep_fn(
 ) -> i64 {
     if depth > 32 { return 0; }
 
-    // ── Fast-path : primitives de lecture TTF (appelées 2000+ fois par GetGlyphId) ──
-    // Évite find_function + parse_blocks + run_blocks_cross pour ces helpers triviaux.
-    // TtfParser._r8/16/32/rtag lisent depuis TTF_DATA_PTR (font bytes).
-    // WoffReader._r8/16/32 lisent depuis (ptr, offset) passés en args.
-    match fn_name {
-        "_r8" if args.len() >= 1 && mod_name.eq_ignore_ascii_case("TtfParser") => {
-            let off = args[0] as usize;
-            let ptr = unsafe { TTF_DATA_PTR } as *const u8;
-            let sz  = unsafe { TTF_SCRATCH[100] as usize };
-            return if !ptr.is_null() && off < sz { unsafe { *ptr.add(off) as i64 } } else { 0 };
-        }
-        "_r16" if args.len() >= 1 && mod_name.eq_ignore_ascii_case("TtfParser") => {
-            let off = args[0] as usize;
-            let ptr = unsafe { TTF_DATA_PTR } as *const u8;
-            let sz  = unsafe { TTF_SCRATCH[100] as usize };
-            return if !ptr.is_null() && off + 1 < sz { unsafe {
-                ((*ptr.add(off) as u32) << 8 | *ptr.add(off+1) as u32) as i64
-            } } else { 0 };
-        }
-        "_r32" | "_rtag" if args.len() >= 1 && mod_name.eq_ignore_ascii_case("TtfParser") => {
-            let off = args[0] as usize;
-            let ptr = unsafe { TTF_DATA_PTR } as *const u8;
-            let sz  = unsafe { TTF_SCRATCH[100] as usize };
-            return if !ptr.is_null() && off + 3 < sz { unsafe {
-                let b0 = *ptr.add(off)   as u32; let b1 = *ptr.add(off+1) as u32;
-                let b2 = *ptr.add(off+2) as u32; let b3 = *ptr.add(off+3) as u32;
-                ((b0 << 24) | (b1 << 16) | (b2 << 8) | b3) as i64
-            } } else { 0 };
-        }
-        // WoffReader primitives : (ptr, off) args
-        "_r8" if args.len() >= 2 => {
-            let base = args[0] as *const u8;
-            let off  = args[1] as usize;
-            return if !base.is_null() { unsafe { *base.add(off) as i64 } } else { 0 };
-        }
-        "_r16" if args.len() >= 2 => {
-            let base = args[0] as *const u8;
-            let off  = args[1] as usize;
-            return if !base.is_null() { unsafe {
-                ((*base.add(off) as u32) << 8 | *base.add(off+1) as u32) as i64
-            } } else { 0 };
-        }
-        "_r32" if args.len() >= 2 => {
-            let base = args[0] as *const u8;
-            let off  = args[1] as usize;
-            return if !base.is_null() { unsafe {
-                let b0 = *base.add(off)   as u32; let b1 = *base.add(off+1) as u32;
-                let b2 = *base.add(off+2) as u32; let b3 = *base.add(off+3) as u32;
-                ((b0 << 24) | (b1 << 16) | (b2 << 8) | b3) as i64
-            } } else { 0 };
-        }
-        _ => {}
+    // Log uniquement les fonctions publiques (pas les helpers internes _xxx)
+    let is_public = !fn_name.starts_with('_');
+    if is_public {
+        serial_log(b"[FN] ");
+        serial_log(mod_name.as_bytes());
+        serial_log(b"::");
+        serial_log(fn_name.as_bytes());
+        serial_log(b"\r\n");
     }
 
-    let local_consts = cached_string_consts(ovc_text);
+    let local_consts = parse_string_consts(ovc_text);
     let func = match find_function(ovc_text, fn_name) {
         Some(f) => f,
         None    => {
-            let null_ctx_local = ExecCtx { fb: ctx.fb, width: ctx.width, height: ctx.height, stride: ctx.stride, font: ctx.font, font_len: ctx.font_len };
-            let arg_vals: alloc::vec::Vec<i64> = args.to_vec();
-            return dispatch(fn_name, &arg_vals, _all_consts, &mut BTreeMap::new(), &null_ctx_local);
+            serial_log(b"[FN] NOT FOUND\r\n");
+            return 0;
         }
     };
     let arg_names = parse_def_args(func);
@@ -739,7 +838,7 @@ fn resolve_cross_module_call(fname: &str) -> Option<(&str, &str)> {
 
 /// Version cross-module de run_blocks.
 fn run_blocks_cross(
-    blocks:   &BTreeMap<String, Vec<&str>>,
+    blocks:   &BTreeMap<String, Vec<String>>,
     consts:   &BTreeMap<String, i64>,
     globals:  &mut BTreeMap<String, i64>,
     regs:     &mut BTreeMap<String, i64>,
@@ -757,9 +856,8 @@ fn run_blocks_cross(
         iters += 1;
         if iters > 200_000 { break; }
 
-        // Références directes vers le texte OVC — zéro copie, zéro alloc.
-        let instrs: &[&str] = match blocks.get(&cur) {
-            Some(v) => v.as_slice(),
+        let instrs = match blocks.get(&cur) {
+            Some(v) => v.clone(),
             None    => break,
         };
 
@@ -767,48 +865,7 @@ fn run_blocks_cross(
         prev = cur.clone();
 
         let mut jumped = false;
-        let mut instr_idx = 0usize;
-        while instr_idx < instrs.len() {
-            let instr: &str = instrs[instr_idx];  // &str est Copy
-
-            // ── switch i32 %val, label %default [ i32 case, label %lbl ... ] ──
-            // Multi-ligne : le switch + ses cases sont des instructions consécutives.
-            if instr.trim().starts_with("switch ") {
-                let t = instr.trim();
-                // Extraire la valeur : "switch TYPE %val, label ..."
-                let val_tok = t.split_whitespace().nth(2).unwrap_or("0");
-                let val = resolve(val_tok, regs, consts);
-                // Extraire le label par défaut : ", label %default ["
-                let default_label = t.find(", label %")
-                    .map(|p| {
-                        let rest = &t[p+9..];
-                        let end = rest.find(|c: char| c == ' ' || c == '[').unwrap_or(rest.len());
-                        rest[..end].to_string()
-                    })
-                    .unwrap_or_default();
-
-                let mut target = default_label;
-                instr_idx += 1;
-                // Scanner les cases jusqu'au ']'
-                while instr_idx < instrs.len() {
-                    let case_ln = instrs[instr_idx].trim();
-                    instr_idx += 1;
-                    if case_ln == "]" { break; }
-                    // Format : "i32 CASEVALUE, label %LABEL"
-                    let ctoks: Vec<&str> = case_ln.split_whitespace().collect();
-                    if ctoks.len() >= 4 {
-                        let case_val: i64 = ctoks[1].trim_end_matches(',').parse().unwrap_or(i64::MIN);
-                        if val == case_val {
-                            target = ctoks[3].trim_start_matches('%').to_string();
-                        }
-                    }
-                }
-                if !target.is_empty() {
-                    prev = cur.clone(); cur = target; jumped = true;
-                }
-                break;
-            }
-
+        for instr in &instrs {
             // Pour les appels de fonction, intercepter les appels cross-module
             let result = if instr.contains(" = ") && instr.contains("call ") {
                 let eq = instr.find(" = ").unwrap();
@@ -842,11 +899,14 @@ fn run_blocks_cross(
                             };
 
                             if let Some((found_mod, found_text)) = found {
-                                serial_log(b"[CM] ");
-                                serial_log(found_mod.as_bytes());
-                                serial_log(b"::");
-                                serial_log(target_fn.as_bytes());
-                                serial_log(b"\r\n");
+                                // Log uniquement les appels cross-module publics
+                                if !target_fn.starts_with('_') {
+                                    serial_log(b"[CM] ");
+                                    serial_log(found_mod.as_bytes());
+                                    serial_log(b"::");
+                                    serial_log(target_fn.as_bytes());
+                                    serial_log(b"\r\n");
+                                }
                                 exec_marep_fn(
                                     found_mod, found_text, target_fn,
                                     &arg_vals, consts, globals, ctx, modules, depth + 1,
@@ -860,23 +920,60 @@ fn run_blocks_cross(
                                 dispatch(fname, &arg_vals, consts, globals, ctx)
                             }
                         } else {
-                            // Pas de séparateur "___" → fonction interne du module courant
-                            // (ex. _r8, _r16, _r32 dans TtfParser.ovc)
-                            let self_text = modules.iter()
-                                .find(|(n, _)| n.eq_ignore_ascii_case(mod_name))
-                                .map(|(_, t)| *t);
-                            if let Some(st) = self_text {
-                                if find_function(st, fname).is_some() {
-                                    exec_marep_fn(
-                                        mod_name, st, fname,
-                                        &arg_vals, consts, globals, ctx, modules, depth + 1,
-                                    )
+                            // Fast-paths pour _r8/_r16/_r32/_rtag de TtfParser
+                            // (évite de re-parser TtfParser.ovc 34KB à chaque lecture)
+                            let fast = match fname {
+                                "_r8" => {
+                                    let off = arg_vals.get(0).copied().unwrap_or(0);
+                                    let ptr = unsafe { TTF_DATA_PTR } as *const u8;
+                                    let sz  = unsafe { TTF_SCRATCH[100] } as i64;
+                                    if ptr.is_null() || off < 0 || off >= sz { Some(0i64) }
+                                    else { Some(unsafe { *ptr.add(off as usize) as i64 }) }
+                                },
+                                "_r16" => {
+                                    let off = arg_vals.get(0).copied().unwrap_or(0);
+                                    let ptr = unsafe { TTF_DATA_PTR } as *const u8;
+                                    let sz  = unsafe { TTF_SCRATCH[100] } as i64;
+                                    if ptr.is_null() || off < 0 || off + 1 >= sz { Some(0i64) }
+                                    else { unsafe {
+                                        let hi = *ptr.add(off as usize) as i64;
+                                        let lo = *ptr.add(off as usize + 1) as i64;
+                                        Some((hi << 8) | lo)
+                                    }}
+                                },
+                                "_r32" | "_rtag" => {
+                                    let off = arg_vals.get(0).copied().unwrap_or(0);
+                                    let ptr = unsafe { TTF_DATA_PTR } as *const u8;
+                                    let sz  = unsafe { TTF_SCRATCH[100] } as i64;
+                                    if ptr.is_null() || off < 0 || off + 3 >= sz { Some(0i64) }
+                                    else { unsafe {
+                                        let b0 = *ptr.add(off as usize)     as i64;
+                                        let b1 = *ptr.add(off as usize + 1) as i64;
+                                        let b2 = *ptr.add(off as usize + 2) as i64;
+                                        let b3 = *ptr.add(off as usize + 3) as i64;
+                                        Some((b0 << 24) | (b1 << 16) | (b2 << 8) | b3)
+                                    }}
+                                },
+                                _ => None,
+                            };
+                            if let Some(v) = fast { v } else {
+                                // Pas de séparateur "___" → fonction interne du module courant
+                                let self_text = modules.iter()
+                                    .find(|(n, _)| n.eq_ignore_ascii_case(mod_name))
+                                    .map(|(_, t)| *t);
+                                if let Some(st) = self_text {
+                                    if find_function(st, fname).is_some() {
+                                        exec_marep_fn(
+                                            mod_name, st, fname,
+                                            &arg_vals, consts, globals, ctx, modules, depth + 1,
+                                        )
+                                    } else {
+                                        dispatch(fname, &arg_vals, consts, globals, ctx)
+                                    }
                                 } else {
                                     dispatch(fname, &arg_vals, consts, globals, ctx)
                                 }
-                            } else {
-                                dispatch(fname, &arg_vals, consts, globals, ctx)
-                            }
+                            }  // end if let Some(v) = fast
                         };
 
                         regs.insert(dst, call_result);
@@ -901,7 +998,6 @@ fn run_blocks_cross(
                 },
                 RunResult::Return(v) => return v,
             }
-            instr_idx += 1;
         }
         if !jumped { break; }
     }
@@ -909,7 +1005,7 @@ fn run_blocks_cross(
 }
 
 fn run_blocks(
-    blocks:  &BTreeMap<String, Vec<&str>>,
+    blocks:  &BTreeMap<String, Vec<String>>,
     consts:  &BTreeMap<String, i64>,
     globals: &mut BTreeMap<String, i64>,
     regs:    &mut BTreeMap<String, i64>,
@@ -924,8 +1020,8 @@ fn run_blocks(
         iters += 1;
         if iters > 200_000 { break; }  // garde-fou boucle infinie
 
-        let instrs: &[&str] = match blocks.get(&cur) {
-            Some(v) => v.as_slice(),
+        let instrs = match blocks.get(&cur) {
+            Some(v) => v.clone(),
             None    => break,
         };
 
@@ -933,37 +1029,17 @@ fn run_blocks(
         prev = cur.clone();
 
         let mut jumped = false;
-        let mut instr_idx2 = 0usize;
-        while instr_idx2 < instrs.len() {
-            let instr: &str = instrs[instr_idx2];
-            if instr.trim().starts_with("switch ") {
-                let t = instr.trim();
-                let val_tok = t.split_whitespace().nth(2).unwrap_or("0");
-                let val = resolve(val_tok, regs, consts);
-                let default_label = t.find(", label %")
-                    .map(|p| { let r = &t[p+9..]; let e = r.find(|c: char| c==' '||c=='[').unwrap_or(r.len()); r[..e].to_string() })
-                    .unwrap_or_default();
-                let mut target = default_label;
-                instr_idx2 += 1;
-                while instr_idx2 < instrs.len() {
-                    let cl = instrs[instr_idx2].trim();
-                    instr_idx2 += 1;
-                    if cl == "]" { break; }
-                    let ct: Vec<&str> = cl.split_whitespace().collect();
-                    if ct.len() >= 4 {
-                        let cv: i64 = ct[1].trim_end_matches(',').parse().unwrap_or(i64::MIN);
-                        if val == cv { target = ct[3].trim_start_matches('%').to_string(); }
-                    }
-                }
-                if !target.is_empty() { prev = cur.clone(); cur = target; jumped = true; }
-                break;
-            }
+        for instr in &instrs {
             match run_instr(instr, consts, globals, regs, ctx, &prev_blk) {
                 RunResult::Ok          => {},
-                RunResult::Branch(lbl) => { prev = cur.clone(); cur = lbl; jumped = true; break; },
+                RunResult::Branch(lbl) => {
+                    prev = cur.clone();
+                    cur  = lbl;
+                    jumped = true;
+                    break;
+                },
                 RunResult::Return(v)   => return v,
             }
-            instr_idx2 += 1;
         }
         if !jumped { break; }
     }
@@ -982,6 +1058,33 @@ fn run_instr(
 ) -> RunResult {
     let instr = instr.trim();
     if instr.is_empty() || instr.starts_with(';') { return RunResult::Ok; }
+
+    // ── switch i32 %val, label %default [ i32 N, label %lbl ... ] ───────────
+    if instr.starts_with("switch ") {
+        let toks: Vec<&str> = instr.split_whitespace().collect();
+        // toks[2] = value token (e.g. "%14"), toks[4] = default label (e.g. "%merge80")
+        let val_tok     = toks.get(2).unwrap_or(&"0");
+        let default_lbl = toks.get(4).unwrap_or(&"").trim_start_matches('%').to_string();
+        let val = resolve(val_tok, regs, consts);
+        let mut target = default_lbl;
+        // Scan pairs: "i32 CONST, label %LBL"
+        let mut i = 5usize;
+        while i + 3 <= toks.len() {
+            if toks[i] == "[" { i += 1; continue; }
+            if toks[i] == "]" { break; }
+            // "i32" CONST "label" "%LBL"
+            if toks[i].starts_with("i") {
+                let case_val: i64 = toks.get(i+1).unwrap_or(&"").trim_end_matches(',').parse().unwrap_or(i64::MAX);
+                let case_lbl = toks.get(i+3).unwrap_or(&"").trim_start_matches('%').trim_end_matches(']');
+                if val == case_val {
+                    target = case_lbl.to_string();
+                    break;
+                }
+                i += 4;
+            } else { i += 1; }
+        }
+        return RunResult::Branch(target);
+    }
 
     // ── br ───────────────────────────────────────────────────────────────────
     if instr.starts_with("br ") {
@@ -1103,18 +1206,22 @@ fn run_instr(
         let b = resolve(b_tok, regs, consts);
         match *op {
             "sgt"              => (a > b) as i64,
+            "sge"              => (a >= b) as i64,
             "eq"               => (a == b) as i64,
             "ne"               => (a != b) as i64,
             "slt"              => (a < b) as i64,
-            "ugt" | "samesign" => (a > b) as i64,
+            "sle"              => (a <= b) as i64,
+            "ugt" | "samesign" => ((a as u64) > (b as u64)) as i64,
+            "uge"              => ((a as u64) >= (b as u64)) as i64,
             "ult"              => ((a as u64) < (b as u64)) as i64,
+            "ule"              => ((a as u64) <= (b as u64)) as i64,
             _                  => 0,
         }
     }
     else {
         // Opérations arithmétiques / casts
         let toks: Vec<&str> = rhs.split_whitespace().collect();
-        // Pattern: "op type %a, %b"  |  "op type %a, N"
+        // Pattern: "op [qualifiers] type %a, %b"  |  "op [qualifiers] type %a, N"
         if toks.len() < 2 { 0 }
         else {
             let op = toks[0];
@@ -1126,6 +1233,10 @@ fn run_instr(
                 "add"   => a.wrapping_add(b),
                 "sub"   => a.wrapping_sub(b),
                 "mul"   => a.wrapping_mul(b),
+                "sdiv"  => if b != 0 { a / b } else { 0 },
+                "udiv"  => if b != 0 { (a as u64 / b as u64) as i64 } else { 0 },
+                "srem"  => if b != 0 { a % b } else { 0 },
+                "urem"  => if b != 0 { (a as u64 % b as u64) as i64 } else { 0 },
                 "shl"   => a.wrapping_shl(b as u32),
                 "ashr"  => (a >> (b & 63)),
                 "lshr"  => ((a as u64) >> (b & 63)) as i64,
@@ -1193,11 +1304,37 @@ fn parse_phi(rhs: &str, prev: &str, regs: &BTreeMap<String, i64>, consts: &BTree
     0
 }
 
+// ── Rendu texte ──────────────────────────────────────────────────────────────
 
+/// Rendu bitmap 8×16 (FONT8X16) — fallback quand TTF non disponible.
+unsafe fn draw_text_bitmap(
+    x: i32, y: i32, tp: *const u8, fg: u32, bg: u32,
+    fb: *mut u32, s: i32,
+) {
+    let font = FONT8X16.as_ptr();
+    let mut cx = x;
+    let mut ci = 0usize;
+    loop {
+        let ch = *tp.add(ci);
+        if ch == 0 { break; }
+        let glyph_off = (ch as usize) * 16;
+        for row in 0..16i32 {
+            let bits = *font.add(glyph_off + row as usize);
+            for col in 0..8i32 {
+                let on = (bits >> (7 - col)) & 1 != 0;
+                let c = if on { fg } else { bg };
+                let idx = ((y + row) * s + cx + col) as usize;
+                fb.add(idx).write_volatile(c);
+            }
+        }
+        cx += 8;
+        ci += 1;
+    }
+}
 
-// ── Helpers d'exécution OVC avec modules extra ────────────────────────────────
-
-/// Exécute une fonction dans un OVC avec modules additionnels pour les cross-calls.
+/// Appelle une fonction OVC avec des arguments et retourne la valeur i64.
+/// `extra_mods` : modules supplémentaires accessibles pour les appels cross-module
+/// (ex. l'OVC lui-même pour les appels internes, GlyphRasterizer pour TtfParser).
 fn exec_fn_raw_with_mods<'a>(
     ovc:        &'a [u8],
     mod_name:   &'a str,
@@ -1208,29 +1345,24 @@ fn exec_fn_raw_with_mods<'a>(
 ) -> i64 {
     let text = core::str::from_utf8(ovc).unwrap_or("");
     if !text.starts_with("# Vyft OVC v1.0") { return 0; }
-    let local_consts = cached_string_consts(text);
-    let func = match find_function(text, fn_name) {
-        Some(f) => f,
-        None    => {
-            serial_log(b"[OVC] fn ");
-            serial_log(fn_name.as_bytes());
-            serial_log(b" NOT FOUND in ");
-            serial_log(mod_name.as_bytes());
-            serial_log(b"\r\n");
-            return 0;
-        }
-    };
+    let local_consts = parse_string_consts(text);
+    let func = match find_function(text, fn_name) { Some(f) => f, None => return 0 };
     let arg_names = parse_def_args(func);
-    let blocks    = parse_blocks(func);
+    let blocks = parse_blocks(func);
     let mut regs: BTreeMap<String, i64> = BTreeMap::new();
     for (i, a) in arg_names.iter().enumerate() {
         regs.insert(a.clone(), args.get(i).copied().unwrap_or(0));
     }
     let mut globals: BTreeMap<String, i64> = BTreeMap::new();
-    let mut mods_vec: alloc::vec::Vec<(&str, &str)> = alloc::vec::Vec::new();
+    // Construire la liste modules : le module courant + les modules extra
+    let mut mods_vec: Vec<(&str, &str)> = alloc::vec::Vec::new();
     mods_vec.push((mod_name, text));
     for &(n, t) in extra_mods { mods_vec.push((n, t)); }
     run_blocks_cross(&blocks, &local_consts, &mut globals, &mut regs, ctx, "entry", mod_name, &mods_vec, 0)
+}
+
+fn exec_fn_raw(ovc: &[u8], fn_name: &str, args: &[i64], ctx: &ExecCtx) -> i64 {
+    exec_fn_raw_with_mods(ovc, fn_name, fn_name, args, ctx, &[])
 }
 
 // ── Dispatch des appels externes ──────────────────────────────────────────────
@@ -1277,32 +1409,32 @@ fn dispatch(
             }
             0
         },
-        // PtrWrite32At(ptr, byteOffset, u32value) — natif LE
-        // Utilisé par GlyphRasterizer : buffers de coordonnées + framebuffer.
         "DrvManSpec___PtrWrite32At___" => {
             if args.len() >= 3 {
                 let p   = args[0] as *mut u8;
                 let off = args[1] as usize;
-                let val = args[2] as u32;
+                let v   = (args[2] as u32).to_be_bytes(); // SRFS = big-endian
                 if !p.is_null() {
-                    unsafe { (p.add(off) as *mut u32).write_volatile(val); }
+                    unsafe {
+                        *p.add(off)   = v[0]; *p.add(off+1) = v[1];
+                        *p.add(off+2) = v[2]; *p.add(off+3) = v[3];
+                    }
                 }
             }
             0
         },
-        "DrvManSpec___WoffGetData___"     => 0,
-        // WoffScratchGet/Set : WoffReader utilise indices 200+ pour stocker
-        // la taille décodée (200) et la signature (201).
+        "DrvManSpec___WoffGetData___" => 0,
         "DrvManSpec___WoffScratchGet___" => {
             if args.len() >= 1 {
-                let idx = (args[0] as usize).min(219);
-                unsafe { TTF_SCRATCH[idx] }
+                let idx = args[0] as usize;
+                if idx < 256 { unsafe { WOFF_SCRATCH[idx] } } else { 0 }
             } else { 0 }
         },
         "DrvManSpec___WoffScratchSet___" => {
             if args.len() >= 2 {
-                let idx = (args[0] as usize).min(219);
-                unsafe { TTF_SCRATCH[idx] = args[1]; }
+                let idx = args[0] as usize;
+                let val = args[1];
+                if idx < 256 { unsafe { WOFF_SCRATCH[idx] = val; } }
             }
             0
         },
@@ -1310,34 +1442,24 @@ fn dispatch(
         // ── DrvManSpec TtfParser state ────────────────────────────────────────
         // TtfGetData/SetData : pointeur vers les bytes TTF en mémoire
         "DrvManSpec___TtfGetData___" => unsafe { TTF_DATA_PTR },
-        // TtfSetData : stocke le pointeur TTF — OVC (TtfParser) l'appelle via WoffReader::Decode
         "DrvManSpec___TtfSetData___" => {
-            if args.len() >= 1 {
-                unsafe { TTF_DATA_PTR = args[0]; }
-            }
+            if args.len() >= 1 { unsafe { TTF_DATA_PTR = args[0]; } }
             0
         },
-
-        // TtfScratchGet/Set : registres temporaires OVC (200 slots)
-        // idx 100=font size, 101=numTables, 102-108=table offsets,
-        // 109=unitsPerEm, 110-112=hhea, 113=locaFormat, 114=numGlyphs/numHMetrics
+        // TtfScratchGet/Set : registres temporaires indexés (200 slots)
+        // idx 100 = taille font, 101 = nb tables, 102-108 = offsets tables TTF,
+        // 109 = unitsPerEm, 110-112 = hhea, 113 = locaFormat, 114 = numHMetrics
         "DrvManSpec___TtfScratchGet___" => {
             if args.len() >= 1 {
                 let idx = args[0] as usize;
-                if idx < 220 { unsafe { TTF_SCRATCH[idx] } } else { 0 }
+                if idx < 200 { unsafe { TTF_SCRATCH[idx] } } else { 0 }
             } else { 0 }
         },
         "DrvManSpec___TtfScratchSet___" => {
             if args.len() >= 2 {
                 let idx = args[0] as usize;
                 let val = args[1];
-                if idx < 220 {
-                    unsafe { TTF_SCRATCH[idx] = val; }
-                    // Slot 109 = unitsPerEm → synchroniser FONT_UNITS_PER_EM
-                    if idx == 109 && val > 0 {
-                        unsafe { FONT_UNITS_PER_EM = val as u32; }
-                    }
-                }
+                if idx < 200 { unsafe { TTF_SCRATCH[idx] = val; } }
             }
             0
         },
@@ -1365,19 +1487,15 @@ fn dispatch(
         },
 
         // ── DrvManSpec Mémoire brute (TtfParser / GlyphRasterizer) ───────────
-        // PtrReadI16At — lire big-endian i16 signé.
-        // IMPORTANT : lire d'abord en u8, puis construire en u16, puis cast i16.
-        // Sinon hi/lo castés directement en i16 donnent des bits incorrects.
         "DrvManSpec___PtrReadI16At___" | "DrvManSpec___PtrRead16At___" => {
             if args.len() >= 2 {
                 let base = args[0] as *const u8;
                 let off  = args[1] as usize;
                 if !base.is_null() {
                     unsafe {
-                        let hi = *base.add(off)     as u8;
-                        let lo = *base.add(off + 1) as u8;
-                        let raw = ((hi as u16) << 8) | (lo as u16);
-                        raw as i16 as i64
+                        let hi = *base.add(off)     as i16;
+                        let lo = *base.add(off + 1) as i16;
+                        ((hi << 8) | lo) as i64
                     }
                 } else { 0 }
             } else { 0 }
@@ -1388,38 +1506,25 @@ fn dispatch(
                 let off  = args[1] as usize;
                 if !base.is_null() {
                     unsafe {
-                        let hi = *base.add(off)     as u8;
-                        let lo = *base.add(off + 1) as u8;
-                        ((hi as u16) << 8) as i64 | lo as i64
+                        let hi = *base.add(off)     as u16;
+                        let lo = *base.add(off + 1) as u16;
+                        ((hi << 8) | lo) as i64
                     }
                 } else { 0 }
             } else { 0 }
         },
-        // PtrReadI32At : big-endian signé — pour données TTF/WOFF en fichier
-        "DrvManSpec___PtrReadI32At___" => {
+        "DrvManSpec___PtrReadI32At___" | "DrvManSpec___PtrRead32At___" => {
             if args.len() >= 2 {
                 let base = args[0] as *const u8;
                 let off  = args[1] as usize;
                 if !base.is_null() {
                     unsafe {
-                        let b0 = *base.add(off)     as u8;
-                        let b1 = *base.add(off + 1) as u8;
-                        let b2 = *base.add(off + 2) as u8;
-                        let b3 = *base.add(off + 3) as u8;
-                        let raw = ((b0 as u32) << 24) | ((b1 as u32) << 16)
-                                | ((b2 as u32) << 8)  | (b3 as u32);
-                        raw as i32 as i64
+                        let b0 = *base.add(off)     as i32;
+                        let b1 = *base.add(off + 1) as i32;
+                        let b2 = *base.add(off + 2) as i32;
+                        let b3 = *base.add(off + 3) as i32;
+                        ((b0 << 24) | (b1 << 16) | (b2 << 8) | b3) as i64
                     }
-                } else { 0 }
-            } else { 0 }
-        },
-        // PtrRead32At : natif LE — pour buffers temporaires GlyphRasterizer (xBuf, yBuf, xs)
-        "DrvManSpec___PtrRead32At___" => {
-            if args.len() >= 2 {
-                let base = args[0] as *const u8;
-                let off  = args[1] as usize;
-                if !base.is_null() {
-                    unsafe { (*(base.add(off) as *const u32)) as i32 as i64 }
                 } else { 0 }
             } else { 0 }
         },
@@ -1451,10 +1556,8 @@ fn dispatch(
             }
             0
         },
-        "DrvManSpec___RastGetWidth___"  |
-        "DrvManSpec___RastGetBmpW___"   => unsafe { RAST_W as i64 },
-        "DrvManSpec___RastGetHeight___" |
-        "DrvManSpec___RastGetBmpH___"   => unsafe { RAST_H as i64 },
+        "DrvManSpec___RastGetWidth___"  => unsafe { RAST_W as i64 },
+        "DrvManSpec___RastGetHeight___" => unsafe { RAST_H as i64 },
 
         // ── DrvManSpec Chaîne ─────────────────────────────────────────────────
         "DrvManSpec___StrLen___" => {
@@ -1558,6 +1661,56 @@ fn dispatch(
         "DrvManSpec___GetBitmapFont8x16___"     => FONT8X16.as_ptr() as i64,
         "DrvManSpec___GopCacheState___"         => 0,
 
+        // PtrWrite32At(fb_ptr, byte_offset, value)
+        "DrvManSpec___PtrWrite32At___" => {
+            if args.len() >= 3 {
+                let fb   = args[0] as *mut u8;
+                let off  = args[1] as usize;
+                let val  = args[2] as u32;
+                if !fb.is_null() {
+                    unsafe { (fb.add(off) as *mut u32).write_volatile(val); }
+                }
+            }
+            0
+        },
+
+        // PtrRead8At(base_ptr, byte_offset)
+        "DrvManSpec___PtrRead8At___" => {
+            if args.len() >= 2 {
+                let p   = args[0] as *const u8;
+                let off = args[1] as usize;
+                if !p.is_null() {
+                    return unsafe { *p.add(off) } as i64;
+                }
+            }
+            0
+        },
+
+        // StrLen(ptr) — null-terminated
+        "DrvManSpec___StrLen___" => {
+            if args.len() >= 1 {
+                let p = args[0] as *const u8;
+                if !p.is_null() {
+                    let mut n = 0i64;
+                    unsafe { while *p.add(n as usize) != 0 { n += 1; } }
+                    return n;
+                }
+            }
+            0
+        },
+
+        // StrCharAt(ptr, idx)
+        "DrvManSpec___StrCharAt___" => {
+            if args.len() >= 2 {
+                let p   = args[0] as *const u8;
+                let idx = args[1] as usize;
+                if !p.is_null() {
+                    return unsafe { *p.add(idx) } as i64;
+                }
+            }
+            0
+        },
+
         // ── DrvAPIInterCon GPU — appelés depuis HelloWorld.ovc ───────────────
         // Ces fonctions sont le pont entre HelloSlura.marep et SluGpu.slul.
 
@@ -1641,22 +1794,46 @@ fn dispatch(
             0
         },
 
-        // DrvAPIInterCon***FontGetDefault*** — retourne _fontPtr de SluFontConf
-        // (les bytes TTF chargés par SluFontConf::onDriverInit via SRFS)
+        // DrvAPIInterCon***FontGetDefault*** — retourne le 1er font du cache SRFS
         "DrvAPIInterCon___FontGetDefault___" => {
             let (ptr, _) = srfs_font_ptr();
             ptr as i64
         },
 
-        // GpuDrawTextFont(x, y, text, fg, bg, fontPtr, pixelSize)
-        // Pipeline complet via OVC :
-        //   TtfParser::Load → GetGlyphId → GetGlyfOffset
-        //   GlyphRasterizer::RasterizeGlyph → DrawGlyphAt
-        // Aucun code de rendu Rust — tout dans les .ovc.
+        // DrvAPIInterCon***FontLoad*** — charge un font par chemin SRFS déclaré dans le marep.
+        // Chemin déclaré dans HelloWorld.mara : "SDC:\\boot\\assets\\font\\..."
+        // 1. Cherche dans le cache SRFS (si déjà chargé)
+        // 2. Sinon, charge depuis l'ESP UEFI via le loader dynamique
+        "DrvAPIInterCon___FontLoad___" => {
+            if args.len() >= 1 {
+                serial_log(b"[FontLoad] path_ptr=");
+                serial_log(if args[0] != 0 { b"+" } else { b"0!" });
+                serial_log(b"\r\n");
+                if args[0] == 0 {
+                    serial_log(b"[FontLoad] path=0 constructor not run?\r\n");
+                    return 0;
+                }
+                // Cache hit ?
+                if let Some(data) = srfs_find(args[0]) {
+                    serial_log(b"[FontLoad] cache hit\r\n");
+                    return data.as_ptr() as i64;
+                }
+                // Chargement à la demande depuis l'ESP
+                let ptr = srfs_load_on_demand(args[0]);
+                if ptr == 0 { serial_log(b"[FONT] FontLoad: echec\r\n"); }
+                ptr
+            } else { 0 }
+        },
+
+        // GpuDrawTextFont(x, y, text, fg, bg, font, pixelSize)
+        // Version avec police TTF — utilise TtfParser + GlyphRasterizer si disponibles,
+        // sinon fallback sur FONT8X16.
+        // GpuDrawTextFont : orchestration Rust → TtfParser.ovc + GlyphRasterizer.ovc
+        // Les algorithmes de rendu restent dans SluFontConf.slul/base/
         "DrvAPIInterCon___GpuDrawTextFont___" => {
             unsafe { GPU_TEXTS += 1; }
             serial_log(b"[GPU] GpuDrawTextFont\r\n");
-            if args.len() < 5 { return 0; }
+            if args.len() < 5 { serial_log(b"[D] args<5\r\n"); return 0; }
             let x        = args[0] as i32;
             let y        = args[1] as i32;
             let tp       = args[2] as *const u8;
@@ -1665,23 +1842,46 @@ fn dispatch(
             let font_ptr = if args.len() >= 6 { args[5] } else { 0 };
             let size     = if args.len() >= 7 { args[6] as i32 } else { 16 };
 
-            if tp.is_null() || font_ptr == 0 { return 0; }
+            // Logs détaillés : font_ptr, fg, bg, size, ctx.font_len
+            serial_log(if font_ptr != 0 { b"[D] font+\r\n" } else { b"[D] font=0!\r\n" });
+            serial_log(if !tp.is_null() { b"[D] tp+\r\n" } else { b"[D] tp=null!\r\n" });
+            serial_log(b"[D] sz=");
+            serial_log(&[(size as u8 % 100) + b'0']);
+            serial_log(b" fl=");
+            serial_log(&[(ctx.font_len % 1000) as u8 / 100 + b'0',
+                          (ctx.font_len % 100)  as u8 / 10  + b'0',
+                          (ctx.font_len % 10)   as u8        + b'0']);
+            serial_log(b"\r\n");
+            serial_log(b"[D] fg=");
+            let fg_b = (fg as u32).to_be_bytes();
+            serial_log(&fg_b);
+            serial_log(b" bg=");
+            let bg_b = (bg as u32).to_be_bytes();
+            serial_log(&bg_b);
+            serial_log(b"\r\n");
+
+            if tp.is_null() || font_ptr == 0 { serial_log(b"[D] skip null\r\n"); return 0; }
 
             let ttf_bytes  = unsafe { FONT_TTF_OVC.as_deref()  }.unwrap_or(&[]);
             let rast_bytes = unsafe { FONT_RAST_OVC.as_deref() }.unwrap_or(&[]);
             let woff_bytes = unsafe { FONT_WOFF_OVC.as_deref() }.unwrap_or(&[]);
+            serial_log(if !ttf_bytes.is_empty()  { b"[D] ttf+\r\n"  } else { b"[D] ttf=0!\r\n"  });
+            serial_log(if !rast_bytes.is_empty() { b"[D] rast+\r\n" } else { b"[D] rast=0!\r\n" });
             if ttf_bytes.is_empty() || rast_bytes.is_empty() { return 0; }
-
+            let ttf_text  = core::str::from_utf8(ttf_bytes).unwrap_or("");
             let rast_text = core::str::from_utf8(rast_bytes).unwrap_or("");
             let woff_text = core::str::from_utf8(woff_bytes).unwrap_or("");
-            let ttf_text  = core::str::from_utf8(ttf_bytes).unwrap_or("");
 
-            // ── Étape 1 : Load — une seule fois par session de rendu ─────────
-            // TTF_SCRATCH[104] = cmap offset, non-nul si Load a déjà réussi.
-            // Évite 3 Load (un par GpuDrawTextFont) pour les 3 strings.
+            // ── Étape 1 : Load ─────────────────────────────────────────────
             if unsafe { TTF_SCRATCH[104] == 0 } {
+                // WoffReader est appelé depuis TtfParser.ovc sous le nom
+                // "std___core___self___WoffReader___Decode" — on expose les deux alias.
                 let load_mods: alloc::vec::Vec<(&str, &str)> = if woff_text.starts_with("# Vyft OVC") {
-                    alloc::vec![("GlyphRasterizer", rast_text), ("WoffReader", woff_text)]
+                    alloc::vec![
+                        ("GlyphRasterizer",                rast_text),
+                        ("WoffReader",                     woff_text),
+                        ("std___core___self___WoffReader",  woff_text),
+                    ]
                 } else {
                     alloc::vec![("GlyphRasterizer", rast_text)]
                 };
@@ -1689,19 +1889,31 @@ fn dispatch(
                     ttf_bytes, "TtfParser", "Load",
                     &[font_ptr, ctx.font_len as i64], ctx, &load_mods,
                 );
-                if load_r == 0 {
-                    serial_log(b"[TTF] Load OK\r\n");
+                if load_r != 0 {
+                    serial_log(b"[D] Load ERR=");
+                    serial_log(&[(load_r as i8).unsigned_abs() + b'0']);
+                    serial_log(b"\r\n");
                 } else {
-                    serial_log(b"[TTF] Load err\r\n");
+                    serial_log(b"[D] Load OK cmap=");
+                    let cmap = unsafe { TTF_SCRATCH[104] as u32 }.to_be_bytes();
+                    serial_log(&cmap[2..]);
+                    serial_log(b" upm=");
+                    serial_log(&[(unsafe { FONT_UNITS_PER_EM } / 100) as u8 + b'0',
+                                  (unsafe { FONT_UNITS_PER_EM } / 10 % 10) as u8 + b'0',
+                                  (unsafe { FONT_UNITS_PER_EM } % 10) as u8 + b'0']);
+                    serial_log(b"\r\n");
                 }
+            } else {
+                serial_log(b"[D] Load cached\r\n");
             }
 
             let fb_i64     = ctx.fb as i64;
             let stride_i64 = ctx.stride as i64;
             let ttf_mods   = [("GlyphRasterizer", rast_text)];
             let rast_mods  = [("TtfParser", ttf_text)];
+            let mut rendered = 0u32;
 
-            // ── Étape 2 : Boucle sur les caractères ───────────────────────────
+            // ── Étape 2 : Boucle sur les caractères ──────────────────────────
             let mut cx = x;
             let mut ci = 0usize;
             loop {
@@ -1709,56 +1921,59 @@ fn dispatch(
                 if ch == 0 { break; }
                 ci += 1;
 
-                // GetGlyphId(codepoint) → glyphId
                 let glyph_id = exec_fn_raw_with_mods(
                     ttf_bytes, "TtfParser", "GetGlyphId",
                     &[ch as i64], ctx, &ttf_mods,
                 );
                 if glyph_id <= 0 {
-                    if ci == 1 { serial_log(b"[D] G=0\r\n"); } // premier char = 0 → cmap fail
+                    if ci <= 2 { serial_log(b"[D] G=0\r\n"); }
                     cx += size / 2; continue;
                 }
-                if ci == 1 { serial_log(b"[D] G+\r\n"); } // premier char ok
+                if ci <= 2 { serial_log(b"[D] G+\r\n"); }
 
-                // GetGlyfOffset(glyphId) → offset absolu dans le font
                 let glyf_off = exec_fn_raw_with_mods(
                     ttf_bytes, "TtfParser", "GetGlyfOffset",
                     &[glyph_id], ctx, &ttf_mods,
                 );
                 if glyf_off <= 0 {
-                    if ci == 1 { serial_log(b"[D] off=0\r\n"); }
+                    if ci <= 2 { serial_log(b"[D] off=0\r\n"); }
                     cx += size / 2; continue;
                 }
 
                 let glyf_data = font_ptr.wrapping_add(glyf_off);
+                // reset arena avant chaque glyphe
 
                 let bitmap = exec_fn_raw_with_mods(
                     rast_bytes, "GlyphRasterizer", "RasterizeGlyph",
                     &[glyf_data, size as i64], ctx, &rast_mods,
                 );
                 if bitmap == 0 {
-                    if ci == 1 { serial_log(b"[D] bmp=0\r\n"); }
+                    if ci <= 2 { serial_log(b"[D] bmp=0\r\n"); }
                     cx += size / 2; continue;
                 }
 
                 let bmp_w = unsafe { RAST_W as i32 };
                 let bmp_h = unsafe { RAST_H as i32 };
-                if ci == 1 {
-                    serial_log(b"[D] bmpW=");
-                    serial_log(&[bmp_w as u8 + b'0']);
-                    serial_log(b" bmpH=");
-                    serial_log(&[bmp_h as u8 + b'0']);
+                if ci <= 2 {
+                    serial_log(b"[D] W=");
+                    serial_log(&[(bmp_w / 10) as u8 + b'0', (bmp_w % 10) as u8 + b'0']);
+                    serial_log(b" H=");
+                    serial_log(&[(bmp_h / 10) as u8 + b'0', (bmp_h % 10) as u8 + b'0']);
                     serial_log(b"\r\n");
                 }
 
-                // DrawGlyphAt(fb, stride, x, y, bmpData, bmpW, bmpH, fg, bg)
                 exec_fn_raw_with_mods(
                     rast_bytes, "GlyphRasterizer", "DrawGlyphAt",
-                    &[fb_i64, stride_i64, cx as i64, y as i64, bitmap, bmp_w as i64, bmp_h as i64, fg, bg],
+                    &[fb_i64, stride_i64, cx as i64, y as i64, bitmap,
+                      bmp_w as i64, bmp_h as i64, fg, bg],
                     ctx, &rast_mods,
                 );
+                rendered += 1;
                 cx += bmp_w + 1;
             }
+            serial_log(b"[FONT] rendered=");
+            serial_log(&[(rendered / 10) as u8 + b'0', (rendered % 10) as u8 + b'0']);
+            serial_log(b"\r\n");
             0
         },
 
@@ -1780,27 +1995,8 @@ fn dispatch(
         "PAccess"                                   => 0,
         "gcc___archInfo___"                         => 0,
 
-        // printf — sort sur COM1 (visible dans QEMU -serial stdio)
-        "printf" => {
-            if args.len() >= 1 {
-                let p = args[0] as *const u8;
-                if !p.is_null() {
-                    serial_log(b"[LOG] ");
-                    let mut i = 0usize;
-                    unsafe {
-                        while i < 120 {
-                            let b = *p.add(i);
-                            if b == 0 { break; }
-                            if b == b'\n' { serial_log(b"\r\n"); }
-                            else { serial_log(core::slice::from_raw_parts(p.add(i), 1)); }
-                            i += 1;
-                        }
-                    }
-                    serial_log(b"\r\n");
-                }
-            }
-            0
-        },
+        // printf — no-op silencieux en UEFI
+        "printf" => 0,
 
         // self___onDriverInit → appelé depuis APrevent::OnPowerOn
         "self___onDriverInit" => 0,
@@ -1845,9 +2041,3 @@ pub unsafe extern "C" fn exec_module_raw(
                         font: core::ptr::null(), font_len: 0 };
     exec_module(ovc, &[(fn_name, &[])], &ctx) as i32
 }
-
-
-
-
-
-

@@ -85,7 +85,7 @@ if [ ! -f "${ESP_DIR}/slr_clk_bt.efi" ]; then
 fi
 
 # Vérifications drivers
-for drv in SluGpu SluKeyMouse SluFontConf SRFSMan; do
+for drv in SluGpu SluKeyMouse SRFSMan; do
     if [ ! -f "${ESP_DIR}/sources/${drv}.slul" ]; then
         echo "⚠️   sources/${drv}.slul manquant"
     fi

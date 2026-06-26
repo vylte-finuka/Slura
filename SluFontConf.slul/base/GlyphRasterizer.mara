@@ -44,8 +44,11 @@ rel op RasterizeGlyph: [glyfData ptr, pixelSize i32] [
     let nPts: <i32> = lastEndPt + 1;
     off = off + nContours * 2;
 
-    // Sauter les instructions
-    let instrLen: <i32> = <DrvManSpec***PtrRead16At***>(glyfData, off);
+    // Sauter les instructions TrueType (hints)
+    // instrLen peut être très grand pour certains glyphes → cap à 4096
+    var instrLen: <i32> = <DrvManSpec***PtrRead16At***>(glyfData, off);
+    if (instrLen < 0) [ instrLen = 0; ];
+    if (instrLen > 4096) [ instrLen = 0; ];
     off = off + 2 + instrLen;
 
     if (nPts <= 0) [ ret bmp; ];

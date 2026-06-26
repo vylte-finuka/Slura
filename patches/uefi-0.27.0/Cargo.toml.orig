@@ -1,0 +1,38 @@
+[package]
+name = "uefi"
+version = "0.27.0"
+readme = "README.md"
+description = "Safe and easy-to-use wrapper for building UEFI apps."
+
+authors.workspace = true
+categories.workspace = true
+edition.workspace = true
+keywords.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["panic-on-logger-errors"]
+alloc = []
+global_allocator = []
+logger = []
+# Ignore text output errors in logger as a workaround for firmware issues that
+# were observed on the VirtualBox UEFI implementation (see uefi-rs#121).
+# In those cases, this feature can be excluded by removing the default features.
+panic-on-logger-errors = []
+# Generic gate to code that uses unstable features of Rust. You usually need a nightly toolchain.
+unstable = []
+
+[dependencies]
+bitflags.workspace = true
+log.workspace = true
+ptr_meta.workspace = true
+ucs2 = "0.3.2"
+uefi-macros = "0.13.0"
+uefi-raw = "0.5.1"
+uguid.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

@@ -102,7 +102,7 @@ rel cl _parseTableDirectory: [] [
         if (tag == 1751474532) [ <DrvManSpec***TtfScratchSet***>(102, offset); ];
         if (tag == 1751672161) [ <DrvManSpec***TtfScratchSet***>(103, offset); ];
         if (tag == 1668112752) [ <DrvManSpec***TtfScratchSet***>(104, offset); ];
-        if (tag == 1818452577) [ <DrvManSpec***TtfScratchSet***>(105, offset); ];
+        if (tag == 1819239265) [ <DrvManSpec***TtfScratchSet***>(105, offset); ];  // loca = 0x6C6F6361
         if (tag == 1735162214) [ <DrvManSpec***TtfScratchSet***>(106, offset); ];
         if (tag == 1752003704) [ <DrvManSpec***TtfScratchSet***>(107, offset); ];
         if (tag == 1835104368) [ <DrvManSpec***TtfScratchSet***>(108, offset); ];
@@ -293,7 +293,8 @@ rel op GetAdvanceWidth: [glyphId i32] [
 // puis parse les tables sfnt résultantes.
 // Supporte : TTF, OTF, WOFF (TTF ou OTF encapsulé), WOFF2.
 rel op Load: [data ptr, size i32] [
-    if (data == 0 || size <= 0) [ ret -1; ];
+    if (data == 0) [ ret -1; ];
+    // size=0 autorisé — WoffReader::Decode gère via actualSize fallback (4MB)
 
     // Décoder via WoffReader (WOFF → sfnt, OTF/TTF natif → passthrough)
     var sfntSize: <i32> = 0;

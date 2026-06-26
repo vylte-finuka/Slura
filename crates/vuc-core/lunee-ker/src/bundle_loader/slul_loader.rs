@@ -2,7 +2,7 @@
 // ___ Kernel core named Lunee — .slul driver loader ___
 
 extern crate alloc;
-use alloc::vec::Vec;
+use alloc::{borrow::ToOwned as _, vec::Vec};
 
 use uefi::{
     cstr16, Handle,
@@ -26,15 +26,9 @@ const DRIVER_BUNDLES: &[&uefi::CStr16] = &[
     cstr16!("\\sources\\SluFontConf.slul"),   // lit police via DrvManSpec***FS***
 ];
 
-/// Chemins SRFS (SDC:\) → chemins UEFI ESP correspondants.
-/// Le kernel pré-charge ces fichiers depuis l'ESP avant d'exécuter les OVC.
-/// SRFSMan.slul les sert via DrvManSpec***FSGetSize***  / DrvManSpec***FSRead***.
-const SRFS_FILES: &[(&str, &uefi::CStr16)] = &[
-    (
-        "SDC:\\slu64\\assets\\fonts\\brsonomasemibold.ttf",
-        cstr16!("\\SDC\\slu64\\assets\\fonts\\brsonomasemibold.ttf"),
-    ),
-];
+// Aucun chemin SRFS hardcodé ici.
+// Les fichiers SRFS sont déclarés dans les marep (ex: HelloWorld.mara)
+// et chargés dynamiquement par marep_loader via srfs_preload_from_ovc().
 
 pub fn load_drivers(st: &mut SystemTable<Boot>, image_handle: Handle) -> usize {
     let mut started = 0usize;
@@ -43,16 +37,6 @@ pub fn load_drivers(st: &mut SystemTable<Boot>, image_handle: Handle) -> usize {
         Ok(h) => h,
         Err(_) => return 0,
     };
-
-    // Pré-charger les fichiers SRFS (SDC:\) depuis l'ESP
-    // avant que SluFontConf.slul ne tente DrvManSpec***FSGetSize***.
-    for &fs_handle in handles.iter() {
-        for &(srfs_path, uefi_path) in SRFS_FILES {
-            if let Some(data) = read_file(st, image_handle, fs_handle, uefi_path) {
-                crate::ovc_exec::srfs_register_file(srfs_path, data);
-            }
-        }
-    }
 
     for &fs_handle in handles.iter() {
         for &bundle_path in DRIVER_BUNDLES {
@@ -63,6 +47,48 @@ pub fn load_drivers(st: &mut SystemTable<Boot>, image_handle: Handle) -> usize {
         }
     }
     started
+}
+
+/// Pré-charge un fichier SRFS (ex: "SDC:\boot\assets\font\...") depuis l'ESP.
+/// Appelé par marep_loader quand il détecte un chemin SDC:\ dans un OVC.
+pub fn srfs_preload_file(
+    st:           &mut SystemTable<Boot>,
+    image_handle: Handle,
+    srfs_path:    &'static str,
+) {
+    // Convertir "SDC:\path\to\file" → "\path\to\file" (UEFI path)
+    let relative = if srfs_path.starts_with("SDC:\\") || srfs_path.starts_with("SDC:/") {
+        &srfs_path[5..]
+    } else { return; };
+
+    // Construire le chemin UEFI en remplaçant \ par / puis en utilisant la version UCS-2
+    // Via un buffer statique pré-alloué pour les chemins courants
+    let handles = match st.boot_services().find_handles::<SimpleFileSystem>() {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+
+    // Allouer un buffer UCS-2 pour le chemin UEFI
+    let mut ucs2_buf = alloc::vec![0u16; relative.len() + 2];
+    ucs2_buf[0] = b'\\' as u16;
+    let mut i = 1usize;
+    for b in relative.bytes() {
+        ucs2_buf[i] = if b == b'\\' { b'\\' as u16 } else { b as u16 };
+        i += 1;
+    }
+    ucs2_buf[i] = 0;
+
+    let uefi_path = match uefi::CStr16::from_u16_with_nul(&ucs2_buf) {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+
+    for &fs_handle in handles.iter() {
+        if let Some(data) = read_file(st, image_handle, fs_handle, uefi_path) {
+            crate::ovc_exec::srfs_register_file(srfs_path.to_owned(), data);
+            return;
+        }
+    }
 }
 
 /// Lit un fichier depuis l'ESP et retourne ses octets.
@@ -151,7 +177,7 @@ fn slul_srid(yaml: &[u8]) -> &str {
 
 /// Détecte si le bundle est SluGpu (contient GpuImpl.ovc).
 fn is_slu_gpu(zip: &ZipReader) -> bool {
-    !zip.extract_file("base\\GpuImpl.ovc").unwrap_or_default().is_empty()
+    !zip.extract_file("base/GpuImpl.ovc").unwrap_or_default().is_empty()
 }
 
 fn start_slul(
@@ -177,7 +203,7 @@ fn start_slul(
     }
 
     // ── OVC OEntry : validation magic ─────────────────────────────────────────
-    let ovc = zip.extract_file("base\\OEntry.ovc")?;
+    let ovc = zip.extract_file("base/OEntry.ovc")?;
     if ovc.is_empty() { return Err(BundleError::EmptyBinary); }
     const MAGIC: &[u8] = b"# Vyft OVC v1.0";
     if ovc.len() < MAGIC.len() || &ovc[..MAGIC.len()] != MAGIC {
@@ -185,7 +211,7 @@ fn start_slul(
     }
 
     // ── APrevent.ovc : exécuter OnPowerOn(arch) via ovc_exec ─────────────────
-    let aprevent = zip.extract_file("base\\APrevent.ovc").unwrap_or_default();
+    let aprevent = zip.extract_file("base/APrevent.ovc").unwrap_or_default();
     if !aprevent.is_empty() {
         // Contexte nul pour OnPowerOn (pas de GOP encore)
         let null_ctx = ovc_exec::ExecCtx {
@@ -202,16 +228,16 @@ fn start_slul(
 
     // ── SluGpu : stocker GpuImpl.ovc pour le rendu ───────────────────────────
     if is_slu_gpu(&zip) {
-        let gpu_impl = zip.extract_file("base\\GpuImpl.ovc").unwrap_or_default();
+        let gpu_impl = zip.extract_file("base/GpuImpl.ovc").unwrap_or_default();
         crate::ovc_exec::register_gpu_ovc(gpu_impl);
         let _ = write!(st.stdout(), "[SluGpu] GpuImpl.ovc enregistre\r\n");
     }
 
     // ── SluFontConf : stocker TtfParser + GlyphRasterizer pour rendu TTF ────
     {
-        let ttf  = zip.extract_file("base\\TtfParser.ovc").unwrap_or_default();
-        let rast = zip.extract_file("base\\GlyphRasterizer.ovc").unwrap_or_default();
-        let woff = zip.extract_file("base\\WoffReader.ovc").unwrap_or_default();
+        let ttf  = zip.extract_file("base/TtfParser.ovc").unwrap_or_default();
+        let rast = zip.extract_file("base/GlyphRasterizer.ovc").unwrap_or_default();
+        let woff = zip.extract_file("base/WoffReader.ovc").unwrap_or_default();
         if !ttf.is_empty() && !rast.is_empty() {
             crate::ovc_exec::register_font_ovc(ttf, rast, woff);
             let _ = write!(st.stdout(), "[SluFontConf] TtfParser+GlyphRasterizer+WoffReader enregistres\r\n");

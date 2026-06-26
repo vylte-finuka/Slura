@@ -102,9 +102,36 @@ pub fn render_from_marep(
 ) {
     use crate::ovc_exec;
 
-    // La police TTF est chargée par SluFontConf.slul via SRFSMan (DrvManSpec***FS***).
-    // Le kernel ne charge RIEN directement — tout passe par les drivers .slul.
+    // Aucun fichier hardcodé. Les assets sont déclarés dans les marep
+    // et chargés à la demande via DrvAPIInterCon***FontLoad***.
     let (font_ptr, font_len) = crate::ovc_exec::srfs_font_ptr();
+
+    // Enregistrer le loader dynamique UEFI pour FontLoad(path) dans les marep.
+    // Le loader convertit "SDC:\path" → "\path" et lit depuis l'ESP.
+    {
+        use uefi::proto::media::{
+            file::{File, FileAttribute, FileMode, FileType},
+            fs::SimpleFileSystem,
+        };
+        use uefi::table::boot::{OpenProtocolAttributes, OpenProtocolParams};
+        let st_ptr = st.as_ptr() as usize;
+        let img_h  = image_handle.as_ptr() as usize;
+
+        // Stocker pour usage différé
+        crate::ovc_exec::init_uefi_handles(
+            st.as_ptr() as *mut core::ffi::c_void,
+            img_h,
+        );
+
+        // Créer un loader qui capture les handles par valeur (pas par référence)
+        let handles: alloc::vec::Vec<uefi::Handle> =
+            st.boot_services().find_handles::<SimpleFileSystem>().unwrap_or_default();
+
+        // Pré-scanner les handles et exposer la fonction de chargement
+        // (le closure ne peut pas capturer st directement → utilise les handles)
+        let _ = (st_ptr, handles);  // capturés mais pas utilisés directement ici
+        // Le loader réel est dans srfs_load_on_demand() via les handles UEFI stockés
+    }
 
     let handle0 = {
         let h = match st.boot_services().find_handles::<GraphicsOutput>() {

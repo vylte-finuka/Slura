@@ -1,9 +1,11 @@
 //===================================================================
-//  APrevent.mara – Cycle de vie + état police SluFontConf
+//  APrevent.mara – Cycle de vie SluFontConf
 //  Projet : SluFontConf.slul
 //  Auteur : Vyft Ltd — 2026
-//  L'état de la police (fontPtr, fontSize) est stocké comme vars
-//  de classe — pattern prouvé par DrvInstance.mara.
+//
+//  SluFontConf.slul expose les parseurs de polices (TtfParser, GlyphRasterizer,
+//  WoffReader) et une API de chargement à la demande.
+//  Le chemin de la police est déclaré par le marep, pas par ce driver.
 //===================================================================
 
 #base <std***ComTpe***SlulFrmt***[ MathSafety, DrvManSpec ]>;
@@ -22,37 +24,9 @@ rel op APrevent: <[string CycleActivity]>t [
     rel op OnPowerOn: [arch string] [
         Architecture = arch;
         log: "SluFontConf: demarrage driver polices TrueType/OTF/WOFF";
-        let r: <i32> = self***onDriverInit();
-        if (r != 0) [
-            log: "SluFontConf: onDriverInit echoue – code " + r;
-            ret r;
-        ];
-        log: "SluFontConf: driver pret";
-        ret 0;
-    ];
-
-    rel cl onDriverInit: [] [
-        let path: <string> = "SDC:\\slu64\\assets\\fonts\\brsonomasemibold.ttf";
-        let size: <i32> = <DrvManSpec***FSGetSize***>(path);
-        if (size <= 0) [
-            log: "SluFontConf: police introuvable – " + path;
-            ret -1;
-        ];
-        let buf: <ptr> = <DrvAPIInterCon***MemAlloc***>(size, 0, 4);
-        if (buf == nullptr) [
-            log: "SluFontConf: allocation echouee";
-            ret -2;
-        ];
-        let r: <i32> = <DrvManSpec***FSRead***>(path, buf, size);
-        if (r != size) [
-            <DrvAPIInterCon***MemFree***>(buf, 0);
-            log: "SluFontConf: lecture echouee";
-            ret -3;
-        ];
-        _fontPtr   = buf;
-        _fontSize  = size;
-        _fontReady = 1;
-        log: "SluFontConf: brsonomasemibold.ttf charge (" + size + " octets)";
+        // Plus de chargement de police hardcodé ici.
+        // Les polices sont chargées à la demande via DrvFontLoad(path).
+        log: "SluFontConf: parseurs TTF/OTF/WOFF enregistres";
         ret 0;
     ];
 
@@ -72,13 +46,38 @@ rel op APrevent: <[string CycleActivity]>t [
 
     // ── API police ────────────────────────────────────────────────────────────
 
+    // Charge une police par chemin SRFS (SDC:\...) — appelé par les marep.
+    // Exemple : DrvFontLoad("SDC:\\boot\\assets\\font\\brsonomasemibold.ttf")
+    rel op DrvFontLoad: [path string] [
+        let size: <i32> = <DrvManSpec***FSGetSize***>(path);
+        if (size <= 0) [
+            log: "SluFontConf: police introuvable – " + path;
+            ret nullptr;
+        ];
+        let buf: <ptr> = <DrvAPIInterCon***MemAlloc***>(size, 0, 4);
+        if (buf == nullptr) [
+            log: "SluFontConf: allocation echouee pour " + path;
+            ret nullptr;
+        ];
+        let r: <i32> = <DrvManSpec***FSRead***>(path, buf, size);
+        if (r != size) [
+            <DrvAPIInterCon***MemFree***>(buf, 0);
+            log: "SluFontConf: lecture echouee pour " + path;
+            ret nullptr;
+        ];
+        _fontPtr   = buf;
+        _fontSize  = size;
+        _fontReady = 1;
+        log: "SluFontConf: police chargee (" + size + " octets)";
+        ret buf;
+    ];
+
     rel op GetFontPtr:  [] [ ret _fontPtr;   ];
     rel op GetFontSize: [] [ ret _fontSize;  ];
     rel op IsReady:     [] [ ret _fontReady; ];
 
-    rel op DrvFontGetDefault: [] [
-        ret _fontPtr;
-    ];
+    // Retourne le dernier font chargé via DrvFontLoad.
+    rel op DrvFontGetDefault: [] [ ret _fontPtr; ];
 
     rel op DrvFontGetHeight: [fontHandle i32] [ ret 16; ];
 ];
