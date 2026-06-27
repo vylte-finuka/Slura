@@ -1,8 +1,7 @@
 //===================================================================
 //  APrevent.mara — SluEnvSys.slul
-//  Cycle de vie + état du gestionnaire d'environnement.
-//  Les variables sont stockées dans SDC:\env\<VAR_NAME>.env
-//  et un index dans SDC:\env\.index
+//  Gestionnaire de variables d'environnement SRFS
+//  SDC:\env\<NOM>.env + SDC:\env\.index (NOM=VALEUR\n)
 //  Auteur : Vyft Ltd — 2026
 //===================================================================
 
@@ -13,172 +12,106 @@
 rel op APrevent: <[string CycleActivity]>t [
 
     var Architecture: <string> = "";
-    var _ready: <i32> = 0;
-
-    // ── Cycle de vie ──────────────────────────────────────────────────────────
+    var ready: <i32> = 0;
 
     rel op OnPowerOn: [arch string] [
         Architecture = arch;
         log: "SluEnvSys: demarrage gestionnaire variables d'environnement";
-
-        // S'assurer que SDC:\env\ existe
         let mkr: <i32> = <DrvManSpec***FSMkdir***>("SDC:\\env");
-        if (mkr < 0) [
-            log: "SluEnvSys: avertissement – creation SDC:\\env echouee";
-        ];
-
-        // Charger les variables persistées depuis SRFS
-        let loaded: <i32> = self***_loadPersisted();
+        let loaded: <i32> = self***LoadPersisted();
         log: "SluEnvSys: " + loaded + " variables restaurees depuis SRFS";
-
-        // Injecter les défauts si absents
-        self***_injectDefaults();
-
-        _ready = 1;
+        let _: <i32> = self***InjectDefaults();
+        ready = 1;
         log: "SluEnvSys: pret";
         ret 0;
     ];
 
     rel op OnPowerOff: [] [
-        _ready = 0;
+        ready = 0;
         log: "SluEnvSys: arret";
         ret 0;
     ];
 
     rel op OnSuspend: [] [ log: "SluEnvSys: suspension"; ret 0; ];
-    rel op OnResume:  [] [
-        _ready = 1;
-        log: "SluEnvSys: reprise";
-        ret 0;
-    ];
+    rel op OnResume:  [] [ ready = 1; log: "SluEnvSys: reprise"; ret 0; ];
 
-    // ── Charger les variables persistées depuis SRFS ──────────────────────────
-
-    rel cl _loadPersisted: [] [
-        var count: <i32> = 0;
-        // Lire l'index SDC:\env\.index (une variable par ligne : NOM=VALEUR)
+    rel cl LoadPersisted: [] [
         let idxSize: <i32> = <DrvManSpec***FSGetSize***>("SDC:\\env\\.index");
         if (idxSize <= 0) [ ret 0; ];
-
         let buf: <ptr> = <DrvAPIInterCon***MemAlloc***>(idxSize + 1, 0, 1);
         if (buf == nullptr) [ ret 0; ];
-
         let r: <i32> = <DrvManSpec***FSRead***>("SDC:\\env\\.index", buf, idxSize);
+        var count: <i32> = 0;
         if (r > 0) [
-            // Chaque ligne "NOM=VALEUR\n" est injectée dans l'env kernel
-            let lines: <i32> = <DrvAPIInterCon***EnvParseIndex***>(buf, r);
-            count = lines;
+            count = <DrvAPIInterCon***EnvParseIndex***>(buf, r);
         ];
-        <DrvAPIInterCon***MemFree***>(buf, 0);
+        let _: <i32> = <DrvAPIInterCon***MemFree***>(buf, 0);
         ret count;
     ];
 
-    // ── Injecter les variables par défaut si absentes ─────────────────────────
-
-    rel cl _injectDefaults: [] [
-        // PRIMARY_VALIDATOR_PRIVKEY — clé du validateur principal
+    rel cl InjectDefaults: [] [
         let hasKey: <i32> = <DrvAPIInterCon***EnvGet***>("PRIMARY_VALIDATOR_PRIVKEY");
         if (hasKey == 0) [
-            self***EnvSet("PRIMARY_VALIDATOR_PRIVKEY",
+            let _: <i32> = self***EnvSet("PRIMARY_VALIDATOR_PRIVKEY",
                 "024ed470c9bbb52a1f002540b446b634840789ccc1ed0d6699b24edbd358863b");
         ];
-
-        // SLURACHAIN_NETWORK — réseau (testnet par défaut)
         let hasNet: <i32> = <DrvAPIInterCon***EnvGet***>("SLURACHAIN_NETWORK");
         if (hasNet == 0) [
-            self***EnvSet("SLURACHAIN_NETWORK", "testnet");
+            let _: <i32> = self***EnvSet("SLURACHAIN_NETWORK", "testnet");
         ];
-
-        // SLURACHAIN_RPC_PORT
         let hasRpc: <i32> = <DrvAPIInterCon***EnvGet***>("SLURACHAIN_RPC_PORT");
         if (hasRpc == 0) [
-            self***EnvSet("SLURACHAIN_RPC_PORT", "8545");
+            let _: <i32> = self***EnvSet("SLURACHAIN_RPC_PORT", "8545");
         ];
-
-        // SLURACHAIN_P2P_PORT
         let hasP2p: <i32> = <DrvAPIInterCon***EnvGet***>("SLURACHAIN_P2P_PORT");
         if (hasP2p == 0) [
-            self***EnvSet("SLURACHAIN_P2P_PORT", "30303");
+            let _: <i32> = self***EnvSet("SLURACHAIN_P2P_PORT", "30303");
         ];
-
-        // SLURACHAIN_DATA_DIR
         let hasData: <i32> = <DrvAPIInterCon***EnvGet***>("SLURACHAIN_DATA_DIR");
         if (hasData == 0) [
-            self***EnvSet("SLURACHAIN_DATA_DIR", "SDC:\\chain\\data");
+            let _: <i32> = self***EnvSet("SLURACHAIN_DATA_DIR", "SDC:\\chain\\data");
         ];
-
         ret 0;
     ];
 
-    // ── API publique ──────────────────────────────────────────────────────────
-
-    // Écrire une variable d'environnement (SRFS + kernel env)
-    // Retourne 0 = OK, -1 = erreur
     rel op EnvSet: [name string, value string] [
         if (name == "" || name == null) [ ret -1; ];
-        if (_ready == 0) [ ret -1; ];
-
-        // Persister dans SRFS : SDC:\env\<name>.env
+        if (ready == 0) [ ret -1; ];
         let path: <string> = "SDC:\\env\\" + name + ".env";
-        let r: <i32> = <DrvAPIInterCon***EnvWrite***>(path, name, value);
-        if (r != 0) [
-            log: "SluEnvSys: echec persistance " + name;
-        ];
-
-        // Injecter dans l'env kernel (pour vuc-platform)
+        let _: <i32> = <DrvAPIInterCon***EnvWrite***>(path, name, value);
         let ri: <i32> = <DrvAPIInterCon***EnvSet***>(name, value);
-
-        // Mettre à jour l'index
-        self***_updateIndex(name, value);
-
+        let entry: <string> = name + "=" + value + "\n";
+        let _: <i32> = <DrvAPIInterCon***EnvAppendIndex***>("SDC:\\env\\.index", entry);
         ret ri;
     ];
 
-    // Lire une variable d'environnement (depuis cache kernel ou SRFS)
-    // Retourne le pointeur vers la valeur (string), ou nullptr
     rel op EnvGet: [name string] [
         if (name == "" || name == null) [ ret nullptr; ];
-
-        // Essayer le cache kernel d'abord
         let val: <ptr> = <DrvAPIInterCon***EnvGetStr***>(name);
         if (val != nullptr) [ ret val; ];
-
-        // Fallback : lire depuis SRFS
         let path: <string> = "SDC:\\env\\" + name + ".env";
         let sz: <i32> = <DrvManSpec***FSGetSize***>(path);
         if (sz <= 0) [ ret nullptr; ];
-
         let buf: <ptr> = <DrvAPIInterCon***MemAlloc***>(sz + 1, 0, 1);
         if (buf == nullptr) [ ret nullptr; ];
-
         let r: <i32> = <DrvManSpec***FSRead***>(path, buf, sz);
         if (r <= 0) [
-            <DrvAPIInterCon***MemFree***>(buf, 0);
+            let _: <i32> = <DrvAPIInterCon***MemFree***>(buf, 0);
             ret nullptr;
         ];
         ret buf;
     ];
 
-    // Supprimer une variable d'environnement
     rel op EnvUnset: [name string] [
         if (name == "" || name == null) [ ret -1; ];
-        <DrvAPIInterCon***EnvUnset***>(name);
+        let _: <i32> = <DrvAPIInterCon***EnvUnset***>(name);
         ret 0;
     ];
 
-    // Lister les variables (retourne le contenu de l'index)
     rel op EnvList: [outBuf ptr, maxSize i32] [
         if (outBuf == nullptr || maxSize <= 0) [ ret -1; ];
         let sz: <i32> = <DrvManSpec***FSGetSize***>("SDC:\\env\\.index");
         if (sz <= 0) [ ret 0; ];
-        let r: <i32> = <DrvManSpec***FSRead***>("SDC:\\env\\.index", outBuf, maxSize);
-        ret r;
-    ];
-
-    // Mettre à jour l'index (appelé après chaque EnvSet)
-    rel cl _updateIndex: [name string, value string] [
-        let entry: <string> = name + "=" + value + "\n";
-        <DrvAPIInterCon***EnvAppendIndex***>("SDC:\\env\\.index", entry);
-        ret 0;
+        ret <DrvManSpec***FSRead***>("SDC:\\env\\.index", outBuf, maxSize);
     ];
 ];

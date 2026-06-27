@@ -1,18 +1,9 @@
 //===================================================================
 //  APrevent.mara — CryptoAssetSupport.slul
-//  Support natif des actifs crypto (*.ca) dans SRFS
-//
-//  Deux formats de fichier *.ca supportés :
-//
-//  ① Actif simple (CRYPTO_ASSET) :
-//  { "type":"CRYPTO_ASSET", "symbol":"SLU", "contract":"0x...", ... }
-//  → Chemin SRFS : SDC:\slu64\assets\crypto\<SYMBOL>.ca
-//
-//  ② Bundle multi-contrats (CRYPTO_ASSET_BUNDLE) — comme un *.sol :
-//  { "type":"CRYPTO_ASSET_BUNDLE", "contracts":{ "VEZproxy":{...}, "reservVEZ":{...} } }
-//  → Chemin SRFS : SDC:\slu64\assets\crypto\<name>.ca
-//  → Accès : GetContractInBundle("vezcurproxy", "VEZproxy")
-//
+//  Actifs simples : SDC:\slu64\assets\crypto\<SYMBOL>.ca
+//  Bundles       : SDC:\slu64\assets\crypto\<name>.ca
+//  Note : le JSON est construit par les dispatchers kernel (pas en Mara,
+//         car les strings Mara ne supportent pas l'echappement de guillemets)
 //  Auteur : Vyft Ltd — 2026
 //===================================================================
 
@@ -23,111 +14,72 @@
 rel op APrevent: <[string CycleActivity]>t [
 
     var Architecture: <string> = "";
-    var _ready: <i32> = 0;
-    var _assetCount: <i32> = 0;
-
-    // ── Cycle de vie ──────────────────────────────────────────────────────────
+    var ready: <i32> = 0;
+    var assetCount: <i32> = 0;
 
     rel op OnPowerOn: [arch string] [
         Architecture = arch;
         log: "CryptoAssetSupport: demarrage (actifs simples + bundles *.ca)";
-        let mkr: <i32> = <DrvManSpec***FSMkdir***>("SDC:\\slu64\\assets\\crypto");
-        _assetCount = self***_scanAssets();
-        log: "CryptoAssetSupport: " + _assetCount + " actifs/bundles trouves";
-        _ready = 1;
+        let _: <i32> = <DrvManSpec***FSMkdir***>("SDC:\\slu64\\assets\\crypto");
+        assetCount = <DrvAPIInterCon***CaCountFiles***>("SDC:\\slu64\\assets\\crypto");
+        log: "CryptoAssetSupport: " + assetCount + " actifs trouves";
+        ready = 1;
         ret 0;
     ];
 
-    rel op OnPowerOff: [] [ _ready = 0; log: "CryptoAssetSupport: arret"; ret 0; ];
+    rel op OnPowerOff: [] [ ready = 0; log: "CryptoAssetSupport: arret"; ret 0; ];
     rel op OnSuspend:  [] [ log: "CryptoAssetSupport: suspension"; ret 0; ];
-    rel op OnResume:   [] [ _ready = 1; log: "CryptoAssetSupport: reprise"; ret 0; ];
+    rel op OnResume:   [] [ ready = 1; log: "CryptoAssetSupport: reprise"; ret 0; ];
 
-    rel cl _scanAssets: [] [
-        ret <DrvAPIInterCon***CaCountFiles***>("SDC:\\slu64\\assets\\crypto");
-    ];
+    // ── Actif simple ─────────────────────────────────────────────────────────
+    // Le JSON est construit par CaCreateAssetRecord dans le kernel Rust.
 
-    // ── Détecter le type d'un fichier .ca ────────────────────────────────────
-
-    // Retourne 1 si le .ca est un bundle CRYPTO_ASSET_BUNDLE, 0 sinon
-    rel op IsBundle: [caPath string] [
-        if (caPath == "" || caPath == null) [ ret 0; ];
-        let sz: <i32> = <DrvManSpec***FSGetSize***>(caPath);
-        if (sz <= 0) [ ret 0; ];
-        let buf: <ptr> = <DrvAPIInterCon***MemAlloc***>(256, 0, 1);
-        if (buf == nullptr) [ ret 0; ];
-        let r: <i32> = <DrvManSpec***FSRead***>(caPath, buf, 255);
-        var isBundle: <i32> = 0;
-        if (r > 0) [
-            isBundle = <DrvAPIInterCon***CaContains***>(buf, "CRYPTO_ASSET_BUNDLE");
-        ];
-        <DrvAPIInterCon***MemFree***>(buf, 0);
-        ret isBundle;
-    ];
-
-    // ── API actif simple (CRYPTO_ASSET) ──────────────────────────────────────
-
-    // Enregistrer un actif simple dans SRFS
     rel op RegisterAsset: [symbol string, name string, decimals i32,
                            contract string, balance string,
                            owner string, assetType string] [
         if (symbol == "" || symbol == null) [ ret -1; ];
-        if (_ready == 0) [ ret -1; ];
+        if (ready == 0) [ ret -1; ];
         let path: <string> = "SDC:\\slu64\\assets\\crypto\\" + symbol + ".ca";
         let chainId: <i32> = <DrvAPIInterCon***BlockchainGetChainId***>();
-        let json: <string> = "{\"type\":\"CRYPTO_ASSET\",\"symbol\":\"" + symbol
-            + "\",\"name\":\"" + name
-            + "\",\"decimals\":" + decimals
-            + ",\"contract\":\"" + contract
-            + "\",\"balance\":\"" + balance
-            + "\",\"chain_id\":" + chainId
-            + ",\"owner\":\"" + owner
-            + "\",\"asset_class\":\"" + assetType + "\"}";
-        let r: <i32> = <DrvAPIInterCon***CaWriteFile***>(path, json);
+        let r: <i32> = <DrvAPIInterCon***CaCreateAssetRecord***>(
+            path, symbol, name, decimals, contract, balance, chainId, owner, assetType
+        );
         if (r == 0) [
-            _assetCount = _assetCount + 1;
-            log: "CryptoAssetSupport: actif simple → " + path;
+            assetCount = assetCount + 1;
+            log: "CryptoAssetSupport: actif simple -> " + path;
         ];
         ret r;
     ];
 
-    // Lire un actif simple (retourne JSON brut du .ca)
     rel op GetAsset: [symbol string] [
         if (symbol == "" || symbol == null) [ ret nullptr; ];
         let path: <string> = "SDC:\\slu64\\assets\\crypto\\" + symbol + ".ca";
-        ret self***_readFile(path);
+        ret self***ReadCaFile(path);
     ];
 
-    // ── API bundle (CRYPTO_ASSET_BUNDLE) ─────────────────────────────────────
+    // ── Bundle multi-contrats ─────────────────────────────────────────────────
 
-    // Enregistrer un bundle complet depuis un JSON déjà sérialisé
-    // bundleName : ex "vezcurproxy"
-    // bundleJson : JSON complet du bundle (contient "contracts":{...})
     rel op RegisterBundle: [bundleName string, bundleJson string] [
         if (bundleName == "" || bundleName == null) [ ret -1; ];
         if (bundleJson == "" || bundleJson == null) [ ret -1; ];
-        if (_ready == 0) [ ret -1; ];
+        if (ready == 0) [ ret -1; ];
         let path: <string> = "SDC:\\slu64\\assets\\crypto\\" + bundleName + ".ca";
         let r: <i32> = <DrvAPIInterCon***CaWriteFile***>(path, bundleJson);
         if (r == 0) [
-            _assetCount = _assetCount + 1;
-            log: "CryptoAssetSupport: bundle → " + path;
+            assetCount = assetCount + 1;
+            log: "CryptoAssetSupport: bundle -> " + path;
         ];
         ret r;
     ];
 
-    // Lire le JSON brut d'un bundle
     rel op GetBundle: [bundleName string] [
         if (bundleName == "" || bundleName == null) [ ret nullptr; ];
         let path: <string> = "SDC:\\slu64\\assets\\crypto\\" + bundleName + ".ca";
-        ret self***_readFile(path);
+        ret self***ReadCaFile(path);
     ];
 
-    // Lire un contrat spécifique dans un bundle
-    // bundleName   : ex "vezcurproxy"
-    // contractName : ex "VEZproxy" | "reservVEZ" | "VEZcustodian"
-    // Retourne un buffer avec le JSON du sous-objet contracts.<contractName>
     rel op GetContractInBundle: [bundleName string, contractName string] [
-        if (bundleName == "" || bundleName == null)   [ ret nullptr; ];
+        if (bundleName == "" || bundleName == null)    [ ret nullptr; ];
         if (contractName == "" || contractName == null) [ ret nullptr; ];
         let path: <string> = "SDC:\\slu64\\assets\\crypto\\" + bundleName + ".ca";
         let sz: <i32> = <DrvManSpec***FSGetSize***>(path);
@@ -136,65 +88,46 @@ rel op APrevent: <[string CycleActivity]>t [
         if (buf == nullptr) [ ret nullptr; ];
         let r: <i32> = <DrvManSpec***FSRead***>(path, buf, sz);
         if (r <= 0) [
-            <DrvAPIInterCon***MemFree***>(buf, 0);
+            let _: <i32> = <DrvAPIInterCon***MemFree***>(buf, 0);
             ret nullptr;
         ];
-        // Extraire le sous-objet "contractName":{...} via dispatcher
         let sub: <ptr> = <DrvAPIInterCon***CaExtractSubObject***>(buf, "contracts", contractName);
-        <DrvAPIInterCon***MemFree***>(buf, 0);
+        let _: <i32> = <DrvAPIInterCon***MemFree***>(buf, 0);
         ret sub;
     ];
 
-    // Lire l'adresse d'un contrat dans un bundle
-    // Retourne la string de l'adresse, ou nullptr si absent/non-déployé
     rel op GetContractAddress: [bundleName string, contractName string] [
         let sub: <ptr> = self***GetContractInBundle(bundleName, contractName);
         if (sub == nullptr) [ ret nullptr; ];
         let addr: <ptr> = <DrvAPIInterCon***CaReadField***>(sub, "contract");
-        <DrvAPIInterCon***MemFree***>(sub, 0);
+        let _: <i32> = <DrvAPIInterCon***MemFree***>(sub, 0);
         ret addr;
     ];
 
-    // Mettre à jour l'adresse d'un contrat déployé dans un bundle
     rel op SetContractAddress: [bundleName string, contractName string, address string] [
         if (bundleName == "" || contractName == "" || address == "") [ ret -1; ];
         let path: <string> = "SDC:\\slu64\\assets\\crypto\\" + bundleName + ".ca";
-        // Le dispatcher met à jour contracts.<contractName>.contract dans le JSON
-        let r: <i32> = <DrvAPIInterCon***CaUpdateNestedField***>(
+        ret <DrvAPIInterCon***CaUpdateNestedField***>(
             path, "contracts", contractName, "contract", address
         );
-        if (r == 0) [
-            log: "CryptoAssetSupport: " + bundleName + "." + contractName + " → " + address;
-        ];
-        ret r;
     ];
 
-    // ── Transfert (supporte actif simple ET bundle) ───────────────────────────
+    // ── Transfert (simple ou bundle:contrat) ─────────────────────────────────
 
-    // Transférer un actif (détecte automatiquement simple vs bundle)
-    // assetRef : "SLU" (simple) ou "vezcurproxy:VEZproxy" (bundle:contrat)
-    // to       : adresse destination
-    // amount   : montant
-    // from     : adresse source
     rel op TransferAsset: [assetRef string, to string, amount string, from string] [
         if (assetRef == "" || to == "") [ ret -1; ];
-
-        // Détecter si bundle : format "bundleName:contractName"
         let sepPos: <i32> = <DrvManSpec***StrIndexOf***>(assetRef, ":");
         var contractAddr: <ptr> = nullptr;
         var assetData: <ptr> = nullptr;
-
         if (sepPos > 0) [
-            // Format bundle "vezcurproxy:VEZproxy"
             let bundleName:   <string> = <DrvManSpec***StrSubstring***>(assetRef, 0, sepPos);
             let contractName: <string> = <DrvManSpec***StrSubstring***>(assetRef, sepPos + 1, <DrvManSpec***StrLen***>(assetRef));
             contractAddr = self***GetContractAddress(bundleName, contractName);
             if (contractAddr == nullptr) [
-                log: "CryptoAssetSupport: contrat " + contractName + " non trouve dans " + bundleName;
+                log: "CryptoAssetSupport: contrat " + assetRef + " non trouve";
                 ret -1;
             ];
         ] else [
-            // Format simple "SLU"
             assetData = self***GetAsset(assetRef);
             if (assetData == nullptr) [
                 log: "CryptoAssetSupport: actif " + assetRef + " non trouve";
@@ -202,30 +135,20 @@ rel op APrevent: <[string CycleActivity]>t [
             ];
             contractAddr = <DrvAPIInterCon***CaReadField***>(assetData, "contract");
         ];
-
         if (contractAddr == nullptr) [
-            if (assetData != nullptr) [ <DrvAPIInterCon***MemFree***>(assetData, 0); ];
-            log: "CryptoAssetSupport: adresse contrat absente pour " + assetRef;
+            if (assetData != nullptr) [ let _: <i32> = <DrvAPIInterCon***MemFree***>(assetData, 0); ];
             ret -1;
         ];
-
-        // ABI : transfer(address,uint256) = 0xa9059cbb
         let calldata: <string> = "0xa9059cbb" + to + amount;
         let txId: <i32> = <DrvAPIInterCon***BlockchainTx***>(contractAddr, calldata, 0, from);
-
-        <DrvAPIInterCon***MemFree***>(contractAddr, 0);
-        if (assetData != nullptr) [ <DrvAPIInterCon***MemFree***>(assetData, 0); ];
-
-        if (txId > 0) [
-            log: "CryptoAssetSupport: transfer " + assetRef + " → tx #" + txId;
-        ];
+        let _: <i32> = <DrvAPIInterCon***MemFree***>(contractAddr, 0);
+        if (assetData != nullptr) [ let _: <i32> = <DrvAPIInterCon***MemFree***>(assetData, 0); ];
+        if (txId > 0) [ log: "CryptoAssetSupport: transfer " + assetRef + " -> tx #" + txId; ];
         ret txId;
     ];
 
-    // ── Utilitaires ──────────────────────────────────────────────────────────
-
     rel op UpdateBalance: [symbol string, newBalance string] [
-        if (symbol == "" || _ready == 0) [ ret -1; ];
+        if (symbol == "" || ready == 0) [ ret -1; ];
         let path: <string> = "SDC:\\slu64\\assets\\crypto\\" + symbol + ".ca";
         ret <DrvAPIInterCon***CaUpdateField***>(path, "balance", newBalance);
     ];
@@ -235,16 +158,16 @@ rel op APrevent: <[string CycleActivity]>t [
         ret <DrvAPIInterCon***CaListFiles***>("SDC:\\slu64\\assets\\crypto", outBuf, maxSize);
     ];
 
-    rel op GetAssetCount: [] [ ret _assetCount; ];
+    rel op GetAssetCount: [] [ ret assetCount; ];
 
-    rel cl _readFile: [path string] [
+    rel cl ReadCaFile: [path string] [
         let sz: <i32> = <DrvManSpec***FSGetSize***>(path);
         if (sz <= 0) [ ret nullptr; ];
         let buf: <ptr> = <DrvAPIInterCon***MemAlloc***>(sz + 1, 0, 1);
         if (buf == nullptr) [ ret nullptr; ];
         let r: <i32> = <DrvManSpec***FSRead***>(path, buf, sz);
         if (r <= 0) [
-            <DrvAPIInterCon***MemFree***>(buf, 0);
+            let _: <i32> = <DrvAPIInterCon***MemFree***>(buf, 0);
             ret nullptr;
         ];
         ret buf;

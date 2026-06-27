@@ -370,7 +370,7 @@
             "type": "process",
             "command": "powershell.exe",
             "args": [ "-NoProfile", "-Command",
-                "marai slin init \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\sources\\install.slin\" --name \"Slura OS\" --os-version \"1.0.0\" --arch x64 --partition-sdc \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\SDC\\slu64\" --include-crypto --include-env" ],
+                "marai slin init \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\sources\\install.slin\" --name \"Slura OS\" --os-version \"1.0.0\" --arch x64 \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\SDC\\slu64\" " ],
             "options": { "cwd": "${workspaceFolder}/slr_clk_bt" },
             "dependsOn": [
                 "make: ESP dirs",

@@ -1,7 +1,33 @@
-SRID: CryptoAssetSupport-2026-Vyft
-Name: CryptoAssetSupport
-Version: 1.0.0
-Author: Vyft Ltd
-Description: "Driver Slura OS — Support natif des actifs crypto (*.ca) dans SRFS. Chaque actif on-chain est un fichier SDC:\\assets\\<symbol>.ca contenant metadata + balance + contract_address."
-Architecture: x64
-Type: slul
+# Maraset – manifest CryptoAssetSupport.slul
+
+package:
+  name: base***CryptoAssetSupport
+  version: 1.0.0
+  build: 20260627-01
+
+metadata:
+  target: arm64
+  bundle: slul
+  attributes:
+    SRID: CryptoAssetSupport-2026-Vyft
+    Marav: 0.1 build 06270101-dev
+    description: |
+      Driver Slura OS – Support natif des actifs crypto (*.ca) dans SRFS.
+      Supporte deux formats :
+        – Actif simple : SDC:\slu64\assets\crypto\<SYMBOL>.ca
+        – Bundle multi-contrats : SDC:\slu64\assets\crypto\<name>.ca
+          (ex. vezcurproxy.ca contenant VEZproxy+reservVEZ+VEZcustodian)
+      API : RegisterAsset, GetAsset, RegisterBundle, GetContractInBundle,
+            TransferAsset, UpdateBalance, ListAssets.
+    slura_min: 1
+    slura_max: 5.0
+
+dependencies:
+  basecon:
+    base***example***APrevent: 1.0.0
+    base***example***OEntry:   1.0.0
+
+resources:
+  - path: RAbstractallowing.xml
+    type: xml
+    description: "Permissions driver CryptoAssetSupport."

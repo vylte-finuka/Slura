@@ -1,7 +1,30 @@
-SRID: SluEnvSys-2026-Vyft
-Name: SluEnvSys
-Version: 1.0.0
-Author: Vyft Ltd
-Description: "Driver Slura OS — Gestionnaire de variables d'environnement SRFS. Stocke PRIMARY_VALIDATOR_PRIVKEY, SLURACHAIN_NETWORK et toutes les vars système dans SDC:\\env\\"
-Architecture: x64
-Type: slul
+# Maraset – manifest SluEnvSys.slul
+
+package:
+  name: base***SluEnvSys
+  version: 1.0.0
+  build: 20260627-01
+
+metadata:
+  target: arm64
+  bundle: slul
+  attributes:
+    SRID: SluEnvSys-2026-Vyft
+    Marav: 0.1 build 06270101-dev
+    description: |
+      Driver Slura OS – Gestionnaire de variables d'environnement SRFS.
+      Stocke PRIMARY_VALIDATOR_PRIVKEY, SLURACHAIN_NETWORK et toutes
+      les variables système dans SDC:\env\<VAR>.env + SDC:\env\.index
+      Injecte les défauts au démarrage (testnet, port 8545/30303).
+    slura_min: 1
+    slura_max: 5.0
+
+dependencies:
+  basecon:
+    base***example***APrevent: 1.0.0
+    base***example***OEntry:   1.0.0
+
+resources:
+  - path: RAbstractallowing.xml
+    type: xml
+    description: "Permissions driver SluEnvSys."
