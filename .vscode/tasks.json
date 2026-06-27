@@ -57,13 +57,10 @@
             "command": "D:/VisualS/VC/Tools/Llvm/x64/bin/lld-link.exe",
             "args": [
                 "/MACHINE:X64",
-                "booter.obj",
-                "efi_manager.obj",
+                "booter.obj", "efi_manager.obj",
                 "/WHOLEARCHIVE:${workspaceFolder}\\target\\x86_64-unknown-uefi\\release\\liblunee_ker.a",
-                "/OUT:slr_clk_bt.efi",
-                "/SUBSYSTEM:EFI_APPLICATION",
-                "/ENTRY:efi_main",
-                "/ALIGN:0x1000",
+                "/OUT:slr_clk_bt.efi", "/SUBSYSTEM:EFI_APPLICATION",
+                "/ENTRY:efi_main", "/ALIGN:0x1000",
                 "/IGNORE:4099", "/IGNORE:4217", "/IGNORE:4001", "/IGNORE:4006"
             ],
             "options": { "cwd": "${workspaceFolder}/slr_clk_bt/x64/amd64" },
@@ -110,33 +107,39 @@
         },
 
         // =================================================================
-        // ESP — Structure FAT32
+        // ESP — Création de TOUS les répertoires
         // esp/
-        // ├── slr_clk_bt.efi         ← kernel Lunée
-        // ├── HelloSlura.marep       ← app principale
-        // ├── sources/               ← drivers .slul
-        // ├── boot/font/             ← SluFontConf.slul (accès au boot)
-        // ├── SDC/slu64/             ← SRFS simulé (assets + drivers)
-        // └── EFI/BOOT/BOOTX64.EFI  ← sélecteur UEFI
+        // ├── slr_clk_bt.efi / HelloSlura.marep / sources/ / boot/ / EFI/
+        // └── SDC/slu64/
+        //     ├── assets/fonts/   ← polices
+        //     ├── assets/crypto/  ← *.ca (actifs crypto)
+        //     ├── contracts/      ← *.sol sources
+        //     ├── env/            ← variables d'environnement *.env + .index
+        //     ├── chain/          ← pending_txs/ calls/ receipts/ state/ metadata/
+        //     └── DrivRequirment/ ← tous les drivers *.slul
         // =================================================================
 
         {
             "label": "make: ESP dirs",
             "type": "process",
-            "command": "cmd",
-            "args": [ "/c",
-                "mkdir \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\" 2>nul & mkdir \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\EFI\" 2>nul & mkdir \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\EFI\\BOOT\" 2>nul & mkdir \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\sources\" 2>nul & mkdir \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\boot\\font\" 2>nul & mkdir \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\boot\\assets\\font\" 2>nul & mkdir \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\SDC\\slu64\\assets\\fonts\" 2>nul & mkdir \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\SDC\\slu64\\DrivRequirment\" 2>nul & exit /b 0"
+            "command": "powershell.exe",
+            "args": [
+                "-NoProfile", "-Command",
+                "$e = '${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp'; $s = \"$e\\SDC\\slu64\"; @(\"$e\\EFI\\BOOT\",\"$e\\sources\",\"$e\\boot\\assets\\font\",\"$e\\boot\\font\",\"$s\\assets\\fonts\",\"$s\\assets\\crypto\",\"$s\\contracts\",\"$s\\DrivRequirment\",\"$s\\env\",\"$s\\chain\\pending_txs\",\"$s\\chain\\calls\",\"$s\\chain\\receipts\",\"$s\\chain\\state\\balances\",\"$s\\chain\\metadata\") | ForEach-Object { New-Item -ItemType Directory -Force $_ | Out-Null }; Write-Host 'ESP dirs OK'"
             ],
             "options": { "cwd": "${workspaceFolder}" },
             "group": "build",
+            "presentation": { "reveal": "silent", "panel": "shared" },
             "problemMatcher": []
         },
+
         {
             "label": "5️⃣ make: esp image",
             "type": "process",
-            "command": "cmd",
-            "args": [ "/c",
-                "copy /Y BOOTX64.EFI \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\EFI\\BOOT\\BOOTX64.EFI\" & copy /Y slr_clk_bt.efi \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\slr_clk_bt.efi\""
+            "command": "powershell.exe",
+            "args": [
+                "-NoProfile", "-Command",
+                "Copy-Item -Force '${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\BOOTX64.EFI' '${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\EFI\\BOOT\\BOOTX64.EFI'; Copy-Item -Force '${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\slr_clk_bt.efi' '${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\slr_clk_bt.efi'; Write-Host 'ESP image OK'"
             ],
             "options": { "cwd": "${workspaceFolder}/slr_clk_bt/x64/amd64" },
             "dependsOn": [
@@ -145,14 +148,14 @@
                 "lld-link: create BOOTX64.EFI"
             ],
             "group": "none",
+            "presentation": { "reveal": "always", "panel": "shared" },
             "problemMatcher": []
         },
 
         // =================================================================
-        // VUC-PLATFORM — Full node SluraChain (std + tokio + jsonrpsee)
+        // VUC-PLATFORM — Full node SluraChain
         // =================================================================
 
-        // Build std (Windows/Linux hôte)
         {
             "label": "cargo: build vuc-platform (std)",
             "type": "process",
@@ -163,7 +166,6 @@
             "group": "build",
             "problemMatcher": ["$rustc"]
         },
-        // Binaire full node chargé par lunee-ker via LoadImage après le boot
         {
             "label": "cargo: build vuc-platform-engine",
             "type": "process",
@@ -174,33 +176,24 @@
             "group": "build",
             "problemMatcher": ["$rustc"]
         },
-        // Copie vuc_platform_engine.exe → ESP (chargé par lunee-ker au runtime)
         {
             "label": "copy: vuc-platform-engine → esp",
             "type": "process",
-            "command": "cmd",
-            "args": [ "/c",
-                "copy /Y \"${workspaceFolder}\\target\\x86_64-pc-windows-msvc\\release\\vuc-platform-engine.exe\" \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\vuc_platform_engine.efi\""
+            "command": "powershell.exe",
+            "args": [
+                "-NoProfile", "-Command",
+                "Copy-Item -Force '${workspaceFolder}\\target\\x86_64-pc-windows-msvc\\release\\vuc-platform-engine.exe' '${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\vuc_platform_engine.efi'"
             ],
             "options": { "cwd": "${workspaceFolder}" },
             "dependsOn": ["cargo: build vuc-platform-engine"],
             "group": "build",
             "problemMatcher": []
         },
-        // vuc-platform-uefi : stubs no_std — réservé au futur (non lié au kernel actuellement)
-        {
-            "label": "cargo: build vuc-platform-uefi (optionnel)",
-            "type": "process",
-            "command": "cargo",
-            "args": [ "build", "-p", "vuc-platform-uefi", "--lib",
-                      "--target", "x86_64-unknown-uefi", "--release" ],
-            "options": { "cwd": "${workspaceFolder}" },
-            "group": "build",
-            "problemMatcher": ["$rustc"]
-        },
 
         // =================================================================
         // MARATINE — Drivers (.slul) + Application (.marep)
+        // 7 drivers : SluGpu, SluKeyMouse, SluFontConf, SRFSMan,
+        //             SluEnvSys, CryptoAssetSupport + HelloSlura
         // =================================================================
 
         {
@@ -209,7 +202,7 @@
             "command": "powershell.exe",
             "args": [ "-NoProfile", "-Command",
                 "marai build SluGpu.slul -O --arch=x64 \"--out-dir=${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\sources\"" ],
-            "options": { "cwd": "${workspaceFolder}" },
+            "options": { "cwd": "${workspaceFolder}/slr_clk_bt" },
             "dependsOn": ["make: ESP dirs"],
             "group": "build",
             "presentation": { "reveal": "always", "panel": "shared" },
@@ -221,7 +214,7 @@
             "command": "powershell.exe",
             "args": [ "-NoProfile", "-Command",
                 "marai build SluKeyMouse.slul -O --arch=x64 \"--out-dir=${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\sources\"" ],
-            "options": { "cwd": "${workspaceFolder}" },
+            "options": { "cwd": "${workspaceFolder}/slr_clk_bt" },
             "dependsOn": ["make: ESP dirs"],
             "group": "build",
             "presentation": { "reveal": "always", "panel": "shared" },
@@ -233,7 +226,7 @@
             "command": "powershell.exe",
             "args": [ "-NoProfile", "-Command",
                 "marai build SluFontConf.slul -O --arch=x64 \"--out-dir=${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\sources\"" ],
-            "options": { "cwd": "${workspaceFolder}" },
+            "options": { "cwd": "${workspaceFolder}/slr_clk_bt" },
             "dependsOn": ["make: ESP dirs"],
             "group": "build",
             "presentation": { "reveal": "always", "panel": "shared" },
@@ -245,7 +238,31 @@
             "command": "powershell.exe",
             "args": [ "-NoProfile", "-Command",
                 "marai build SRFSMan.slul -O --arch=x64 \"--out-dir=${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\sources\"" ],
-            "options": { "cwd": "${workspaceFolder}" },
+            "options": { "cwd": "${workspaceFolder}/slr_clk_bt" },
+            "dependsOn": ["make: ESP dirs"],
+            "group": "build",
+            "presentation": { "reveal": "always", "panel": "shared" },
+            "problemMatcher": []
+        },
+        {
+            "label": "marai build: SluEnvSys.slul",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": [ "-NoProfile", "-Command",
+                "marai build SluEnvSys.slul -O --arch=x64 \"--out-dir=${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\sources\"" ],
+            "options": { "cwd": "${workspaceFolder}/slr_clk_bt" },
+            "dependsOn": ["make: ESP dirs"],
+            "group": "build",
+            "presentation": { "reveal": "always", "panel": "shared" },
+            "problemMatcher": []
+        },
+        {
+            "label": "marai build: CryptoAssetSupport.slul",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": [ "-NoProfile", "-Command",
+                "marai build CryptoAssetSupport.slul -O --arch=x64 \"--out-dir=${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\sources\"" ],
+            "options": { "cwd": "${workspaceFolder}/slr_clk_bt" },
             "dependsOn": ["make: ESP dirs"],
             "group": "build",
             "presentation": { "reveal": "always", "panel": "shared" },
@@ -257,7 +274,7 @@
             "command": "powershell.exe",
             "args": [ "-NoProfile", "-Command",
                 "marai build HelloSlura.marep -O --arch=x64 \"--out-dir=${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\"" ],
-            "options": { "cwd": "${workspaceFolder}" },
+            "options": { "cwd": "${workspaceFolder}/slr_clk_bt" },
             "dependsOn": ["make: ESP dirs"],
             "group": "build",
             "presentation": { "reveal": "always", "panel": "shared" },
@@ -270,6 +287,8 @@
                 "marai build: SluKeyMouse.slul",
                 "marai build: SluFontConf.slul",
                 "marai build: SRFSMan.slul",
+                "marai build: SluEnvSys.slul",
+                "marai build: CryptoAssetSupport.slul",
                 "marai build: HelloSlura.marep"
             ],
             "dependsOrder": "parallel",
@@ -284,42 +303,66 @@
         {
             "label": "copy: SluFontConf → boot/font",
             "type": "process",
-            "command": "cmd",
-            "args": [ "/c",
-                "copy /Y \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\sources\\SluFontConf.slul\" \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\boot\\font\\SluFontConf.slul\""
+            "command": "powershell.exe",
+            "args": [
+                "-NoProfile", "-Command",
+                "Copy-Item -Force '${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\sources\\SluFontConf.slul' '${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\boot\\font\\SluFontConf.slul'; Write-Host 'SluFontConf → boot/font OK'"
             ],
             "options": { "cwd": "${workspaceFolder}" },
-            "dependsOn": ["marai build: SluFontConf.slul"],
+            "dependsOn": ["marai build: SluFontConf.slul", "make: ESP dirs"],
             "group": "build",
             "problemMatcher": []
         },
+
         {
             "label": "copy: brsonomasemibold.ttf → assets",
             "type": "process",
-            "command": "cmd",
-            "args": [ "/c",
-                "copy /Y \"${workspaceFolder}\\slura_disk_part_installation\\assets\\fonts\\brsonomasemibold.ttf\" \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\SDC\\slu64\\assets\\fonts\\brsonomasemibold.ttf\" & copy /Y \"${workspaceFolder}\\slura_disk_part_installation\\assets\\fonts\\brsonomasemibold.ttf\" \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\boot\\assets\\font\\brsonomasemibold.ttf\""
+            "command": "powershell.exe",
+            "args": [
+                "-NoProfile", "-Command",
+                "$src = '${workspaceFolder}\\slr_clk_bt\\slura_disk_part_installation\\assets\\fonts\\brsonomasemibold.ttf'; Copy-Item -Force $src '${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\boot\\assets\\font\\brsonomasemibold.ttf'; Copy-Item -Force $src '${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\SDC\\slu64\\assets\\fonts\\brsonomasemibold.ttf'; Write-Host 'brsonomasemibold.ttf OK'"
             ],
             "options": { "cwd": "${workspaceFolder}" },
             "dependsOn": ["make: ESP dirs"],
             "group": "build",
             "problemMatcher": []
         },
+
+        // vezcurproxy.ca (bundle) + vezcurproxy.sol → SRFS
         {
-            "label": "copy: all drivers → SRFS DrivRequirment",
+            "label": "copy: vezcurproxy.ca + vezcurproxy.sol → SRFS",
             "type": "process",
-            "command": "cmd",
-            "args": [ "/c",
-                "copy /Y \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\sources\\SluGpu.slul\" \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\SDC\\slu64\\DrivRequirment\\SluGpu.slul\" & copy /Y \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\sources\\SluKeyMouse.slul\" \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\SDC\\slu64\\DrivRequirment\\SluKeyMouse.slul\" & copy /Y \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\sources\\SluFontConf.slul\" \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\SDC\\slu64\\DrivRequirment\\SluFontConf.slul\" & copy /Y \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\sources\\SRFSMan.slul\" \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\SDC\\slu64\\DrivRequirment\\SRFSMan.slul\""
+            "command": "powershell.exe",
+            "args": [
+                "-NoProfile", "-Command",
+                "Copy-Item -Force '${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\SDC\\slu64\\assets\\crypto\\vezcurproxy.ca' '${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\SDC\\slu64\\assets\\crypto\\vezcurproxy.ca'; Copy-Item -Force '${workspaceFolder}\\vezcurproxy.sol' '${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\SDC\\slu64\\contracts\\vezcurproxy.sol'; Write-Host 'vezcurproxy.ca + vezcurproxy.sol OK'"
             ],
             "options": { "cwd": "${workspaceFolder}" },
-            "dependsOn": ["🔨 build all drivers", "make: ESP dirs"],
+            "dependsOn": ["make: ESP dirs"],
             "group": "build",
             "problemMatcher": []
         },
 
+        // TOUS les drivers → esp/SDC/slu64/DrivRequirment/
+        // (SluGpu, SluKeyMouse, SluFontConf, SRFSMan, SluEnvSys, CryptoAssetSupport)
+        {
+            "label": "copy: all drivers → SRFS DrivRequirment",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": [
+                "-NoProfile", "-Command",
+                "$dst = '${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\SDC\\slu64\\DrivRequirment'; $src = '${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\sources'; @('SluGpu.slul','SluKeyMouse.slul','SluFontConf.slul','SRFSMan.slul','SluEnvSys.slul','CryptoAssetSupport.slul') | ForEach-Object { Copy-Item -Force \"$src\\$_\" $dst }; Write-Host '6 drivers → DrivRequirment OK'"
+            ],
+            "options": { "cwd": "${workspaceFolder}" },
+            "dependsOn": ["🔨 build all drivers", "make: ESP dirs"],
+            "group": "build",
+            "presentation": { "reveal": "always", "panel": "shared" },
+            "problemMatcher": []
+        },
+
         // =================================================================
-        // SLIN — Image système Slura (placeholder)
+        // SLIN — Image système Slura avec partition SDC
+        // Inclut : kernel, drivers, actifs crypto, env vars, contrats
         // =================================================================
 
         {
@@ -327,9 +370,13 @@
             "type": "process",
             "command": "powershell.exe",
             "args": [ "-NoProfile", "-Command",
-                "marai slin init \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\sources\\install.slin\" --name \"Slura OS\" --os-version \"1.0.0\" --arch x64" ],
-            "options": { "cwd": "${workspaceFolder}" },
-            "dependsOn": ["make: ESP dirs"],
+                "marai slin init \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\sources\\install.slin\" --name \"Slura OS\" --os-version \"1.0.0\" --arch x64 --partition-sdc \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\SDC\\slu64\" --include-crypto --include-env" ],
+            "options": { "cwd": "${workspaceFolder}/slr_clk_bt" },
+            "dependsOn": [
+                "make: ESP dirs",
+                "copy: all drivers → SRFS DrivRequirment",
+                "copy: vezcurproxy.ca + vezcurproxy.sol → SRFS"
+            ],
             "group": "none",
             "presentation": { "reveal": "always", "panel": "shared" },
             "problemMatcher": []
@@ -337,27 +384,34 @@
 
         // =================================================================
         // ISO bootable UEFI — booter.iso
+        // Fix: xorriso (supporte EFI) au lieu de mkisofs ucrt64
+        // xorriso -as mkisofs supporte -eltorito-alt-boot -e
         // =================================================================
 
         {
             "label": "make: booter.iso",
             "type": "process",
-            "command": "mkisofs",
+            "command": "xorriso",
             "args": [
-                "-o", "${workspaceFolder}\\booter.iso",
-                "-R", "-J", "-d", "-N", "-joliet-long",
-                "-eltorito-alt-boot",
-                "-e", "EFI/BOOT/BOOTX64.EFI",
+                "-as", "mkisofs",
+                "-V", "SLURA_OS_1.0",
+                "-R", "-J", "-joliet-long",
+                "-iso-level", "3",
                 "-no-emul-boot",
+                "-eltorito-alt-boot",
+                    "-e", "EFI/BOOT/BOOTX64.EFI",
+                    "-no-emul-boot",
+                    "-isohybrid-gpt-basdat",
+                "-o", "${workspaceFolder}\\booter.iso",
                 "${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp"
             ],
             "options": { "cwd": "${workspaceFolder}" },
             "dependsOn": [
                 "5️⃣ make: esp image",
-                "🔨 build all drivers",
                 "copy: SluFontConf → boot/font",
                 "copy: brsonomasemibold.ttf → assets",
                 "copy: all drivers → SRFS DrivRequirment",
+                "copy: vezcurproxy.ca + vezcurproxy.sol → SRFS",
                 "marai image: create install.slin"
             ],
             "group": "build",
@@ -371,50 +425,63 @@
 
         {
             "label": "marai check: SluGpu.slul",
-            "type": "process",
-            "command": "powershell.exe",
+            "type": "process", "command": "powershell.exe",
             "args": [ "-NoProfile", "-Command", "marai check SluGpu.slul -O --json" ],
-            "options": { "cwd": "${workspaceFolder}" },
+            "options": { "cwd": "${workspaceFolder}/slr_clk_bt" },
             "group": "test",
             "presentation": { "reveal": "always", "panel": "shared", "clear": true },
             "problemMatcher": []
         },
         {
             "label": "marai check: SluKeyMouse.slul",
-            "type": "process",
-            "command": "powershell.exe",
+            "type": "process", "command": "powershell.exe",
             "args": [ "-NoProfile", "-Command", "marai check SluKeyMouse.slul -O --json" ],
-            "options": { "cwd": "${workspaceFolder}" },
+            "options": { "cwd": "${workspaceFolder}/slr_clk_bt" },
             "group": "test",
             "presentation": { "reveal": "always", "panel": "shared", "clear": true },
             "problemMatcher": []
         },
         {
             "label": "marai check: SluFontConf.slul",
-            "type": "process",
-            "command": "powershell.exe",
+            "type": "process", "command": "powershell.exe",
             "args": [ "-NoProfile", "-Command", "marai check SluFontConf.slul -O --json" ],
-            "options": { "cwd": "${workspaceFolder}" },
+            "options": { "cwd": "${workspaceFolder}/slr_clk_bt" },
             "group": "test",
             "presentation": { "reveal": "always", "panel": "shared", "clear": true },
             "problemMatcher": []
         },
         {
             "label": "marai check: SRFSMan.slul",
-            "type": "process",
-            "command": "powershell.exe",
+            "type": "process", "command": "powershell.exe",
             "args": [ "-NoProfile", "-Command", "marai check SRFSMan.slul -O --json" ],
-            "options": { "cwd": "${workspaceFolder}" },
+            "options": { "cwd": "${workspaceFolder}/slr_clk_bt" },
+            "group": "test",
+            "presentation": { "reveal": "always", "panel": "shared", "clear": true },
+            "problemMatcher": []
+        },
+        {
+            "label": "marai check: SluEnvSys.slul",
+            "type": "process", "command": "powershell.exe",
+            "args": [ "-NoProfile", "-Command", "marai check SluEnvSys.slul -O --json" ],
+            "options": { "cwd": "${workspaceFolder}/slr_clk_bt" },
+            "group": "test",
+            "presentation": { "reveal": "always", "panel": "shared", "clear": true },
+            "problemMatcher": []
+        },
+        {
+            "label": "marai check: CryptoAssetSupport.slul",
+            "type": "process", "command": "powershell.exe",
+            "args": [ "-NoProfile", "-Command", "marai check CryptoAssetSupport.slul -O --json" ],
+            "options": { "cwd": "${workspaceFolder}/slr_clk_bt" },
             "group": "test",
             "presentation": { "reveal": "always", "panel": "shared", "clear": true },
             "problemMatcher": []
         },
         {
             "label": "marai check: HelloSlura.marep",
-            "type": "process",
-            "command": "powershell.exe",
+            "type": "process", "command": "powershell.exe",
             "args": [ "-NoProfile", "-Command", "marai check HelloSlura.marep -O --json" ],
-            "options": { "cwd": "${workspaceFolder}" },
+            "options": { "cwd": "${workspaceFolder}/slr_clk_bt" },
             "group": "test",
             "presentation": { "reveal": "always", "panel": "shared", "clear": true },
             "problemMatcher": []
@@ -426,6 +493,8 @@
                 "marai check: SluKeyMouse.slul",
                 "marai check: SluFontConf.slul",
                 "marai check: SRFSMan.slul",
+                "marai check: SluEnvSys.slul",
+                "marai check: CryptoAssetSupport.slul",
                 "marai check: HelloSlura.marep"
             ],
             "dependsOrder": "parallel",
@@ -434,7 +503,7 @@
         },
 
         // =================================================================
-        // TEST QEMU
+        // TEST QEMU / VMware
         // =================================================================
 
         {
@@ -463,31 +532,20 @@
         // PIPELINES COMPLETS
         // =================================================================
 
-        // Kernel seul (dev rapide)
-        {
-            "label": "🔧 build kernel only",
-            "dependsOn": ["4️⃣ lld-link: create slr_clk_bt.efi"],
-            "group": "build",
-            "problemMatcher": []
-        },
+        { "label": "🔧 build kernel only",
+          "dependsOn": ["4️⃣ lld-link: create slr_clk_bt.efi"],
+          "group": "build", "problemMatcher": [] },
 
-        // Full Slura OS (kernel + drivers + ISO)
         {
             "label": "🚀 Full Slura build (kernel + drivers + ISO)",
-            "dependsOn": [
-                "make: booter.iso"
-            ],
+            "dependsOn": ["make: booter.iso"],
             "group": { "kind": "build", "isDefault": true },
             "problemMatcher": []
         },
 
-        // Full Slura OS + Full node SluraChain (blockchain)
         {
             "label": "🌐 Full Slura + Platform Engine (kernel + blockchain + ISO)",
-            "dependsOn": [
-                "make: booter.iso",
-                "copy: vuc-platform-engine → esp"
-            ],
+            "dependsOn": [ "make: booter.iso", "copy: vuc-platform-engine → esp" ],
             "group": "build",
             "problemMatcher": []
         }

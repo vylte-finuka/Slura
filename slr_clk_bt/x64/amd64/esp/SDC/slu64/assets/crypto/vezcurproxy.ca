@@ -1,0 +1,98 @@
+{
+  "schema_version": "1.0",
+  "type": "CRYPTO_ASSET_BUNDLE",
+  "license": "UNLICENSED",
+  "issuer": "Vyft, SAS",
+  "network": "testnet",
+  "chain_id": 1337,
+  "source_path": "SDC:\\slu64\\contracts\\vezcurproxy.sol",
+  "srfs_path": "SDC:\\slu64\\assets\\crypto\\vezcurproxy.ca",
+
+  "contracts": {
+
+    "VEZproxy": {
+      "symbol": "VEZ",
+      "name": "Vyft Enhancing ZER",
+      "decimals": 18,
+      "contract": "",
+      "contract_pending": true,
+      "owner": "0x53Ae54b11251D5003e9aA51422405bC35A2eF32D",
+      "custodian": "0x53Ae54b11251D5003e9aA51422405bC35A2eF32D",
+      "price_feed": "0xCcCCccccCCCCcCCCCCCcCcCccCcCCCcCcccccccC",
+      "currency": "EUR",
+      "total_supply": "888000000000000000000000000",
+      "max_mint_per_tx": "1000000000000000000000000",
+      "transfer_burn_pct": 10,
+      "disburse_burn_pct": 10,
+      "balance": "0",
+      "asset_class": "ERC20_DEFLATIONARY",
+      "token_standard": "ERC20",
+      "upgradeable": "UUPS",
+      "abi": [
+        { "name": "mint",           "selector": "0x40c10f19", "stateMutability": "nonpayable", "inputs": [{"type":"address","name":"to"},{"type":"uint256","name":"amount"}],              "outputs": [],                    "access": "custodian_only" },
+        { "name": "obtain",         "selector": "0x5b6c3571", "stateMutability": "nonpayable", "inputs": [{"type":"uint256","name":"amount"},{"type":"string","name":"proof"}],          "outputs": [],                    "note": "burn + EUR reimbursement off-chain" },
+        { "name": "transfer",       "selector": "0xa9059cbb", "stateMutability": "nonpayable", "inputs": [{"type":"address","name":"to"},{"type":"uint256","name":"amount"}],             "outputs": [{"type":"bool"}],     "note": "10% burn" },
+        { "name": "transferFrom",   "selector": "0x23b872dd", "stateMutability": "nonpayable", "inputs": [{"type":"address","name":"from"},{"type":"address","name":"to"},{"type":"uint256","name":"amount"}], "outputs": [{"type":"bool"}] },
+        { "name": "disburse",       "selector": "0x33fc4d83", "stateMutability": "nonpayable", "inputs": [{"type":"uint256","name":"amount"},{"type":"address","name":"disburser"}],     "outputs": [] },
+        { "name": "relay_master",   "selector": "0x67d9f7b2", "stateMutability": "nonpayable", "inputs": [{"type":"address","name":"validator"},{"type":"uint256","name":"delegatedAmount"}], "outputs": [{"type":"uint256"}], "access": "owner_only" },
+        { "name": "reward_lurosonie_holder", "selector": "0xa9e86c1a", "stateMutability": "nonpayable", "inputs": [{"type":"address","name":"holder"},{"type":"uint256","name":"rewardAmount"}], "outputs": [], "access": "owner_only" },
+        { "name": "blacklist",      "selector": "0xf9f92be4", "stateMutability": "nonpayable", "inputs": [{"type":"address","name":"account"}],    "outputs": [], "access": "owner_only" },
+        { "name": "unBlacklist",    "selector": "0x1a895266", "stateMutability": "nonpayable", "inputs": [{"type":"address","name":"account"}],    "outputs": [], "access": "owner_only" },
+        { "name": "pause",          "selector": "0x8456cb59", "stateMutability": "nonpayable", "inputs": [],                                        "outputs": [], "access": "owner_only" },
+        { "name": "unpause",        "selector": "0x3f4ba83a", "stateMutability": "nonpayable", "inputs": [],                                        "outputs": [], "access": "owner_only" },
+        { "name": "setVEZcustodian","selector": "0x2b2fbbd0", "stateMutability": "nonpayable", "inputs": [{"type":"address","name":"newCustodian"}], "outputs": [], "access": "owner_only" },
+        { "name": "balanceOf",      "selector": "0x70a08231", "stateMutability": "view",       "inputs": [{"type":"address","name":"account"}],    "outputs": [{"type":"uint256"}] },
+        { "name": "totalSupply",    "selector": "0x18160ddd", "stateMutability": "view",       "inputs": [],                                        "outputs": [{"type":"uint256"}] },
+        { "name": "validatorRelayPower", "selector": "0x97a66b79", "stateMutability": "view",  "inputs": [{"type":"address","name":""}],            "outputs": [{"type":"uint256"}] }
+      ],
+      "events": [
+        "TransferWithBurn(address indexed,address indexed,uint256,uint256)",
+        "DisbursedWithBurn(uint256,uint256)",
+        "Blacklisted(address indexed)",
+        "Paused(address)",
+        "RelayPowerUpdated(address indexed,uint256,uint256)",
+        "LurosonieRewardDistributed(address indexed,uint256,uint256)",
+        "MintLimited(address indexed,uint256)",
+        "FiatBackingConfirmed(uint256,string)",
+        "ObtainRequested(address indexed,uint256,string)",
+        "CustodianUpdated(address,address)"
+      ]
+    },
+
+    "reservVEZ": {
+      "contract": "",
+      "contract_pending": true,
+      "asset_class": "PROOF_OF_RESERVES",
+      "abi": [
+        { "name": "updateReserves", "selector": "0xd94c6d98", "stateMutability": "nonpayable", "inputs": [{"type":"uint256","name":"_supplySolde"},{"type":"string","name":"_lienIpfs"}], "outputs": [], "access": "VEZIssuer_only" },
+        { "name": "getReserves",    "selector": "0x4b2c5e4e", "stateMutability": "view",       "inputs": [], "outputs": [
+            {"type":"uint256","name":"onChainSupply"},
+            {"type":"uint256","name":"supplySolde"},
+            {"type":"string","name":"lienIpfs"},
+            {"type":"uint256","name":"lastUpdated"},
+            {"type":"int256","name":"eurUsdPrice"}
+          ]
+        }
+      ],
+      "events": ["ReservesUpdated(uint256,string,uint256)"]
+    },
+
+    "VEZcustodian": {
+      "contract": "",
+      "contract_pending": true,
+      "asset_class": "CUSTODIAN",
+      "abi": [
+        { "name": "confirmDeposit",  "selector": "0x7df73e27", "stateMutability": "nonpayable", "inputs": [{"type":"address","name":"user"},{"type":"uint256","name":"amountEuro"},{"type":"string","name":"proof"}], "outputs": [], "access": "owner_only", "note": "EUR deposit confirmed → auto mint VEZ 1:1" },
+        { "name": "registerObtain",  "selector": "0x8c65c81f", "stateMutability": "nonpayable", "inputs": [{"type":"address","name":"user"},{"type":"uint256","name":"amountEuro"}], "outputs": [], "access": "vezProxy_only" },
+        { "name": "confirmObtain",   "selector": "0x2e1a7d4d", "stateMutability": "nonpayable", "inputs": [{"type":"address","name":"user"},{"type":"uint256","name":"amountEuro"}], "outputs": [], "access": "owner_only" },
+        { "name": "getUserStatus",   "selector": "0x45568dea", "stateMutability": "view",       "inputs": [{"type":"address","name":"user"}], "outputs": [{"type":"uint256","name":"deposited"},{"type":"uint256","name":"pending"}] }
+      ],
+      "events": [
+        "EuroDeposited(address indexed,uint256,uint256)",
+        "ObtainRequested(address indexed,uint256,string)",
+        "ObtainConfirmed(address indexed,uint256)"
+      ]
+    }
+
+  }
+}

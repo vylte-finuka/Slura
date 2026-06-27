@@ -321,6 +321,60 @@ static mut FONT_UNITS_PER_EM: u32 = 1000;
 static mut RAST_W: u32 = 0;
 static mut RAST_H: u32 = 0;
 
+// Cache de parse_string_consts par OVC text pointer — évite de re-parser
+// TtfParser.ovc (34KB) et GlyphRasterizer.ovc (26KB) à chaque appel OVC.
+// Box::into_raw → fuite permanente justifiée (UEFI boot, ~4 maps max).
+static mut CONSTS_CACHE: [(usize, *const BTreeMap<String, i64>); 8] =
+    [(0, core::ptr::null()); 8];
+
+// ── Arène statique pour MemAlloc OVC (bitmaps glyphes, flagBuf, etc.) ────────
+// Évite d'utiliser le heap UEFI (limité, fragmentation). Reset entre glyphes.
+static mut OVC_ARENA: [u8; 512 * 1024] = [0u8; 512 * 1024];  // 512KB
+static mut OVC_ARENA_POS: usize = 0;
+
+fn ovc_arena_alloc(size: usize, align: usize) -> *mut u8 {
+    if size == 0 { return core::ptr::null_mut(); }
+    unsafe {
+        let pos = (OVC_ARENA_POS + align - 1) & !(align - 1);
+        if pos + size > OVC_ARENA.len() { return core::ptr::null_mut(); }
+        OVC_ARENA_POS = pos + size;
+        OVC_ARENA[pos] = 0;  // mark first byte (bulk zeroing done lazily)
+        core::ptr::write_bytes(OVC_ARENA[pos..pos+size].as_mut_ptr(), 0, size);
+        OVC_ARENA[pos..].as_mut_ptr()
+    }
+}
+
+pub fn ovc_arena_reset() { unsafe { OVC_ARENA_POS = 0; } }
+
+// Cache parse_blocks par (ovc_ptr, func_start_ptr) — évite de re-allouer
+// des centaines de BTreeMap<String,Vec<String>> par appel OVC.
+static mut BLOCKS_CACHE: [(usize, usize, *const BTreeMap<String, Vec<String>>); 32] =
+    [(0, 0, core::ptr::null()); 32];
+
+// ── Registres OVC sans String (hash FNV-1a 64 bits) ─────────────────────────
+// Remplace BTreeMap<String,i64> pour regs : zéro allocation String.
+// Le Vec grossit en place — une seule alloc heap pour toute la durée de vie.
+type Regs = Vec<(u64, i64)>;
+
+#[inline(always)]
+fn fnv64(s: &str) -> u64 {
+    let mut h: u64 = 14695981039346656037;
+    for b in s.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(1099511628211);
+    }
+    h
+}
+fn regs_get(r: &Regs, name: &str) -> i64 {
+    let k = fnv64(name);
+    r.iter().rev().find(|&&(h, _)| h == k).map(|&(_, v)| v).unwrap_or(0)
+}
+fn regs_set(r: &mut Regs, name: &str, val: i64) {
+    let k = fnv64(name);
+    if let Some(e) = r.iter_mut().rev().find(|(h, _)| *h == k) { e.1 = val; }
+    else { r.push((k, val)); }
+}
+
 // ── TtfParser state (DrvManSpec***TtfGetData/Set + TtfScratchGet/Set) ─────────
 // Partagé entre Load / GetGlyphId / GetGlyfOffset car ces appels
 // passent par le dispatcher global, pas par les globals OVC.
@@ -422,12 +476,12 @@ fn reg_name(tok: &str) -> String {
 ///   "inttoptr (i64 1710638 to ptr)"    → 1710638
 ///   "ptr null"                         → 0
 ///   "42"                               → 42
-fn resolve(tok: &str, regs: &BTreeMap<String, i64>, consts: &BTreeMap<String, i64>) -> i64 {
+fn resolve(tok: &str, regs: &Regs, consts: &BTreeMap<String, i64>) -> i64 {
     let tok = tok.trim().trim_end_matches(',');
 
     // Registre %name
     if tok.starts_with('%') {
-        return *regs.get(reg_name(tok).as_str()).unwrap_or(&0);
+        return regs_get(regs, reg_name(tok).as_str());
     }
     // Constante @name
     if tok.starts_with('@') {
@@ -454,7 +508,7 @@ fn resolve(tok: &str, regs: &BTreeMap<String, i64>, consts: &BTreeMap<String, i6
     //            "i32 42" → "42" → 42
     let last = tok.split_whitespace().last().unwrap_or(tok);
     if last.starts_with('%') {
-        return *regs.get(reg_name(last).as_str()).unwrap_or(&0);
+        return regs_get(regs, reg_name(last).as_str());
     }
     if last.starts_with('@') {
         let k = last.trim_start_matches('@').trim_end_matches(',');
@@ -496,26 +550,53 @@ fn parse_call_args(src: &str) -> Vec<String> {
 
 // ── Parsing des constantes de chaîne : @N = ... c"text\00" ───────────────────
 
-fn parse_string_consts(ovc: &str) -> BTreeMap<String, i64> {
-    let mut map = BTreeMap::new();
-    for line in ovc.lines() {
-        let line = line.trim();
-        if !line.starts_with('@') { continue; }
-        let Some(eq) = line.find('=') else { continue };
-        let name = line[1..eq].trim().to_string();
-        // Cherche c"text\00"
-        let Some(cp) = line.find(" c\"") else { continue };
-        let after = &line[cp+3..];
-        let Some(ep) = after.find("\\00\"") else { continue };
-        let s: String = after[..ep].to_string();
-        // Stocker avec null-terminator pour GpuDrawText (loop cherche \0)
-        let mut bytes = s.as_bytes().to_vec();
-        bytes.push(0u8);
-        let boxed: alloc::boxed::Box<[u8]> = bytes.into_boxed_slice();
-        let ptr = alloc::boxed::Box::into_raw(boxed) as *const u8 as i64;
-        map.insert(name, ptr);
+fn parse_string_consts(ovc: &str) -> &'static BTreeMap<String, i64> {
+    let key = ovc.as_ptr() as usize;
+    unsafe {
+        // Cherche dans le cache (OVC pointer = identifiant unique du module)
+        for &(k, ptr) in CONSTS_CACHE.iter() {
+            if k == key && !ptr.is_null() { return &*ptr; }
+        }
+        // Non trouvé — parser et mettre en cache
+        let mut map = BTreeMap::new();
+        for line in ovc.lines() {
+            let line = line.trim();
+            if !line.starts_with('@') { continue; }
+            let Some(eq) = line.find('=') else { continue };
+            let name = line[1..eq].trim().to_string();
+            let Some(cp) = line.find(" c\"") else { continue };
+            let after = &line[cp+3..];
+            let Some(ep) = after.find("\\00\"") else { continue };
+            let s: &str = &after[..ep];
+            // Décoder les escapes \xx → byte, stocker avec \0 final
+            let mut bytes: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+            let sb = s.as_bytes();
+            let mut i = 0;
+            while i < sb.len() {
+                if sb[i] == b'\\' && i + 2 < sb.len() {
+                    if let (Some(hi), Some(lo)) = (
+                        (sb[i+1] as char).to_digit(16),
+                        (sb[i+2] as char).to_digit(16)) {
+                        bytes.push((hi * 16 + lo) as u8);
+                        i += 3;
+                        continue;
+                    }
+                }
+                bytes.push(sb[i]); i += 1;
+            }
+            bytes.push(0u8);
+            let boxed: alloc::boxed::Box<[u8]> = bytes.into_boxed_slice();
+            let ptr_val = alloc::boxed::Box::into_raw(boxed) as *const u8 as i64;
+            map.insert(name, ptr_val);
+        }
+        // Fuite justifiée : UEFI boot, max ~8 modules, chacun parsé une seule fois
+        let boxed_map = alloc::boxed::Box::new(map);
+        let map_ptr = alloc::boxed::Box::into_raw(boxed_map) as *const BTreeMap<String, i64>;
+        for slot in CONSTS_CACHE.iter_mut() {
+            if slot.0 == 0 { *slot = (key, map_ptr); break; }
+        }
+        &*map_ptr
     }
-    map
 }
 
 // ── Localisation d'une fonction ───────────────────────────────────────────────
@@ -564,7 +645,15 @@ fn parse_def_args(func: &str) -> Vec<String> {
 
 // ── Parsing des blocs de base ─────────────────────────────────────────────────
 
-fn parse_blocks(func: &str) -> BTreeMap<String, Vec<String>> {
+fn parse_blocks(func: &str) -> &'static BTreeMap<String, Vec<String>> {
+    // Cache par pointeur de texte de fonction — parsé UNE SEULE FOIS par fonction OVC
+    let key_ovc  = func.as_ptr() as usize;
+    let key_func = func.len();
+    unsafe {
+        for &(ko, kf, ptr) in BLOCKS_CACHE.iter() {
+            if ko == key_ovc && kf == key_func && !ptr.is_null() { return &*ptr; }
+        }
+    }
     let mut blocks: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut cur = "entry".to_string();
     blocks.insert(cur.clone(), Vec::new());
@@ -610,7 +699,15 @@ fn parse_blocks(func: &str) -> BTreeMap<String, Vec<String>> {
             v.push(t.to_string());
         }
     }
-    blocks
+    // Fuite justifiée (UEFI boot) — chaque fonction parsée une seule fois
+    unsafe {
+        let boxed = alloc::boxed::Box::new(blocks);
+        let ptr   = alloc::boxed::Box::into_raw(boxed) as *const BTreeMap<String, Vec<String>>;
+        for slot in BLOCKS_CACHE.iter_mut() {
+            if slot.0 == 0 { *slot = (key_ovc, key_func, ptr); break; }
+        }
+        &*ptr
+    }
 }
 
 // ── Exécution ─────────────────
@@ -629,11 +726,11 @@ pub fn exec_fn(
     let arg_names = parse_def_args(func);
     let blocks  = parse_blocks(func);
 
-    let mut regs:    BTreeMap<String, i64> = BTreeMap::new();
-    let mut globals: BTreeMap<String, i64> = BTreeMap::new();
+    let mut regs: Regs = Vec::new();
+    let mut globals: Regs = Vec::new();
 
     for (i, a) in arg_names.iter().enumerate() {
-        regs.insert(a.clone(), args.get(i).copied().unwrap_or(0));
+        regs_set(&mut regs, &a, args.get(i).copied().unwrap_or(0));
     }
 
     run_blocks(&blocks, &consts, &mut globals, &mut regs, ctx, "entry")
@@ -646,16 +743,16 @@ pub fn exec_module(ovc: &[u8], fns: &[(&str, &[i64])], ctx: &ExecCtx) -> i64 {
     if !text.starts_with("# Vyft OVC v1.0") { return -1; }
 
     let consts  = parse_string_consts(text);
-    let mut globals: BTreeMap<String, i64> = BTreeMap::new();
+    let mut globals: Regs = Vec::new();
     let mut last = 0i64;
 
     for (fn_name, args) in fns {
         let func = match find_function(text, fn_name) { Some(f) => f, None => continue };
         let arg_names = parse_def_args(func);
         let blocks    = parse_blocks(func);
-        let mut regs: BTreeMap<String, i64> = BTreeMap::new();
+        let mut regs: Regs = Vec::new();
         for (i, a) in arg_names.iter().enumerate() {
-            regs.insert(a.clone(), args.get(i).copied().unwrap_or(0));
+            regs_set(&mut regs, &a, args.get(i).copied().unwrap_or(0));
         }
         last = run_blocks(&blocks, &consts, &mut globals, &mut regs, ctx, "entry");
     }
@@ -704,16 +801,16 @@ pub fn exec_marep(
             // Fusionner les constantes de chaque module dans un espace global
             // (préfixées par le module pour éviter les collisions)
             let c = parse_string_consts(text);
-            for (k, v) in c {
-                all_consts.insert(alloc::format!("{}::{}", name, k), v);
-                all_consts.entry(k).or_insert(v); // sans préfixe aussi
+            for (k, v) in c.iter() {
+                all_consts.insert(alloc::format!("{}::{}", name, k), *v);
+                all_consts.entry(k.clone()).or_insert(*v);
             }
             mod_texts.push((name, text));
         }
     }
 
     // Globals partagés entre tous les modules
-    let mut globals: BTreeMap<String, i64> = BTreeMap::new();
+    let mut globals: Regs = Vec::new();
 
     serial_log(b"[OVC] constructors start\r\n");
 
@@ -761,7 +858,7 @@ fn exec_marep_fn(
     fn_name:    &str,
     args:       &[i64],
     _all_consts: &BTreeMap<String, i64>,
-    globals:    &mut BTreeMap<String, i64>,
+    globals:    &mut Regs,
     ctx:        &ExecCtx,
     modules:    &[(&str, &str)],
     depth:      u32,
@@ -789,9 +886,9 @@ fn exec_marep_fn(
     let arg_names = parse_def_args(func);
     let blocks = parse_blocks(func);
 
-    let mut regs: BTreeMap<String, i64> = BTreeMap::new();
+    let mut regs: Regs = Vec::new();
     for (i, a) in arg_names.iter().enumerate() {
-        regs.insert(a.clone(), args.get(i).copied().unwrap_or(0));
+        regs_set(&mut regs, &a, args.get(i).copied().unwrap_or(0));
     }
 
     run_blocks_cross(
@@ -840,8 +937,8 @@ fn resolve_cross_module_call(fname: &str) -> Option<(&str, &str)> {
 fn run_blocks_cross(
     blocks:   &BTreeMap<String, Vec<String>>,
     consts:   &BTreeMap<String, i64>,
-    globals:  &mut BTreeMap<String, i64>,
-    regs:     &mut BTreeMap<String, i64>,
+    globals:  &mut Regs,
+    regs:     &mut Regs,
     ctx:      &ExecCtx,
     start:    &str,
     mod_name: &str,
@@ -976,7 +1073,7 @@ fn run_blocks_cross(
                             }  // end if let Some(v) = fast
                         };
 
-                        regs.insert(dst, call_result);
+                        regs_set(regs, &dst, call_result);
                         RunResult::Ok
                     } else {
                         run_instr(instr, consts, globals, regs, ctx, &prev_blk)
@@ -1007,8 +1104,8 @@ fn run_blocks_cross(
 fn run_blocks(
     blocks:  &BTreeMap<String, Vec<String>>,
     consts:  &BTreeMap<String, i64>,
-    globals: &mut BTreeMap<String, i64>,
-    regs:    &mut BTreeMap<String, i64>,
+    globals: &mut Regs,
+    regs:    &mut Regs,
     ctx:     &ExecCtx,
     start:   &str,
 ) -> i64 {
@@ -1051,8 +1148,8 @@ enum RunResult { Ok, Branch(String), Return(i64) }
 fn run_instr(
     instr:   &str,
     consts:  &BTreeMap<String, i64>,
-    globals: &mut BTreeMap<String, i64>,
-    regs:    &mut BTreeMap<String, i64>,
+    globals: &mut Regs,
+    regs:    &mut Regs,
     ctx:     &ExecCtx,
     prev:    &str,
 ) -> RunResult {
@@ -1126,7 +1223,7 @@ fn run_instr(
         let val = if src_tok == "true" { 1i64 }
                   else if src_tok == "false" { 0i64 }
                   else { resolve(src_tok, regs, consts) };
-        globals.insert(dest_k, val);
+        regs_set(globals, &dest_k, val);
         return RunResult::Ok;
     }
 
@@ -1150,7 +1247,7 @@ fn run_instr(
                    || rhs.starts_with("call (")
     {
         // Extraire le nom de la fonction
-        let fn_start = match rhs.find('@') { Some(p) => p, None => { regs.insert(dst, 0); return RunResult::Ok; } };
+        let fn_start = match rhs.find('@') { Some(p) => p, None => { regs_set(regs, &dst, 0); return RunResult::Ok; } };
         let after_at = &rhs[fn_start+1..];
         let fn_end = after_at.find('(').unwrap_or(after_at.len());
         let fname = &after_at[..fn_end];
@@ -1163,8 +1260,12 @@ fn run_instr(
     }
     else if rhs.starts_with("phi ") {
         // phi i32 [ v1, %lbl1 ], [ v2, %lbl2 ]
-        // Cherche la valeur associée au bloc précédent
-        parse_phi(rhs, prev, regs, consts)
+        // Cherche la valeur associée au bloc précédent.
+        // Si le prédécesseur n'est pas dans la phi (optimisation LLVM : le compilateur
+        // peut fusionner des chemins), on retourne la valeur actuelle du registre de
+        // destination — c'est le comportement attendu pour les phi de boucles.
+        if let Some(v) = parse_phi_opt(rhs, prev, regs, consts) { v }
+        else { regs_get(regs, &dst) }  // prédécesseur non trouvé → valeur inchangée
     }
     else if rhs.starts_with("load ") {
         // load i1, ptr @global  |  load ptr, ptr @global
@@ -1175,9 +1276,9 @@ fn run_instr(
         let key = src.split_whitespace().last().unwrap_or("").trim_end_matches(',');
         if key.starts_with('@') {
             let k = key.trim_start_matches('@');
-            *globals.get(k).unwrap_or(&0)
+            regs_get(globals, k)
         } else if key.starts_with('%') {
-            *regs.get(reg_name(key).as_str()).unwrap_or(&0)
+            regs_get(regs, reg_name(key).as_str())
         } else {
             0
         }
@@ -1238,7 +1339,7 @@ fn run_instr(
                 "srem"  => if b != 0 { a % b } else { 0 },
                 "urem"  => if b != 0 { (a as u64 % b as u64) as i64 } else { 0 },
                 "shl"   => a.wrapping_shl(b as u32),
-                "ashr"  => (a >> (b & 63)),
+                "ashr"  => a >> (b & 63),
                 "lshr"  => ((a as u64) >> (b & 63)) as i64,
                 "and"   => a & b,
                 "or"    => a | b,
@@ -1262,7 +1363,7 @@ fn run_instr(
         }
     };
 
-    regs.insert(dst, val);
+    regs_set(regs, &dst, val);
     RunResult::Ok
 }
 
@@ -1282,26 +1383,26 @@ fn extract_binop_args<'a>(toks: &[&'a str]) -> (&'a str, &'a str) {
     (toks[len-2].trim_end_matches(','), b_tok)
 }
 
-fn parse_phi(rhs: &str, prev: &str, regs: &BTreeMap<String, i64>, consts: &BTreeMap<String, i64>) -> i64 {
-    // phi i32 [ val1, %label1 ], [ val2, %label2 ], ...
+// Retourne Some(val) si le prédécesseur est trouvé, None sinon.
+fn parse_phi_opt(rhs: &str, prev: &str, regs: &Regs, consts: &BTreeMap<String, i64>) -> Option<i64> {
     let mut pos = 0usize;
-    let bytes = rhs.as_bytes();
-    while pos < bytes.len() {
-        // Cherche '['
+    while pos < rhs.len() {
         let Some(open) = rhs[pos..].find('[') else { break };
         let open_abs = pos + open;
         let Some(close) = rhs[open_abs..].find(']') else { break };
         let inner = &rhs[open_abs+1..open_abs+close];
-        // inner = " val, %label "
         let parts: Vec<&str> = inner.split(',').collect();
         let val_tok = parts.first().map(|s| s.trim()).unwrap_or("0");
         let lbl_tok = parts.get(1).map(|s| s.trim().trim_start_matches('%')).unwrap_or("");
         if lbl_tok == prev {
-            return resolve(val_tok, regs, consts);
+            return Some(resolve(val_tok, regs, consts));
         }
         pos = open_abs + close + 1;
     }
-    0
+    None
+}
+fn parse_phi(rhs: &str, prev: &str, regs: &Regs, consts: &BTreeMap<String, i64>) -> i64 {
+    parse_phi_opt(rhs, prev, regs, consts).unwrap_or(0)
 }
 
 // ── Rendu texte ──────────────────────────────────────────────────────────────
@@ -1349,11 +1450,11 @@ fn exec_fn_raw_with_mods<'a>(
     let func = match find_function(text, fn_name) { Some(f) => f, None => return 0 };
     let arg_names = parse_def_args(func);
     let blocks = parse_blocks(func);
-    let mut regs: BTreeMap<String, i64> = BTreeMap::new();
+    let mut regs: Regs = Vec::new();
     for (i, a) in arg_names.iter().enumerate() {
-        regs.insert(a.clone(), args.get(i).copied().unwrap_or(0));
+        regs_set(&mut regs, &a, args.get(i).copied().unwrap_or(0));
     }
-    let mut globals: BTreeMap<String, i64> = BTreeMap::new();
+    let mut globals: Regs = Vec::new();
     // Construire la liste modules : le module courant + les modules extra
     let mut mods_vec: Vec<(&str, &str)> = alloc::vec::Vec::new();
     mods_vec.push((mod_name, text));
@@ -1371,7 +1472,7 @@ fn dispatch(
     fname:   &str,
     args:    &[i64],
     _consts: &BTreeMap<String, i64>,
-    _globals:&BTreeMap<String, i64>,
+    _globals:&Regs,
     ctx:     &ExecCtx,
 ) -> i64 {
     match fname {
@@ -1403,21 +1504,23 @@ fn dispatch(
         "DrvManSpec___PtrWrite8At___" => {
             if args.len() >= 3 {
                 let p   = args[0] as *mut u8;
-                let off = args[1] as usize;
+                let off = args[1];
                 let v   = args[2] as u8;
-                if !p.is_null() { unsafe { *p.add(off) = v; } }
+                if !p.is_null() && off >= 0 && off < 16 * 1024 * 1024 {
+                    unsafe { *p.add(off as usize) = v; }
+                }
             }
             0
         },
         "DrvManSpec___PtrWrite32At___" => {
             if args.len() >= 3 {
                 let p   = args[0] as *mut u8;
-                let off = args[1] as usize;
-                let v   = (args[2] as u32).to_be_bytes(); // SRFS = big-endian
-                if !p.is_null() {
+                let off = args[1];
+                let val = args[2] as u32;
+                if !p.is_null() && off >= 0 && off < 256 * 1024 * 1024 {
                     unsafe {
-                        *p.add(off)   = v[0]; *p.add(off+1) = v[1];
-                        *p.add(off+2) = v[2]; *p.add(off+3) = v[3];
+                        // écriture 4 octets little-endian (framebuffer BGRA)
+                        core::ptr::write_unaligned(p.add(off as usize) as *mut u32, val);
                     }
                 }
             }
@@ -1487,15 +1590,17 @@ fn dispatch(
         },
 
         // ── DrvManSpec Mémoire brute (TtfParser / GlyphRasterizer) ───────────
+        // Limite de sécurité: offset > 16MB → accès invalide probable (offset négatif converti en usize énorme)
         "DrvManSpec___PtrReadI16At___" | "DrvManSpec___PtrRead16At___" => {
             if args.len() >= 2 {
                 let base = args[0] as *const u8;
-                let off  = args[1] as usize;
-                if !base.is_null() {
+                let off  = args[1];
+                if !base.is_null() && off >= 0 && off < 16 * 1024 * 1024 {
+                    let o = off as usize;
                     unsafe {
-                        let hi = *base.add(off)     as i16;
-                        let lo = *base.add(off + 1) as i16;
-                        ((hi << 8) | lo) as i64
+                        let hi = *base.add(o)     as i64;
+                        let lo = *base.add(o + 1) as i64;
+                        (hi << 8) | lo
                     }
                 } else { 0 }
             } else { 0 }
@@ -1503,12 +1608,13 @@ fn dispatch(
         "DrvManSpec___PtrReadU16At___" => {
             if args.len() >= 2 {
                 let base = args[0] as *const u8;
-                let off  = args[1] as usize;
-                if !base.is_null() {
+                let off  = args[1];
+                if !base.is_null() && off >= 0 && off < 16 * 1024 * 1024 {
+                    let o = off as usize;
                     unsafe {
-                        let hi = *base.add(off)     as u16;
-                        let lo = *base.add(off + 1) as u16;
-                        ((hi << 8) | lo) as i64
+                        let hi = *base.add(o)     as i64;
+                        let lo = *base.add(o + 1) as i64;
+                        (hi << 8) | lo
                     }
                 } else { 0 }
             } else { 0 }
@@ -1516,23 +1622,21 @@ fn dispatch(
         "DrvManSpec___PtrReadI32At___" | "DrvManSpec___PtrRead32At___" => {
             if args.len() >= 2 {
                 let base = args[0] as *const u8;
-                let off  = args[1] as usize;
-                if !base.is_null() {
-                    unsafe {
-                        let b0 = *base.add(off)     as i32;
-                        let b1 = *base.add(off + 1) as i32;
-                        let b2 = *base.add(off + 2) as i32;
-                        let b3 = *base.add(off + 3) as i32;
-                        ((b0 << 24) | (b1 << 16) | (b2 << 8) | b3) as i64
-                    }
+                let off  = args[1];
+                if !base.is_null() && off >= 0 && off < 16 * 1024 * 1024 {
+                    // Lecture native-endian : cohérente avec PtrWrite32At (buffers internes OVC)
+                    // TtfParser utilise _r32 fast-path (big-endian) pour les données font TTF
+                    unsafe { core::ptr::read_unaligned(base.add(off as usize) as *const i32) as i64 }
                 } else { 0 }
             } else { 0 }
         },
         "DrvManSpec___PtrRead8At___" => {
             if args.len() >= 2 {
                 let base = args[0] as *const u8;
-                let off  = args[1] as usize;
-                if !base.is_null() { unsafe { *base.add(off) as i64 } } else { 0 }
+                let off  = args[1];
+                if !base.is_null() && off >= 0 && off < 16 * 1024 * 1024 {
+                    unsafe { *base.add(off as usize) as i64 }
+                } else { 0 }
             } else { 0 }
         },
         "DrvManSpec___PtrAdd___" => {
@@ -1549,6 +1653,24 @@ fn dispatch(
             if args.len() >= 1 { unsafe { FONT_UNITS_PER_EM = args[0] as u32; } }
             0
         },
+        // MathSafety : fonctions clamp (utilisées par GlyphRasterizer)
+        "MathSafety___ClampI32___" => {
+            if args.len() >= 3 {
+                let v   = args[0];
+                let min = args[1];
+                let max = args[2];
+                if v < min { min } else if v > max { max } else { v }
+            } else { 0 }
+        },
+        "MathSafety___ClampU32___" => {
+            if args.len() >= 3 {
+                let v   = args[0] as u64;
+                let min = args[1] as u64;
+                let max = args[2] as u64;
+                if v < min { min as i64 } else if v > max { max as i64 } else { v as i64 }
+            } else { 0 }
+        },
+
         "DrvManSpec___RastSetDims___" => {
             // Stocke les dimensions du raster en cours (width, height)
             if args.len() >= 2 {
@@ -1589,13 +1711,13 @@ fn dispatch(
         },
 
         // ── DrvAPIInterCon Mémoire (GlyphRasterizer utilise MemAlloc/Set) ────
+        // Utilise l'arène statique OVC (512KB) au lieu du heap UEFI limité.
         "DrvAPIInterCon___MemAlloc___" => {
             if args.len() >= 1 {
-                let size = args[0] as usize;
-                if size == 0 { return 0; }
-                let layout = alloc::alloc::Layout::from_size_align(size, 8)
-                    .unwrap_or(alloc::alloc::Layout::new::<u8>());
-                let p = unsafe { alloc::alloc::alloc_zeroed(layout) };
+                let size  = args[0] as usize;
+                let align = if args.len() >= 3 { args[2] as usize } else { 8 };
+                let align = align.max(1).next_power_of_two().min(64);
+                let p = ovc_arena_alloc(size, align);
                 p as i64
             } else { 0 }
         },
@@ -1661,30 +1783,7 @@ fn dispatch(
         "DrvManSpec___GetBitmapFont8x16___"     => FONT8X16.as_ptr() as i64,
         "DrvManSpec___GopCacheState___"         => 0,
 
-        // PtrWrite32At(fb_ptr, byte_offset, value)
-        "DrvManSpec___PtrWrite32At___" => {
-            if args.len() >= 3 {
-                let fb   = args[0] as *mut u8;
-                let off  = args[1] as usize;
-                let val  = args[2] as u32;
-                if !fb.is_null() {
-                    unsafe { (fb.add(off) as *mut u32).write_volatile(val); }
-                }
-            }
-            0
-        },
-
-        // PtrRead8At(base_ptr, byte_offset)
-        "DrvManSpec___PtrRead8At___" => {
-            if args.len() >= 2 {
-                let p   = args[0] as *const u8;
-                let off = args[1] as usize;
-                if !p.is_null() {
-                    return unsafe { *p.add(off) } as i64;
-                }
-            }
-            0
-        },
+        // (PtrWrite32At et PtrRead8At déjà définis ci-dessus avec bounds check)
 
         // StrLen(ptr) — null-terminated
         "DrvManSpec___StrLen___" => {
@@ -1807,8 +1906,7 @@ fn dispatch(
         "DrvAPIInterCon___FontLoad___" => {
             if args.len() >= 1 {
                 serial_log(b"[FontLoad] path_ptr=");
-                serial_log(if args[0] != 0 { b"+" } else { b"0!" });
-                serial_log(b"\r\n");
+                    serial_log(b"\r\n");
                 if args[0] == 0 {
                     serial_log(b"[FontLoad] path=0 constructor not run?\r\n");
                     return 0;
@@ -1843,16 +1941,11 @@ fn dispatch(
             let size     = if args.len() >= 7 { args[6] as i32 } else { 16 };
 
             // Logs détaillés : font_ptr, fg, bg, size, ctx.font_len
-            serial_log(if font_ptr != 0 { b"[D] font+\r\n" } else { b"[D] font=0!\r\n" });
-            serial_log(if !tp.is_null() { b"[D] tp+\r\n" } else { b"[D] tp=null!\r\n" });
-            serial_log(b"[D] sz=");
-            serial_log(&[(size as u8 % 100) + b'0']);
             serial_log(b" fl=");
             serial_log(&[(ctx.font_len % 1000) as u8 / 100 + b'0',
                           (ctx.font_len % 100)  as u8 / 10  + b'0',
                           (ctx.font_len % 10)   as u8        + b'0']);
             serial_log(b"\r\n");
-            serial_log(b"[D] fg=");
             let fg_b = (fg as u32).to_be_bytes();
             serial_log(&fg_b);
             serial_log(b" bg=");
@@ -1865,8 +1958,6 @@ fn dispatch(
             let ttf_bytes  = unsafe { FONT_TTF_OVC.as_deref()  }.unwrap_or(&[]);
             let rast_bytes = unsafe { FONT_RAST_OVC.as_deref() }.unwrap_or(&[]);
             let woff_bytes = unsafe { FONT_WOFF_OVC.as_deref() }.unwrap_or(&[]);
-            serial_log(if !ttf_bytes.is_empty()  { b"[D] ttf+\r\n"  } else { b"[D] ttf=0!\r\n"  });
-            serial_log(if !rast_bytes.is_empty() { b"[D] rast+\r\n" } else { b"[D] rast=0!\r\n" });
             if ttf_bytes.is_empty() || rast_bytes.is_empty() { return 0; }
             let ttf_text  = core::str::from_utf8(ttf_bytes).unwrap_or("");
             let rast_text = core::str::from_utf8(rast_bytes).unwrap_or("");
@@ -1890,12 +1981,9 @@ fn dispatch(
                     &[font_ptr, ctx.font_len as i64], ctx, &load_mods,
                 );
                 if load_r != 0 {
-                    serial_log(b"[D] Load ERR=");
-                    serial_log(&[(load_r as i8).unsigned_abs() + b'0']);
-                    serial_log(b"\r\n");
+                                    serial_log(b"\r\n");
                 } else {
-                    serial_log(b"[D] Load OK cmap=");
-                    let cmap = unsafe { TTF_SCRATCH[104] as u32 }.to_be_bytes();
+                            let cmap = unsafe { TTF_SCRATCH[104] as u32 }.to_be_bytes();
                     serial_log(&cmap[2..]);
                     serial_log(b" upm=");
                     serial_log(&[(unsafe { FONT_UNITS_PER_EM } / 100) as u8 + b'0',
@@ -1904,8 +1992,7 @@ fn dispatch(
                     serial_log(b"\r\n");
                 }
             } else {
-                serial_log(b"[D] Load cached\r\n");
-            }
+                }
 
             let fb_i64     = ctx.fb as i64;
             let stride_i64 = ctx.stride as i64;
@@ -1941,7 +2028,7 @@ fn dispatch(
                 }
 
                 let glyf_data = font_ptr.wrapping_add(glyf_off);
-                // reset arena avant chaque glyphe
+                ovc_arena_reset();  // reset arène avant chaque glyphe
 
                 let bitmap = exec_fn_raw_with_mods(
                     rast_bytes, "GlyphRasterizer", "RasterizeGlyph",
@@ -1955,11 +2042,8 @@ fn dispatch(
                 let bmp_w = unsafe { RAST_W as i32 };
                 let bmp_h = unsafe { RAST_H as i32 };
                 if ci <= 2 {
-                    serial_log(b"[D] W=");
-                    serial_log(&[(bmp_w / 10) as u8 + b'0', (bmp_w % 10) as u8 + b'0']);
-                    serial_log(b" H=");
-                    serial_log(&[(bmp_h / 10) as u8 + b'0', (bmp_h % 10) as u8 + b'0']);
-                    serial_log(b"\r\n");
+                                    serial_log(b" H=");
+                            serial_log(b"\r\n");
                 }
 
                 exec_fn_raw_with_mods(
@@ -1972,7 +2056,6 @@ fn dispatch(
                 cx += bmp_w + 1;
             }
             serial_log(b"[FONT] rendered=");
-            serial_log(&[(rendered / 10) as u8 + b'0', (rendered % 10) as u8 + b'0']);
             serial_log(b"\r\n");
             0
         },
@@ -1998,11 +2081,503 @@ fn dispatch(
         // printf — no-op silencieux en UEFI
         "printf" => 0,
 
+        // ── CryptoAssetSupport dispatchers (*.ca simple + bundle) ────────────
+        // Écrire un fichier .ca dans SRFS (simple ou bundle JSON brut)
+        // args[0]=path_ptr  args[1]=json_ptr_or_bytes
+        "DrvAPIInterCon___CaWriteFile___" => {
+            if args.len() >= 2 {
+                let path_ptr = args[0] as *const u8;
+                let json_ptr = args[1] as *const u8;
+                if !path_ptr.is_null() && !json_ptr.is_null() {
+                    let path_str = unsafe { read_cstr(path_ptr) };
+                    let json_str = unsafe { read_cstr(json_ptr) };
+                    srfs_write_chain_file(&path_str, json_str.as_bytes());
+                }
+            }
+            0
+        },
+
+        // Lire un fichier .ca depuis SRFS vers un buffer alloué par l'appelant
+        // (identique à FSRead mais dans le namespace Ca)
+        "DrvAPIInterCon___CaReadFile___" => {
+            if args.len() >= 3 {
+                let path_ptr = args[0] as *const u8;
+                let out_buf  = args[1] as *mut u8;
+                let out_size = args[2] as usize;
+                if !path_ptr.is_null() && !out_buf.is_null() {
+                    let path_str = unsafe { read_cstr(path_ptr) };
+                    if let Some(data) = srfs_read_chain_file(&path_str) {
+                        let n = data.len().min(out_size);
+                        unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), out_buf, n); }
+                        return n as i64;
+                    }
+                }
+            }
+            -1
+        },
+
+        // Compter les fichiers .ca dans un répertoire SRFS
+        // args[0]=dir_path_ptr → nombre de .ca trouvés dans le cache
+        "DrvAPIInterCon___CaCountFiles___" => {
+            let count = unsafe {
+                SRFS_CACHE.iter()
+                    .filter(|s| {
+                        if let Some((k, _)) = s { k.ends_with(".ca") } else { false }
+                    })
+                    .count() as i64
+            };
+            count
+        },
+
+        // Lister les .ca (noms séparés par \n) dans un répertoire SRFS
+        // args[0]=dir_path_ptr  args[1]=out_buf  args[2]=max_size
+        "DrvAPIInterCon___CaListFiles___" => {
+            if args.len() >= 3 {
+                let out_buf  = args[1] as *mut u8;
+                let out_size = args[2] as usize;
+                if !out_buf.is_null() && out_size > 0 {
+                    let mut listing = alloc::string::String::new();
+                    unsafe {
+                        for slot in SRFS_CACHE.iter() {
+                            if let Some((k, _)) = slot {
+                                if k.ends_with(".ca") {
+                                    listing.push_str(k);
+                                    listing.push('\n');
+                                }
+                            }
+                        }
+                    }
+                    let bytes = listing.as_bytes();
+                    let n = bytes.len().min(out_size - 1);
+                    if n > 0 {
+                        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, n); }
+                        unsafe { *out_buf.add(n) = 0; }
+                    }
+                    return n as i64;
+                }
+            }
+            -1
+        },
+
+        // Vérifier si un buffer contient une substring (pour IsBundle)
+        // args[0]=buf_ptr  args[1]=needle_ptr → 1 si trouvé, 0 sinon
+        "DrvAPIInterCon___CaContains___" => {
+            if args.len() >= 2 {
+                let buf_ptr    = args[0] as *const u8;
+                let needle_ptr = args[1] as *const u8;
+                if !buf_ptr.is_null() && !needle_ptr.is_null() {
+                    let buf_str    = unsafe { read_cstr(buf_ptr) };
+                    let needle_str = unsafe { read_cstr(needle_ptr) };
+                    return if buf_str.contains(needle_str.as_str()) { 1 } else { 0 };
+                }
+            }
+            0
+        },
+
+        // Lire un champ de premier niveau dans un JSON .ca
+        // args[0]=json_buf_ptr  args[1]=field_ptr → pointeur vers valeur (alloc), ou null
+        "DrvAPIInterCon___CaReadField___" => {
+            if args.len() >= 2 {
+                let json_ptr  = args[0] as *const u8;
+                let field_ptr = args[1] as *const u8;
+                if !json_ptr.is_null() && !field_ptr.is_null() {
+                    let json_str  = unsafe { read_cstr(json_ptr) };
+                    let field_str = unsafe { read_cstr(field_ptr) };
+                    let needle = alloc::format!("\"{}\":", field_str);
+                    if let Some(pos) = json_str.find(&needle) {
+                        let rest = json_str[pos + needle.len()..].trim_start();
+                        let value = if rest.starts_with('"') {
+                            // Valeur string : extraire entre guillemets
+                            let inner = &rest[1..];
+                            let end = inner.find('"').unwrap_or(inner.len());
+                            inner[..end].to_string()
+                        } else {
+                            // Valeur numérique/bool
+                            let end = rest.find(|c: char| c == ',' || c == '}' || c == '\n')
+                                .unwrap_or(rest.len());
+                            rest[..end].trim().to_string()
+                        };
+                        if !value.is_empty() {
+                            let mut bytes = value.into_bytes();
+                            bytes.push(0);
+                            let boxed = bytes.into_boxed_slice();
+                            return alloc::boxed::Box::into_raw(boxed) as *mut u8 as i64;
+                        }
+                    }
+                }
+            }
+            0
+        },
+
+        // Extraire un sous-objet nested dans un bundle JSON
+        // args[0]=json_buf_ptr  args[1]=parent_key_ptr  args[2]=child_key_ptr
+        // Ex : CaExtractSubObject(buf, "contracts", "VEZproxy") → JSON de VEZproxy
+        "DrvAPIInterCon___CaExtractSubObject___" => {
+            if args.len() >= 3 {
+                let json_ptr   = args[0] as *const u8;
+                let parent_ptr = args[1] as *const u8;
+                let child_ptr  = args[2] as *const u8;
+                if !json_ptr.is_null() && !parent_ptr.is_null() && !child_ptr.is_null() {
+                    let json_str   = unsafe { read_cstr(json_ptr) };
+                    let parent_str = unsafe { read_cstr(parent_ptr) };
+                    let child_str  = unsafe { read_cstr(child_ptr) };
+                    // Trouver "parent":{ puis "child":{ ... }
+                    let parent_key = alloc::format!("\"{}\":", parent_str);
+                    let child_key  = alloc::format!("\"{}\":", child_str);
+                    if let Some(p_pos) = json_str.find(&parent_key) {
+                        let after_parent = &json_str[p_pos + parent_key.len()..];
+                        if let Some(c_pos) = after_parent.find(&child_key) {
+                            let after_child = &after_parent[c_pos + child_key.len()..].trim_start();
+                            // Extraire l'objet JSON { ... } avec comptage de braces
+                            if after_child.starts_with('{') {
+                                let mut depth = 0usize;
+                                let mut end   = 0usize;
+                                for (i, c) in after_child.char_indices() {
+                                    if c == '{' { depth += 1; }
+                                    if c == '}' {
+                                        depth -= 1;
+                                        if depth == 0 { end = i + 1; break; }
+                                    }
+                                }
+                                if end > 0 {
+                                    let sub = after_child[..end].to_string();
+                                    let mut bytes = sub.into_bytes();
+                                    bytes.push(0);
+                                    let boxed = bytes.into_boxed_slice();
+                                    return alloc::boxed::Box::into_raw(boxed) as *mut u8 as i64;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            0
+        },
+
+        // Mettre à jour un champ de premier niveau dans un fichier .ca SRFS
+        // args[0]=path_ptr  args[1]=field_ptr  args[2]=value_ptr
+        "DrvAPIInterCon___CaUpdateField___" => {
+            if args.len() >= 3 {
+                let path_ptr  = args[0] as *const u8;
+                let field_ptr = args[1] as *const u8;
+                let val_ptr   = args[2] as *const u8;
+                if !path_ptr.is_null() && !field_ptr.is_null() && !val_ptr.is_null() {
+                    let path_str  = unsafe { read_cstr(path_ptr) };
+                    let field_str = unsafe { read_cstr(field_ptr) };
+                    let val_str   = unsafe { read_cstr(val_ptr) };
+                    if let Some(data) = srfs_read_chain_file(&path_str) {
+                        if let Ok(mut json_str) = alloc::string::String::from_utf8(data) {
+                            let needle = alloc::format!("\"{}\":", field_str);
+                            if let Some(pos) = json_str.find(&needle) {
+                                let val_start = pos + needle.len();
+                                let rest = json_str[val_start..].trim_start().to_string();
+                                let val_end = rest.find(|c: char| c == ',' || c == '}')
+                                    .unwrap_or(rest.len());
+                                let old_val = &rest[..val_end];
+                                let new_val = alloc::format!("\"{}\"", val_str);
+                                json_str = json_str.replacen(old_val, &new_val, 1);
+                                srfs_write_chain_file(&path_str, json_str.as_bytes());
+                                return 0;
+                            }
+                        }
+                    }
+                }
+            }
+            -1
+        },
+
+        // Mettre à jour un champ nested contracts.<contract>.<field> dans un bundle
+        // args[0]=path  args[1]=parent("contracts")  args[2]=contract_name  args[3]=field  args[4]=value
+        "DrvAPIInterCon___CaUpdateNestedField___" => {
+            if args.len() >= 5 {
+                let path_ptr     = args[0] as *const u8;
+                let contract_ptr = args[2] as *const u8;
+                let field_ptr    = args[3] as *const u8;
+                let val_ptr      = args[4] as *const u8;
+                if !path_ptr.is_null() && !contract_ptr.is_null() && !field_ptr.is_null() && !val_ptr.is_null() {
+                    let path_str     = unsafe { read_cstr(path_ptr) };
+                    let contract_str = unsafe { read_cstr(contract_ptr) };
+                    let field_str    = unsafe { read_cstr(field_ptr) };
+                    let val_str      = unsafe { read_cstr(val_ptr) };
+                    if let Some(data) = srfs_read_chain_file(&path_str) {
+                        if let Ok(mut json_str) = alloc::string::String::from_utf8(data) {
+                            // Trouver "contractName":{ ... "field":"old" ... }
+                            let contract_key = alloc::format!("\"{}\":", contract_str);
+                            let field_key    = alloc::format!("\"{}\":", field_str);
+                            if let Some(c_pos) = json_str.find(&contract_key) {
+                                let sub = &json_str[c_pos..];
+                                if let Some(f_pos) = sub.find(&field_key) {
+                                    let abs_pos  = c_pos + f_pos + field_key.len();
+                                    let rest     = json_str[abs_pos..].trim_start().to_string();
+                                    let val_end  = rest.find(|c: char| c == ',' || c == '}')
+                                        .unwrap_or(rest.len());
+                                    let old_val  = &rest[..val_end];
+                                    let new_val  = alloc::format!("\"{}\"", val_str);
+                                    json_str     = json_str.replacen(old_val, &new_val, 1);
+                                    srfs_write_chain_file(&path_str, json_str.as_bytes());
+                                    return 0;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            -1
+        },
+
+        // Ajouter une entrée à l'index SRFS (SDC:\env\.index)
+        // args[0]=index_path_ptr  args[1]=entry_ptr ("NOM=VALEUR\n")
+        "DrvAPIInterCon___EnvAppendIndex___" => {
+            if args.len() >= 2 {
+                let path_ptr  = args[0] as *const u8;
+                let entry_ptr = args[1] as *const u8;
+                if !path_ptr.is_null() && !entry_ptr.is_null() {
+                    let path_str  = unsafe { read_cstr(path_ptr) };
+                    let entry_str = unsafe { read_cstr(entry_ptr) };
+                    let existing  = srfs_read_chain_file(&path_str)
+                        .and_then(|d| alloc::string::String::from_utf8(d).ok())
+                        .unwrap_or_default();
+                    let new_index = alloc::format!("{}{}", existing, entry_str);
+                    srfs_write_chain_file(&path_str, new_index.as_bytes());
+                }
+            }
+            0
+        },
+
+        // Parser les entrées NOM=VALEUR\n d'un buffer d'index et les injecter
+        // args[0]=buf_ptr  args[1]=buf_size → nombre de vars parsées
+        "DrvAPIInterCon___EnvParseIndex___" => {
+            if args.len() >= 2 {
+                let buf_ptr  = args[0] as *const u8;
+                let buf_size = args[1] as usize;
+                if !buf_ptr.is_null() && buf_size > 0 {
+                    let data  = unsafe { core::slice::from_raw_parts(buf_ptr, buf_size) };
+                    let text  = core::str::from_utf8(data).unwrap_or("");
+                    let count = text.lines()
+                        .filter(|line| line.contains('='))
+                        .count();
+                    return count as i64;
+                }
+            }
+            0
+        },
+
+        // LLVM intrinsics (utilisés par GlyphRasterizer pour smax/smin)
+        "llvm.smax.i32" => if args.len() >= 2 { args[0].max(args[1]) } else { 0 },
+        "llvm.smin.i32" => if args.len() >= 2 { args[0].min(args[1]) } else { 0 },
+        "llvm.umax.i32" => if args.len() >= 2 { (args[0] as u64).max(args[1] as u64) as i64 } else { 0 },
+        "llvm.umin.i32" => if args.len() >= 2 { (args[0] as u64).min(args[1] as u64) as i64 } else { 0 },
+
         // self___onDriverInit → appelé depuis APrevent::OnPowerOn
         "self___onDriverInit" => 0,
 
+        // ── SluraChain Bridge (SluChainBridge.mara) ──────────────────────────
+        // Pont SRFS ↔ vuc-platform : sérialise txns/calls en JSON dans SRFS.
+        // vuc-platform (engine_platform.rs) les consomme en mode deferred.
+
+        // Générer un ID unique pour une transaction/call (monotone, basé sur compteur)
+        "DrvAPIInterCon___BlockchainGenTxId___" => {
+            unsafe {
+                static mut CHAIN_TX_COUNTER: u32 = 0;
+                CHAIN_TX_COUNTER = CHAIN_TX_COUNTER.wrapping_add(1);
+                CHAIN_TX_COUNTER as i64
+            }
+        },
+
+        // Enqueue une transaction dans SRFS : SDC:\chain\pending_txs\<id>.json
+        // args[0]=path_ptr args[1]=from_ptr args[2]=to_ptr args[3]=data_ptr args[4]=value args[5]=txId
+        "DrvAPIInterCon___BlockchainQueueTx___" => {
+            if args.len() >= 6 {
+                let path_ptr = args[0] as *const u8;
+                let to_ptr   = args[2] as *const u8;
+                let data_ptr = args[3] as *const u8;
+                let value    = args[4] as u64;
+                let tx_id    = args[5] as u32;
+                if !path_ptr.is_null() && !to_ptr.is_null() {
+                    // Sérialiser en JSON minimaliste et écrire dans SRFS via srfs_write_chain_file
+                    let to_str   = unsafe { read_cstr(to_ptr) };
+                    let data_str = if data_ptr.is_null() { "0x".to_string() }
+                                   else { unsafe { read_cstr(data_ptr) } };
+                    let path_str = unsafe { read_cstr(path_ptr) };
+                    let json = alloc::format!(
+                        "{{\"type\":\"tx\",\"id\":{},\"to\":\"{}\",\"data\":\"{}\",\"value\":{}}}",
+                        tx_id, to_str, data_str, value
+                    );
+                    srfs_write_chain_file(&path_str, json.as_bytes());
+                }
+            }
+            0
+        },
+
+        // Enqueue un eth_call en lecture seule : SDC:\chain\calls\<id>.req.json
+        // args[0]=reqPath args[1]=contract args[2]=selector args[3]=args_data args[4]=callId
+        "DrvAPIInterCon___BlockchainQueueCall___" => {
+            if args.len() >= 5 {
+                let path_ptr     = args[0] as *const u8;
+                let contract_ptr = args[1] as *const u8;
+                let sel_ptr      = args[2] as *const u8;
+                let args_ptr     = args[3] as *const u8;
+                let call_id      = args[4] as u32;
+                if !path_ptr.is_null() && !contract_ptr.is_null() {
+                    let path_str     = unsafe { read_cstr(path_ptr) };
+                    let contract_str = unsafe { read_cstr(contract_ptr) };
+                    let sel_str      = if sel_ptr.is_null()  { "0x".to_string() } else { unsafe { read_cstr(sel_ptr) } };
+                    let args_str     = if args_ptr.is_null() { "0x".to_string() } else { unsafe { read_cstr(args_ptr) } };
+                    let json = alloc::format!(
+                        "{{\"type\":\"call\",\"id\":{},\"to\":\"{}\",\"selector\":\"{}\",\"args\":\"{}\"}}",
+                        call_id, contract_str, sel_str, args_str
+                    );
+                    srfs_write_chain_file(&path_str, json.as_bytes());
+                }
+            }
+            0
+        },
+
+        // Polling sur la réponse d'un call : SDC:\chain\calls\<id>.resp.json
+        // args[0]=respPath args[1]=outBuf args[2]=outSize args[3]=timeout_ms
+        // Retourne le nombre d'octets lus dans outBuf, ou -1 si timeout
+        "DrvAPIInterCon___BlockchainPollResp___" => {
+            if args.len() >= 4 {
+                let path_ptr = args[0] as *const u8;
+                let out_buf  = args[1] as *mut u8;
+                let out_size = args[2] as usize;
+                if !path_ptr.is_null() && !out_buf.is_null() && out_size > 0 {
+                    let path_str = unsafe { read_cstr(path_ptr) };
+                    // Lire depuis SRFS cache (mis à jour par vuc-platform)
+                    if let Some(data) = srfs_read_chain_file(&path_str) {
+                        let n = data.len().min(out_size);
+                        unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), out_buf, n); }
+                        return n as i64;
+                    }
+                }
+            }
+            -1
+        },
+
+        // Enqueue un déploiement de contrat : SDC:\chain\pending_txs\<id>.deploy.json
+        // args[0]=queuePath args[1]=bytecodePath args[2]=ctorArgs args[3]=from args[4]=txId
+        "DrvAPIInterCon___BlockchainQueueDeploy___" => {
+            if args.len() >= 5 {
+                let path_ptr     = args[0] as *const u8;
+                let bc_path_ptr  = args[1] as *const u8;
+                let ctor_ptr     = args[2] as *const u8;
+                let from_ptr     = args[3] as *const u8;
+                let tx_id        = args[4] as u32;
+                if !path_ptr.is_null() && !bc_path_ptr.is_null() {
+                    let path_str    = unsafe { read_cstr(path_ptr) };
+                    let bc_path_str = unsafe { read_cstr(bc_path_ptr) };
+                    let ctor_str    = if ctor_ptr.is_null()  { "0x".to_string() } else { unsafe { read_cstr(ctor_ptr) } };
+                    let from_str    = if from_ptr.is_null()  { "0x0000000000000000000000000000000000000000".to_string() } else { unsafe { read_cstr(from_ptr) } };
+                    let json = alloc::format!(
+                        "{{\"type\":\"deploy\",\"id\":{},\"bytecodePath\":\"{}\",\"ctorArgs\":\"{}\",\"from\":\"{}\"}}",
+                        tx_id, bc_path_str, ctor_str, from_str
+                    );
+                    srfs_write_chain_file(&path_str, json.as_bytes());
+                }
+            }
+            0
+        },
+
+        // Lire la balance depuis SRFS : SDC:\chain\state\balances\<addr>.json
+        // args[0]=statePath_ptr → retourne la balance (i32 simplifié) ou -1
+        "DrvAPIInterCon___BlockchainReadBalance___" => {
+            if args.len() >= 1 {
+                let path_ptr = args[0] as *const u8;
+                if !path_ptr.is_null() {
+                    let path_str = unsafe { read_cstr(path_ptr) };
+                    if let Some(data) = srfs_read_chain_file(&path_str) {
+                        // Parse JSON minimaliste {"balance":12345}
+                        if let Ok(s) = core::str::from_utf8(&data) {
+                            if let Some(pos) = s.find("\"balance\":") {
+                                let rest = &s[pos + 10..];
+                                let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+                                if let Ok(v) = rest[..end].parse::<i64>() {
+                                    return v;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            -1
+        },
+
+        // Lire un champ JSON depuis un fichier SRFS de métadonnées
+        // args[0]=path_ptr args[1]=field_ptr → valeur du champ (i32) ou -1
+        "DrvAPIInterCon___BlockchainReadMeta___" => {
+            if args.len() >= 2 {
+                let path_ptr  = args[0] as *const u8;
+                let field_ptr = args[1] as *const u8;
+                if !path_ptr.is_null() && !field_ptr.is_null() {
+                    let path_str  = unsafe { read_cstr(path_ptr) };
+                    let field_str = unsafe { read_cstr(field_ptr) };
+                    if let Some(data) = srfs_read_chain_file(&path_str) {
+                        if let Ok(s) = core::str::from_utf8(&data) {
+                            let needle = alloc::format!("\"{}\":", field_str);
+                            if let Some(pos) = s.find(&needle) {
+                                let rest = &s[pos + needle.len()..].trim_start();
+                                let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+                                if let Ok(v) = rest[..end].parse::<i64>() {
+                                    return v;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            -1
+        },
+
         _ => 0,
     }
+}
+
+// ── Helpers internes pour le bridge blockchain ────────────────────────────────
+
+/// Lit une chaîne C nulle-terminée depuis un pointeur brut.
+unsafe fn read_cstr(ptr: *const u8) -> alloc::string::String {
+    let mut len = 0usize;
+    while *ptr.add(len) != 0 && len < 512 { len += 1; }
+    core::str::from_utf8(core::slice::from_raw_parts(ptr, len))
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Écrit un fichier JSON dans la queue blockchain SRFS.
+/// Cherche d'abord dans SRFS_CACHE un slot libre ; sinon enregistre directement.
+fn srfs_write_chain_file(path: &str, data: &[u8]) {
+    unsafe {
+        for slot in SRFS_CACHE.iter_mut() {
+            if slot.is_none() {
+                *slot = Some((path.to_string(), data.to_vec()));
+                return;
+            }
+        }
+        // Cache plein : écraser le premier slot chain (pas de font/marep)
+        for slot in SRFS_CACHE.iter_mut() {
+            if let Some((ref k, _)) = slot {
+                if k.contains("chain") {
+                    *slot = Some((path.to_string(), data.to_vec()));
+                    return;
+                }
+            }
+        }
+    }
+    serial_log(b"[CHAIN] cache plein, tx perdue\r\n");
+}
+
+/// Lit un fichier de réponse blockchain depuis SRFS_CACHE.
+fn srfs_read_chain_file(path: &str) -> Option<alloc::vec::Vec<u8>> {
+    unsafe {
+        for slot in SRFS_CACHE.iter() {
+            if let Some((ref k, ref data)) = slot {
+                if k == path {
+                    return Some(data.clone());
+                }
+            }
+        }
+    }
+    None
 }
 
 // ── Bridge C-ABI pour vuc-platform (uefi-kernel feature) ─────────────────────

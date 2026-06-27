@@ -1,0 +1,170 @@
+//===================================================================
+//  SluChainBridge.mara – Pont Slura OS ↔ SluraChain (vuc-platform)
+//  Projet : SRFSMan.slul
+//  Auteur : Vyft Ltd — 2026
+//
+//  Rôle : permet aux apps Maratine (marep) d'interagir avec la
+//  blockchain SluraChain via SRFS comme bus IPC :
+//
+//    marep → DrvAPIInterCon***BlockchainTx***  → SDC:\chain\pending_txs\<id>.json
+//    marep → DrvAPIInterCon***BlockchainCall*** → SDC:\chain\calls\<id>.req.json
+//              vuc-platform lit + répond dans   → SDC:\chain\calls\<id>.resp.json
+//
+//  Design : pendant le boot UEFI, pas de réseau ni de TCP stack.
+//  Les transactions et appels sont sérialisés comme JSON dans SRFS.
+//  vuc-platform (engine_platform.rs) les consomme en mode deferred.
+//===================================================================
+
+#base <std***ComTpe***SlulFrmt***[ DrvManSpec, MathSafety ]>;
+#base <MaratineKit>;
+
+// ── Chemins SRFS de la queue blockchain ──────────────────────────────────────
+// Tous en SDC:\ (monté par SRFSMan au démarrage)
+
+// ── Envoyer une transaction à la queue SRFS ───────────────────────────────────
+// to       : adresse destination (hex 0x...)
+// data     : calldata ABI-encodé (hex ou null pour transfert simple)
+// value    : montant SLU en wei-equivalents
+// from     : adresse expéditrice (ou "" pour utiliser le validator)
+// Retourne : ID de transaction dans la queue (int) ou -1 si erreur
+rel op BlockchainTx: [to string, data string, value i32, from string] [
+    // Valider les paramètres minimaux
+    if (to == "" || to == null) [ ret -1; ];
+
+    // Générer un ID de transaction unique (timestamp-based)
+    let txId: <i32> = <DrvAPIInterCon***BlockchainGenTxId***>();
+    if (txId < 0) [ ret -1; ];
+
+    // Construire le path SRFS de la queue
+    // Chemin : SDC:\chain\pending_txs\<txId>.json
+    let queuePath: <string> = "SDC:\\chain\\pending_txs\\" + txId + ".json";
+
+    // Sérialiser la transaction en JSON minimal
+    // Format compatible send_transaction() de engine_platform.rs
+    var fromAddr: <string> = from;
+    if (fromAddr == "" || fromAddr == null) [
+        fromAddr = "0x0000000000000000000000000000000000000000";
+    ];
+
+    var dataField: <string> = data;
+    if (dataField == "" || dataField == null) [
+        dataField = "0x";
+    ];
+
+    // Écrire dans SRFS via le dispatcher kernel
+    let r: <i32> = <DrvAPIInterCon***BlockchainQueueTx***>(
+        queuePath,
+        from, to, dataField, value, txId
+    );
+    if (r != 0) [
+        log: "SluChainBridge: echec écriture tx #" + txId + " → " + queuePath;
+        ret -1;
+    ];
+
+    log: "SluChainBridge: tx #" + txId + " en attente → " + queuePath;
+    ret txId;
+];
+
+// ── Appel lecture seule (eth_call) ────────────────────────────────────────────
+// contract  : adresse du contrat (hex 0x...)
+// selector  : signature ABI ex "balanceOf(address)" → keccak4
+// args      : arguments ABI-encodés (hex)
+// outBuf    : buffer de réponse alloué par l'appelant
+// outSize   : taille max du buffer
+// Retourne  : taille des données lues, ou -1
+rel op BlockchainCall: [contract string, selector string, args string, outBuf ptr, outSize i32] [
+    if (contract == "" || contract == null) [ ret -1; ];
+    if (outBuf == nullptr || outSize <= 0)  [ ret -1; ];
+
+    let callId: <i32> = <DrvAPIInterCon***BlockchainGenTxId***>();
+    if (callId < 0) [ ret -1; ];
+
+    // Écrire requête : SDC:\chain\calls\<callId>.req.json
+    let reqPath:  <string> = "SDC:\\chain\\calls\\" + callId + ".req.json";
+    let respPath: <string> = "SDC:\\chain\\calls\\" + callId + ".resp.json";
+
+    var selStr: <string> = selector;
+    if (selStr == "" || selStr == null) [ selStr = "0x"; ];
+    var argsStr: <string> = args;
+    if (argsStr == "" || argsStr == null) [ argsStr = "0x"; ];
+
+    let r: <i32> = <DrvAPIInterCon***BlockchainQueueCall***>(
+        reqPath, contract, selStr, argsStr, callId
+    );
+    if (r != 0) [
+        log: "SluChainBridge: echec écriture call #" + callId;
+        ret -1;
+    ];
+
+    // Attendre la réponse (polling SRFS) avec timeout 5s
+    let result: <i32> = <DrvAPIInterCon***BlockchainPollResp***>(
+        respPath, outBuf, outSize, 5000
+    );
+    if (result < 0) [
+        log: "SluChainBridge: call #" + callId + " timeout ou erreur";
+        ret -1;
+    ];
+
+    ret result;
+];
+
+// ── Lire la balance SLU d'une adresse (cache SRFS) ───────────────────────────
+// Lit depuis SDC:\chain\state\balances\<addr>.json (mis à jour par vuc-platform)
+// Retourne la balance en unités entières (pas wei) ou -1
+rel op GetBalance: [addr string] [
+    if (addr == "" || addr == null) [ ret -1; ];
+    let statePath: <string> = "SDC:\\chain\\state\\balances\\" + addr + ".json";
+    let bal: <i32> = <DrvAPIInterCon***BlockchainReadBalance***>(statePath);
+    ret bal;
+];
+
+// ── Lire le chain ID depuis les métadonnées SRFS ─────────────────────────────
+// Lit depuis SDC:\chain\metadata\chain_id.json (écrit par vuc-platform au boot)
+rel op GetChainId: [] [
+    let metaPath: <string> = "SDC:\\chain\\metadata\\chain_id.json";
+    let id: <i32> = <DrvAPIInterCon***BlockchainReadMeta***>(metaPath, "chainId");
+    if (id <= 0) [ ret 1337; ];  // 1337 = SluraChain devnet par défaut
+    ret id;
+];
+
+// ── Déployer un contrat Solidity (bytecode compilé stocké dans SRFS) ─────────
+// bytecodePath : chemin SRFS vers le .bin (ex "SDC:\contracts\MyToken.bin")
+// ctorArgs     : arguments constructeur ABI-encodés (hex)
+// from         : adresse du déployeur
+// Retourne     : txId dans la queue, ou -1
+rel op DeployContract: [bytecodePath string, ctorArgs string, from string] [
+    if (bytecodePath == "" || bytecodePath == null) [ ret -1; ];
+
+    let txId: <i32> = <DrvAPIInterCon***BlockchainGenTxId***>();
+    if (txId < 0) [ ret -1; ];
+
+    let queuePath: <string> = "SDC:\\chain\\pending_txs\\" + txId + ".deploy.json";
+
+    var fromAddr: <string> = from;
+    if (fromAddr == "" || fromAddr == null) [
+        fromAddr = "0x0000000000000000000000000000000000000000";
+    ];
+    var ctorStr: <string> = ctorArgs;
+    if (ctorStr == "" || ctorStr == null) [ ctorStr = "0x"; ];
+
+    let r: <i32> = <DrvAPIInterCon***BlockchainQueueDeploy***>(
+        queuePath, bytecodePath, ctorStr, fromAddr, txId
+    );
+    if (r != 0) [
+        log: "SluChainBridge: echec deploy #" + txId;
+        ret -1;
+    ];
+
+    log: "SluChainBridge: deploy #" + txId + " queued → " + queuePath;
+    ret txId;
+];
+
+// ── Vérifier le statut d'une transaction précédemment soumise ─────────────────
+// txId : identifiant retourné par BlockchainTx() ou DeployContract()
+// 0 = pending, 1 = mined, 2 = failed, -1 = not found
+rel op GetTxStatus: [txId i32] [
+    if (txId < 0) [ ret -1; ];
+    let statusPath: <string> = "SDC:\\chain\\receipts\\" + txId + ".json";
+    let status: <i32> = <DrvAPIInterCon***BlockchainReadMeta***>(statusPath, "status");
+    ret status;
+];

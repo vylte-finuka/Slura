@@ -175,39 +175,64 @@ rel cl _parseMaxp: [] [
 
 // ── cmap : Unicode → Glyph ID ─────────────────────────────────────────────────
 
-// Cherche le sous-tableau cmap format 4 (platformID=3 encodingID=1, Windows Unicode BMP)
-// Retourne l'offset absolu du sous-tableau format 4, ou 0 si introuvable.
+// Cherche le sous-tableau cmap format 4 — priorité décroissante :
+//   1. platformID=3 encodingID=1  fmt=4  (Windows Unicode BMP — optimal)
+//   2. platformID=0               fmt=4  (Unicode — large couverture)
+//   3. platformID=6               fmt=4  (custom / étendu — filet custom)
+//   4. N'importe quel platformID  fmt=4  (filet universel)
 rel cl _findCmapFormat4: [] [
     if (<DrvManSpec***TtfScratchGet***>(104) == 0) [ ret 0; ];
-    let version:   <i32> = _r16(<DrvManSpec***TtfScratchGet***>(104));
-    let numSubtab: <i32> = _r16(<DrvManSpec***TtfScratchGet***>(104) + 2);
+    let cmapBase: <i32>   = <DrvManSpec***TtfScratchGet***>(104);
+    let numSubtab: <i32>  = _r16(cmapBase + 2);
+
+    // Passe 1 : Windows Unicode BMP (platformID=3 encodingID=1 fmt=4)
     var i: <i32> = 0;
     loop (i < numSubtab) [
-        let recOff:    <i32> = <DrvManSpec***TtfScratchGet***>(104) + 4 + (i * 8);
+        let recOff:     <i32> = cmapBase + 4 + (i * 8);
         let platformID: <i32> = _r16(recOff);
         let encodingID: <i32> = _r16(recOff + 2);
         let subOffset:  <i32> = _r32(recOff + 4);
-        let absOff:     <i32> = <DrvManSpec***TtfScratchGet***>(104) + subOffset;
+        let absOff:     <i32> = cmapBase + subOffset;
         let fmt:        <i32> = _r16(absOff);
-        // platformID=3 encodingID=1 format=4 → Windows Unicode BMP
-        if (platformID == 3 && encodingID == 1 && fmt == 4) [
-            ret absOff;
-        ];
+        if (platformID == 3 && encodingID == 1 && fmt == 4) [ ret absOff; ];
         i = i + 1;
     ];
-    // Fallback : platformID=0 (Unicode) format=4
+
+    // Passe 2 : Unicode (platformID=0 fmt=4)
     i = 0;
     loop (i < numSubtab) [
-        let recOff:     <i32> = <DrvManSpec***TtfScratchGet***>(104) + 4 + (i * 8);
+        let recOff:     <i32> = cmapBase + 4 + (i * 8);
         let platformID: <i32> = _r16(recOff);
         let subOffset:  <i32> = _r32(recOff + 4);
-        let absOff:     <i32> = <DrvManSpec***TtfScratchGet***>(104) + subOffset;
+        let absOff:     <i32> = cmapBase + subOffset;
         let fmt:        <i32> = _r16(absOff);
-        if (platformID == 0 && fmt == 4) [
-            ret absOff;
-        ];
+        if (platformID == 0 && fmt == 4) [ ret absOff; ];
         i = i + 1;
     ];
+
+    // Passe 3 : platformID=6 (custom/étendu)
+    i = 0;
+    loop (i < numSubtab) [
+        let recOff:    <i32> = cmapBase + 4 + (i * 8);
+        let platformID: <i32> = _r16(recOff);
+        let subOffset: <i32> = _r32(recOff + 4);
+        let absOff:    <i32> = cmapBase + subOffset;
+        let fmt:       <i32> = _r16(absOff);
+        if (platformID == 6 && fmt == 4) [ ret absOff; ];
+        i = i + 1;
+    ];
+
+    // Passe 4 : filet universel — premier fmt=4 trouvé quelle que soit la plateforme
+    i = 0;
+    loop (i < numSubtab) [
+        let recOff:    <i32> = cmapBase + 4 + (i * 8);
+        let subOffset: <i32> = _r32(recOff + 4);
+        let absOff:    <i32> = cmapBase + subOffset;
+        let fmt:       <i32> = _r16(absOff);
+        if (fmt == 4) [ ret absOff; ];
+        i = i + 1;
+    ];
+
     ret 0;
 ];
 
