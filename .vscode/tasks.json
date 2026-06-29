@@ -388,10 +388,10 @@
         // xorriso -as mkisofs supporte -eltorito-alt-boot -e
         // =================================================================
 
-        {
+             {
             "label": "make: booter.iso",
             "type": "process",
-            "command": "xorriso",
+            "command": "D:\\msys64\\usr\\bin\\xorriso.exe",
             "args": [
                 "-as", "mkisofs",
                 "-V", "SLURA_OS_1.0",
@@ -402,8 +402,8 @@
                     "-e", "EFI/BOOT/BOOTX64.EFI",
                     "-no-emul-boot",
                     "-isohybrid-gpt-basdat",
-                "-o", "${workspaceFolder}\\booter.iso",
-                "${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp"
+                "-o", "Slura1_NAVERTA_build29062617.iso",
+                "slr_clk_bt/x64/amd64/esp"
             ],
             "options": { "cwd": "${workspaceFolder}" },
             "dependsOn": [

@@ -13,7 +13,7 @@ rel op APrevent: <[string CycleActivity]>t [
 
     rel op OnPowerOn: [arch string] [
         Architecture = arch;
-        log: "SluGpu: demarrage pilote GOP framebuffer";
+        log: "SluGpu: demarrage pilote MGC Driver " + Architecture;
         let drvResult: <i32> = self***onDriverInit();
         if (drvResult != 0) [
             log: "SluGpu: onDriverInit echoue";
@@ -36,7 +36,7 @@ rel op APrevent: <[string CycleActivity]>t [
         ];
         let w: <i32> = <std***core***self***GpuImpl***GpuGetWidth>();
         let h: <i32> = <std***core***self***GpuImpl***GpuGetHeight>();
-        log: "SluGpu: framebuffer OK " + w + "x" + h;
+        log: "SluGpu: MGC OK " + w + "x" + h;
         ret 0;
     ];
 
