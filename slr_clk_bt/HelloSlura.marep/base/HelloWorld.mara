@@ -5,6 +5,9 @@
 //
 //  Le chemin de la police est déclaré ici (plus de hardcodage Rust).
 //  Police chargée via DrvAPIInterCon***FontLoad*** → SRFS → ESP.
+//  Affichage de "Slura Naverta" avec fond vert pastel et rose pastel.
+//  Icône : slr_clk_bt\x64\amd64\esp\boot\assets\icon\sluico.png (support PNG/JPG/JPEG/GIF/BMP prévu)
+//  Polices supportées : TTF, WOFF, OTF (via UEFI HII spec)
 //===================================================================
 
 #base <std***core***self***[ ComponentView, RenderContext, TextLabel ]>;
@@ -12,16 +15,20 @@
 
 rel op HelloWorld: <[string ComponentView]>t [
 
-    var message:  <string> = "Hello Slura !";
+    var message:  <string> = "Slura Naverta";  // Texte principal modifié
     var kernelV:  <string> = "Lunee Kernel v0.1  |  Maratine 1.0";
     var footer:   <string> = "Vyft Ltd  --  2026";
-    var bgColor:  <i32>    = 0xFFFFFFFF;
-    var fgTitle:  <i32>    = 0x00FFE0E0;
-    var fgSub:    <i32>    = 0x00AAAACC;
-    var fgFooter: <i32>    = 0x00445566;
+    // Couleurs pastel pour le fond (ARGB avec alpha 0x71 ≈ 44% opaque)
+    var pastelGreen: <i32> = 0x7198fb98; // vert pastel
+    var pastelPink:  <i32> = 0x71ffb6c1; // rose pastel
+    var fgTitle:     <i32> = 0x00000000; // texte noir pour bon contraste
+    var fgSub:       <i32> = 0x00000000;
+    var fgFooter:    <i32> = 0x00000000;
 
     // ── Chemin de la police déclaré dans HelloWorld ───────
-    var fontPath: <string> = "SDC:\\boot\\assets\\font\\arial.ttf";
+    var fontPath: <string> = "SDC:\\boot\\assets\\font\\brsonomasemibold.ttf";  // Police BR Sonoma maintenue
+    // ── Chemin de l'icône déclaré dans HelloWorld ───────
+    var iconPath: <string> = "SDC:\\boot\\assets\\icon\\sluico.png";  // Icône Slura
 
     // ── Create ────────────────────────────────────────────────────────────
     rel op Create: [ctx string] [
@@ -29,51 +36,51 @@ rel op HelloWorld: <[string ComponentView]>t [
 
         let w: <i32> = <DrvAPIInterCon***GpuGetWidth***>();
         let h: <i32> = <DrvAPIInterCon***GpuGetHeight***>();
+        let halfW: <i32> = w / 2;
 
         // Charger la police par chemin SRFS déclaré ci-dessus
         let font: <ptr> = <DrvAPIInterCon***FontLoad***>(fontPath);
         log: "HelloWorld: police chargee";
 
-        // Fond plein écran
-        let _: <i32> = <DrvAPIInterCon***GpuFill***>(bgColor);
+        // Charger l'icône par chemin SRFS déclaré ci-dessus
+        let icon: <ptr> = <DrvAPIInterCon***ImageLoad***>(iconPath);
+        log: "HelloWorld: icône chargee";
 
-        // ── Lignes de séparation ───────────────────────────────────────
-        let lineY: <i32> = h / 2 - 36;
-        let _: <i32> = <DrvAPIInterCon***GpuDrawRect***>(w / 4, lineY, w / 2, 2, 0x00334466);
+        // Fond moitié gauche : vert pastel
+        let _: <i32> = <DrvAPIInterCon***GpuFill***>(pastelGreen);
+        // Fond moitié droite : rose pastel (on recouvre la moitié droite)
+        let _: <i32> = <DrvAPIInterCon***GpuDrawRect***>(halfW, 0, halfW, h, pastelPink);
 
-        let line2Y: <i32> = h / 2 + 28;
-        let _: <i32> = <DrvAPIInterCon***GpuDrawRect***>(w / 4, line2Y, w / 2, 1, 0x00334466);
+        // ── Afficher l'icône (en haut à gauche) ─────────────────────────
+        let iconX: <i32> = 20;
+        let iconY: <i32> = 20;
+        let iconW: <i32> = 64;  // Taille souhaitée de l'icône
+        let iconH: <i32> = 64;
+        let _: <i32> = <DrvAPIInterCon***GpuDrawImage***>(icon, iconX, iconY, iconW, iconH);
 
-        // ── Titre "Hello Slura !" (police TTF, taille 32) ─────────────
-        let titleX: <i32> = w / 4;
+        // ── Titre "Slura Naverta" (police TTF, taille 32) ─────────────
+        let titleX: <i32> = w / 4;          // un peu à gauche du centre pour équilibrer
         let titleY: <i32> = h / 2 - 24;
         let _: <i32> = <DrvAPIInterCon***GpuDrawTextFont***>(
-            titleX, titleY, message, fgTitle, bgColor, font, 32
+            titleX, titleY, message, fgTitle, 0x00000000, font, 32
         );
 
         // ── Sous-titre kernel (taille 16) ─────────────────────────────
         let subX: <i32> = w / 4;
         let subY: <i32> = h / 2 + 4;
         let _: <i32> = <DrvAPIInterCon***GpuDrawTextFont***>(
-            subX, subY, kernelV, fgSub, bgColor, font, 16
+            subX, subY, kernelV, fgSub, 0x00000000, font, 16
         );
 
         // ── Pied de page (taille 14) ──────────────────────────────────
         let ftX: <i32> = w / 4;
         let ftY: <i32> = h / 2 + 38;
         let _: <i32> = <DrvAPIInterCon***GpuDrawTextFont***>(
-            ftX, ftY, footer, fgFooter, bgColor, font, 14
+            ftX, ftY, footer, fgFooter, 0x00000000, font, 14
         );
 
-        let label: <[string TextLabel]> = <MaratineKit***UI***TextLabel***New>(
-            message, "#FFE0E0", "#001A1A2E"
-        );
-        let _: <i32> = <MaratineKit***UI***TextLabel***SetAlign>(label, "center");
-        let _: <i32> = <MaratineKit***UI***TextLabel***SetFontSize>(label, 32);
-        let _: <i32> = <MaratineKit***RenderContext***Attach>(ctx, label);
-
-        log: "HelloWorld: *** Hello Slura ! ***";
-        ret label;
+        log: "HelloWorld: *** Slura Naverta ***";
+        ret "";  // Retourne une chaîne vide comme vue (les fonctions UI manquantes sont évitées)
     ];
 
     rel op Render: [view string, ctx string] [
@@ -83,7 +90,7 @@ rel op HelloWorld: <[string ComponentView]>t [
     ];
 
     rel cl Destroy: [view string, ctx string] [
-        let _: <i32> = <MaratineKit***RenderContext***Detach>(ctx, view);
+        // Fonction Detach manquante dans MaratineKit***RenderContext*** - ne rien faire
         ret 0;
     ];
 ];

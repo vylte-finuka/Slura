@@ -194,6 +194,23 @@ rel op GpuLoadFont: [fontPath string] [
 ];
 
 
+// Chargement d'une image (PNG, JPG, JPEG, GIF, BMP) via l'interface DrvAPIInterCon.
+// Retourne un pointeur vers l'image chargée ou nullptr en cas d'échec.
+rel op GpuLoadImage: [imagePath string] [
+    ret <DrvAPIInterCon***ImageLoad***>(imagePath);
+];
+
+
+// Dessin d'une image chargée à l'écran.
+// Paramètres : pointeur image, position (x,y), largeur et hauteur souhaitées.
+// Retourne 0 en cas de succès, code d'erreur sinon.
+rel op GpuDrawImage: [img ptr, x i32, y i32, width i32, height i32] [
+    // Verrouillage optionnel du GPU (déjà géré par l'appelant si nécessaire)
+    let result: <i32> = <DrvAPIInterCon***ImageDraw***>(img, x, y, width, height);
+    ret result;
+];
+
+
 // Fonctions d'initialisation et d'accès attendues par APrevent.mara
 // Initialisation du moteur MGC (gop est le protocole UEFI GfxOutput, non utilisé ici)
 rel op GpuInit: [gop ptr] [
