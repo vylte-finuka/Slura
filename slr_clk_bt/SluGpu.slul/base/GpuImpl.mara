@@ -230,6 +230,131 @@ rel op GpuGetHeight: [] [ ret <MaratineKit***MGC***MGC***GetHeight***>(); ];
 rel op GpuFlushRenderContext: [ctx string] [ ret 0; ];
 
 
+// ─────────────────────────────────────────────────────────────────────────────
+// GpuDrawRoundedRectSolid – rectangle arrondi solide via CmdFillRect ligne/ligne.
+// PtrWrite32At ne flush pas le WC-MMIO GOP → on utilise exclusivement CmdFillRect
+// (qui passe par GOP Blt() en interne et est garanti visible).
+// Algorithme coin : sqrt entier — cdx_max = floor(sqrt(r²−cdy²)) par boucle ascendante.
+// ─────────────────────────────────────────────────────────────────────────────
+rel op GpuDrawRoundedRectSolid: [x i32, y i32, width i32, height i32, radius i32, color i32] [
+    let solidColor: <i32> = 0xFF000000 | (color & 0x00FFFFFF);
+    let r2:    <i32> = radius * radius;
+    let fbVid: <ptr> = <MaratineKit***MGC***MGC***GetVideoMemoryPtr***>();
+    let stride:<i32> = <MaratineKit***MGC***MGC***GetPixelsPerScanLine***>();
+    let cmdBuf:<ptr> = <MaratineKit***MGC***MGC***CreateCommandBuffer***>();
+
+    var py: <i32> = 0;
+    loop (py < height) [
+        // Distance verticale dans la zone de coin
+        let eT: <i32> = radius - py;
+        let eB: <i32> = py - (height - radius) + 1;
+        var cdy: <i32> = 0;
+        if (eT > 0) [ cdy = eT; ];
+        if (eB > 0) [ cdy = eB; ];
+
+        var rowX0: <i32> = 0;
+        var rowX1: <i32> = width;
+
+        if (cdy > 0) [
+            // cdx_max = floor(sqrt(r2 - cdy²)) via boucle entière
+            let rem: <i32> = r2 - cdy * cdy;
+            var cdx_max: <i32> = 0;
+            if (rem >= 0) [
+                loop ((cdx_max + 1) * (cdx_max + 1) <= rem) [
+                    cdx_max = cdx_max + 1;
+                ];
+            ];
+            rowX0 = radius - cdx_max;
+            rowX1 = width - rowX0;
+        ];
+
+        let lineW: <i32> = rowX1 - rowX0;
+        if (lineW > 0) [
+            <MaratineKit***MGC***MGC***CmdFillRect***>(cmdBuf, x + rowX0, y + py, lineW, 1, solidColor, fbVid, stride);
+        ];
+        py = py + 1;
+    ];
+
+    <MaratineKit***MGC***MGC***SubmitCommandBuffer***>(cmdBuf);
+    <MaratineKit***MGC***MGC***DestroyCommandBuffer***>(cmdBuf);
+    ret 0;
+];
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GpuDrawRoundedRectAlpha – conservé pour hardware réel (PtrWrite32At + flush manuel).
+// NE PAS utiliser sous QEMU/OVMF : le WC-MMIO GOP ne flush pas sans mfence.
+// ─────────────────────────────────────────────────────────────────────────────
+rel op GpuDrawRoundedRectAlpha: [x i32, y i32, width i32, height i32, radius i32, color i32] [
+    ret <DrvAPIInterCon***GpuDrawRoundedRectSolid***>(x, y, width, height, radius, color);
+];
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GpuLoadImage / GpuDrawImage – chargement et affichage d'images (PNG/JPG/GIF)
+// via stb_image FFI (img_load___, img_free___, img_get_width___, etc.)
+// ─────────────────────────────────────────────────────────────────────────────
+rel op GpuLoadImage: [imagePath string] [
+    if (imagePath == "") [ ret nullptr; ];
+    ret <img_load***>(imagePath);
+];
+
+rel op GpuFreeImage: [img ptr] [
+    if (img == nullptr) [ ret 0; ];
+    <img_free***>(img);
+    ret 0;
+];
+
+rel op GpuDrawImage: [img ptr, x i32, y i32, drawW i32, drawH i32] [
+    if (img == nullptr || drawW <= 0 || drawH <= 0) [ ret -1; ];
+    let srcW: <i32>    = <img_get_width***>(img);
+    let srcH: <i32>    = <img_get_height***>(img);
+    let channels: <i32> = <img_get_channels***>(img);
+    let pixels: <ptr>  = <img_get_pixels***>(img);
+    if (pixels == nullptr || srcW <= 0 || srcH <= 0) [ ret -2; ];
+
+    let fbVid:  <ptr> = <MaratineKit***MGC***MGC***GetVideoMemoryPtr***>();
+    let stride: <i32> = <MaratineKit***MGC***MGC***GetPixelsPerScanLine***>();
+    let cmdBuf: <ptr> = <MaratineKit***MGC***MGC***CreateCommandBuffer***>();
+
+    var dy: <i32> = 0;
+    loop (dy < drawH) [
+        // Mapping bilinéaire simplifié (nearest-neighbour)
+        let sy: <i32> = (dy * srcH) / drawH;
+        var dx: <i32> = 0;
+        loop (dx < drawW) [
+            let sx: <i32> = (dx * srcW) / drawW;
+            let srcOff: <i32> = (sy * srcW + sx) * channels;
+            let pr: <i32> = <DrvManSpec***PtrRead8At***>(pixels, srcOff);
+            let pg: <i32> = <DrvManSpec***PtrRead8At***>(pixels, srcOff + 1);
+            let pb: <i32> = <DrvManSpec***PtrRead8At***>(pixels, srcOff + 2);
+            var pa: <i32> = 255;
+            if (channels >= 4) [ pa = <DrvManSpec***PtrRead8At***>(pixels, srcOff + 3); ];
+
+            let fbOff: <i32> = ((y + dy) * stride + x + dx) * 4;
+            var pixel: <i32> = 0xFF000000 | (pr << 16) | (pg << 8) | pb;
+
+            if (pa < 255) [
+                let ia: <i32> = 255 - pa;
+                let db: <i32> = <DrvManSpec***PtrRead8At***>(fbVid, fbOff);
+                let dg: <i32> = <DrvManSpec***PtrRead8At***>(fbVid, fbOff + 1);
+                let dr: <i32> = <DrvManSpec***PtrRead8At***>(fbVid, fbOff + 2);
+                let nr: <i32> = (pr * pa + dr * ia) / 255;
+                let ng: <i32> = (pg * pa + dg * ia) / 255;
+                let nb: <i32> = (pb * pa + db * ia) / 255;
+                pixel = 0xFF000000 | (nr << 16) | (ng << 8) | nb;
+            ];
+            <MaratineKit***MGC***MGC***CmdWritePixel***>(cmdBuf, fbOff, pixel);
+            dx = dx + 1;
+        ];
+        dy = dy + 1;
+    ];
+    <MaratineKit***MGC***MGC***SubmitCommandBuffer***>(cmdBuf);
+    <MaratineKit***MGC***MGC***DestroyCommandBuffer***>(cmdBuf);
+    ret 0;
+];
+
+
 // Sécurisation d'accès au GPU pour les opérations de rendu. Retourne 0 si le GPU est disponible, sinon -1.
 rel op LockGpuFeat: [thresholdresolution i32, monitormode i32] [
 

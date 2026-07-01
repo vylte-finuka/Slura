@@ -238,12 +238,17 @@ rel cl _findCmapFormat4: [] [
 
 // Cherche un glyphID dans un sous-tableau cmap format 4.
 // Retourne le glyphID (0 = .notdef si introuvable).
+// Appel à stb_set_current_glyph avant chaque retour : GlyphRasterizer.mara
+// récupère l'index via stb_get_current_glyph sans modifier le kernel Rust.
 rel op GetGlyphId: [codepoint i32] [
     let cmapOff: <i32> = _findCmapFormat4();
-    if (cmapOff == 0) [ ret 0; ];
+    if (cmapOff == 0) [
+        <stb_set_current_glyph***>(0);
+        ret 0;
+    ];
 
     let segCount: <i32> = _r16(cmapOff + 6) / 2;
-    let endBase:  <i32> = cmapOff + 14;
+    let endBase:   <i32> = cmapOff + 14;
     let startBase: <i32> = endBase + (segCount * 2) + 2;
     let deltaBase: <i32> = startBase + (segCount * 2);
     let rangeBase: <i32> = deltaBase + (segCount * 2);
@@ -257,18 +262,24 @@ rel op GetGlyphId: [codepoint i32] [
 
         if (codepoint >= startCode && codepoint <= endCode) [
             if (rangeOff == 0) [
-                ret (codepoint + delta) & 0xFFFF;
+                let gid1: <i32> = (codepoint + delta) & 0xFFFF;
+                <stb_set_current_glyph***>(gid1);
+                ret gid1;
             ];
             let glyphOff: <i32> = rangeBase + seg * 2 + rangeOff
                                 + (codepoint - startCode) * 2;
-            let gid: <i32> = _r16(glyphOff);
-            if (gid != 0) [
-                ret (gid + delta) & 0xFFFF;
+            let gid2: <i32> = _r16(glyphOff);
+            if (gid2 != 0) [
+                let gid3: <i32> = (gid2 + delta) & 0xFFFF;
+                <stb_set_current_glyph***>(gid3);
+                ret gid3;
             ];
+            <stb_set_current_glyph***>(0);
             ret 0;
         ];
         seg = seg + 1;
     ];
+    <stb_set_current_glyph***>(0);
     ret 0;
 ];
 
@@ -330,8 +341,13 @@ rel op Load: [data ptr, size i32] [
         ret -2;
     ];
 
-    <DrvManSpec***TtfGetData***>() = sfnt;
+    <DrvManSpec***TtfSetData***>(sfnt);
     <DrvManSpec***TtfScratchSet***>(100, sfntSize);
+
+    // Initialiser stb_truetype avec la police brute décodée
+    // Appel natif via #include "stb_truetype.h" — aucun dispatcher Rust requis
+    let stbOk: <i32> = <stb_font_init***>(sfnt);
+    log: "TtfParser: stb_truetype init=" + stbOk;
 
     let r: <i32> = _parseOffsetTable();
     if (r != 0) [ ret r; ];

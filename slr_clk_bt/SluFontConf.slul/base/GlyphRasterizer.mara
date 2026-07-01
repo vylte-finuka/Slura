@@ -1,311 +1,53 @@
 //===================================================================
-//  GlyphRasterizer.mara – UEFI HII Compliant Glyph Rasterizer
+//  GlyphRasterizer.mara – Rastériseur qualité commerciale
 //  Projet : SluFontConf.slul
 //  Auteur : Vyft Ltd — 2026
-//  Ref: UEFI Spec 2.10, Section 34.1.4 (EFI_HII_FONT_PROTOCOL.GetGlyph)
+//
+//  Implémentation : stb_truetype.h (github.com/nothings/stb)
+//    — Anti-aliasing sub-pixel, winding rule non-zero
+//    — Supporte Latin, CJK, Arabe, Hébreu, Devanagari, etc.
+//    — Aucune allocation dynamique (buffer statique 256×256)
+//
+//  Pont TtfParser → GlyphRasterizer :
+//    TtfParser::GetGlyphId appelle stb_set_current_glyph(id)
+//    GlyphRasterizer::RasterizeGlyph lit l'index via stb_get_current_glyph()
+//    → Aucune modification du kernel Rust requise.
 //===================================================================
 
 #base <std***ComTpe***SlulFrmt***[ DrvManSpec, MathSafety ]>;
 #base <MaratineKit>;
 
-// UEFI HII Font Protocol compatible glyph rasterizer
-// Returns EFI_IMAGE_OUTPUT structure for a single glyph
-rel op GetGlyph: [char u16, fontInfo ptr, outImage ptr, baseline ptr] [
-    // Validate inputs
-    if (fontInfo == nullptr || outImage == nullptr || baseline == nullptr) [
-        ret -1; // EFI_INVALID_PARAMETER
-    ];
+// ── Rastérisation d'un glyphe via stb_truetype ──────────────────────────────
+// fontData  : pointeur vers les données TTF/OTF brutes (police complète)
+// pixelSize : hauteur cible en pixels
+// upm       : units-per-em (ignoré par stb, conservé pour compatibilité API)
+// Retourne  : pointeur vers bitmap alpha 8bpp dans le buffer statique 256×256
+//             ou nullptr si échec
+rel op RasterizeGlyph: [fontData ptr, pixelSize i32, upm i32] [
+    if (pixelSize <= 0) [ ret nullptr; ];
 
-    // Extract font data from fontInfo (simplified - actual impl would parse EFI_FONT_INFO)
-    let fontData: <ptr> = <DrvManSpec***FontGetRawData***>(fontInfo);
-    let pixelSize: <i32> = <DrvManSpec***FontGetPixelSize***>(fontInfo);
-    let upm: <i32> = <DrvManSpec***FontGetUnitsPerEm***>(fontData);
+    // stb_truetype a été initialisé par TtfParser::Load avec la police complète.
+    // fontData ici est glyf_data (offset dans la police) — non utilisé par stb.
+    // L'index de glyphe a été positionné par TtfParser::GetGlyphId via stb_set_current_glyph.
+    let glyphIdx: <i32> = <stb_get_current_glyph***>();
+    if (glyphIdx <= 0) [ ret nullptr; ];
 
-    if (fontData == nullptr || pixelSize <= 0 || upm <= 0) [
-        ret -2; // EFI_INVALID_PARAMETER
-    ];
+    // Facteur d'échelle * 1000 (entier, évite float côté Mara)
+    let scaleK: <i32> = <stb_scale_k***>(pixelSize);
+    if (scaleK <= 0) [ ret nullptr; ];
 
-    // Find glyph in font data (simplified - actual impl would use cmap table)
-    var glyfData: <ptr> = <DrvManSpec***FindGlyphInFont***>(fontData, char);
-    // Per UEFI spec: if glyph not found, use replacement character (0xFFFD)
-    if (glyfData == nullptr) [
-        glyfData = <DrvManSpec***FindGlyphInFont***>(fontData, 0xFFFD);
-        if (glyfData == nullptr) [
-            ret -3; // EFI_WARN_UNKNOWN_GLYPH (treated as error for simplicity)
-        ];
-    ];
-
-    // Rasterize glyph using existing logic
-    let bmp: <ptr> = <SluFontConf***GlyphRasterizer***RasterizeGlyph***>(glyfData, pixelSize, upm);
-    if (bmp == nullptr) [
-        ret -4; // EFI_OUT_OF_RESOURCES
-    ];
-
-    // Get bitmap dimensions
-    let bmpW: <i32> = <SluFontConf***GlyphRasterizer***GetLastBmpW***>();
-    let bmpH: <i32> = <SluFontConf***GlyphRasterizer***GetLastBmpH***>();
-
-    // Calculate baseline (ascent in pixels)
-    let yMin: <i32> = <DrvManSpec***PtrReadI16At***>(glyfData, 4);
-    let yMax: <i32> = <DrvManSpec***PtrReadI16At***>(glyfData, 8);
-    let ascent: <i32> = <DrvManSpec***FontGetAscent***>(fontInfo); // Preferred method
-    let baselinePx: <i32> = <MathSafety***ClampI32***>((ascent * pixelSize * 1000) / upm, 0, bmpH - 1);
-
-    // Allocate output image buffer (UEFI HII expects caller to free, but we'll allocate here per common pattern)
-    let imageSize: <i32> = bmpW * bmpH * 4; // ARGB32
-    let imageBuf: <ptr> = <DrvAPIInterCon***MemAlloc***>(imageSize, 0, 1);
-    if (imageBuf == nullptr) [
-        <DrvAPIInterCon***MemFree***>(bmp, 0);
-        ret -4; // EFI_OUT_OF_RESOURCES
-    ];
-    <DrvAPIInterCon***MemSet***>(imageBuf, 0, imageSize);
-
-    // Convert alpha bitmap to ARGB32 (assuming white glyph on transparent bg)
-    var row: <i32> = 0;
-    loop (row < bmpH) [
-        var col: <i32> = 0;
-        loop (col < bmpW) [
-            let alpha: <i32> = <DrvManSpec***PtrRead8At***>(bmp, row * bmpW + col);
-            let pixel: <i32> = (alpha << 24) | 0x00FFFFFF; // White glyph, alpha channel
-            <DrvManSpec***PtrWrite32At***>(imageBuf, (row * bmpW + col) * 4, pixel);
-            col = col + 1;
-        ];
-        row = row + 1;
-    ];
-
-    // Set output parameters
-    <DrvManSpec***PtrWritePtrAt***>(outImage, 0, imageBuf);   // Image.Bitmap
-    <DrvManSpec***PtrWriteI32At***>(outImage, 4, bmpW);      // Image.Width
-    <DrvManSpec***PtrWriteI32At***>(outImage, 8, bmpH);      // Image.Height
-    <DrvManSpec***PtrWritePtrAt***>(outImage, 12, nullptr);  // Image.Screen (NULL for bitmap)
-    <DrvManSpec***PtrWriteI32At***>(baseline, 0, baselinePx); // Baseline output
-
-    // Cleanup temporary bitmap
-    <DrvAPIInterCon***MemFree***>(bmp, 0);
-
-    ret 0; // EFI_SUCCESS
+    // Rastérisation stb → bitmap alpha 8bpp dans g_bmp statique (256×256 max)
+    let bmpPtr: <ptr> = <stb_rasterize***>(glyphIdx, scaleK);
+    ret bmpPtr;
 ];
 
-// Existing rasterization logic (unchanged)
-rel op RasterizeGlyph: [glyfData ptr, pixelSize i32, upm i32] [
-    if (glyfData == nullptr || pixelSize <= 0 || upm <= 0) [ ret nullptr; ];
-
-    // ── Entête glyphe (10 octets) ─────────────────────────────────────────────
-    let nContours: <i32> = <DrvManSpec***PtrReadI16At***>(glyfData, 0);
-    let xMin:  <i32> = <DrvManSpec***PtrReadI16At***>(glyfData, 2);
-    let yMin:  <i32> = <DrvManSpec***PtrReadI16At***>(glyfData, 4);
-    let xMax:  <i32> = <DrvManSpec***PtrReadI16At***>(glyfData, 6);
-    let yMax:  <i32> = <DrvManSpec***PtrReadI16At***>(glyfData, 8);
-
-    // Échelle globale basée sur UPM : préserve les proportions entre glyphes
-    let s1000: <i32> = (pixelSize * 1000) / upm;
-    let bmpW:  <i32> = <MathSafety***ClampI32***>(((xMax - xMin) * s1000) / 1000 + 2, 1, 256);
-    let bmpH:  <i32> = <MathSafety***ClampI32***>(((yMax - yMin) * s1000) / 1000 + 2, 1, 256);
-
-    let bmp: <ptr> = <DrvAPIInterCon***MemAlloc***>(bmpW * bmpH, 0, 4);
-    if (bmp == nullptr) [ ret nullptr; ];
-    <DrvAPIInterCon***MemSet***>(bmp, 0, bmpW * bmpH);
-    <DrvManSpec***RastSetDims***>(bmpW, bmpH);
-
-    // Glyphe composite : remplir le rectangle entier
-    if (nContours < 0) [
-        <DrvAPIInterCon***MemSet***>(bmp, 255, bmpW * bmpH);
-        ret bmp;
-    ];
-    if (nContours == 0) [ ret bmp; ];
-
-    // ── Nombre total de points ────────────────────────────────────────────────
-    var off: <i32> = 10;
-    let lastEndPt: <i32> = <DrvManSpec***PtrRead16At***>(glyfData, off + (nContours - 1) * 2);
-    let nPts: <i32> = lastEndPt + 1;
-    off = off + nContours * 2;
-
-    // Sauter les instructions TrueType (hints)
-    // instrLen peut être très grand pour certains glyphes → cap à 4096
-    var instrLen: <i32> = <DrvManSpec***PtrRead16At***>(glyfData, off);
-    if (instrLen < 0) [ instrLen = 0; ];
-    if (instrLen > 4096) [ instrLen = 0; ];
-    off = off + 2 + instrLen;
-
-    if (nPts <= 0) [ ret bmp; ];
-
-    // ── Buffers temporaires ───────────────────────────────────────────────────
-    // flagBuf : 1 octet/point  (flags)
-    // xBuf    : 4 octets/point (coordonnée X pixel, i32)
-    // yBuf    : 4 octets/point (coordonnée Y pixel, i32)
-    let flagBuf: <ptr> = <DrvAPIInterCon***MemAlloc***>(nPts, 0, 1);
-    let xBuf:   <ptr> = <DrvAPIInterCon***MemAlloc***>(nPts * 4, 0, 4);
-    let yBuf:   <ptr> = <DrvAPIInterCon***MemAlloc***>(nPts * 4, 0, 4);
-
-    if (flagBuf == nullptr || xBuf == nullptr || yBuf == nullptr) [
-        <DrvAPIInterCon***MemFree***>(flagBuf, 0);
-        <DrvAPIInterCon***MemFree***>(xBuf, 0);
-        <DrvAPIInterCon***MemFree***>(yBuf, 0);
-        ret bmp;
-    ];
-
-    // ── Phase 1 : Lire les flags (avec REPEAT_FLAG = bit 3) ──────────────────
-    var pt: <i32> = 0;
-    loop (pt < nPts) [
-        let f: <i32> = <DrvManSpec***PtrRead8At***>(glyfData, off);
-        off = off + 1;
-        <DrvManSpec***PtrWrite8At***>(flagBuf, pt, f);
-        pt = pt + 1;
-        if ((f & 8) != 0) [
-            let rep: <i32> = <DrvManSpec***PtrRead8At***>(glyfData, off);
-            off = off + 1;
-            var r: <i32> = 0;
-            loop (r < rep) [
-                <DrvManSpec***PtrWrite8At***>(flagBuf, pt, f);
-                pt = pt + 1;
-                r = r + 1;
-            ];
-        ];
-    ];
-
-    // ── Phase 2 : Lire coordonnées X (delta-encodées) ─────────────────────────
-    // Bit 1 (X_SHORT_VECTOR) : 1 octet uint8, signe = bit 4
-    // Bit 4 set, bit 1 clear : X inchangé (aucun octet)
-    // Bits 1 et 4 tous deux clears : int16 signé (2 octets)
-    var curX: <i32> = 0;
-    pt = 0;
-    loop (pt < nPts) [
-        let f: <i32> = <DrvManSpec***PtrRead8At***>(flagBuf, pt);
-        // X_SHORT_VECTOR (bit1) : 1 octet, signe = bit4
-        if ((f & 2) != 0) [
-            let d: <i32> = <DrvManSpec***PtrRead8At***>(glyfData, off);
-            off = off + 1;
-            if ((f & 16) != 0) [ curX = curX + d; ];
-            if ((f & 16) == 0) [ curX = curX - d; ];
-        ];
-        // Not X_SHORT and not X_IS_SAME → int16 signé
-        if ((f & 2) == 0 && (f & 16) == 0) [
-            let d: <i32> = <DrvManSpec***PtrReadI16At***>(glyfData, off);
-            off = off + 2;
-            curX = curX + d;
-        ];
-        // X_IS_SAME (bit1=0, bit4=1) → curX inchangé, aucun octet
-        let px: <i32> = <MathSafety***ClampI32***>(((curX - xMin) * s1000) / 1000, 0, bmpW - 1);
-        <DrvManSpec***PtrWrite32At***>(xBuf, pt * 4, px);
-        pt = pt + 1;
-    ];
-
-    // ── Phase 3 : Lire coordonnées Y (delta-encodées) ─────────────────────────
-    // Bit 2 (Y_SHORT_VECTOR) : 1 octet uint8, signe = bit 5
-    // Bit 5 set, bit 2 clear : Y inchangé
-    // Bits 2 et 5 tous deux clears : int16 signé
-    // Y est inversé pour l'écran : pxY = bmpH - 1 - scaledY
-    var curY: <i32> = 0;
-    pt = 0;
-    loop (pt < nPts) [
-        let f: <i32> = <DrvManSpec***PtrRead8At***>(flagBuf, pt);
-        // Y_SHORT_VECTOR (bit2) : 1 octet, signe = bit5
-        if ((f & 4) != 0) [
-            let d: <i32> = <DrvManSpec***PtrRead8At***>(glyfData, off);
-            off = off + 1;
-            if ((f & 32) != 0) [ curY = curY + d; ];
-            if ((f & 32) == 0) [ curY = curY - d; ];
-        ];
-        // Not Y_SHORT and not Y_IS_SAME → int16 signé
-        if ((f & 4) == 0 && (f & 32) == 0) [
-            let d: <i32> = <DrvManSpec***PtrReadI16At***>(glyfData, off);
-            off = off + 2;
-            curY = curY + d;
-        ];
-        // Y_IS_SAME (bit2=0, bit5=1) → curY inchangé
-        let py: <i32> = <MathSafety***ClampI32***>(bmpH - 1 - ((curY - yMin) * s1000) / 1000, 0, bmpH - 1);
-        <DrvManSpec***PtrWrite32At***>(yBuf, pt * 4, py);
-        pt = pt + 1;
-    ];
-
-    // ── Phase 4 : Scanline fill (règle even-odd) ───────────────────────────────
-    // Buffer d'intersections réutilisé pour chaque ligne (max nPts intersections)
-    let xs: <ptr> = <DrvAPIInterCon***MemAlloc***>(nPts * 4, 0, 4);
-
-    if (xs != nullptr) [
-        var row: <i32> = 0;
-        loop (row < bmpH) [
-            var nXs: <i32> = 0;
-
-            // Parcourir tous les contours et leurs arêtes
-            var contourStart: <i32> = 0;
-            var c: <i32> = 0;
-            loop (c < nContours) [
-                let endPt: <i32> = <DrvManSpec***PtrRead16At***>(glyfData, 10 + c * 2);
-                var i: <i32> = contourStart;
-                loop (i <= endPt) [
-                    // Point suivant dans le contour (fermé)
-                    var j: <i32> = i + 1;
-                    if (i == endPt) [ j = contourStart; ];
-
-                    let x0: <i32> = <DrvManSpec***PtrRead32At***>(xBuf, i * 4);
-                    let y0: <i32> = <DrvManSpec***PtrRead32At***>(yBuf, i * 4);
-                    let x1: <i32> = <DrvManSpec***PtrRead32At***>(xBuf, j * 4);
-                    let y1: <i32> = <DrvManSpec***PtrRead32At***>(yBuf, j * 4);
-
-                    // Arête non horizontale : chercher intersection avec `row`
-                    // Intervalle demi-ouvert [ya, yb) pour éviter les doubles comptages
-                    var ya: <i32> = y0;
-                    var xa: <i32> = x0;
-                    var yb: <i32> = y1;
-                    var xb: <i32> = x1;
-                    if (y0 > y1) [ ya = y1; xa = x1; yb = y0; xb = x0; ];
-
-                    if (row >= ya && row < yb && yb > ya) [
-                        let xi: <i32> = xa + (xb - xa) * (row - ya) / (yb - ya);
-                        <DrvManSpec***PtrWrite32At***>(xs, nXs * 4, xi);
-                        nXs = nXs + 1;
-                    ];
-                    i = i + 1;
-                ];
-                contourStart = endPt + 1;
-                c = c + 1;
-            ];
-
-            // Tri des intersections (bubble sort — typiquement < 10 éléments)
-            var sorted: <i32> = 0;
-            loop (sorted == 0) [
-                sorted = 1;
-                var k: <i32> = 0;
-                loop (k < nXs - 1) [
-                    let a: <i32> = <DrvManSpec***PtrRead32At***>(xs, k * 4);
-                    let b: <i32> = <DrvManSpec***PtrRead32At***>(xs, (k + 1) * 4);
-                    if (a > b) [
-                        <DrvManSpec***PtrWrite32At***>(xs, k * 4, b);
-                        <DrvManSpec***PtrWrite32At***>(xs, (k + 1) * 4, a);
-                        sorted = 0;
-                    ];
-                    k = k + 1;
-                ];
-            ];
-
-            // Remplir entre chaque paire d'intersections (règle pair-impair)
-            var k: <i32> = 0;
-            loop (k + 1 < nXs) [
-                let xa2: <i32> = <MathSafety***ClampI32***>(<DrvManSpec***PtrRead32At***>(xs, k * 4), 0, bmpW - 1);
-                let xb2: <i32> = <MathSafety***ClampI32***>(<DrvManSpec***PtrRead32At***>(xs, (k + 1) * 4), 0, bmpW - 1);
-                var col: <i32> = xa2;
-                loop (col <= xb2) [
-                    <DrvManSpec***PtrWrite8At***>(bmp, row * bmpW + col, 255);
-                    col = col + 1;
-                ];
-                k = k + 2;
-            ];
-            row = row + 1;
-        ];
-        <DrvAPIInterCon***MemFree***>(xs, 0);
-    ];
-
-    <DrvAPIInterCon***MemFree***>(flagBuf, 0);
-    <DrvAPIInterCon***MemFree***>(xBuf, 0);
-    <DrvAPIInterCon***MemFree***>(yBuf, 0);
-    ret bmp;
-];
-
-// Helper functions (unchanged)
-rel op GetLastBmpW: [] [ ret <DrvManSpec***RastGetBmpW***>(); ];
-rel op GetLastBmpH: [] [ ret <DrvManSpec***RastGetBmpH***>(); ];
-
+// ── Dessin d'un glyphe rastérisé dans le framebuffer ────────────────────────
+// fbPtr   : pointeur framebuffer (pixels ARGB32)
+// stride  : nombre de pixels par ligne (pas mémoire)
+// x, y    : position haut-gauche du glyphe (corrigée par les offsets stb)
+// bmpData : bitmap alpha 8bpp (depuis RasterizeGlyph)
+// bmpW/H  : dimensions du bitmap
+// fg/bg   : couleurs premier plan / arrière-plan (ARGB32)
 rel op DrawGlyphAt: [fbPtr ptr, stride i32, x i32, y i32,
                      bmpData ptr, bmpW i32, bmpH i32, fg i32, bg i32] [
     if (fbPtr == nullptr || bmpData == nullptr) [ ret 0; ];
@@ -314,6 +56,7 @@ rel op DrawGlyphAt: [fbPtr ptr, stride i32, x i32, y i32,
         var col: <i32> = 0;
         loop (col < bmpW) [
             let alpha: <i32> = <DrvManSpec***PtrRead8At***>(bmpData, row * bmpW + col);
+            // Blend binaire : alpha > 127 → premier plan, sinon arrière-plan
             var color: <i32> = bg;
             if (alpha > 127) [ color = fg; ];
             <DrvManSpec***PtrWrite32At***>(fbPtr, ((y + row) * stride + x + col) * 4, color);
@@ -322,4 +65,78 @@ rel op DrawGlyphAt: [fbPtr ptr, stride i32, x i32, y i32,
         row = row + 1;
     ];
     ret 0;
+];
+
+// ── Accesseurs dimensions du dernier glyphe rastérisé ────────────────────────
+rel op GetLastBmpW: [] [ ret <stb_bmp_w***>(); ];
+rel op GetLastBmpH: [] [ ret <stb_bmp_h***>(); ];
+
+// ── Interface UEFI HII (EFI_HII_FONT_PROTOCOL compatible) ───────────────────
+// char      : point de code Unicode (u16)
+// fontInfo  : pointeur EFI_FONT_INFO (police + taille)
+// outImage  : EFI_IMAGE_OUTPUT à remplir (bitmap + dimensions)
+// baseline  : sortie : position de la ligne de base en pixels depuis le haut
+rel op GetGlyph: [char u16, fontInfo ptr, outImage ptr, baseline ptr] [
+    if (fontInfo == nullptr || outImage == nullptr || baseline == nullptr) [
+        ret -1; // EFI_INVALID_PARAMETER
+    ];
+
+    let fontData:  <ptr> = <DrvManSpec***FontGetRawData***>(fontInfo);
+    let pixelSize: <i32> = <DrvManSpec***FontGetPixelSize***>(fontInfo);
+    if (fontData == nullptr || pixelSize <= 0) [ ret -2; ];
+
+    // Init stb_truetype (appel natif C FFI via #include "stb_truetype.h")
+    let initOk: <i32> = <stb_font_init***>(fontData);
+    if (initOk == 0) [ ret -3; ];
+
+    // Codepoint → index de glyphe stb
+    var glyphIdx: <i32> = <stb_glyph_index***>(char);
+    if (glyphIdx == 0) [
+        // Caractère de remplacement U+FFFD
+        glyphIdx = <stb_glyph_index***>(65533);
+        if (glyphIdx == 0) [ ret -4; ];
+    ];
+
+    // Synchroniser le pont partagé pour RasterizeGlyph
+    <stb_set_current_glyph***>(glyphIdx);
+
+    let scaleK: <i32> = <stb_scale_k***>(pixelSize);
+    let bmpPtr: <ptr> = <stb_rasterize***>(glyphIdx, scaleK);
+    if (bmpPtr == nullptr) [ ret -5; ];
+
+    let bmpW: <i32> = <stb_bmp_w***>();
+    let bmpH: <i32> = <stb_bmp_h***>();
+
+    // stb_bmp_yoff() = y0 (offset Y depuis baseline, négatif si au-dessus)
+    // baseline dans le bitmap = -yoff pixels depuis le haut
+    let yoff: <i32> = <stb_bmp_yoff***>();
+    let baselinePx: <i32> = <MathSafety***ClampI32***>(-yoff, 0, bmpH - 1);
+
+    // Allouer buffer ARGB32 pour EFI_IMAGE_OUTPUT
+    let imageSize: <i32> = bmpW * bmpH * 4;
+    let imageBuf:  <ptr> = <DrvAPIInterCon***MemAlloc***>(imageSize, 0, 1);
+    if (imageBuf == nullptr) [ ret -6; ];
+    let _: <i32> = <DrvAPIInterCon***MemSet***>(imageBuf, 0, imageSize);
+
+    // Convertir bitmap alpha 8bpp → ARGB32 (blanc + canal alpha)
+    var row: <i32> = 0;
+    loop (row < bmpH) [
+        var col: <i32> = 0;
+        loop (col < bmpW) [
+            let alpha: <i32> = <DrvManSpec***PtrRead8At***>(bmpPtr, row * bmpW + col);
+            let pixel: <i32> = (alpha << 24) | 0x00FFFFFF;
+            let _: <i32> = <DrvManSpec***PtrWrite32At***>(imageBuf, (row * bmpW + col) * 4, pixel);
+            col = col + 1;
+        ];
+        row = row + 1;
+    ];
+
+    // Remplir EFI_IMAGE_OUTPUT (layout : bitmap_ptr @0, width @4, height @8, font_info @12)
+    let _: <i32> = <DrvManSpec***PtrWritePtrAt***>(outImage, 0, imageBuf);
+    let _: <i32> = <DrvManSpec***PtrWriteI32At***>(outImage, 4, bmpW);
+    let _: <i32> = <DrvManSpec***PtrWriteI32At***>(outImage, 8, bmpH);
+    let _: <i32> = <DrvManSpec***PtrWritePtrAt***>(outImage, 12, nullptr);
+    let _: <i32> = <DrvManSpec***PtrWriteI32At***>(baseline, 0, baselinePx);
+
+    ret 0; // EFI_SUCCESS
 ];

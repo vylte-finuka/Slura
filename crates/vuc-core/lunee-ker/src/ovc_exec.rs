@@ -22,7 +22,10 @@ static mut FONT_WOFF_OVC:    Option<Vec<u8>> = None;
 // ── Cache SRFS (SDC: → octets chargés à la demande depuis l'ESP) ─────────────
 // Plus aucun fichier hardcodé dans slul_loader.
 // FontLoad(path) charge le fichier depuis l'ESP UEFI au premier appel.
-static mut SRFS_CACHE: [Option<(String, Vec<u8>)>; 4] = [None, None, None, None];
+static mut SRFS_CACHE: [Option<(String, Vec<u8>)>; 8] = [None, None, None, None, None, None, None, None];
+
+// Cache d'images décodées (PNG → RGBA).  handle = index+1 (0 = erreur).
+static mut IMAGE_CACHE: [Option<(u32, u32, Vec<u8>)>; 4] = [None, None, None, None];
 
 // Handles UEFI pour le chargement à la demande — initialisés par render_from_marep
 static mut UEFI_ST_PTR:     *mut core::ffi::c_void = core::ptr::null_mut();
@@ -216,6 +219,90 @@ fn srfs_find(path_ptr: i64) -> Option<&'static [u8]> {
 fn keys_match(a: &str, b: &str) -> bool {
     if a.len() != b.len() { return false; }
     a.bytes().zip(b.bytes()).all(|(x, y)| x.to_ascii_lowercase() == y.to_ascii_lowercase())
+}
+
+// ── Décodeur PNG minimal (signature + IHDR/IDAT/IEND + filtres) ──────────────
+
+fn paeth_predictor(a: u8, b: u8, c: u8) -> u8 {
+    let (ai, bi, ci) = (a as i32, b as i32, c as i32);
+    let p = ai + bi - ci;
+    let (pa, pb, pc) = ((p - ai).abs(), (p - bi).abs(), (p - ci).abs());
+    if pa <= pb && pa <= pc { a } else if pb <= pc { b } else { c }
+}
+
+/// Décode un PNG 8-bit RGB ou RGBA en pixels RGBA bruts.
+/// Retourne (width, height, rgba_bytes) ou None si le format n'est pas supporté.
+fn png_decode_rgba(data: &[u8]) -> Option<(u32, u32, alloc::vec::Vec<u8>)> {
+    if data.len() < 8 || &data[..8] != b"\x89PNG\r\n\x1a\n" { return None; }
+    let mut pos = 8usize;
+    let mut width = 0u32; let mut height = 0u32; let mut color_type = 0u8;
+    let mut idat: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    while pos + 8 <= data.len() {
+        let clen = u32::from_be_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]) as usize;
+        let typ  = &data[pos+4..pos+8];
+        let end  = pos + 8 + clen;
+        if end > data.len() { break; }
+        let cd = &data[pos+8..end];
+        match typ {
+            b"IHDR" if cd.len() >= 13 => {
+                width       = u32::from_be_bytes([cd[0], cd[1], cd[2], cd[3]]);
+                height      = u32::from_be_bytes([cd[4], cd[5], cd[6], cd[7]]);
+                let bd      = cd[8]; color_type = cd[9];
+                if bd != 8 || (color_type != 2 && color_type != 6) { return None; }
+            }
+            b"IDAT" => idat.extend_from_slice(cd),
+            b"IEND" => break,
+            _ => {}
+        }
+        pos = end + 4; // sauter CRC
+    }
+    if width == 0 || height == 0 || idat.is_empty() { return None; }
+    let bpp  = if color_type == 6 { 4usize } else { 3 };
+    let srow = width as usize * bpp;
+    let exp  = (srow + 1) * height as usize;
+    // PNG IDAT = zlib : 2-byte header + raw DEFLATE + 4-byte Adler32
+    if idat.len() < 6 { return None; }
+    let deflate = &idat[2..idat.len().saturating_sub(4)];
+    let mut dec = alloc::vec![0u8; exp.max(1)];
+    let mut dzox = miniz_oxide::inflate::core::DecompressorOxide::new();
+    let (st, _, out_n) = miniz_oxide::inflate::core::decompress(
+        &mut dzox, deflate, &mut dec, 0,
+        miniz_oxide::inflate::core::inflate_flags::TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF,
+    );
+    if st != miniz_oxide::inflate::TINFLStatus::Done || out_n < exp { return None; }
+    dec.truncate(out_n);
+    let mut out  = alloc::vec![0u8; width as usize * height as usize * 4];
+    let mut prev = alloc::vec![0u8; srow]; // ligne précédente reconstruite
+    for row in 0..height as usize {
+        let rs  = row * (srow + 1);
+        let flt = dec[rs];
+        let src = &dec[rs + 1..rs + 1 + srow];
+        let mut recon = alloc::vec![0u8; srow];
+        for i in 0..srow {
+            let fx = src[i];
+            let a  = if i >= bpp { recon[i - bpp] } else { 0 };
+            let b  = prev[i];
+            let c  = if i >= bpp { prev[i - bpp] } else { 0 };
+            recon[i] = match flt {
+                0 => fx,
+                1 => fx.wrapping_add(a),
+                2 => fx.wrapping_add(b),
+                3 => fx.wrapping_add(((a as u16 + b as u16) / 2) as u8),
+                4 => fx.wrapping_add(paeth_predictor(a, b, c)),
+                _ => fx,
+            };
+        }
+        let o = row * width as usize * 4;
+        for px in 0..width as usize {
+            let s = px * bpp;
+            out[o + px*4]     = recon[s];
+            out[o + px*4 + 1] = recon[s + 1];
+            out[o + px*4 + 2] = recon[s + 2];
+            out[o + px*4 + 3] = if bpp == 4 { recon[s + 3] } else { 255 };
+        }
+        prev.copy_from_slice(&recon);
+    }
+    Some((width, height, out))
 }
 
 pub fn register_gpu_ovc(ovc: Vec<u8>) {
@@ -1856,6 +1943,81 @@ fn dispatch(
             0
         },
 
+        // GpuDrawRoundedRectSolid(x, y, w, h, radius, color) — coins ronds, opaque
+        "DrvAPIInterCon___GpuDrawRoundedRectSolid___" => {
+            if args.len() >= 6 {
+                let x      = args[0] as i32;
+                let y      = args[1] as i32;
+                let w      = args[2] as i32;
+                let h      = args[3] as i32;
+                let radius = args[4] as i32;
+                let color  = (args[5] as u32) | 0xFF000000;
+                let fb     = ctx.fb;
+                let s      = ctx.stride;
+                let r2     = radius * radius;
+                if !fb.is_null() && w > 0 && h > 0 {
+                    for row in 0..h {
+                        let et  = radius - row;
+                        let eb  = row - (h - radius) + 1;
+                        let cdy = if et > 0 { et } else if eb > 0 { eb } else { 0 };
+                        for col in 0..w {
+                            let el  = radius - col;
+                            let er  = col - (w - radius) + 1;
+                            let cdx = if el > 0 { el } else if er > 0 { er } else { 0 };
+                            if cdx > 0 && cdy > 0 && cdx * cdx + cdy * cdy > r2 { continue; }
+                            let idx = ((y + row) * s + x + col) as usize;
+                            unsafe { fb.add(idx).write_volatile(color); }
+                        }
+                    }
+                }
+            }
+            0
+        },
+
+        // GpuDrawRoundedRectAlpha(x, y, w, h, radius, color_argb) — coins ronds + alpha blending
+        "DrvAPIInterCon___GpuDrawRoundedRectAlpha___" => {
+            if args.len() >= 6 {
+                let x      = args[0] as i32;
+                let y      = args[1] as i32;
+                let w      = args[2] as i32;
+                let h      = args[3] as i32;
+                let radius = args[4] as i32;
+                let c      = args[5] as u32;
+                let alpha  = (c >> 24) & 0xFF;
+                let fb = ctx.fb;
+                let s  = ctx.stride;
+                if alpha > 0 && !fb.is_null() && w > 0 && h > 0 {
+                    let r2 = radius * radius;
+                    let sr = ((c >> 16) & 0xFF) as u32;
+                    let sg = ((c >>  8) & 0xFF) as u32;
+                    let sb = ( c        & 0xFF) as u32;
+                    let ia = 255 - alpha;
+                    for row in 0..h {
+                        let et  = radius - row;
+                        let eb  = row - (h - radius) + 1;
+                        let cdy = if et > 0 { et } else if eb > 0 { eb } else { 0 };
+                        for col in 0..w {
+                            let el  = radius - col;
+                            let er  = col - (w - radius) + 1;
+                            let cdx = if el > 0 { el } else if er > 0 { er } else { 0 };
+                            if cdx > 0 && cdy > 0 && cdx * cdx + cdy * cdy > r2 { continue; }
+                            let idx = ((y + row) * s + x + col) as usize;
+                            let dst = unsafe { fb.add(idx).read_volatile() };
+                            let db  = (dst        & 0xFF) as u32;
+                            let dg  = ((dst >>  8) & 0xFF) as u32;
+                            let dr  = ((dst >> 16) & 0xFF) as u32;
+                            let nr  = (sr * alpha + dr * ia) / 255;
+                            let ng  = (sg * alpha + dg * ia) / 255;
+                            let nb  = (sb * alpha + db * ia) / 255;
+                            let blended: u32 = 0xFF000000 | (nr << 16) | (ng << 8) | nb;
+                            unsafe { fb.add(idx).write_volatile(blended); }
+                        }
+                    }
+                }
+            }
+            0
+        },
+
         // GpuDrawText(x, y, text_ptr, fg, bg) — police 8×16 depuis FONT8X16
         "DrvAPIInterCon___GpuDrawText___" => {
             unsafe { GPU_TEXTS += 1; }
@@ -2057,6 +2219,89 @@ fn dispatch(
             }
             serial_log(b"[FONT] rendered=");
             serial_log(b"\r\n");
+            0
+        },
+
+        // ImageLoad(path_ptr) — charge et décode un PNG RGBA depuis l'ESP UEFI.
+        // Retourne un handle entier (1-based) ou 0 en cas d'erreur.
+        "DrvAPIInterCon___ImageLoad___" => {
+            if args.len() < 1 || args[0] == 0 { return 0; }
+            serial_log(b"[IMG] ImageLoad\r\n");
+            // Réutiliser l'image déjà décodée si disponible
+            if unsafe { IMAGE_CACHE[0].is_some() } {
+                serial_log(b"[IMG] cache hit\r\n");
+                return 1;
+            }
+            // Charger les octets PNG bruts depuis l'ESP (via cache SRFS)
+            let raw: &[u8] = if let Some(d) = srfs_find(args[0]) { d } else {
+                let lp = srfs_load_on_demand(args[0]);
+                if lp == 0 { serial_log(b"[IMG] file not found\r\n"); return 0; }
+                match srfs_find(args[0]) { Some(d) => d, None => return 0 }
+            };
+            serial_log(b"[IMG] decode PNG\r\n");
+            match png_decode_rgba(raw) {
+                Some((w, h, pixels)) => {
+                    unsafe { IMAGE_CACHE[0] = Some((w, h, pixels)); }
+                    serial_log(b"[IMG] decode OK\r\n");
+                    1
+                }
+                None => { serial_log(b"[IMG] decode fail\r\n"); 0 }
+            }
+        },
+
+        // ImageDraw(handle, x, y, draw_w, draw_h) — blite l'image décodée sur le framebuffer.
+        // draw_w/draw_h <= 0 → utilise la taille naturelle de l'image.
+        // Les pixels transparents (alpha=0) sont sautés ; semi-transparents → alpha blending.
+        "DrvAPIInterCon___ImageDraw___" => {
+            if args.len() < 3 { return 0; }
+            let handle = args[0] as usize;
+            if handle == 0 || handle > 4 { return 0; }
+            let dst_x = args[1] as i32;
+            let dst_y = args[2] as i32;
+            let dst_w = if args.len() >= 4 && args[3] > 0 { args[3] as u32 } else { 0 };
+            let dst_h = if args.len() >= 5 && args[4] > 0 { args[4] as u32 } else { 0 };
+            let fb = ctx.fb; let s = ctx.stride;
+            let sw = ctx.width; let sh = ctx.height;
+            if fb.is_null() { return 0; }
+            let (img_w, img_h, pix_ptr) = unsafe {
+                match IMAGE_CACHE[handle - 1] {
+                    Some(ref e) => (e.0, e.1, e.2.as_ptr()),
+                    None => { serial_log(b"[IMG] handle invalid\r\n"); return 0; }
+                }
+            };
+            let draw_w = if dst_w > 0 { dst_w } else { img_w };
+            let draw_h = if dst_h > 0 { dst_h } else { img_h };
+            serial_log(b"[IMG] ImageDraw\r\n");
+            for py in 0..draw_h as i32 {
+                let fy = dst_y + py;
+                if fy < 0 || fy >= sh { continue; }
+                let sy = (py as u64 * img_h as u64 / draw_h as u64) as usize;
+                for px in 0..draw_w as i32 {
+                    let fx = dst_x + px;
+                    if fx < 0 || fx >= sw { continue; }
+                    let sx = (px as u64 * img_w as u64 / draw_w as u64) as usize;
+                    let so = (sy * img_w as usize + sx) * 4;
+                    let r  = unsafe { *pix_ptr.add(so)     } as u32;
+                    let g  = unsafe { *pix_ptr.add(so + 1) } as u32;
+                    let bv = unsafe { *pix_ptr.add(so + 2) } as u32;
+                    let a  = unsafe { *pix_ptr.add(so + 3) } as u32;
+                    let di = (fy * s + fx) as usize;
+                    if a == 255 {
+                        unsafe { fb.add(di).write_volatile(0xFF000000 | (r << 16) | (g << 8) | bv); }
+                    } else if a > 0 {
+                        let dst = unsafe { fb.add(di).read_volatile() };
+                        let db = (dst & 0xFF) as u32;
+                        let dg = ((dst >> 8) & 0xFF) as u32;
+                        let dr = ((dst >> 16) & 0xFF) as u32;
+                        let ia = 255 - a;
+                        let nr = (r * a + dr * ia) / 255;
+                        let ng = (g * a + dg * ia) / 255;
+                        let nb = (bv * a + db * ia) / 255;
+                        unsafe { fb.add(di).write_volatile(0xFF000000 | (nr << 16) | (ng << 8) | nb); }
+                    }
+                }
+            }
+            serial_log(b"[IMG] draw done\r\n");
             0
         },
 

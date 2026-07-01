@@ -1,6 +1,12 @@
 //===================================================================
 //  APrevent.mara – Cycle de vie SluGpu
 //  Auteur : Vyft Ltd — 2026
+//
+//  Pipeline GPU :
+//    1. UefiLocate GfxOutput → obtenir le protocole UEFI GOP
+//    2. GpuImpl.GpuInit → init MGC avec le framebuffer GOP
+//    3. MGC prend en charge tout le rendu (fill, rect, texte, shaders)
+//    4. Pour le texte TTF : GpuDrawTextFont → stb_truetype
 //===================================================================
 
 #base <std***ComTpe***SlulFrmt***[ MathSafety, DrvManSpec ]>;
@@ -13,30 +19,35 @@ rel op APrevent: <[string CycleActivity]>t [
 
     rel op OnPowerOn: [arch string] [
         Architecture = arch;
-        log: "SluGpu: demarrage pilote MGC Driver " + Architecture;
+        log: "SluGpu: demarrage pilote GPU MGC " + Architecture;
         let drvResult: <i32> = self***onDriverInit();
         if (drvResult != 0) [
-            log: "SluGpu: onDriverInit echoue";
+            log: "SluGpu: onDriverInit echoue (" + drvResult + ")";
             ret drvResult;
         ];
-        log: "SluGpu: pilote pret";
+        log: "SluGpu: pilote GPU + MGC pret";
         ret 0;
     ];
 
     rel cl onDriverInit: [] [
+        // Étape 1 : localiser le protocole GOP UEFI
         let gop: <ptr> = <DrvManSpec***UefiLocate***GfxOutput***>();
         if (gop == 0) [
             log: "SluGpu: protocole GOP introuvable";
             ret 1;
         ];
+
+        // Étape 2 : initialiser MGC via GpuImpl (configure framebuffer + pipeline)
         let initResult: <i32> = <std***core***self***GpuImpl***GpuInit>(gop);
         if (initResult != 0) [
-            log: "SluGpu: echec init framebuffer";
+            log: "SluGpu: echec init MGC";
             ret initResult;
         ];
+
+        // Étape 3 : vérifier les dimensions
         let w: <i32> = <std***core***self***GpuImpl***GpuGetWidth>();
         let h: <i32> = <std***core***self***GpuImpl***GpuGetHeight>();
-        log: "SluGpu: MGC OK " + w + "x" + h;
+        log: "SluGpu: MGC pret " + w + "x" + h + " | stb_truetype actif";
         ret 0;
     ];
 

@@ -130,7 +130,7 @@ qemu-system-x86_64 \
     -nodefaults \
     -machine   q35,accel=kvm:tcg \
     -m         1024M \
-    -device    bochs-display \
+    -device    virtio-vga \
     -display   sdl,gl=off \
     -drive     if=pflash,format=raw,readonly=on,file="${OVMF_CODE}",id=ovmf_code \
     -drive     if=pflash,format=raw,file="${OVMF_VARS}",id=ovmf_vars \
