@@ -1,0 +1,62 @@
+#base <std***core***self***[ AppLifecycle, ComponentView, RenderContext ]>;
+#base <std***ComTpe***SlulFrmt***[ DrvAPIInterCon ]>;
+#base <MaratineKit>;
+#base <std***core***self***[ TemplateView ]>;
+
+rel op LAPrevent: <[string AppLifecycle]>t [
+
+    // Seules les vars <string> persistent via class vars — <ptr> non propagées depuis self***
+    var Architecture: <string> = "";
+    var _ctx:         <string> = "";
+
+    rel op Launch: [arch string] [
+        Architecture = arch;
+        log: "LAPrevent: démarrage — arch " + arch;
+
+        _ctx = <MaratineKit***RenderContext***New()>;
+
+        // Assets comme var locales dans Launch — valides pendant toute la boucle
+        var fnt: <ptr> = <DrvAPIInterCon***FontLoad***>("SDC:/slu64/assets/fonts/brsonomasemibold.ttf");
+        if (fnt == nullptr) [
+            fnt = <DrvAPIInterCon***FontLoad***>("SDC:/boot/assets/font/brsonomasemibold.ttf");
+        ];
+        if (fnt == nullptr) [ fnt = <DrvAPIInterCon***FontGetDefault***>(); ];
+
+        log: "LAPrevent: assets chargés";
+
+        // ── État OS — var locales dans Launch (README: pas module-level) ──
+        var battLevel:  <i32>    = <SluPwManSrv***GetBatteryLevel***()>;
+        var isCharging: <i32>    = <SluPwManSrv***IsCharging***()>;
+        var timeStr:    <string> = <SluTimeSrv***GetTimeString***()>;
+        var notifCount: <i32>    = <SluNotifSrv***GetCount***()>;
+        var activeTab:  <i32>    = 0;
+
+        var running: <bool> = true;
+        loop (running) [
+            let _: <i32> = <StateRefresh***()>;
+            let renderResult: <i32> = <TemplateView***Render>(_ctx, fnt);
+            if (renderResult != 0) [ running = false; ];
+        ];
+
+        let _: <i32> = self***onDestroy();
+        ret 0;
+    ];
+
+    rel op onPause: [] [
+        let _: <i32> = <MaratineKit***RenderContext***Suspend()>;
+        log: "LAPrevent: pause";
+        ret 0;
+    ];
+
+    rel op onResume: [] [
+        let _: <i32> = <MaratineKit***RenderContext***Resume()>;
+        log: "LAPrevent: reprise";
+        ret 0;
+    ];
+
+    rel cl onDestroy: [] [
+        let _: <i32> = <MaratineKit***RenderContext***Destroy()>;
+        log: "LAPrevent: ShiLauncher arrêté";
+        ret 0;
+    ];
+];

@@ -19,11 +19,20 @@ use uefi::{
 use super::{zip_reader::ZipReader, BundleError};
 
 // Chemins absolus (leading \) — nécessaire pour les sous-dossiers sur QEMU FAT.
+// Ordre de chargement intentionnel :
+//   1. SluGpu       — framebuffer GOP disponible en premier
+//   2. SluKeyMouse  — entrées clavier + pointeur
+//   3. SRFSMan      — système de fichiers SDC:\ (avant SluFontConf qui en dépend)
+//   4. SluFontConf  — rendu TTF/WOFF via DrvManSpec***FS***
+//   5. SluEnvSys    — variables d'environnement système (timezone, locale, etc.)
+//   6. CryptoAssetSupport — wallet, crypto, VezCur proxy
 const DRIVER_BUNDLES: &[&uefi::CStr16] = &[
     cstr16!("\\sources\\SluGpu.slul"),
     cstr16!("\\sources\\SluKeyMouse.slul"),
-    cstr16!("\\sources\\SRFSMan.slul"),       // filesystem SDC:\ — avant SluFontConf
-    cstr16!("\\sources\\SluFontConf.slul"),   // lit police via DrvManSpec***FS***
+    cstr16!("\\sources\\SRFSMan.slul"),
+    cstr16!("\\sources\\SluFontConf.slul"),
+    cstr16!("\\sources\\SluEnvSys.slul"),
+    cstr16!("\\sources\\CryptoAssetSupport.slul"),
 ];
 
 // Aucun chemin SRFS hardcodé ici.

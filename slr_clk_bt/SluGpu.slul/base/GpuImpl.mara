@@ -355,6 +355,130 @@ rel op GpuDrawImage: [img ptr, x i32, y i32, drawW i32, drawH i32] [
 ];
 
 
+// ─────────────────────────────────────────────────────────────────────────────
+// GPU State Machine — Opacité, Blend, Rotation, Blur, Gradient, Shadow, Clip
+// Toutes ces opérations délèguent au kernel Lunée via DrvAPIInterCon.
+// ─────────────────────────────────────────────────────────────────────────────
+
+rel op GpuSetOpacity: [opacity i32] [
+    ret <DrvAPIInterCon***GpuSetOpacity***>(opacity);
+];
+
+rel op GpuResetOpacity: [] [
+    ret <DrvAPIInterCon***GpuResetOpacity***>();
+];
+
+rel op GpuSetBlendMode: [mode i32] [
+    ret <DrvAPIInterCon***GpuSetBlendMode***>(mode);
+];
+
+rel op GpuResetBlendMode: [] [
+    ret <DrvAPIInterCon***GpuResetBlendMode***>();
+];
+
+// Transformation 2D affine (a/b/c/d × 10000, tx/ty en pixels).
+// Identité : GpuSetTransform2D(10000, 0, 0, 10000, 0, 0)
+rel op GpuSetTransform2D: [a i32, b i32, c i32, d i32, tx i32, ty i32] [
+    ret <DrvAPIInterCon***GpuSetTransform2D***>(a, b, c, d, tx, ty);
+];
+
+rel op GpuResetTransform: [] [
+    ret <DrvAPIInterCon***GpuResetTransform***>();
+];
+
+rel op GpuDrawRotatedImage: [img ptr, cx i32, cy i32, w i32, h i32, angleDeg i32] [
+    ret <DrvAPIInterCon***GpuDrawRotatedImage***>(img, cx, cy, w, h, angleDeg);
+];
+
+rel op GpuGaussianBlur: [x i32, y i32, w i32, h i32, radius i32] [
+    ret <DrvAPIInterCon***GpuGaussianBlur***>(x, y, w, h, radius);
+];
+
+rel op GpuBackgroundBlur: [x i32, y i32, w i32, h i32, r i32, radius i32] [
+    ret <DrvAPIInterCon***GpuBackgroundBlur***>(x, y, w, h, r, radius);
+];
+
+rel op GpuProgressiveBlur: [x i32, y i32, w i32, h i32, startRadius i32, endRadius i32, angleDeg i32] [
+    ret <DrvAPIInterCon***GpuProgressiveBlur***>(x, y, w, h, startRadius, endRadius, angleDeg);
+];
+
+rel op GpuDrawLinearGradient: [x i32, y i32, w i32, h i32, r i32, angleDeg i32, stop1Color i32, stop1Pos i32, stop2Color i32, stop2Pos i32, stopCount i32] [
+    ret <DrvAPIInterCon***GpuDrawLinearGradient***>(x, y, w, h, r, angleDeg, stop1Color, stop1Pos, stop2Color, stop2Pos, stopCount);
+];
+
+rel op GpuDrawRadialGradient: [x i32, y i32, w i32, h i32, stop1Color i32, stop1Pos i32, stop2Color i32, stop2Pos i32] [
+    ret <DrvAPIInterCon***GpuDrawRadialGradient***>(x, y, w, h, stop1Color, stop1Pos, stop2Color, stop2Pos);
+];
+
+rel op GpuDrawDropShadow: [x i32, y i32, w i32, h i32, cornerRadius i32, offsetX i32, offsetY i32, blurRadius i32, spreadRadius i32, color i32] [
+    ret <DrvAPIInterCon***GpuDrawDropShadow***>(x, y, w, h, cornerRadius, offsetX, offsetY, blurRadius, spreadRadius, color);
+];
+
+rel op GpuDrawInnerShadow: [x i32, y i32, w i32, h i32, cornerRadius i32, offsetX i32, offsetY i32, blurRadius i32, color i32] [
+    ret <DrvAPIInterCon***GpuDrawInnerShadow***>(x, y, w, h, cornerRadius, offsetX, offsetY, blurRadius, color);
+];
+
+rel op GpuPushClip: [x i32, y i32, w i32, h i32, r i32] [
+    ret <DrvAPIInterCon***GpuPushClip***>(x, y, w, h, r);
+];
+
+rel op GpuPopClip: [] [
+    ret <DrvAPIInterCon***GpuPopClip***>();
+];
+
+rel op GpuCaptureMask: [x i32, y i32, w i32, h i32] [
+    ret <DrvAPIInterCon***GpuCaptureMask***>(x, y, w, h);
+];
+
+rel op GpuApplyAlphaMask: [mask ptr] [
+    ret <DrvAPIInterCon***GpuApplyAlphaMask***>(mask);
+];
+
+rel op GpuDrawRoundedRectFull: [x i32, y i32, w i32, h i32, rTopLeft i32, rTopRight i32, rBottomLeft i32, rBottomRight i32, color i32] [
+    ret <DrvAPIInterCon***GpuDrawRoundedRectFull***>(x, y, w, h, rTopLeft, rTopRight, rBottomLeft, rBottomRight, color);
+];
+
+rel op GpuDrawNoisePatch: [x i32, y i32, w i32, h i32, r i32, alpha i32, seed i32] [
+    ret <DrvAPIInterCon***GpuDrawNoisePatch***>(x, y, w, h, r, alpha, seed);
+];
+
+rel op GpuDrawColoredNoise: [x i32, y i32, w i32, h i32, r i32, alpha i32, seed i32, hue i32] [
+    ret <DrvAPIInterCon***GpuDrawColoredNoise***>(x, y, w, h, r, alpha, seed, hue);
+];
+
+rel op GpuDrawStroke: [x i32, y i32, w i32, h i32, r i32, weight i32, alignment i32, color i32] [
+    ret <DrvAPIInterCon***GpuDrawStroke***>(x, y, w, h, r, weight, alignment, color);
+];
+
+rel op GpuDrawDashedStroke: [x i32, y i32, w i32, h i32, r i32, weight i32, dashLen i32, gapLen i32, color i32] [
+    ret <DrvAPIInterCon***GpuDrawDashedStroke***>(x, y, w, h, r, weight, dashLen, gapLen, color);
+];
+
+rel op GpuDrawGradientStroke: [x i32, y i32, w i32, h i32, r i32, weight i32, stops i32, stopCount i32] [
+    ret <DrvAPIInterCon***GpuDrawGradientStroke***>(x, y, w, h, r, weight, stops, stopCount);
+];
+
+rel op GpuDrawTextFontAlign: [x i32, y i32, maxW i32, text string, fg i32, bg i32, font ptr, size i32, align i32] [
+    ret <DrvAPIInterCon***GpuDrawTextFontAlign***>(x, y, maxW, text, fg, bg, font, size, align);
+];
+
+rel op GpuDrawTextFontFull: [x i32, y i32, text string, fg i32, bg i32, font ptr, size i32, letterSpacing i32, lineHeight i32, align i32, decoration i32] [
+    ret <DrvAPIInterCon***GpuDrawTextFontFull***>(x, y, text, fg, bg, font, size, letterSpacing, lineHeight, align, decoration);
+];
+
+rel op SvgLoad: [path string] [
+    ret <DrvAPIInterCon***SvgLoad***>(path);
+];
+
+rel op SvgDraw: [svg ptr, x i32, y i32, w i32, h i32] [
+    ret <DrvAPIInterCon***SvgDraw***>(svg, x, y, w, h);
+];
+
+rel op SvgFree: [svg ptr] [
+    ret <DrvAPIInterCon***SvgFree***>(svg);
+];
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Sécurisation d'accès au GPU pour les opérations de rendu. Retourne 0 si le GPU est disponible, sinon -1.
 rel op LockGpuFeat: [thresholdresolution i32, monitormode i32] [
 

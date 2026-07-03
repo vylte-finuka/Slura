@@ -42,9 +42,9 @@ use uefi::{
 use super::{zip_reader::ZipReader, BundleError, FnOEntry};
 
 /// Chemin absolu — cohérent avec les drivers dans \sources\.
-const HOME_MAREP: &uefi::CStr16 = cstr16!("\\HelloSlura.marep");
+const HOME_MAREP: &uefi::CStr16 = cstr16!("\\ShiLauncher.marep");
 
-/// Charge `HelloSlura.marep`, vérifie l'OVC et transfère au driver SluGpu.
+/// Charge `ShiLauncher.marep`, vérifie l'OVC et transfère au driver SluGpu.
 /// Le rendu est géré par le driver HAL (SluGpu.slul) chargé par hal_manager.
 pub fn load_and_run(
     st:           &mut SystemTable<Boot>,
@@ -100,24 +100,24 @@ fn run_ovc(st: &mut SystemTable<Boot>, image_handle: Handle, bundle: &[u8])
         return Err(BundleError::EmptyBinary);
     }
 
-    // Découverte dynamique des OVC depuis le ZIP du marep.
-    // Le kernel ne connaît que "OEntry" comme point d'entrée universel.
-    // Les autres modules sont passés à exec_marep pour résolution cross-module.
-    // Les deux séparateurs sont essayés (ZIP Windows = \, ZIP Unix = /).
-    let ovc_names = ["OEntry", "HelloWorld", "LAPrevent", "TemplateView"];
+    // Découverte dynamique des OVC depuis le répertoire central du ZIP.
+    // Le kernel ne hardcode aucun nom de module — tous les base/*.ovc sont chargés.
+    // OEntry est le seul point d'entrée universel ; les autres sont passés pour
+    // la résolution cross-module dans exec_marep.
+    let ovc_names: alloc::vec::Vec<alloc::string::String> = zip.list_ovc_modules();
     let mut modules: alloc::vec::Vec<(&str, alloc::vec::Vec<u8>)> = alloc::vec::Vec::new();
 
-    for name in &ovc_names {
+    for name_owned in &ovc_names {
         let bytes = {
-            let p = alloc::format!("base\\{}.ovc", name);
+            let p = alloc::format!("base/{}.ovc", name_owned);
             let b = zip.extract_file(&p).unwrap_or_default();
             if !b.is_empty() { b } else {
-                let p2 = alloc::format!("base/{}.ovc", name);
+                let p2 = alloc::format!("base\\{}.ovc", name_owned);
                 zip.extract_file(&p2).unwrap_or_default()
             }
         };
         if !bytes.is_empty() {
-            modules.push((name, bytes));
+            modules.push((name_owned.as_str(), bytes));
         }
     }
 
@@ -126,6 +126,13 @@ fn run_ovc(st: &mut SystemTable<Boot>, image_handle: Handle, bundle: &[u8])
         let _ = write!(st.stdout(),
             "[MARATINE] {} modules OVC charges\r\n", modules.len());
     }
+
+    // ── Installation automatique des assets → SDC:/apps/<AppName>/ ──────────
+    // Chaque .marep est installé sur l'ESP au premier chargement.
+    // Les fichiers assets (*.slasset/) sont copiés dans SDC/slu64/apps/<AppName>/
+    // avant que l'OVC tourne, de sorte que les ImageLoad("SDC:/apps/...") réussissent.
+    let app_name = zip.find_app_name().unwrap_or_else(|| alloc::string::String::from("App"));
+    install_assets_to_esp(st, image_handle, &zip, &app_name);
 
     // Exécution via exec_marep — OEntry() est le seul point d'entrée.
     // Aucun nom de fonction ou de module hardcodé dans ce code Rust.
@@ -201,6 +208,139 @@ fn read_all(file: &mut uefi::proto::media::file::RegularFile) -> Result<Vec<u8>,
     }
 
     Ok(buf)
+}
+
+// ── Installation assets → ESP ─────────────────────────────────────────────────
+
+/// Copie tous les assets du ZIP vers `SDC/slu64/apps/<app_name>/` sur l'ESP.
+/// Appelé une fois par chargement de marep, avant l'exécution OVC.
+fn install_assets_to_esp(
+    st:           &mut SystemTable<Boot>,
+    image_handle: Handle,
+    zip:          &super::zip_reader::ZipReader<'_>,
+    app_name:     &str,
+) {
+    use uefi::proto::media::{
+        file::{File, FileAttribute, FileMode, FileType},
+        fs::SimpleFileSystem,
+    };
+
+    let assets = zip.list_all_assets();
+    if assets.is_empty() { return; }
+
+    let handles = match st.boot_services().find_handles::<SimpleFileSystem>() {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+
+    // installed > 0 une fois que les assets sont écrits — log après que fs est droppé.
+    let mut installed = 0usize;
+    'volumes: for &fs_handle in handles.iter() {
+        let wrote = {
+            let mut fs = match unsafe {
+                st.boot_services().open_protocol::<SimpleFileSystem>(
+                    OpenProtocolParams { handle: fs_handle, agent: image_handle, controller: None },
+                    OpenProtocolAttributes::GetProtocol,
+                )
+            } {
+                Ok(f) => f,
+                Err(_) => continue,
+            };
+            let mut root = match fs.open_volume() {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            let mut w = 0usize;
+            for (rel_path, data) in &assets {
+                let dest = alloc::format!("SDC\\slu64\\apps\\{}\\{}",
+                    app_name, rel_path.replace('/', "\\"));
+                esp_ensure_parent_dirs(&mut root, &dest);
+                if esp_write_file(&mut root, &dest, data) { w += 1; }
+            }
+            w
+            // fs et root droppés ici → borrow sur st libéré
+        };
+        if wrote > 0 { installed = wrote; break 'volumes; }
+    }
+
+    if installed > 0 {
+        use core::fmt::Write;
+        let _ = write!(st.stdout(),
+            "[INSTALL] {}/{} assets installes dans SDC/apps/{}\r\n",
+            installed, assets.len(), app_name);
+    }
+}
+
+/// Construit un chemin UCS-2 pour l'API UEFI (séparateur `\`, préfixe `\`).
+fn esp_ucs2(path: &str) -> alloc::vec::Vec<u16> {
+    let mut v: alloc::vec::Vec<u16> = alloc::vec::Vec::with_capacity(path.len() + 2);
+    v.push(b'\\' as u16);
+    let mut last_sep = true;
+    for b in path.bytes() {
+        if b == b'\\' || b == b'/' {
+            if !last_sep { v.push(b'\\' as u16); }
+            last_sep = true;
+        } else {
+            v.push(b as u16);
+            last_sep = false;
+        }
+    }
+    v.push(0u16);
+    v
+}
+
+/// Crée récursivement chaque composant de répertoire du chemin (hors fichier final).
+fn esp_ensure_parent_dirs(
+    root: &mut uefi::proto::media::file::Directory,
+    full_path: &str,
+) {
+    use uefi::proto::media::file::{File, FileAttribute, FileMode};
+    let parts: alloc::vec::Vec<&str> = full_path
+        .split('\\')
+        .filter(|s| !s.is_empty())
+        .collect();
+    let dir_count = parts.len().saturating_sub(1);
+    let mut cum = alloc::string::String::new();
+    for i in 0..dir_count {
+        if !cum.is_empty() { cum.push('\\'); }
+        cum.push_str(parts[i]);
+        let ucs2 = esp_ucs2(&cum);
+        if let Ok(p) = uefi::CStr16::from_u16_with_nul(&ucs2) {
+            // Ouvre si existant, crée si absent — ignorer l'erreur dans les deux cas.
+            let _ = root.open(p, FileMode::CreateReadWrite, FileAttribute::DIRECTORY);
+        }
+    }
+}
+
+/// Crée ou écrase le fichier à `path` avec `data`.
+fn esp_write_file(
+    root: &mut uefi::proto::media::file::Directory,
+    path: &str,
+    data: &[u8],
+) -> bool {
+    use uefi::proto::media::file::{File, FileAttribute, FileMode, FileType};
+    let ucs2 = esp_ucs2(path);
+    let p = match uefi::CStr16::from_u16_with_nul(&ucs2) {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let fh = match root.open(p, FileMode::CreateReadWrite, FileAttribute::empty()) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let mut file = match fh.into_type() {
+        Ok(FileType::Regular(f)) => f,
+        _ => return false,
+    };
+    let mut off = 0usize;
+    while off < data.len() {
+        let end = data.len().min(off + 4096);
+        match file.write(&data[off..end]) {
+            Ok(()) => off = end,
+            Err(_) => return false,
+        }
+    }
+    true
 }
 
 // ── Mapping exécutable ────────────────────────────────────────────────────────

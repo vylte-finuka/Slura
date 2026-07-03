@@ -44,13 +44,13 @@ impl KernelRuntime {
     }
 
     pub fn maratine_phase(&mut self, st: &mut SystemTable<Boot>, image_handle: Handle) {
-        let _ = st.stdout().write_str("[MARATINE] Loading HelloSlura...\r\n");
+        let _ = st.stdout().write_str("[MARATINE] Loading ShiLauncher...\r\n");
         match marep_loader::load_and_run(st, image_handle) {
             Ok(code) => {
                 let _ = write!(st.stdout(), "[MARATINE] OEntry returned {}\r\n", code);
             }
             Err(BundleError::FileNotFound) => {
-                let _ = st.stdout().write_str("[MARATINE] HelloSlura.marep not found.\r\n");
+                let _ = st.stdout().write_str("[MARATINE] ShiLauncher.marep not found.\r\n");
             }
             Err(BundleError::NotInitialized) => {
                 let _ = st.stdout().write_str("[MARATINE] OVC trouve.\r\n");
@@ -64,22 +64,106 @@ impl KernelRuntime {
         }
     }
 
-    /// Lance le full node SluraChain via LoadImage UEFI.
-    /// Charge \vuc_platform_engine.efi depuis l'ESP après le boot.
+    /// Lance le platform engine via UEFI LoadImage + StartImage.
+    /// Lit `\vuc_platform_engine.efi` depuis l'ESP, le charge en mémoire et le démarre.
     pub fn launch_platform_engine(
         &self,
         st:           &mut SystemTable<Boot>,
         image_handle: Handle,
         network:      &str,
     ) {
+        use uefi::{
+            cstr16,
+            proto::media::{
+                file::{File, FileAttribute, FileMode, FileType},
+                fs::SimpleFileSystem,
+            },
+            table::boot::{LoadImageSource, OpenProtocolAttributes, OpenProtocolParams},
+        };
+
         let _ = write!(st.stdout(),
             "[PLATFORM] Chargement vuc_platform_engine ({})\r\n", network);
-        let _ = network;
 
-        // TODO: implémenter LoadImage via EFI_SIMPLE_FILE_SYSTEM_PROTOCOL
-        // pour charger \vuc_platform_engine.efi depuis l'ESP.
-        let _ = image_handle;
-        let _ = write!(st.stdout(), "[PLATFORM] LoadImage — non encore implémenté\r\n");
+        const EFI_PATH: &uefi::CStr16 = cstr16!("\\vuc_platform_engine.efi");
+
+        // Lire le binaire EFI depuis l'ESP via SimpleFileSystem.
+        let handles = match st.boot_services().find_handles::<SimpleFileSystem>() {
+            Ok(h) => h,
+            Err(_) => {
+                let _ = st.stdout().write_str("[PLATFORM] SimpleFileSystem introuvable\r\n");
+                return;
+            }
+        };
+
+        let mut efi_bytes: Option<alloc::vec::Vec<u8>> = None;
+        'fs: for &fs_handle in handles.iter() {
+            let mut fs = match unsafe {
+                st.boot_services().open_protocol::<SimpleFileSystem>(
+                    OpenProtocolParams { handle: fs_handle, agent: image_handle, controller: None },
+                    OpenProtocolAttributes::GetProtocol,
+                )
+            } {
+                Ok(f) => f,
+                Err(_) => continue,
+            };
+            let mut root = match fs.open_volume() {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            let fh = match root.open(EFI_PATH, FileMode::Read, FileAttribute::empty()) {
+                Ok(f) => f,
+                Err(_) => continue,
+            };
+            let mut file = match fh.into_type() {
+                Ok(FileType::Regular(f)) => f,
+                _ => continue,
+            };
+            let mut buf = alloc::vec::Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                match file.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    Err(_) => break,
+                }
+            }
+            if !buf.is_empty() {
+                efi_bytes = Some(buf);
+                break 'fs;
+            }
+        }
+
+        let bytes = match efi_bytes {
+            Some(b) => b,
+            None => {
+                let _ = st.stdout().write_str("[PLATFORM] vuc_platform_engine.efi introuvable\r\n");
+                return;
+            }
+        };
+
+        // LoadImage depuis le buffer en mémoire.
+        let loaded = match st.boot_services().load_image(
+            image_handle,
+            LoadImageSource::FromBuffer { buffer: &bytes, file_path: None },
+        ) {
+            Ok(h) => h,
+            Err(e) => {
+                let _ = write!(st.stdout(), "[PLATFORM] load_image echoue: {:?}\r\n", e);
+                return;
+            }
+        };
+
+        let _ = st.stdout().write_str("[PLATFORM] vuc_platform_engine.efi charge — demarrage...\r\n");
+
+        // StartImage — transfère le contrôle au platform engine.
+        match st.boot_services().start_image(loaded) {
+            Ok(_) => {
+                let _ = st.stdout().write_str("[PLATFORM] vuc_platform_engine termine\r\n");
+            }
+            Err(e) => {
+                let _ = write!(st.stdout(), "[PLATFORM] start_image echoue: {:?}\r\n", e);
+            }
+        }
     }
 }
 

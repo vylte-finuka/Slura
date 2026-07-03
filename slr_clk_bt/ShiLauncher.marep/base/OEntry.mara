@@ -1,0 +1,19 @@
+#base <std***core***self***[ RegistrationRoot, CaseComponentActivity ]>;
+#base <MaratineKit>;
+#include <std***gcc***arch***[ ArchitectureInfo ]>;
+
+rel cl OEntry: <[string RegistrationRoot]>t [
+
+    let ObtProcess: <[string PIDActivity]>        = <MaratineKit***PIDActivity***ObtInfo>;
+    let PAccess:    <[string AuthARoot]>           = <MaratineKit***AuthARoot>;
+
+    let ResLayout:    <[string CaseComponentActivity]>                     = ObtProcess(<MaratineKit***RenRootUI>);
+    let RenderRootUI: <[string RegistrationRoot***[ SRIDAtt, KeyReg, PAccessAuth ]]> = PAccess(ResLayout);
+
+    let ArchInfo:     <[string ArchitectureInfo]> = <gcc***archInfo***()>;
+    log: ArchInfo;
+
+    let Architecture: <string> = ArchInfo;
+    let AppMain: <i32> = <std***core***self***LAPrevent***Launch>(Architecture);
+    ret AppMain;
+];

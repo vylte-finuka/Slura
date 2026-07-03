@@ -109,7 +109,7 @@
         // =================================================================
         // ESP — Création de TOUS les répertoires
         // esp/
-        // ├── slr_clk_bt.efi / HelloSlura.marep / sources/ / boot/ / EFI/
+        // ├── slr_clk_bt.efi / ShiLauncher.marep / sources/ / boot/ / EFI/
         // └── SDC/slu64/
         //     ├── assets/fonts/   ← polices
         //     ├── assets/crypto/  ← *.ca (actifs crypto)
@@ -125,7 +125,7 @@
             "command": "powershell.exe",
             "args": [
                 "-NoProfile", "-Command",
-                "$e = '${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp'; $s = \"$e\\SDC\\slu64\"; @(\"$e\\EFI\\BOOT\",\"$e\\sources\",\"$e\\boot\\assets\\font\",\"$e\\boot\\font\",\"$s\\assets\\fonts\",\"$s\\assets\\crypto\",\"$s\\contracts\",\"$s\\DrivRequirment\",\"$s\\env\",\"$s\\chain\\pending_txs\",\"$s\\chain\\calls\",\"$s\\chain\\receipts\",\"$s\\chain\\state\\balances\",\"$s\\chain\\metadata\") | ForEach-Object { New-Item -ItemType Directory -Force $_ | Out-Null }; Write-Host 'ESP dirs OK'"
+                "$e = '${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp'; $s = \"$e\\SDC\\slu64\"; @(\"$e\\EFI\\BOOT\",\"$e\\sources\",\"$e\\boot\\assets\\font\",\"$e\\boot\\font\",\"$s\\assets\\fonts\",\"$s\\assets\\crypto\",\"$s\\contracts\",\"$s\\DrivRequirment\",\"$s\\env\",\"$s\\chain\\pending_txs\",\"$s\\chain\\calls\",\"$s\\chain\\receipts\",\"$s\\chain\\state\\balances\",\"$s\\chain\\metadata\",\"$s\\apps\\ShiLauncher\\ShiLauncher.slasset\") | ForEach-Object { New-Item -ItemType Directory -Force $_ | Out-Null }; Write-Host 'ESP dirs OK'"
             ],
             "options": { "cwd": "${workspaceFolder}" },
             "group": "build",
@@ -193,7 +193,7 @@
         // =================================================================
         // MARATINE — Drivers (.slul) + Application (.marep)
         // 7 drivers : SluGpu, SluKeyMouse, SluFontConf, SRFSMan,
-        //             SluEnvSys, CryptoAssetSupport + HelloSlura
+        //             SluEnvSys, CryptoAssetSupport + ShiLauncher
         // =================================================================
 
         {
@@ -269,11 +269,11 @@
             "problemMatcher": []
         },
         {
-            "label": "marai build: HelloSlura.marep",
+            "label": "marai build: ShiLauncher.marep",
             "type": "process",
             "command": "powershell.exe",
             "args": [ "-NoProfile", "-Command",
-                "marai build HelloSlura.marep -O --arch=x64 \"--out-dir=${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\"" ],
+                "marai build ShiLauncher.marep -O --arch=x64 \"--out-dir=${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\"" ],
             "options": { "cwd": "${workspaceFolder}/slr_clk_bt" },
             "dependsOn": ["make: ESP dirs"],
             "group": "build",
@@ -289,7 +289,7 @@
                 "marai build: SRFSMan.slul",
                 "marai build: SluEnvSys.slul",
                 "marai build: CryptoAssetSupport.slul",
-                "marai build: HelloSlura.marep"
+                "marai build: ShiLauncher.marep"
             ],
             "dependsOrder": "parallel",
             "group": "build",
@@ -325,6 +325,23 @@
             "options": { "cwd": "${workspaceFolder}" },
             "dependsOn": ["make: ESP dirs"],
             "group": "build",
+            "problemMatcher": []
+        },
+
+        // ShiLauncher.slasset → SDC:/apps/ShiLauncher/ShiLauncher.slasset/
+        // Polices + images référencées dans TemplateView.mara
+        {
+            "label": "copy: ShiLauncher.slasset → SRFS",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": [
+                "-NoProfile", "-Command",
+                "$src = '${workspaceFolder}\\slr_clk_bt\\ShiLauncher.marep\\ShiLauncher.slasset'; $dst = '${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\SDC\\slu64\\apps\\ShiLauncher\\ShiLauncher.slasset'; if (Test-Path $src) { Copy-Item -Force -Recurse \"$src\\*\" $dst; Write-Host \"ShiLauncher.slasset → SRFS OK\" } else { Write-Warning \"ShiLauncher.slasset introuvable: $src\" }"
+            ],
+            "options": { "cwd": "${workspaceFolder}" },
+            "dependsOn": ["make: ESP dirs"],
+            "group": "build",
+            "presentation": { "reveal": "always", "panel": "shared" },
             "problemMatcher": []
         },
 
@@ -411,6 +428,7 @@
                 "copy: SluFontConf → boot/font",
                 "copy: brsonomasemibold.ttf → assets",
                 "copy: all drivers → SRFS DrivRequirment",
+                "copy: ShiLauncher.slasset → SRFS",
                 "copy: vezcurproxy.ca + vezcurproxy.sol → SRFS",
                 "marai image: create install.slin"
             ],
@@ -478,9 +496,9 @@
             "problemMatcher": []
         },
         {
-            "label": "marai check: HelloSlura.marep",
+            "label": "marai check: ShiLauncher.marep",
             "type": "process", "command": "powershell.exe",
-            "args": [ "-NoProfile", "-Command", "marai check HelloSlura.marep -O --json" ],
+            "args": [ "-NoProfile", "-Command", "marai check ShiLauncher.marep -O --json" ],
             "options": { "cwd": "${workspaceFolder}/slr_clk_bt" },
             "group": "test",
             "presentation": { "reveal": "always", "panel": "shared", "clear": true },
@@ -495,7 +513,7 @@
                 "marai check: SRFSMan.slul",
                 "marai check: SluEnvSys.slul",
                 "marai check: CryptoAssetSupport.slul",
-                "marai check: HelloSlura.marep"
+                "marai check: ShiLauncher.marep"
             ],
             "dependsOrder": "parallel",
             "group": "test",

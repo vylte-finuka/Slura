@@ -102,6 +102,123 @@ impl<'a> ZipReader<'a> {
         Err(BundleError::FileNotFound)
     }
 
+    /// Retourne le nom de l'application déduit du premier répertoire `*.slasset/`
+    /// trouvé dans le ZIP (ex. `ShiLauncher.slasset/img1.png` → `"ShiLauncher"`).
+    pub fn find_app_name(&self) -> Option<alloc::string::String> {
+        let end = self.cd_offset + self.cd_size;
+        let mut pos = self.cd_offset;
+        while pos + CD_HEADER_SIZE <= end {
+            if r_u32(self.data, pos) != SIG_CENTRAL { break; }
+            let fname_len   = r_u16(self.data, pos + CD_FNAME_LEN);
+            let extra_len   = r_u16(self.data, pos + CD_EXTRA_LEN);
+            let comment_len = r_u16(self.data, pos + CD_COMMENT_LEN);
+            let nstart = pos + CD_HEADER_SIZE;
+            let nend   = nstart + fname_len;
+            if nend <= self.data.len() {
+                if let Ok(s) = core::str::from_utf8(&self.data[nstart..nend]) {
+                    let norm = {
+                        let mut t = alloc::string::String::with_capacity(s.len());
+                        for c in s.chars() { t.push(if c == '\\' { '/' } else { c }); }
+                        t
+                    };
+                    if let Some(idx) = norm.find(".slasset/") {
+                        let before = &norm[..idx];
+                        let stem_start = before.rfind('/').map(|i| i + 1).unwrap_or(0);
+                        let name = &before[stem_start..];
+                        if !name.is_empty() {
+                            return Some(alloc::string::String::from(name));
+                        }
+                    }
+                }
+            }
+            pos += CD_HEADER_SIZE + fname_len + extra_len + comment_len;
+        }
+        None
+    }
+
+    /// Retourne tous les fichiers assets du ZIP (hors `base/*.ovc` et métadonnées).
+    /// Chaque entrée est `(chemin_normalisé, données_décompressées)`.
+    pub fn list_all_assets(&self) -> alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<u8>)> {
+        let mut result = alloc::vec::Vec::new();
+        let end = self.cd_offset + self.cd_size;
+        let mut pos = self.cd_offset;
+        while pos + CD_HEADER_SIZE <= end {
+            if r_u32(self.data, pos) != SIG_CENTRAL { break; }
+            let compress    = r_u16(self.data, pos + CD_COMPRESS);
+            let comp_size   = r_u32(self.data, pos + CD_COMP_SIZE)   as usize;
+            let uncomp_size = r_u32(self.data, pos + CD_UNCOMP_SIZE) as usize;
+            let fname_len   = r_u16(self.data, pos + CD_FNAME_LEN)   as usize;
+            let extra_len   = r_u16(self.data, pos + CD_EXTRA_LEN)   as usize;
+            let comment_len = r_u16(self.data, pos + CD_COMMENT_LEN) as usize;
+            let local_off   = r_u32(self.data, pos + CD_LOCAL_OFF)   as usize;
+            let nstart = pos + CD_HEADER_SIZE;
+            let nend   = nstart + fname_len;
+            if nend <= self.data.len() {
+                if let Ok(s) = core::str::from_utf8(&self.data[nstart..nend]) {
+                    let norm = {
+                        let mut t = alloc::string::String::with_capacity(s.len());
+                        for c in s.chars() { t.push(if c == '\\' { '/' } else { c }); }
+                        t
+                    };
+                    let is_dir  = norm.ends_with('/');
+                    let is_ovc  = norm.starts_with("base/") && norm.ends_with(".ovc");
+                    let is_meta = norm == "Maraset.yaml" || norm == "RAbstractallowing.xml";
+                    if !is_dir && !is_ovc && !is_meta && !norm.is_empty() {
+                        if let Ok(raw) = self.raw_data_from_local(local_off, comp_size) {
+                            let data = match compress {
+                                0 => Ok(raw.to_vec()),
+                                8 => inflate_raw(raw, uncomp_size),
+                                _ => Err(BundleError::CompressedNotSupported),
+                            };
+                            if let Ok(bytes) = data { result.push((norm, bytes)); }
+                        }
+                    }
+                }
+            }
+            pos += CD_HEADER_SIZE + fname_len + extra_len + comment_len;
+        }
+        result
+    }
+
+    /// Retourne les noms de modules (sans chemin ni extension) de tous les
+    /// `base/*.ovc` présents dans le ZIP.  Utilisé par marep_loader pour une
+    /// découverte dynamique — aucun nom de module n'est hardcodé dans le kernel.
+    pub fn list_ovc_modules(&self) -> alloc::vec::Vec<alloc::string::String> {
+        use alloc::string::ToString as _;
+        let mut result = alloc::vec::Vec::new();
+        let end = self.cd_offset + self.cd_size;
+        let mut pos = self.cd_offset;
+
+        while pos + CD_HEADER_SIZE <= end {
+            if r_u32(self.data, pos) != SIG_CENTRAL { break; }
+
+            let fname_len   = r_u16(self.data, pos + CD_FNAME_LEN);
+            let extra_len   = r_u16(self.data, pos + CD_EXTRA_LEN);
+            let comment_len = r_u16(self.data, pos + CD_COMMENT_LEN);
+            let name_start  = pos + CD_HEADER_SIZE;
+            let name_end    = name_start + fname_len;
+
+            if name_end <= self.data.len() {
+                if let Ok(s) = core::str::from_utf8(&self.data[name_start..name_end]) {
+                    // Normaliser les séparateurs (ZIP Windows = \)
+                    let mut norm = alloc::string::String::with_capacity(s.len());
+                    for c in s.chars() {
+                        norm.push(if c == '\\' { '/' } else { c });
+                    }
+                    if norm.starts_with("base/") && norm.ends_with(".ovc") {
+                        let stem = &norm["base/".len()..norm.len() - ".ovc".len()];
+                        if !stem.is_empty() {
+                            result.push(stem.to_string());
+                        }
+                    }
+                }
+            }
+
+            pos += CD_HEADER_SIZE + fname_len + extra_len + comment_len;
+        }
+        result
+    }
+
     fn raw_data_from_local(&self, local_off: usize, size: usize) -> Result<&'a [u8], BundleError> {
         if local_off + LFH_HEADER_MIN > self.data.len() {
             return Err(BundleError::InvalidZip);

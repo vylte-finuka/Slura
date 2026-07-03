@@ -1,0 +1,94 @@
+#base <std***ComTpe***SlulFrmt***[ DrvAPIInterCon ]>;
+#base <MaratineKit>;
+
+// Renderer stateless — images chargées inline avant chaque draw (cache OVC = 8 slots max)
+// Une seule var im: <ptr> réutilisée — évite l'éviction du cache sur N>8 images
+rel op Render: [ctx string, fnt ptr] [
+    var im: <ptr> = nullptr;   // handle réutilisable — chaque ImageLoad écrase le slot
+
+    // ── Scaling proportionnel — ratio 1440×1024 préservé sur tout écran ──
+    let sw: <i32> = <DrvAPIInterCon***GpuGetWidth***>();
+    let sh: <i32> = <DrvAPIInterCon***GpuGetHeight***>();
+    let scaleW: <i32> = (sw * 1000) / 1440;
+    let scaleH: <i32> = (sh * 1000) / 1024;
+    var scale: <i32> = scaleW;
+    if (scaleH < scaleW) [ scale = scaleH; ];
+    let offX: <i32> = (sw - (1440 * scale) / 1000) / 2;
+    let offY: <i32> = (sh - (1024 * scale) / 1000) / 2;
+
+    // ── Mara Stylesheet (équivalent StyleSheet.create) ──────────────────────
+    let S_NAVBAR_COMPONENT: <i32> = 0x17F5E3E1;
+    let S_NAVBAR_COMPONENT_1: <i32> = 0x10F5F5F5;
+    let S_SHILOOKER___NOTIFICA: <i32> = 0xFF000000;
+    let S_SHILOOKER___NOTIFICA_1: <i32> = 0x00000000;
+
+    // ── Rendu fidèle pixel-perfect extrait du design Figma (design: 1440×1024) ──
+        // [VECTOR: ShUI wallpeper leem jik]
+        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png");
+        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, (offX + (0 * scale) / 1000), (offY + (0 * scale) / 1000), ((1440 * scale) / 1000), ((1037 * scale) / 1000));
+        // [VECTOR: Navbar gesture]
+        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img2.png");
+        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, (offX + (610 * scale) / 1000), (offY + (1003 * scale) / 1000), ((215 * scale) / 1000), ((0 * scale) / 1000));
+        let _: <i32> = <DrvAPIInterCon***GpuDrawDropShadow***>((offX + (-14 * scale) / 1000), (offY + (0 * scale) / 1000), ((1462 * scale) / 1000), ((980 * scale) / 1000), 0, 0, 4, 4, 0x40000000);
+        // RN equivalent: style={{ opacity: 30pct }}
+        let _: <i32> = <DrvAPIInterCon***GpuSetOpacity***>(77);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawDropShadow***>((offX + (526 * scale) / 1000), (offY + (900 * scale) / 1000), ((405 * scale) / 1000), ((80 * scale) / 1000), ((30 * scale) / 1000), 0, 4, 4, 0x40000000);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>((offX + (526 * scale) / 1000), (offY + (900 * scale) / 1000), ((405 * scale) / 1000), ((80 * scale) / 1000), ((30 * scale) / 1000), S_NAVBAR_COMPONENT);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>((offX + (526 * scale) / 1000), (offY + (900 * scale) / 1000), ((1 * scale) / 1000), ((80 * scale) / 1000), ((30 * scale) / 1000), S_NAVBAR_COMPONENT_1);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>((offX + (930 * scale) / 1000), (offY + (900 * scale) / 1000), ((1 * scale) / 1000), ((80 * scale) / 1000), ((30 * scale) / 1000), S_NAVBAR_COMPONENT_1);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>((offX + (526 * scale) / 1000), (offY + (900 * scale) / 1000), ((405 * scale) / 1000), ((1 * scale) / 1000), ((30 * scale) / 1000), S_NAVBAR_COMPONENT_1);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>((offX + (526 * scale) / 1000), (offY + (979 * scale) / 1000), ((405 * scale) / 1000), ((1 * scale) / 1000), ((30 * scale) / 1000), S_NAVBAR_COMPONENT_1);
+        let _: <i32> = <DrvAPIInterCon***GpuResetOpacity***>();
+        // RN equivalent: style={{ opacity: 70pct }}
+        let _: <i32> = <DrvAPIInterCon***GpuSetOpacity***>(178);
+        // [VECTOR: Shi Windows]
+        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img3.png");
+        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, (offX + (0 * scale) / 1000), (offY + (0 * scale) / 1000), ((1462 * scale) / 1000), ((892 * scale) / 1000));
+        let _: <i32> = <DrvAPIInterCon***GpuResetOpacity***>();
+        // [COMPONENT: ShiLooker]
+        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img4.png");
+        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, (offX + (539 * scale) / 1000), (offY + (908 * scale) / 1000), ((63 * scale) / 1000), ((63 * scale) / 1000));
+        // [VECTOR: ShiSetting windows]
+        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img5.png");
+        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, (offX + (569 * scale) / 1000), (offY + (2 * scale) / 1000), ((23 * scale) / 1000), ((23 * scale) / 1000));
+        let _: <i32> = <DrvAPIInterCon***GpuDrawRect***>((offX + (604 * scale) / 1000), (offY + (7 * scale) / 1000), ((209 * scale) / 1000), ((14 * scale) / 1000), S_SHILOOKER___NOTIFICA);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>((offX + (604 * scale) / 1000), (offY + (7 * scale) / 1000), ((209 * scale) / 1000), "ShiLooker  - Notifications & Widgets", S_SHILOOKER___NOTIFICA, S_SHILOOKER___NOTIFICA_1, fnt, ((12 * scale) / 1000), 0);
+        // [VECTOR: ShiDialer]
+        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img6.png");
+        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, (offX + (600 * scale) / 1000), (offY + (908 * scale) / 1000), ((68 * scale) / 1000), ((68 * scale) / 1000));
+        // [VECTOR: ShiMessages]
+        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img7.png");
+        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, (offX + (665 * scale) / 1000), (offY + (908 * scale) / 1000), ((63 * scale) / 1000), ((63 * scale) / 1000));
+        // RN equivalent: style={{ transform: [{ rotate: '90deg' }] }}
+        let _: <i32> = <DrvAPIInterCon***GpuSetTransform2D***>(0, 10000, -10000, 0, 760, 940);
+        // [ROTATED 90deg: ShiContacts]
+        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img8.png");
+        let _: <i32> = <DrvAPIInterCon***GpuDrawRotatedImage***>(im, (offX + (760 * scale) / 1000), (offY + (940 * scale) / 1000), ((63 * scale) / 1000), ((63 * scale) / 1000), 90);
+        let _: <i32> = <DrvAPIInterCon***GpuResetTransform***>();
+        // [VECTOR: ShiBrowser]
+        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img9.png");
+        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, (offX + (791 * scale) / 1000), (offY + (908 * scale) / 1000), ((63 * scale) / 1000), ((63 * scale) / 1000));
+        // [VECTOR: ShiSettings]
+        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img10.png");
+        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, (offX + (854 * scale) / 1000), (offY + (908 * scale) / 1000), ((63 * scale) / 1000), ((63 * scale) / 1000));
+        // RN equivalent: style={{ opacity: 31pct }}
+        let _: <i32> = <DrvAPIInterCon***GpuSetOpacity***>(79);
+        // [VECTOR: Shi Windows]
+        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img11.png");
+        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, (offX + (1323 * scale) / 1000), (offY + (0 * scale) / 1000), ((143 * scale) / 1000), ((85 * scale) / 1000));
+        let _: <i32> = <DrvAPIInterCon***GpuResetOpacity***>();
+        // RN equivalent: style={{ transform: [{ rotate: '164deg' }] }}
+        let _: <i32> = <DrvAPIInterCon***GpuSetTransform2D***>(-9613, 2756, -2756, -9613, 199, 379);
+        // [ROTATED 164deg: ShiMouse sketch]
+        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img12.png");
+        let _: <i32> = <DrvAPIInterCon***GpuDrawRotatedImage***>(im, (offX + (199 * scale) / 1000), (offY + (379 * scale) / 1000), ((38 * scale) / 1000), ((38 * scale) / 1000), 164);
+        let _: <i32> = <DrvAPIInterCon***GpuResetTransform***>();
+
+    // GpuFlushRenderContext retourne -1 en UEFI → sortie propre (no busy loop)
+    let gpuResult: <i32> = <DrvAPIInterCon***GpuFlushRenderContext***>(ctx);
+    if (gpuResult != 0) [ ret 1; ];
+    ret 0;
+];
+
+// Destroy sans params — attendu par le framework OVC après chaque Render
+rel op Destroy: [] [ ret 0; ];
