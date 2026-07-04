@@ -54,6 +54,62 @@ Toutes les fonctions GPU sont exposées depuis Maratine via `rel op` dans `GpuIm
 et dispatchées côté kernel dans `ovc_exec.rs`.  
 Le framebuffer est le GOP UEFI (1440 × 1037, ARGB 32 bpp).
 
+> **Miroir pixel-perfect Figma → Slura OS** — Mali-G68 MP2  
+> Toutes les fonctions ci-dessous sont obligatoires. Sans l'une d'elles le rendu n'est pas un miroir à 100%.
+
+### Compositing
+
+| # | Fonction | Impact si absente |
+|---|---|---|
+| 1 | `ImageDraw(img, x, y, w, h)` — Porter-Duff Over par canal : `dst = src + dst × (1 − src.α/255)` | Fond blanc sur toute image transparente |
+| 2 | `GpuSetOpacity(opacity)` / `GpuResetOpacity()` — multiplie l'alpha de tous les draws suivants | `0x33B9B9B9` rendu plein au lieu de 20% transparent |
+| 3 | `GpuSetBlendMode(mode)` / `GpuResetBlendMode()` — 12 modes (0 NORMAL…11 EXCLUSION) | Calques blend mode = rendu plat incorrect |
+
+### Formes et géométrie
+
+| # | Fonction | Impact si absente |
+|---|---|---|
+| 4 | `SvgLoad(path)→ptr` / `SvgDraw(svg, x, y, w, h)` / `SvgFree(svg)` | Shi Windows, gesture bar, beziers = rectangles pleins |
+| 5 | `GpuDrawRoundedRectFull(x, y, w, h, rTL, rTR, rBL, rBR, color)` | Coins asymétriques Figma = valeur moyenne incorrecte |
+| 6 | `GpuSetTransform2D(a, b, c, d, tx, ty)` / `GpuResetTransform()` — valeurs ×10000 fixed-point | Éléments rotatifs dessinés droits |
+
+### Effets visuels
+
+| # | Fonction | Impact si absente |
+|---|---|---|
+| 7 | `GpuBackgroundBlur(x, y, w, h, r, radius)` — capture GOP → blur σ=radius/3 → reblit | Dock pill = rectangle plat, pas de verre dépoli |
+| 8 | `GpuGaussianBlur(x, y, w, h, radius)` — blur in-place sur la région | LAYER_BLUR Figma = bords incorrectement nets |
+| 9 | `GpuDrawDropShadow(x, y, w, h, cr, offX, offY, blurR, color)` | Icônes et dock sans ombre = aspect 2D plat |
+| 10 | `GpuDrawInnerShadow(x, y, w, h, cr, offX, offY, blurR, color)` | Inner shadows Figma absentes |
+| 11 | `GpuDrawGlow(x, y, w, h, r, glowColor, glowRadius, intensity)` — SDF rounded rect + falloff linéaire | LED strip dorée Shixbook absente |
+
+### Typographie
+
+| # | Fonction | Impact si absente |
+|---|---|---|
+| 12 | `GpuDrawTextFontAlign(x, y, maxW, text, fg, bg, font, size, align)` — align : 0=left 1=center 2=right | Titres centrés Figma = alignés à gauche |
+| 13 | `GpuDrawTextFontFull(x, y, text, fg, bg, font, size, letterSp, lineH, align, deco)` — deco : 0=none 1=underline 2=strikethrough | Espacement lettres, line-height, soulignement incorrects |
+
+### Dégradés
+
+| # | Fonction | Impact si absente |
+|---|---|---|
+| 14 | `GpuDrawLinearGradient(x, y, w, h, r, angleDeg, c1, pos1, c2, pos2, stopCount)` — pos 0–1000 | Dégradés = couleur uniforme du premier stop |
+| 15 | `GpuDrawRadialGradient(x, y, w, h, cx, cy, r, color1, color2)` | Dégradés radiaux Figma incorrects |
+
+### Masques et clip
+
+| # | Fonction | Impact si absente |
+|---|---|---|
+| 16 | `GpuPushClip(x, y, w, h, r)` / `GpuPopClip()` | Contenu débordant hors des conteneurs |
+| 17 | `GpuCaptureMask(x, y, w, h)→ptr` / `GpuApplyAlphaMask(mask)` | Masques alpha Figma non appliqués |
+
+### Images
+
+| # | Fonction | Impact si absente |
+|---|---|---|
+| 18 | `GpuDrawRotatedImage(img, cx, cy, w, h, angleDeg)` | Images avec rotation dessinées droites |
+
 ### Rendu de base
 
 | Fonction | Paramètres | Description |

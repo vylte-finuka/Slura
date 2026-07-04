@@ -292,67 +292,17 @@ rel op GpuDrawRoundedRectAlpha: [x i32, y i32, width i32, height i32, radius i32
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GpuLoadImage / GpuDrawImage – chargement et affichage d'images (PNG/JPG/GIF)
-// via stb_image FFI (img_load___, img_free___, img_get_width___, etc.)
+// Les handles sont des indices IMAGE_CACHE (1-26) gérés par le kernel.
 // ─────────────────────────────────────────────────────────────────────────────
 rel op GpuLoadImage: [imagePath string] [
-    if (imagePath == "") [ ret nullptr; ];
-    ret <img_load***>(imagePath);
+    if (imagePath == "") [ ret 0; ];
+    ret <DrvAPIInterCon***ImageLoad***>(imagePath);
 ];
 
 rel op GpuFreeImage: [img ptr] [
-    if (img == nullptr) [ ret 0; ];
-    <img_free***>(img);
     ret 0;
 ];
 
-rel op GpuDrawImage: [img ptr, x i32, y i32, drawW i32, drawH i32] [
-    if (img == nullptr || drawW <= 0 || drawH <= 0) [ ret -1; ];
-    let srcW: <i32>    = <img_get_width***>(img);
-    let srcH: <i32>    = <img_get_height***>(img);
-    let channels: <i32> = <img_get_channels***>(img);
-    let pixels: <ptr>  = <img_get_pixels***>(img);
-    if (pixels == nullptr || srcW <= 0 || srcH <= 0) [ ret -2; ];
-
-    let fbVid:  <ptr> = <MaratineKit***MGC***MGC***GetVideoMemoryPtr***>();
-    let stride: <i32> = <MaratineKit***MGC***MGC***GetPixelsPerScanLine***>();
-    let cmdBuf: <ptr> = <MaratineKit***MGC***MGC***CreateCommandBuffer***>();
-
-    var dy: <i32> = 0;
-    loop (dy < drawH) [
-        // Mapping bilinéaire simplifié (nearest-neighbour)
-        let sy: <i32> = (dy * srcH) / drawH;
-        var dx: <i32> = 0;
-        loop (dx < drawW) [
-            let sx: <i32> = (dx * srcW) / drawW;
-            let srcOff: <i32> = (sy * srcW + sx) * channels;
-            let pr: <i32> = <DrvManSpec***PtrRead8At***>(pixels, srcOff);
-            let pg: <i32> = <DrvManSpec***PtrRead8At***>(pixels, srcOff + 1);
-            let pb: <i32> = <DrvManSpec***PtrRead8At***>(pixels, srcOff + 2);
-            var pa: <i32> = 255;
-            if (channels >= 4) [ pa = <DrvManSpec***PtrRead8At***>(pixels, srcOff + 3); ];
-
-            let fbOff: <i32> = ((y + dy) * stride + x + dx) * 4;
-            var pixel: <i32> = 0xFF000000 | (pr << 16) | (pg << 8) | pb;
-
-            if (pa < 255) [
-                let ia: <i32> = 255 - pa;
-                let db: <i32> = <DrvManSpec***PtrRead8At***>(fbVid, fbOff);
-                let dg: <i32> = <DrvManSpec***PtrRead8At***>(fbVid, fbOff + 1);
-                let dr: <i32> = <DrvManSpec***PtrRead8At***>(fbVid, fbOff + 2);
-                let nr: <i32> = (pr * pa + dr * ia) / 255;
-                let ng: <i32> = (pg * pa + dg * ia) / 255;
-                let nb: <i32> = (pb * pa + db * ia) / 255;
-                pixel = 0xFF000000 | (nr << 16) | (ng << 8) | nb;
-            ];
-            <MaratineKit***MGC***MGC***CmdWritePixel***>(cmdBuf, fbOff, pixel);
-            dx = dx + 1;
-        ];
-        dy = dy + 1;
-    ];
-    <MaratineKit***MGC***MGC***SubmitCommandBuffer***>(cmdBuf);
-    <MaratineKit***MGC***MGC***DestroyCommandBuffer***>(cmdBuf);
-    ret 0;
-];
 
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -390,6 +340,10 @@ rel op GpuDrawRotatedImage: [img ptr, cx i32, cy i32, w i32, h i32, angleDeg i32
     ret <DrvAPIInterCon***GpuDrawRotatedImage***>(img, cx, cy, w, h, angleDeg);
 ];
 
+rel op GpuDrawGlow: [x i32, y i32, w i32, h i32, r i32, glowColor i32, glowRadius i32, intensity i32] [
+    ret <DrvAPIInterCon***GpuDrawGlow***>(x, y, w, h, r, glowColor, glowRadius, intensity);
+];
+
 rel op GpuGaussianBlur: [x i32, y i32, w i32, h i32, radius i32] [
     ret <DrvAPIInterCon***GpuGaussianBlur***>(x, y, w, h, radius);
 ];
@@ -406,12 +360,12 @@ rel op GpuDrawLinearGradient: [x i32, y i32, w i32, h i32, r i32, angleDeg i32, 
     ret <DrvAPIInterCon***GpuDrawLinearGradient***>(x, y, w, h, r, angleDeg, stop1Color, stop1Pos, stop2Color, stop2Pos, stopCount);
 ];
 
-rel op GpuDrawRadialGradient: [x i32, y i32, w i32, h i32, stop1Color i32, stop1Pos i32, stop2Color i32, stop2Pos i32] [
-    ret <DrvAPIInterCon***GpuDrawRadialGradient***>(x, y, w, h, stop1Color, stop1Pos, stop2Color, stop2Pos);
+rel op GpuDrawRadialGradient: [x i32, y i32, w i32, h i32, cx i32, cy i32, r i32, color1 i32, color2 i32] [
+    ret <DrvAPIInterCon***GpuDrawRadialGradient***>(x, y, w, h, cx, cy, r, color1, color2);
 ];
 
-rel op GpuDrawDropShadow: [x i32, y i32, w i32, h i32, cornerRadius i32, offsetX i32, offsetY i32, blurRadius i32, spreadRadius i32, color i32] [
-    ret <DrvAPIInterCon***GpuDrawDropShadow***>(x, y, w, h, cornerRadius, offsetX, offsetY, blurRadius, spreadRadius, color);
+rel op GpuDrawDropShadow: [x i32, y i32, w i32, h i32, cornerRadius i32, offsetX i32, offsetY i32, blurRadius i32, color i32] [
+    ret <DrvAPIInterCon***GpuDrawDropShadow***>(x, y, w, h, cornerRadius, offsetX, offsetY, blurRadius, color);
 ];
 
 rel op GpuDrawInnerShadow: [x i32, y i32, w i32, h i32, cornerRadius i32, offsetX i32, offsetY i32, blurRadius i32, color i32] [

@@ -3009,15 +3009,15 @@ fn dispatch(
             0
         },
 
-        // ── GpuDrawRadialGradient(x,y,w,h,c1,p1,c2,p2,...) ──────────────────
+        // ── GpuDrawRadialGradient(x,y,w,h, cx,cy,r, color1,color2) ──────────
         "DrvAPIInterCon___GpuDrawRadialGradient___" => {
-            if args.len() < 8 { return 0; }
+            if args.len() < 9 { return 0; }
             let gx=args[0] as i32; let gy=args[1] as i32; let gw=args[2] as i32; let gh=args[3] as i32;
-            let c1=args[4] as u32; let c2=args[6] as u32;
+            let c1=args[7] as u32; let c2=args[8] as u32;
             let fb=ctx.fb; let s=ctx.stride; let sw=ctx.width; let sh=ctx.height;
             if fb.is_null()||gw<=0||gh<=0 { return 0; }
-            let gcx=gx+gw/2; let gcy=gy+gh/2;
-            let mr=isqrt((gw*gw/4+gh*gh/4) as u32).max(1) as i32;
+            let gcx=args[4] as i32; let gcy=args[5] as i32;
+            let mr=(args[6] as i32).max(1);
             let (a1,r1,g1,b1)=((c1>>24)&0xFF,(c1>>16)&0xFF,(c1>>8)&0xFF,c1&0xFF);
             let (a2,r2,g2,b2)=((c2>>24)&0xFF,(c2>>16)&0xFF,(c2>>8)&0xFF,c2&0xFF);
             let (a1,r1,g1,b1)=(a1 as i32,r1 as i32,g1 as i32,b1 as i32);
@@ -3042,15 +3042,15 @@ fn dispatch(
         // En OS runtime, ce serait 0 (flush réel du buffer).
         "DrvAPIInterCon___GpuFlushRenderContext___" => -1,
 
-        // ── GpuDrawDropShadow(x,y,w,h,cr,offX,offY,blur,spread,color) ─────────
+        // ── GpuDrawDropShadow(x,y,w,h,cr,offX,offY,blur,color) ──────────────
         "DrvAPIInterCon___GpuDrawDropShadow___" => {
-            if args.len() < 10 { return 0; }
+            if args.len() < 9 { return 0; }
             let x=args[0] as i32; let y=args[1] as i32; let w=args[2] as i32; let h=args[3] as i32;
             let cr=args[4] as i32; let ox=args[5] as i32; let oy=args[6] as i32;
-            let br=(args[7] as i32).clamp(0,16); let sp=args[8] as i32; let c=args[9] as u32;
+            let br=(args[7] as i32).clamp(0,16); let c=args[8] as u32;
             let fb=ctx.fb; let s=ctx.stride; let sw=ctx.width; let sh=ctx.height;
             if fb.is_null() { return 0; }
-            let sx=x+ox-sp; let sy_=y+oy-sp; let sw2=w+2*sp; let sh2=h+2*sp;
+            let sx=x+ox; let sy_=y+oy; let sw2=w; let sh2=h;
             let alpha=(c>>24)&0xFF; let sr_=(c>>16)&0xFF; let sg_=(c>>8)&0xFF; let sb_=c&0xFF;
             let r2=cr*cr; let ia=255-alpha;
             for py in 0..sh2 {
@@ -3070,6 +3070,52 @@ fn dispatch(
                 }
             }
             if br>0 { box_blur_region(fb,s,sx-br,sy_-br,sw2+2*br,sh2+2*br,br); }
+            0
+        },
+
+        // ── GpuDrawGlow(x,y,w,h,r,glowColor,glowRadius,intensity) ────────────
+        // Lueur extérieure autour d'un rounded rect — additive src-over avec falloff linéaire.
+        "DrvAPIInterCon___GpuDrawGlow___" => {
+            if args.len() < 8 { return 0; }
+            let x  = args[0] as i32; let y  = args[1] as i32;
+            let w  = args[2] as i32; let h  = args[3] as i32;
+            let r  = (args[4] as i32).max(0);
+            let gc = args[5] as u32;
+            let gr = (args[6] as i32).max(1);
+            let intensity = (args[7] as u32).min(255);
+            let fb = ctx.fb; let s = ctx.stride; let sw = ctx.width; let sh = ctx.height;
+            if fb.is_null() || intensity == 0 || w <= 0 || h <= 0 { return 0; }
+            let cr_ = (gc >> 16) & 0xFF;
+            let cg_ = (gc >>  8) & 0xFF;
+            let cb_ =  gc        & 0xFF;
+            let hx = w / 2; let hy = h / 2;
+            for py in (y - gr)..(y + h + gr) {
+                if py < 0 || py >= sh { continue; }
+                for px in (x - gr)..(x + w + gr) {
+                    if px < 0 || px >= sw { continue; }
+                    // SDF du rounded rect : dist > 0 = extérieur
+                    let qx = (px - x - hx).abs() - hx + r;
+                    let qy = (py - y - hy).abs() - hy + r;
+                    let ext = isqrt((qx.max(0) * qx.max(0) + qy.max(0) * qy.max(0)) as u32) as i32;
+                    let dist = ext + qx.max(qy).min(0) - r;
+                    if dist <= 0 || dist > gr { continue; }
+                    // Falloff linéaire : plein sur l'arête, nul à glowRadius
+                    let a = (intensity * (gr - dist) as u32 / gr as u32).min(255);
+                    if a == 0 { continue; }
+                    let di = (py * s + px) as usize;
+                    unsafe {
+                        let dst = fb.add(di).read_volatile();
+                        let db = (dst & 0xFF) as u32;
+                        let dg = ((dst >> 8) & 0xFF) as u32;
+                        let dr = ((dst >> 16) & 0xFF) as u32;
+                        let ia = 255 - a;
+                        let nr = (cr_ * a / 255 + dr * ia / 255).min(255);
+                        let ng = (cg_ * a / 255 + dg * ia / 255).min(255);
+                        let nb = (cb_ * a / 255 + db * ia / 255).min(255);
+                        fb.add(di).write_volatile(0xFF000000 | (nr << 16) | (ng << 8) | nb);
+                    }
+                }
+            }
             0
         },
 
