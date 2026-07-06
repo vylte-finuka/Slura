@@ -57,12 +57,23 @@ Le framebuffer est le GOP UEFI (1440 × 1037, ARGB 32 bpp).
 > **Miroir pixel-perfect Figma → Slura OS** — Mali-G68 MP2  
 > Toutes les fonctions ci-dessous sont obligatoires. Sans l'une d'elles le rendu n'est pas un miroir à 100%.
 
+### Rendu confirmé sur device (ShiXbook)
+
+| Élément | Statut | Fonctions impliquées |
+|---|---|---|
+| Wallpaper PNG plein écran | ✅ Visible | `ImageLoad` + `ImageDraw` (fast-path opaque) |
+| Dock bar frosted glass | ✅ Visible | `GpuSetOpacity(77)` + `GpuDrawRoundedRectAlpha` |
+| Dock icons losanges (6) | ✅ Visibles | `GpuSetTransform2D` pivot + `GpuDrawRoundedRectAlpha` |
+| PNG icons dans les losanges | ✅ Visibles | `ImageDraw` Porter-Duff + GPU_OPACITY |
+| Gesture bar gradient | 🔧 Partiel | `GpuDrawLinearGradient` |
+| Shi Windows SVG wave | 🔧 À implémenter | `SvgLoad` + `SvgDraw` |
+
 ### Compositing
 
 | # | Fonction | Impact si absente |
 |---|---|---|
-| 1 | `ImageDraw(img, x, y, w, h)` — Porter-Duff Over par canal : `dst = src + dst × (1 − src.α/255)` | Fond blanc sur toute image transparente |
-| 2 | `GpuSetOpacity(opacity)` / `GpuResetOpacity()` — multiplie l'alpha de tous les draws suivants | `0x33B9B9B9` rendu plein au lieu de 20% transparent |
+| 1 | `ImageDraw(handle, x, y, w, h)` — Porter-Duff Over par canal : `out = (src·α + dst·(255−α)) / 255`. `handle` = `i32` retourné par `ImageLoad`. GPU_OPACITY module le canal alpha du PNG : `a = png_alpha * GPU_OPACITY / 255`. | Fond blanc sur toute image transparente |
+| 2 | `GpuSetOpacity(opacity)` / `GpuResetOpacity()` — sémantique SET (pas de stack) : `final_alpha = color_alpha * GPU_OPACITY / 255`. | `0x33B9B9B9` rendu plein au lieu de 20% transparent |
 | 3 | `GpuSetBlendMode(mode)` / `GpuResetBlendMode()` — 12 modes (0 NORMAL…11 EXCLUSION) | Calques blend mode = rendu plat incorrect |
 
 ### Formes et géométrie
@@ -71,7 +82,7 @@ Le framebuffer est le GOP UEFI (1440 × 1037, ARGB 32 bpp).
 |---|---|---|
 | 4 | `SvgLoad(path)→ptr` / `SvgDraw(svg, x, y, w, h)` / `SvgFree(svg)` | Shi Windows, gesture bar, beziers = rectangles pleins |
 | 5 | `GpuDrawRoundedRectFull(x, y, w, h, rTL, rTR, rBL, rBR, color)` | Coins asymétriques Figma = valeur moyenne incorrecte |
-| 6 | `GpuSetTransform2D(a, b, c, d, tx, ty)` / `GpuResetTransform()` — valeurs ×10000 fixed-point | Éléments rotatifs dessinés droits |
+| 6 | `GpuSetTransform2D(cos, sin, neg_sin, cos, pivot_x, pivot_y)` / `GpuResetTransform()` — valeurs ×10000 ; args 4–5 = **pivot** (centre de rotation en pixels), le kernel calcule la translation affine en interne | Éléments rotatifs dessinés droits |
 
 ### Effets visuels
 
@@ -103,8 +114,8 @@ Le framebuffer est le GOP UEFI (1440 × 1037, ARGB 32 bpp).
 
 | # | Fonction | Impact si absente |
 |---|---|---|
-| 16 | `GpuPushClip(x, y, w, h, r)` / `GpuPopClip()` | Contenu débordant hors des conteneurs |
-| 17 | `GpuCaptureMask(x, y, w, h)→ptr` / `GpuApplyAlphaMask(mask)` | Masques alpha Figma non appliqués |
+| 18 | `GpuPushClip(x, y, w, h, r)` / `GpuPopClip()` | Contenu débordant hors des conteneurs |
+| 19 | `GpuCaptureMask(x, y, w, h)→ptr` / `GpuApplyAlphaMask(mask)` | Masques alpha Figma non appliqués |
 
 ### Images
 
@@ -152,20 +163,22 @@ Le framebuffer est le GOP UEFI (1440 × 1037, ARGB 32 bpp).
 
 | Fonction | Paramètres | Description |
 |---|---|---|
-| `GpuSetTransform2D` | `a, b, c, d, tx, ty` | Matrice affine 2×2 (×10000) + translation pixels |
+| `GpuSetTransform2D` | `cos, sin, neg_sin, cos, pivot_x, pivot_y` | Rotation affine 2×2 (×10000) autour d'un pivot. Le kernel calcule `tx/ty` en interne : `tx = (px*(10000−cos) + py*sin) / 10000` |
 | `GpuResetTransform` | — | Remet la matrice à l'identité |
 
 Identité : `GpuSetTransform2D(10000, 0, 0, 10000, 0, 0)`.  
-Rotation 45° : `a=c=7071, b=-7071, d=7071` (cos/sin × 10000).  
-La transformation s'applique aux coordonnées de tous les draws suivants.
+Rotation 45° autour de (cx, cy) : `GpuSetTransform2D(7071, 7071, -7071, 7071, cx, cy)`.  
+Rotation 46° (dock diamonds) : `GpuSetTransform2D(6947, 7193, -7193, 6947, cx, cy)`.  
+Args 4–5 sont le **pivot** (centre de l'élément en px écran) — pas la translation Figma.  
+La transformation s'applique à tous les draws jusqu'au prochain `GpuResetTransform()`.
 
 ### Images
 
 | Fonction | Paramètres | Description |
 |---|---|---|
-| `ImageLoad` | `path` | Charge un PNG depuis SRFS → handle |
-| `ImageDraw` | `handle, x, y, w, h` | Dessine une image chargée |
-| `GpuDrawRotatedImage` | `handle, cx, cy, w, h, angleDeg` | Dessin d'image avec rotation |
+| `ImageLoad` | `path` | Charge un PNG depuis SRFS → `i32` handle (1–8, cache LRU). Chemin : `SDC:/apps/<App>/…` |
+| `ImageDraw` | `handle i32, x, y, w, h` | Blit nearest-neighbour + Porter-Duff Over. GPU_OPACITY appliqué au canal alpha PNG. |
+| `GpuDrawRotatedImage` | `handle i32, cx, cy, w, h, angleDeg` | Dessin d'image avec rotation (inverse mapping) |
 
 ### Gradients
 
@@ -251,11 +264,11 @@ Mara n'a que des entiers (`i32`). Le plugin **doit** appliquer ces transformatio
 | Source Figma | Règle de génération | Exemple |
 |---|---|---|
 | Coordonnée flottante (`570.5`) | `Math.round(v)` → `i32` | `570.5` → `571` |
-| Translation de transform (`tx`, `ty`) | Idem — arrondi à l'entier le plus proche | `939.5` → `940` |
+| Pivot de rotation (`pivot_x`, `pivot_y`) | Centre de l'élément en px écran — **pas** les champs `tx/ty` de la transform matrix Figma | `node.x + node.width/2` → `571` |
 | Valeur négative composée (`--7071`) | Calculer la valeur finale : `-(-7071) = 7071` | émettre `7071` |
 | Valeur `-0` | Émettre `0` | `-0` → `0` |
 | Opacité flottante (`0.30 * 255`) | `Math.round(opacity * 255)` | `0.30` → `77` |
-| `sin`/`cos` de rotation (×10000) | `Math.round(Math.cos(deg * Math.PI/180) * 10000)` | `45°` → `7071` |
+| `sin`/`cos` de rotation (×10000) | `Math.round(Math.cos(deg * Math.PI/180) * 10000)` | `46°` → `6947` |
 
 En TypeScript dans le plugin :
 
@@ -265,13 +278,14 @@ const i32 = (v: number): number => Math.round(v);
 const cosFixed = (deg: number): number => Math.round(Math.cos(deg * Math.PI / 180) * 10000);
 const sinFixed = (deg: number): number => Math.round(Math.sin(deg * Math.PI / 180) * 10000);
 
-// Matrice 2D pour une rotation deg (GpuSetTransform2D attend a,b,c,d en ×10000)
-function rotationMatrix(deg: number, tx: number, ty: number): string {
-    const a =  cosFixed(deg), b = sinFixed(deg);
-    const c = -sinFixed(deg), d = cosFixed(deg);
-    return `${a}, ${b}, ${c}, ${d}, ${i32(tx)}, ${i32(ty)}`;
+// Matrice 2D pour une rotation autour du centre de l'élément (pivot).
+// pivotX/Y = centre de l'élément en pixels écran (absoluteBoundingBox.x + w/2, y + h/2).
+// Ne pas passer les champs tx/ty de la transform matrix Figma — ce sont des valeurs différentes.
+function rotationMatrix(deg: number, pivotX: number, pivotY: number): string {
+    const cos = cosFixed(deg), sin = sinFixed(deg);
+    return `${cos}, ${sin}, ${-sin}, ${cos}, ${i32(pivotX)}, ${i32(pivotY)}`;
 }
-// Emit:  <DrvAPIInterCon***GpuSetTransform2D***>(${rotationMatrix(deg, tx, ty)});
+// Emit:  <DrvAPIInterCon***GpuSetTransform2D***>(${rotationMatrix(deg, pivotX, pivotY)});
 ```
 
 ### Mapping layer Figma → GPU Mara
