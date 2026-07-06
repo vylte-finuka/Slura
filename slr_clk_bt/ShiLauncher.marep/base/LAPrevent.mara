@@ -16,7 +16,10 @@ rel op LAPrevent: <[string AppLifecycle]>t [
         _ctx = <MaratineKit***RenderContext***New()>;
 
         // Assets comme var locales dans Launch — valides pendant toute la boucle
-        var fnt: <ptr> = <DrvAPIInterCon***FontLoad***>("SDC:/slu64/assets/fonts/brsonomasemibold.ttf");
+        var fnt: <ptr> = <DrvAPIInterCon***FontLoad***>("SDC:/boot/assets/font/brsonomasemibold.ttf");
+        if (fnt == nullptr) [
+            fnt = <DrvAPIInterCon***FontLoad***>("SDC:/boot/assets/font/brsonomasemibold.ttf");
+        ];
         if (fnt == nullptr) [ fnt = <DrvAPIInterCon***FontGetDefault***>(); ];
 
         log: "LAPrevent: assets chargés";

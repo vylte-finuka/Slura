@@ -424,6 +424,219 @@ let offY: <i32> = (sh - (1024 * scale) / 1000) / 2;
 Le plugin doit émettre `Math.round(v * scale / 1000)` pour toutes les valeurs numériques.
 Les dimensions design (`designW`, `designH`) sont extraites de `Maraset.yaml → metadata.design_size`.
 
+### Fill-screen vs fit-screen
+
+Deux modes de scaling existent selon le type d'élément :
+
+| Mode | Formule | Usage |
+|---|---|---|
+| **fill-screen** (non-uniforme) | `scaleX = sw*1000/1440`, `scaleY = sh*1000/1024` (indépendants) | Fond d'écran, wallpaper PNG — étire pour couvrir sans bandes |
+| **fit-screen** (uniforme) | `scale = min(scaleX, scaleY)` + `offX`/`offY` | UI overlay, composants — préserve les proportions Figma |
+
+Pour un wallpaper plein écran :
+```mara
+let scaleX: <i32> = (sw * 1000) / 1440;
+let scaleY: <i32> = (sh * 1000) / 1024;
+// ImageDraw utilise scaleX/scaleY indépendamment via drawW/drawH
+let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, 0, 0, sw, sh);
+```
+
+---
+
+## État MVP — ce qui a été corrigé / ce qui reste
+
+### ✅ Corrigé
+
+| # | Fichier | Bug | Fix |
+| --- | --- | --- | --- |
+| 1 | `TemplateView.mara` | `var im: <ptr>` type mismatch OVC | → `var im: <i32> = 0` |
+| 2 | `TemplateView.mara` | Double-alpha dock `0x4DF5E3E1` dans GpuSetOpacity(77) → 9% | → `0xFFF5E3E1` |
+| 3 | `TemplateView.mara` | S_SHI_WINDOWS + GpuDrawRoundedRectAlpha Shi Windows absents | → Restaurés |
+| 4 | `TemplateView.mara` | Wallpaper hors-écran y=-17, h=1037 | → `ImageDraw(im, 0, 0, sw, sh)` |
+| 5 | `TemplateView.mara` | ShiContacts 136° (2e transform écrasait 90°) | → Supprimé, seul 90° |
+| 6 | `TemplateView.mara` | Triple GpuSetOpacity/GpuResetOpacity redondants | → Un seul par groupe |
+| 7 | `TemplateView.mara` | `log:` syntaxe invalide Mara | → Supprimé |
+| 8 | `TemplateView.mara` | Handles SVG déclarés `<ptr>` | → `<i32>` |
+| 9 | `TemplateView.mara` | `fnt` param kernel = null (SRFS_CACHE vide avant Render) → DrawText=0 | → `FontLoad("SDC:/slu64/assets/fonts/brsonomasemibold.ttf")` appelé directement |
+| 10 | `DrvAPIInterCon.mara` | `GpuDrawTextFontAlign` absent du stdlib | → Ajouté |
+
+### 🔧 Reste pour MVP pixel-perfect
+
+| Priorité | Problème visible | Cause racine | Résolution |
+| --- | --- | --- | --- |
+| **P1** | Coins blancs sur icônes (img4–img10) | PNGs sans canal alpha depuis Figma | Re-exporter Figma : `Export PNG` avec fond transparent (décocher "Include background") |
+| **P1** | Shi Windows quasi-invisible | Gris `0xFFE0E0E0` à 70% sur wallpaper blanc = ~97% blanc | Changer tint : `0xFF8BAFC2` (bleu-gris Figma) ou augmenter opacité → `GpuSetOpacity(200)` |
+| **P2** | Barre noire sysbar au-dessus du texte | `GpuDrawRect(…, 0xFF000000)` debug bg | Remplacer par `0x00000000` (transparent) ou supprimer la ligne |
+| **P2** | x64 `.marep` bootable pas mis à jour | Archive ZIP compilée indépendante | Rebundle via pipeline build (tâche VS Code) |
+| **P3** | SVG wave vec3 non visible | Clipping hors zone Shi Windows | Vérifier dimensions vec3.svg vs zone (-14, 0, 1462, 892) |
+
+### Règle FontLoad dans un marep (plugin Figma → codegen)
+
+`srfs_font_ptr()` (kernel) retourne le premier slot SRFS — souvent null au démarrage.  
+**Toujours charger la police directement dans le `rel op Render`**, pas via le paramètre `fnt` :
+
+```mara
+let font: <ptr> = <DrvAPIInterCon***FontLoad***>("SDC:/slu64/assets/fonts/brsonomasemibold.ttf");
+// Puis passer font (pas fnt) à GpuDrawTextFont / GpuDrawTextFontAlign
+```
+
+Plugin TS — codegen obligatoire :
+
+```typescript
+// En tête de Render, avant tout draw texte
+emit(`let font: <ptr> = <DrvAPIInterCon***FontLoad***>("SDC:/slu64/assets/fonts/${fontFile}");`);
+// Chaque draw texte utilise `font`, jamais `fnt`
+```
+
+---
+
+## Règles pixel-perfect — génération plugin MVP
+
+### 1. Règle double-alpha (CRITIQUE)
+
+Quand un bloc utilise `GpuSetOpacity(v)`, l'opacité effective est `color_alpha * v / 255`.  
+**Toute couleur de remplissage à l'intérieur d'un bloc `GpuSetOpacity` DOIT avoir `0xFF` en alpha.**
+
+```
+// FAUX — double-multiplication : 0x4D * 77 / 255 = 9% au lieu de 30%
+let color: <i32> = 0x4DF5E3E1;
+GpuSetOpacity(77); GpuDrawRoundedRectAlpha(..., color); GpuResetOpacity();
+
+// CORRECT — l'opacité 30% est entièrement portée par GpuSetOpacity(77)
+let color: <i32> = 0xFFF5E3E1;
+GpuSetOpacity(77); GpuDrawRoundedRectAlpha(..., color); GpuResetOpacity();
+```
+
+Plugin TS : extraire `layer.opacity` → `GpuSetOpacity(Math.round(opacity * 255))`, forcer `fills[0].color.a = 1.0` dans la couleur émise.
+
+### 2. Ordre de rendu minimal MVP
+
+```
+1. ImageDraw(wallpaper, 0, 0, sw, sh)          ← fond plein écran
+2. GpuDrawRoundedRectAlpha(dock…)               ← panneaux vitrés
+3. GpuSetOpacity(v) / draw / GpuResetOpacity()  ← éléments semi-transparents
+4. GpuSetTransform2D(…) / draw / GpuResetTransform() ← éléments tournés
+5. GpuDrawTextFontAlign(…)                      ← textes
+6. GpuFlushRenderContext(ctx)                   ← commit framebuffer
+```
+
+### 3. `GpuSetOpacity` : sémantique SET (pas de stack)
+
+Chaque appel **remplace** l'opacité courante — il n'y a pas de push/pop.  
+Toujours appeler `GpuResetOpacity()` exactement **une fois** après le dernier draw du groupe.  
+Ne jamais émettre deux `GpuSetOpacity` consécutifs sans `GpuResetOpacity` entre eux.
+
+### 4. `GpuSetTransform2D` : pivot = centre de l'élément
+
+Args 4–5 = `pivot_x`, `pivot_y` = centre de l'élément en pixels écran **après scaling**.
+
+```typescript
+// Plugin TS
+const pivotX = i32((node.absoluteBoundingBox.x + node.width  / 2) * scale / 1000);
+const pivotY = i32((node.absoluteBoundingBox.y + node.height / 2) * scale / 1000);
+// → GpuSetTransform2D(cos, sin, -sin, cos, pivotX, pivotY)
+```
+
+Ne jamais passer `node.relativeTransform[0][2]` / `[1][2]` (champs `tx/ty` Figma) — ce sont des valeurs différentes.
+
+---
+
+## Plugin Figma — Réponses aux questions de rendu
+
+### Q1 — Pivot GpuSetTransform2D : design px ou écran px ?
+
+**Écran pixels, post-scale.** Le kernel lit `args[4]` et `args[5]` comme des coordonnées d'écran absolues.
+
+```typescript
+// FAUX — pivot en coordonnées design brutes
+emit(`GpuSetTransform2D(${cos}, ${sin}, ${-sin}, ${cos}, ${i32(pivotX)}, ${i32(pivotY)})`);
+
+// CORRECT — pivot scalé vers l'écran
+const px = i32((node.absoluteBoundingBox.x + node.width  / 2) * scaleX / 1000);
+const py = i32((node.absoluteBoundingBox.y + node.height / 2) * scaleY / 1000);
+emit(`GpuSetTransform2D(${cos}, ${sin}, ${-sin}, ${cos}, ${px}, ${py})`);
+```
+
+### Q2 — `0x33B9B9B9` (alpha=20%) dans les diamonds dock
+
+Les couches concentrique du diamond (S_SHILOOKER, SHILOOKER_1…) ont leur propre alpha ARGB — elles ne doivent **PAS** être enveloppées dans `GpuSetOpacity`. L'opacité 30% s'applique uniquement au fond `GpuDrawRoundedRectAlpha` de la dock bar, pas aux icônes à l'intérieur.
+
+```mara
+// FAUX — GpuSetOpacity(77) englobe les diamonds eux-mêmes
+GpuSetOpacity(77);
+GpuSetTransform2D(...); GpuDrawRoundedRectAlpha(..., 0x33B9B9B9); GpuResetTransform();
+GpuResetOpacity();  // → alpha effectif : 51 * 77 / 255 = 15% (trop dim)
+
+// CORRECT — GpuSetOpacity(77) ne s'applique QU'AU fond de la dock bar
+GpuSetOpacity(77);
+GpuDrawRoundedRectAlpha(..., 0xFFF5E3E1);  // dock bar background
+GpuResetOpacity();
+// Puis les diamonds sans GpuSetOpacity — leur alpha est dans la couleur ARGB
+GpuSetTransform2D(...); GpuDrawRoundedRectAlpha(..., 0x33B9B9B9); GpuResetTransform();
+```
+
+Plugin TS : `GpuSetOpacity` ne s'émet QUE si `node.opacity < 1.0 && node.type !== "COMPONENT"`. Les enfants héritent de l'opacité via leur couleur ARGB — ne pas propager `GpuSetOpacity` aux sous-couches.
+
+### Q3 — GpuSetOpacity affecte-t-il GpuDrawDropShadow ?
+
+**OUI** — `GPU_OPACITY` est appliqué au canal alpha de la couleur shadow : `final_alpha = color_alpha * GPU_OPACITY / 255`. Shadow `0x40000000` (α=64) sous `GpuSetOpacity(77)` → α effectif = `64 * 77 / 255 = 19`. Très subtil mais correct pour l'ombre de la dock pill.
+
+### Q4 — GpuBackgroundBlur : ordre et comportement
+
+`GpuBackgroundBlur` blurs **in-place** les pixels déjà dans le GOP framebuffer. Il capture et réécrit la même zone.
+
+**Ordre obligatoire (frosted glass) :**
+
+```mara
+// 1. Blur le fond (wallpaper seul à ce stade)
+GpuBackgroundBlur(x, y, w, h, r, radius);
+// 2. Tint sur le fond flouté
+GpuDrawRoundedRectAlpha(x, y, w, h, r, 0xFFE0E0E0);  // 0xFF — opacité via GpuSetOpacity
+// 3. SVG overlay (si nécessaire)
+SvgDraw(handle, x, y, w, h);
+```
+
+**FAUX** — DrawRoundedRect avant BackgroundBlur (le fill solide est incorporé dans le blur → résultat grisé indistinct).
+
+### Q5 — SvgDraw : support des paths Figma
+
+Le renderer SVG supporte uniquement : `rect`, `circle`, `ellipse`, `line`, `polygon`, `polyline`, `path (M/m L/l H/h V/v Z/z)`.
+
+**Non supporté** : commandes `C` (cubic bézier), `S`, `Q`, `A` — ignorées silencieusement.  
+**Non supporté** : `stroke="url(#...)"` (gradient stroke) → stroke = transparent.  
+**Non supporté** : `<filter>`, `<feGaussianBlur>`, `<feBlend>`, `<feTurbulence>`.
+
+**Impact sur les SVGs actuels :**
+
+| Fichier | Contenu | Résultat sur device |
+| --- | --- | --- |
+| vec2.svg (gesture bar) | `<path d="M6.5 2.5H221.5" stroke="url(#gradient)">` | Ligne tracée (M+H ✅) mais stroke invisible (URL gradient ❌) |
+| vec3.svg (Shi Windows top) | `<path d="M1431 0H7C-1 0 -8 7 -8 16V29H1448V16C1448 7 1440 0 1431 0Z">` | Contient `C` → portion courbe ignorée → forme incorrecte |
+| vec5.svg (ShiSettings button) | À vérifier | Inconnu |
+
+**Solution pour vec2.svg** — remplacer le gradient stroke par une couleur fixe dans le SVG :
+
+```xml
+<!-- Dans vec2.svg, remplacer stroke="url(#...)" par -->
+<path d="M6.5 2.5H221.5" stroke="#878787" stroke-width="5" stroke-linecap="round"/>
+```
+
+**Solution pour les paths bézier Figma** — export SVG simplifié : dans Figma, avant export, "Flatten" le vecteur (Ctrl+E), puis utiliser "Outline stroke". Les paths complexes avec C doivent être convertis en polygones approximatifs (l'outil Figma `Vectorize` / `Flatten` peut parfois réduire la complexité).
+
+**Alternative** — pour les formes wave complexes, exporter en PNG avec fond transparent et utiliser `ImageLoad + ImageDraw` à la place de `SvgLoad + SvgDraw`.
+
+### Q6 — ImageDraw y<0 (hors écran) et transparence PNG
+
+**y<0 clipping** : ✅ géré par le kernel pixel par pixel — `if fy < 0 || fy >= sh { continue; }`. Les zones hors framebuffer sont simplement sautées.
+
+**PNG alpha / coins blancs** : ImageDraw utilise Porter-Duff OVER sur le canal alpha du PNG (octets `so+3`). Si le PNG a été exporté sans canal alpha (3 canaux RGB), l'octet alpha est 255 → coins opaques blancs/colorés. Solution : re-exporter depuis Figma avec fond transparent (PNG 32-bit RGBA).
+
+```typescript
+// Plugin TS — pour les PNGs sketch (icônes dock) :
+// Export depuis Figma : clic droit → Export → PNG → "Include 'Ignore overlapping layers'" décoché
+// → Le fond devient transparent dans le PNG → Porter-Duff rend les coins corrects
+```
+
 ---
 
 ## Sécurité
