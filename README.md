@@ -95,7 +95,9 @@ Le framebuffer est le GOP UEFI (1440 × 1037, ARGB 32 bpp).
 | # | Fonction | Impact si absente |
 |---|---|---|
 | 14 | `GpuDrawLinearGradient(x, y, w, h, r, angleDeg, c1, pos1, c2, pos2, stopCount)` — pos 0–1000 | Dégradés = couleur uniforme du premier stop |
-| 15 | `GpuDrawRadialGradient(x, y, w, h, cx, cy, r, color1, color2)` | Dégradés radiaux Figma incorrects |
+| 15 | `GpuDrawRadialGradient(x, y, w, h, radius, c1, pos1, c2, pos2, stopCount)` — centre = rect center, pos 0–1000 | Dégradés radiaux Figma incorrects |
+| 16 | `GpuDrawEllipse(x, y, w, h, color)` | Formes elliptiques invisibles |
+| 17 | `GpuDrawGrainNoise(x, y, w, h, radius, color, grainSize)` — hash déterministe | Effet grain absent (navbar gesture) |
 
 ### Masques et clip
 
@@ -384,6 +386,29 @@ rel op OEntry: [] [
 2. Vérification AuthARoot (SRID dans `Maraset.yaml` ↔ `RAbstractallowing.xml`)
 3. **Auto-install assets** → `SDC:/apps/<AppName>/` (avant exécution OVC)
 4. Exécution OVC via `exec_marep` (entry point `OEntry`)
+
+---
+
+## Scaling proportionnel — React Native style
+
+Le plugin Figma génère les coordonnées sur la base du design cible (ex : 1440×1024).
+À l'exécution OVC, les coordonnées sont scalées dynamiquement selon les dimensions réelles de l'écran :
+
+```mara
+let sw: <i32> = <DrvAPIInterCon***GpuGetWidth***>();
+let sh: <i32> = <DrvAPIInterCon***GpuGetHeight***>();
+let scaleW: <i32> = (sw * 1000) / 1440;
+let scaleH: <i32> = (sh * 1000) / 1024;
+var scale:  <i32> = scaleW;
+if (scaleH < scaleW) [ scale = scaleH; ];
+let offX: <i32> = (sw - (1440 * scale) / 1000) / 2;
+let offY: <i32> = (sh - (1024 * scale) / 1000) / 2;
+```
+
+**Formule coordonnée scalée :** `(v * scale + 500) / 1000` — arrondi au plus proche (round-to-nearest).
+
+Le plugin doit émettre `Math.round(v * scale / 1000)` pour toutes les valeurs numériques.
+Les dimensions design (`designW`, `designH`) sont extraites de `Maraset.yaml → metadata.design_size`.
 
 ---
 

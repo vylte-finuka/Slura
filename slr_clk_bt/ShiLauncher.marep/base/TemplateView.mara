@@ -6,141 +6,20 @@
 rel op Render: [ctx string, fnt ptr] [
     var im: <ptr> = nullptr;   // handle réutilisable — chaque ImageLoad écrase le slot
 
-    // ── Scaling proportionnel — ratio 1440×1024 préservé sur tout écran ──
+    // ── Full-screen scaling — design 1440×1024 remplit tout l'écran sans letterbox ──
     let sw: <i32> = <DrvAPIInterCon***GpuGetWidth***>();
     let sh: <i32> = <DrvAPIInterCon***GpuGetHeight***>();
-    let scaleW: <i32> = (sw * 1000) / 1440;
-    let scaleH: <i32> = (sh * 1000) / 1024;
-    var scale: <i32> = scaleW;
-    if (scaleH < scaleW) [ scale = scaleH; ];
-    let offX: <i32> = (sw - (1440 * scale) / 1000) / 2;
-    let offY: <i32> = (sh - (1024 * scale) / 1000) / 2;
+    let scaleX: <i32> = (sw * 1000) / 1440;
+    let scaleY: <i32> = (sh * 1000) / 1024;
+    // No offX/offY — design fills screen from corner to corner (x=0,y=0 → sw,sh)
 
     // ── Mara Stylesheet (équivalent StyleSheet.create) ──────────────────────
-    let S_NAVBAR_GESTURE: <i32> = 0x1AFFFFFF;
-    let S_NAVBAR_COMPONENT: <i32> = 0x4DF5E3E1;
-    let S_NAVBAR_COMPONENT_1: <i32> = 0x36F5F5F5;
-    let S_SHILOOKER___NOTIFICA: <i32> = 0xFF000000;
-    let S_SHILOOKER___NOTIFICA_1: <i32> = 0x00000000;
 
     // ── Rendu fidèle pixel-perfect extrait du design Figma (design: 1440×1024) ──
-        // [IMAGE: ShUI wallpeper leem jik]
-        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png");
-        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, (offX + (0 * scale) / 1000), (offY + (0 * scale) / 1000), ((1440 * scale) / 1000), ((1037 * scale) / 1000));
-        let _: <i32> = <DrvAPIInterCon***GpuDrawDropShadow***>((offX + (610 * scale) / 1000), (offY + (1001 * scale) / 1000), ((215 * scale) / 1000), ((5 * scale) / 1000), ((2 * scale) / 1000), 0, 4, 4, 0x40000000);
-        let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>((offX + (610 * scale) / 1000), (offY + (1001 * scale) / 1000), ((215 * scale) / 1000), ((5 * scale) / 1000), ((2 * scale) / 1000), S_NAVBAR_GESTURE);
-        let _: <i32> = <DrvAPIInterCon***GpuDrawLinearGradient***>((offX + (610 * scale) / 1000), (offY + (1001 * scale) / 1000), ((215 * scale) / 1000), ((5 * scale) / 1000), ((2 * scale) / 1000), -90, 0xFF878787, 500, 0xFFB9B9B9, 530, 2);
-        let _: <i32> = <DrvAPIInterCon***GpuDrawDropShadow***>((offX + (-14 * scale) / 1000), (offY + (0 * scale) / 1000), ((1462 * scale) / 1000), ((980 * scale) / 1000), 0, 0, 4, 4, 0x40000000);
-        let _: <i32> = <DrvAPIInterCon***GpuDrawDropShadow***>((offX + (526 * scale) / 1000), (offY + (900 * scale) / 1000), ((405 * scale) / 1000), ((80 * scale) / 1000), ((30 * scale) / 1000), 0, 4, 4, 0x40000000);
-        let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>((offX + (526 * scale) / 1000), (offY + (900 * scale) / 1000), ((405 * scale) / 1000), ((80 * scale) / 1000), ((30 * scale) / 1000), S_NAVBAR_COMPONENT);
-        let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>((offX + (526 * scale) / 1000), (offY + (900 * scale) / 1000), ((1 * scale) / 1000), ((80 * scale) / 1000), ((30 * scale) / 1000), S_NAVBAR_COMPONENT_1);
-        let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>((offX + (930 * scale) / 1000), (offY + (900 * scale) / 1000), ((1 * scale) / 1000), ((80 * scale) / 1000), ((30 * scale) / 1000), S_NAVBAR_COMPONENT_1);
-        let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>((offX + (526 * scale) / 1000), (offY + (900 * scale) / 1000), ((405 * scale) / 1000), ((1 * scale) / 1000), ((30 * scale) / 1000), S_NAVBAR_COMPONENT_1);
-        let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>((offX + (526 * scale) / 1000), (offY + (979 * scale) / 1000), ((405 * scale) / 1000), ((1 * scale) / 1000), ((30 * scale) / 1000), S_NAVBAR_COMPONENT_1);
-        // [VECTOR: Shi Windows] — frosted glass approx via GpuBackgroundBlur
-        let _: <i32> = <DrvAPIInterCon***GpuBackgroundBlur***>((offX + (-14 * scale) / 1000), (offY + (0 * scale) / 1000), ((1462 * scale) / 1000), ((892 * scale) / 1000), 0, 18);
-        // [ROTATED 46deg: ShiLooker]
-        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img2.png");
-        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, (offX + (539 * scale) / 1000), (offY + (908 * scale) / 1000), ((63 * scale) / 1000), ((63 * scale) / 1000));
-        // [ROTATED 135deg: Sluralooker icon]
-        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img3.png");
-        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, (offX + (543 * scale) / 1000), (offY + (912 * scale) / 1000), ((57 * scale) / 1000), ((57 * scale) / 1000));
-        // [VECTOR: ShiSetting windows] — frosted glass approx via GpuBackgroundBlur
-        let _: <i32> = <DrvAPIInterCon***GpuBackgroundBlur***>((offX + (569 * scale) / 1000), (offY + (2 * scale) / 1000), ((23 * scale) / 1000), ((23 * scale) / 1000), 0, 8);
-        let _: <i32> = <DrvAPIInterCon***GpuDrawRect***>((offX + (604 * scale) / 1000), (offY + (7 * scale) / 1000), ((209 * scale) / 1000), ((14 * scale) / 1000), S_SHILOOKER___NOTIFICA);
-        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>((offX + (604 * scale) / 1000), (offY + (7 * scale) / 1000), ((209 * scale) / 1000), "ShiLooker  - Notifications & Widgets", S_SHILOOKER___NOTIFICA, S_SHILOOKER___NOTIFICA_1, fnt, ((12 * scale) / 1000), 0);
-        // [ROTATED 46deg: ShiDialer]
-        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img4.png");
-        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, (offX + (602 * scale) / 1000), (offY + (910 * scale) / 1000), ((63 * scale) / 1000), ((63 * scale) / 1000));
-        // [ROTATED 135deg: ShiDialer sketch]
-        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img5.png");
-        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, (offX + (600 * scale) / 1000), (offY + (908 * scale) / 1000), ((68 * scale) / 1000), ((68 * scale) / 1000));
-        // [ROTATED 46deg: ShiMessages]
-        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img6.png");
-        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, (offX + (665 * scale) / 1000), (offY + (908 * scale) / 1000), ((63 * scale) / 1000), ((63 * scale) / 1000));
-        // [IMAGE: ShiMessages sketch]
-        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img7.png");
-        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, (offX + (667 * scale) / 1000), (offY + (910 * scale) / 1000), ((60 * scale) / 1000), ((60 * scale) / 1000));
-        // [ROTATED 90deg: ShiContacts]
-        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img8.png");
-        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, (offX + (728 * scale) / 1000), (offY + (908 * scale) / 1000), ((63 * scale) / 1000), ((63 * scale) / 1000));
-        // [ROTATED 46deg: ShiBrowser]
-        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img9.png");
-        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, (offX + (791 * scale) / 1000), (offY + (908 * scale) / 1000), ((63 * scale) / 1000), ((63 * scale) / 1000));
-        // [IMAGE: ShiBrowser sketch]
-        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img10.png");
-        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, (offX + (796 * scale) / 1000), (offY + (915 * scale) / 1000), ((54 * scale) / 1000), ((49 * scale) / 1000));
-        // [ROTATED 46deg: ShiSettings]
-        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img11.png");
-        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, (offX + (854 * scale) / 1000), (offY + (908 * scale) / 1000), ((63 * scale) / 1000), ((63 * scale) / 1000));
-        // [IMAGE: ShiSettings sketch]
-        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img12.png");
-        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, (offX + (856 * scale) / 1000), (offY + (910 * scale) / 1000), ((60 * scale) / 1000), ((60 * scale) / 1000));
-        // [ROTATED -90deg: ic_sysbar_windows_increase]
-        let _: <i32> = <DrvAPIInterCon***GpuSetOpacity***>(79);
-        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img13.png");
-        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, (offX + (1362 * scale) / 1000), (offY + (0 * scale) / 1000), ((34 * scale) / 1000), ((34 * scale) / 1000));
-        let _: <i32> = <DrvAPIInterCon***GpuResetOpacity***>();
-        // [ROTATED 90deg: ic_sysbar_windows_increase]
-        let _: <i32> = <DrvAPIInterCon***GpuSetOpacity***>(79);
-        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img14.png");
-        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, (offX + (1373 * scale) / 1000), (offY + (0 * scale) / 1000), ((34 * scale) / 1000), ((34 * scale) / 1000));
-        let _: <i32> = <DrvAPIInterCon***GpuResetOpacity***>();
-        // [IMAGE: ic_sysbar_windows_increase]
-        let _: <i32> = <DrvAPIInterCon***GpuSetOpacity***>(79);
-        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img15.png");
-        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, (offX + (1368 * scale) / 1000), (offY + (0 * scale) / 1000), ((34 * scale) / 1000), ((34 * scale) / 1000));
-        let _: <i32> = <DrvAPIInterCon***GpuResetOpacity***>();
-        // [ROTATED 180deg: ic_sysbar_windows_increase]
-        let _: <i32> = <DrvAPIInterCon***GpuSetOpacity***>(79);
-        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img16.png");
-        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, (offX + (1368 * scale) / 1000), (offY + (4 * scale) / 1000), ((34 * scale) / 1000), ((34 * scale) / 1000));
-        let _: <i32> = <DrvAPIInterCon***GpuResetOpacity***>();
-        // [ROTATED 180deg: ic_sysbar_windows_increase]
-        let _: <i32> = <DrvAPIInterCon***GpuSetOpacity***>(79);
-        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img17.png");
-        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, (offX + (1369 * scale) / 1000), (offY + (0 * scale) / 1000), ((34 * scale) / 1000), ((34 * scale) / 1000));
-        let _: <i32> = <DrvAPIInterCon***GpuResetOpacity***>();
-        // [ROTATED 90deg: ic_sysbar_windows_increase]
-        let _: <i32> = <DrvAPIInterCon***GpuSetOpacity***>(79);
-        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img18.png");
-        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, (offX + (1375 * scale) / 1000), (offY + (0 * scale) / 1000), ((34 * scale) / 1000), ((34 * scale) / 1000));
-        let _: <i32> = <DrvAPIInterCon***GpuResetOpacity***>();
-        // [IMAGE: ic_sysbar_windows_reduce]
-        let _: <i32> = <DrvAPIInterCon***GpuSetOpacity***>(79);
-        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img19.png");
-        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, (offX + (1323 * scale) / 1000), (offY + (0 * scale) / 1000), ((60 * scale) / 1000), ((60 * scale) / 1000));
-        let _: <i32> = <DrvAPIInterCon***GpuResetOpacity***>();
-        // [ROTATED 45deg: ic_sysbar_windows_close]
-        let _: <i32> = <DrvAPIInterCon***GpuSetOpacity***>(79);
-        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img20.png");
-        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, (offX + (1381 * scale) / 1000), (offY + (0 * scale) / 1000), ((85 * scale) / 1000), ((85 * scale) / 1000));
-        let _: <i32> = <DrvAPIInterCon***GpuResetOpacity***>();
-        // [ROTATED -45deg: ic_sysbar_windows_close]
-        let _: <i32> = <DrvAPIInterCon***GpuSetOpacity***>(79);
-        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img21.png");
-        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, (offX + (1378 * scale) / 1000), (offY + (0 * scale) / 1000), ((85 * scale) / 1000), ((85 * scale) / 1000));
-        let _: <i32> = <DrvAPIInterCon***GpuResetOpacity***>();
-        // [ROTATED 164deg: ShiMouse sketch]
-        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img22.png");
-        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, (offX + (180 * scale) / 1000), (offY + (360 * scale) / 1000), ((38 * scale) / 1000), ((38 * scale) / 1000));
+        // ── Background pixel-perfect (Figma pre-rendered 1440×1024) ──
+        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/bg.png");
+        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, 0, 0, sw, sh);
 
-    // Hotspots prototype (TouchGetEvent = no-op en UEFI — pour usage futur)
-    var _state1: <i32> = 0;
-    var _state2: <i32> = 0;
-    let touch: <i32> = <DrvAPIInterCon***TouchGetEvent***>();
-    if (touch != 0) [
-        let tx: <i32> = touch & 0xFFFF;
-        let ty: <i32> = (touch >> 16) & 0xFFFF;
-    // Hotspot: ShiDialer (600,908 68x68)
-    if (tx >= 600 && tx <= 668 && ty >= 908 && ty <= 976) [
-    log: "tap ShiDialer"; _state1 = 1;
-    ];
-    // Hotspot: ic_sysbar_windows_close (1378,-26 88x85)
-    if (tx >= 1378 && tx <= 1466 && ty >= -26 && ty <= 59) [
-    log: "tap ic_sysbar_windows_close"; _state2 = 1;
-    ];
-    ];
 
     // GpuFlushRenderContext retourne -1 en UEFI → sortie propre (no busy loop)
     let gpuResult: <i32> = <DrvAPIInterCon***GpuFlushRenderContext***>(ctx);

@@ -282,11 +282,11 @@ rel op GpuDrawRoundedRectSolid: [x i32, y i32, width i32, height i32, radius i32
 
 
 // ─────────────────────────────────────────────────────────────────────────────
-// GpuDrawRoundedRectAlpha – conservé pour hardware réel (PtrWrite32At + flush manuel).
-// NE PAS utiliser sous QEMU/OVMF : le WC-MMIO GOP ne flush pas sans mfence.
+// GpuDrawRoundedRectAlpha – canal alpha de la couleur + GPU_OPACITY + transform.
+// Route vers le handler kernel qui respecte les trois (alpha, opacity, transform).
 // ─────────────────────────────────────────────────────────────────────────────
 rel op GpuDrawRoundedRectAlpha: [x i32, y i32, width i32, height i32, radius i32, color i32] [
-    ret <DrvAPIInterCon***GpuDrawRoundedRectSolid***>(x, y, width, height, radius, color);
+    ret <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(x, y, width, height, radius, color);
 ];
 
 
@@ -360,8 +360,8 @@ rel op GpuDrawLinearGradient: [x i32, y i32, w i32, h i32, r i32, angleDeg i32, 
     ret <DrvAPIInterCon***GpuDrawLinearGradient***>(x, y, w, h, r, angleDeg, stop1Color, stop1Pos, stop2Color, stop2Pos, stopCount);
 ];
 
-rel op GpuDrawRadialGradient: [x i32, y i32, w i32, h i32, cx i32, cy i32, r i32, color1 i32, color2 i32] [
-    ret <DrvAPIInterCon***GpuDrawRadialGradient***>(x, y, w, h, cx, cy, r, color1, color2);
+rel op GpuDrawRadialGradient: [x i32, y i32, w i32, h i32, radius i32, color1 i32, pos1 i32, color2 i32, pos2 i32, stopCount i32] [
+    ret <DrvAPIInterCon***GpuDrawRadialGradient***>(x, y, w, h, radius, color1, pos1, color2, pos2, stopCount);
 ];
 
 rel op GpuDrawDropShadow: [x i32, y i32, w i32, h i32, cornerRadius i32, offsetX i32, offsetY i32, blurRadius i32, color i32] [
@@ -430,6 +430,14 @@ rel op SvgDraw: [svg ptr, x i32, y i32, w i32, h i32] [
 
 rel op SvgFree: [svg ptr] [
     ret <DrvAPIInterCon***SvgFree***>(svg);
+];
+
+rel op GpuDrawEllipse: [x i32, y i32, w i32, h i32, color i32] [
+    ret <DrvAPIInterCon***GpuDrawEllipse***>(x, y, w, h, color);
+];
+
+rel op GpuDrawGrainNoise: [x i32, y i32, w i32, h i32, radius i32, color i32, grainSize i32] [
+    ret <DrvAPIInterCon***GpuDrawGrainNoise***>(x, y, w, h, radius, color, grainSize);
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────

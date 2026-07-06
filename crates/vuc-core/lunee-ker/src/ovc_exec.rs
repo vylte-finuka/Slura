@@ -25,8 +25,10 @@ static mut FONT_WOFF_OVC:    Option<Vec<u8>> = None;
 static mut SRFS_CACHE: [Option<(String, Vec<u8>)>; 8] = [None, None, None, None, None, None, None, None];
 
 // Cache d'images décodées (PNG → RGBA).  handle = index+1 (0 = erreur).
-// 26 slots — couvre img1..img26 du plugin Figma ShiLauncher.
-static mut IMAGE_CACHE: [Option<(u32, u32, Vec<u8>)>; 26] = [None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None];
+// 8 slots avec éviction LRU — ImageLoad inline juste avant ImageDraw.
+static mut IMAGE_CACHE: [Option<(u32, u32, Vec<u8>)>; 8] = [None, None, None, None, None, None, None, None];
+static mut IMAGE_CACHE_AGE:  [u32; 8] = [0, 0, 0, 0, 0, 0, 0, 0];
+static mut IMAGE_CACHE_TICK: u32 = 0;
 
 // Handles UEFI pour le chargement à la demande — initialisés par render_from_marep
 static mut UEFI_ST_PTR:     *mut core::ffi::c_void = core::ptr::null_mut();
@@ -2429,17 +2431,21 @@ fn dispatch(
         "DrvAPIInterCon___GpuGetWidth___"  => ctx.width  as i64,
         "DrvAPIInterCon___GpuGetHeight___" => ctx.height as i64,
 
-        // GpuFill(color_as_ptr) — remplit tout le framebuffer
+        // GpuFill(color_argb) — remplit tout le framebuffer (respecte GPU_OPACITY)
         "DrvAPIInterCon___GpuFill___" => {
             unsafe { GPU_FILLS += 1; }
             serial_log(b"[GPU] GpuFill\r\n");
             if args.len() >= 1 {
-                let color = args[0] as u32;
+                let c  = args[0] as u32;
+                let sr = (c >> 16) & 0xFF;
+                let sg = (c >>  8) & 0xFF;
+                let sb =  c        & 0xFF;
+                let sa = (c >> 24) & 0xFF;
                 let fb    = ctx.fb;
                 let total = (ctx.stride * ctx.height) as usize;
                 if !fb.is_null() {
                     for i in 0..total {
-                        unsafe { fb.add(i).write_volatile(color); }
+                        unsafe { gpu_write_pixel(fb, i, sr, sg, sb, sa); }
                     }
                 }
             }
@@ -2450,18 +2456,25 @@ fn dispatch(
         "DrvAPIInterCon___GpuDrawRect___" => {
             unsafe { GPU_RECTS += 1; }
             if args.len() >= 5 {
-                let x     = args[0] as i32;
-                let y     = args[1] as i32;
-                let w     = args[2] as i32;
-                let h     = args[3] as i32;
-                let color = args[4] as u32;
-                let fb    = ctx.fb;
-                let s     = ctx.stride;
+                let x  = args[0] as i32;
+                let y  = args[1] as i32;
+                let w  = args[2] as i32;
+                let h  = args[3] as i32;
+                let c  = args[4] as u32;
+                let sr = (c >> 16) & 0xFF;
+                let sg = (c >>  8) & 0xFF;
+                let sb =  c        & 0xFF;
+                let sa = (c >> 24) & 0xFF;
+                let fb = ctx.fb;
+                let s  = ctx.stride;
+                let sw = ctx.width; let sh = ctx.height;
                 if !fb.is_null() && w > 0 && h > 0 {
                     for row in 0..h {
                         for col in 0..w {
-                            let idx = ((y + row) * s + x + col) as usize;
-                            unsafe { fb.add(idx).write_volatile(color); }
+                            let (fx, fy) = unsafe { gpu_transform_point(x + col, y + row) };
+                            if fx < 0 || fx >= sw || fy < 0 || fy >= sh { continue; }
+                            let idx = (fy * s + fx) as usize;
+                            unsafe { gpu_write_pixel(fb, idx, sr, sg, sb, sa); }
                         }
                     }
                 }
@@ -2477,10 +2490,15 @@ fn dispatch(
                 let w      = args[2] as i32;
                 let h      = args[3] as i32;
                 let radius = args[4] as i32;
-                let color  = (args[5] as u32) | 0xFF000000;
+                let c      = args[5] as u32;
+                let sr     = (c >> 16) & 0xFF;
+                let sg     = (c >>  8) & 0xFF;
+                let sb     =  c        & 0xFF;
+                let sa     = 0xFF_u32; // Solid = opaque (GPU_OPACITY scale appliqué dans gpu_write_pixel)
                 let fb     = ctx.fb;
                 let s      = ctx.stride;
                 let r2     = radius * radius;
+                let sw = ctx.width; let sh = ctx.height;
                 if !fb.is_null() && w > 0 && h > 0 {
                     for row in 0..h {
                         let et  = radius - row;
@@ -2491,8 +2509,10 @@ fn dispatch(
                             let er  = col - (w - radius) + 1;
                             let cdx = if el > 0 { el } else if er > 0 { er } else { 0 };
                             if cdx > 0 && cdy > 0 && cdx * cdx + cdy * cdy > r2 { continue; }
-                            let idx = ((y + row) * s + x + col) as usize;
-                            unsafe { fb.add(idx).write_volatile(color); }
+                            let (fx, fy) = unsafe { gpu_transform_point(x + col, y + row) };
+                            if fx < 0 || fx >= sw || fy < 0 || fy >= sh { continue; }
+                            let idx = (fy * s + fx) as usize;
+                            unsafe { gpu_write_pixel(fb, idx, sr, sg, sb, sa); }
                         }
                     }
                 }
@@ -2509,9 +2529,12 @@ fn dispatch(
                 let h      = args[3] as i32;
                 let radius = args[4] as i32;
                 let c      = args[5] as u32;
-                let alpha  = (c >> 24) & 0xFF;
+                // GPU_OPACITY scale : alpha_effectif = color_alpha * GPU_OPACITY / 255
+                let opa    = unsafe { GPU_OPACITY };
+                let alpha  = ((c >> 24) & 0xFF) * opa / 255;
                 let fb = ctx.fb;
                 let s  = ctx.stride;
+                let sw = ctx.width; let sh = ctx.height;
                 if alpha > 0 && !fb.is_null() && w > 0 && h > 0 {
                     let r2 = radius * radius;
                     let sr = ((c >> 16) & 0xFF) as u32;
@@ -2527,7 +2550,9 @@ fn dispatch(
                             let er  = col - (w - radius) + 1;
                             let cdx = if el > 0 { el } else if er > 0 { er } else { 0 };
                             if cdx > 0 && cdy > 0 && cdx * cdx + cdy * cdy > r2 { continue; }
-                            let idx = ((y + row) * s + x + col) as usize;
+                            let (fx, fy) = unsafe { gpu_transform_point(x + col, y + row) };
+                            if fx < 0 || fx >= sw || fy < 0 || fy >= sh { continue; }
+                            let idx = (fy * s + fx) as usize;
                             let dst = unsafe { fb.add(idx).read_volatile() };
                             let db  = (dst        & 0xFF) as u32;
                             let dg  = ((dst >>  8) & 0xFF) as u32;
@@ -2791,21 +2816,25 @@ fn dispatch(
             serial_log(b"[IMG] decode PNG\r\n");
             match png_decode_rgba(&raw_owned) {
                 Some((w, h, pixels)) => {
-                    // Trouver le premier slot libre
-                    let slot = unsafe {
-                        IMAGE_CACHE.iter().position(|s| s.is_none())
+                    // Slot libre ou LRU eviction (8 slots max)
+                    let idx = unsafe {
+                        match IMAGE_CACHE.iter().position(|s| s.is_none()) {
+                            Some(i) => i,
+                            None => {
+                                let mut oldest = 0usize;
+                                for i in 1..8 { if IMAGE_CACHE_AGE[i] < IMAGE_CACHE_AGE[oldest] { oldest = i; } }
+                                IMAGE_CACHE[oldest] = None;
+                                oldest
+                            }
+                        }
                     };
-                    match slot {
-                        Some(idx) => {
-                            unsafe { IMAGE_CACHE[idx] = Some((w, h, pixels)); }
-                            serial_log(b"[IMG] decode OK\r\n");
-                            (idx + 1) as i64
-                        }
-                        None => {
-                            serial_log(b"[IMG] cache full\r\n");
-                            0
-                        }
+                    unsafe {
+                        IMAGE_CACHE_TICK = IMAGE_CACHE_TICK.wrapping_add(1);
+                        IMAGE_CACHE_AGE[idx] = IMAGE_CACHE_TICK;
+                        IMAGE_CACHE[idx] = Some((w, h, pixels));
                     }
+                    serial_log(b"[IMG] decode OK\r\n");
+                    (idx + 1) as i64
                 }
                 None => { serial_log(b"[IMG] decode fail\r\n"); 0 }
             }
@@ -2817,7 +2846,7 @@ fn dispatch(
         "DrvAPIInterCon___ImageDraw___" => {
             if args.len() < 3 { return 0; }
             let handle = args[0] as usize;
-            if handle == 0 || handle > 26 { return 0; }
+            if handle == 0 || handle > 8 { return 0; }
             let dst_x = args[1] as i32;
             let dst_y = args[2] as i32;
             let dst_w = if args.len() >= 4 && args[3] > 0 { args[3] as u32 } else { 0 };
@@ -2846,7 +2875,9 @@ fn dispatch(
                     let r  = unsafe { *pix_ptr.add(so)     } as u32;
                     let g  = unsafe { *pix_ptr.add(so + 1) } as u32;
                     let bv = unsafe { *pix_ptr.add(so + 2) } as u32;
-                    let a  = unsafe { *pix_ptr.add(so + 3) } as u32;
+                    let raw_a = unsafe { *pix_ptr.add(so + 3) } as u32;
+                    let opa = unsafe { GPU_OPACITY };
+                    let a = raw_a * opa / 255;
                     let di = (fy * s + fx) as usize;
                     if a == 255 {
                         unsafe { fb.add(di).write_volatile(0xFF000000 | (r << 16) | (g << 8) | bv); }
@@ -2881,14 +2912,21 @@ fn dispatch(
             unsafe { GPU_BLEND_MODE = 0; } 0
         },
 
-        // ── GpuSetTransform2D(a,b,c,d,tx,ty) — matrice affine 2D ─────────────
-        // a,b,c,d en fixed-point ×10000 (identité : a=d=10000, b=c=0).
-        // tx,ty en pixels (translation directe).
+        // ── GpuSetTransform2D(cos, sin, neg_sin, cos, pivot_x, pivot_y) ─────────
+        // args 4/5 = pivot autour duquel la rotation est appliquée (pas une translation brute).
+        // Conversion pivot → translation affine :
+        //   tx = (px*(10000-cos) + py*sin) / 10000
+        //   ty = (py*(10000-cos) - px*sin) / 10000
         "DrvAPIInterCon___GpuSetTransform2D___" => {
             if args.len() >= 6 {
+                let cos_ = args[0] as i32;
+                let sin_ = args[1] as i32;
+                let px   = args[4] as i32;
+                let py   = args[5] as i32;
+                let tx   = (px * (10000 - cos_) + py * sin_) / 10000;
+                let ty   = (py * (10000 - cos_) - px * sin_) / 10000;
                 unsafe {
-                    GPU_TRANSFORM = [args[0] as i32, args[1] as i32, args[2] as i32,
-                                     args[3] as i32, args[4] as i32, args[5] as i32];
+                    GPU_TRANSFORM = [cos_, sin_, -sin_, cos_, tx, ty];
                     GPU_TRANSFORM_ACTIVE = true;
                 }
             }
@@ -2906,7 +2944,7 @@ fn dispatch(
         "DrvAPIInterCon___GpuDrawRotatedImage___" => {
             if args.len() < 6 { return 0; }
             let handle = args[0] as usize;
-            if handle == 0 || handle > 26 { return 0; }
+            if handle == 0 || handle > 8 { return 0; }
             let cx = args[1] as i32; let cy = args[2] as i32;
             let dw = args[3] as i32; let dh = args[4] as i32;
             let ang = args[5] as i32;
@@ -3009,15 +3047,17 @@ fn dispatch(
             0
         },
 
-        // ── GpuDrawRadialGradient(x,y,w,h, cx,cy,r, color1,color2) ──────────
+        // ── GpuDrawRadialGradient(x,y,w,h,radius,c1,p1,c2,p2,num_stops) ──────
         "DrvAPIInterCon___GpuDrawRadialGradient___" => {
-            if args.len() < 9 { return 0; }
+            if args.len() < 10 { return 0; }
             let gx=args[0] as i32; let gy=args[1] as i32; let gw=args[2] as i32; let gh=args[3] as i32;
-            let c1=args[7] as u32; let c2=args[8] as u32;
+            let mr=(args[4] as i32).max(1);
+            let c1=args[5] as u32; let p1=args[6] as i32;
+            let c2=args[7] as u32; let p2=args[8] as i32;
+            let gcx=gx+gw/2; let gcy=gy+gh/2;
+            let range=(p2-p1).max(1);
             let fb=ctx.fb; let s=ctx.stride; let sw=ctx.width; let sh=ctx.height;
             if fb.is_null()||gw<=0||gh<=0 { return 0; }
-            let gcx=args[4] as i32; let gcy=args[5] as i32;
-            let mr=(args[6] as i32).max(1);
             let (a1,r1,g1,b1)=((c1>>24)&0xFF,(c1>>16)&0xFF,(c1>>8)&0xFF,c1&0xFF);
             let (a2,r2,g2,b2)=((c2>>24)&0xFF,(c2>>16)&0xFF,(c2>>8)&0xFF,c2&0xFF);
             let (a1,r1,g1,b1)=(a1 as i32,r1 as i32,g1 as i32,b1 as i32);
@@ -3028,7 +3068,8 @@ fn dispatch(
                     let fx=gx+px; if fx<0||fx>=sw { continue; }
                     let dx=(fx-gcx) as i64; let dy=(fy-gcy) as i64;
                     let d=isqrt((dx*dx+dy*dy) as u32) as i32;
-                    let t=(d*1000/mr).min(1000); let it=1000-t;
+                    let t=((d*1000/mr)-p1).max(0).min(range)*1000/range;
+                    let it=1000-t;
                     let nr=((r1*it+r2*t)/1000) as u32; let ng=((g1*it+g2*t)/1000) as u32;
                     let nb=((b1*it+b2*t)/1000) as u32; let na=((a1*it+a2*t)/1000) as u32;
                     unsafe { gpu_write_pixel(fb,(fy*s+fx) as usize,nr,ng,nb,na); }
@@ -3051,7 +3092,8 @@ fn dispatch(
             let fb=ctx.fb; let s=ctx.stride; let sw=ctx.width; let sh=ctx.height;
             if fb.is_null() { return 0; }
             let sx=x+ox; let sy_=y+oy; let sw2=w; let sh2=h;
-            let alpha=(c>>24)&0xFF; let sr_=(c>>16)&0xFF; let sg_=(c>>8)&0xFF; let sb_=c&0xFF;
+            let opa=unsafe{GPU_OPACITY};
+            let alpha=((c>>24)&0xFF)*opa/255; let sr_=(c>>16)&0xFF; let sg_=(c>>8)&0xFF; let sb_=c&0xFF;
             let r2=cr*cr; let ia=255-alpha;
             for py in 0..sh2 {
                 let fy=sy_+py; if fy<0||fy>=sh { continue; }
@@ -3141,20 +3183,51 @@ fn dispatch(
             let x=args[0] as i32; let y=args[1] as i32; let w=args[2] as i32; let h=args[3] as i32;
             let rtl=args[4] as i32; let rtr=args[5] as i32; let rbl=args[6] as i32; let rbr=args[7] as i32;
             let c=args[8] as u32;
-            let alpha=(c>>24)&0xFF; let sr_=(c>>16)&0xFF; let sg_=(c>>8)&0xFF; let sb_=c&0xFF;
+            let opa=unsafe{GPU_OPACITY};
+            let alpha=((c>>24)&0xFF)*opa/255;
+            let sr_=(c>>16)&0xFF; let sg_=(c>>8)&0xFF; let sb_=c&0xFF;
             let fb=ctx.fb; let s=ctx.stride; let sw=ctx.width; let sh=ctx.height;
             if fb.is_null()||alpha==0||w<=0||h<=0 { return 0; }
             let ia=255-alpha;
             for py in 0..h {
-                let fy=y+py; if fy<0||fy>=sh { continue; }
                 for px in 0..w {
-                    let fx=x+px; if fx<0||fx>=sw { continue; }
                     let r=if py<h/2{if px<w/2{rtl}else{rtr}}else{if px<w/2{rbl}else{rbr}};
                     if r>0 {
                         let cdx=if px<r{r-px}else if px>=w-r{px-(w-r-1)}else{0};
                         let cdy=if py<r{r-py}else if py>=h-r{py-(h-r-1)}else{0};
                         if cdx>0&&cdy>0&&cdx*cdx+cdy*cdy>r*r { continue; }
                     }
+                    let (fx,fy)=unsafe{gpu_transform_point(x+px,y+py)};
+                    if fx<0||fx>=sw||fy<0||fy>=sh { continue; }
+                    let di=(fy*s+fx) as usize;
+                    let dst=unsafe{fb.add(di).read_volatile()};
+                    let db=(dst&0xFF) as u32; let dg=((dst>>8)&0xFF) as u32; let dr=((dst>>16)&0xFF) as u32;
+                    let nr=(sr_*alpha+dr*ia)/255; let ng=(sg_*alpha+dg*ia)/255; let nb=(sb_*alpha+db*ia)/255;
+                    unsafe{fb.add(di).write_volatile(0xFF000000|(nr<<16)|(ng<<8)|nb);}
+                }
+            }
+            0
+        },
+
+        // ── GpuDrawEllipse(x,y,w,h,color) ────────────────────────────────────
+        "DrvAPIInterCon___GpuDrawEllipse___" => {
+            if args.len() < 5 { return 0; }
+            let x=args[0] as i32; let y=args[1] as i32; let w=args[2] as i32; let h=args[3] as i32;
+            let c=args[4] as u32;
+            let opa=unsafe{GPU_OPACITY};
+            let alpha=((c>>24)&0xFF)*opa/255;
+            let sr_=(c>>16)&0xFF; let sg_=(c>>8)&0xFF; let sb_=c&0xFF;
+            let fb=ctx.fb; let s=ctx.stride; let sw=ctx.width; let sh=ctx.height;
+            if fb.is_null()||alpha==0||w<=0||h<=0 { return 0; }
+            let ia=255-alpha; let w64=w as i64; let h64=h as i64;
+            let wh2=w64*w64*h64*h64;
+            for py in 0..h {
+                let dy=2*py as i64-h64+1;
+                for px in 0..w {
+                    let dx=2*px as i64-w64+1;
+                    if dx*dx*h64*h64+dy*dy*w64*w64 > wh2 { continue; }
+                    let (fx,fy)=unsafe{gpu_transform_point(x+px,y+py)};
+                    if fx<0||fx>=sw||fy<0||fy>=sh { continue; }
                     let di=(fy*s+fx) as usize;
                     let dst=unsafe{fb.add(di).read_volatile()};
                     let db=(dst&0xFF) as u32; let dg=((dst>>8)&0xFF) as u32; let dr=((dst>>16)&0xFF) as u32;
@@ -3218,6 +3291,40 @@ fn dispatch(
                     let db=(dst&0xFF) as u32; let dg=((dst>>8)&0xFF) as u32; let dr=((dst>>16)&0xFF) as u32;
                     let nnr=(cr_*na+dr*ia)/255; let nng=(cg_*na+dg*ia)/255; let nnb=(cb_*na+db*ia)/255;
                     unsafe{fb.add(di).write_volatile(0xFF000000|(nnr<<16)|(nng<<8)|nnb);}
+                }
+            }
+            0
+        },
+
+        // ── GpuDrawGrainNoise(x,y,w,h,radius,color,grain_size) ───────────────
+        // hash = (px*1664525 ^ py*1013904223) & 0xFF  →  alpha = color_alpha * hash / 255
+        "DrvAPIInterCon___GpuDrawGrainNoise___" => {
+            if args.len() < 7 { return 0; }
+            let x=args[0] as i32; let y=args[1] as i32; let w=args[2] as i32; let h=args[3] as i32;
+            let cr=args[4] as i32; let c=args[5] as u32; let gs=(args[6] as i32).max(1);
+            let opa=unsafe{GPU_OPACITY};
+            let alpha=((c>>24)&0xFF)*opa/255; let sr_=(c>>16)&0xFF; let sg_=(c>>8)&0xFF; let sb_=c&0xFF;
+            let fb=ctx.fb; let s=ctx.stride; let sw=ctx.width; let sh=ctx.height;
+            if fb.is_null()||alpha==0||w<=0||h<=0 { return 0; }
+            let r2=cr*cr;
+            for py in 0..h {
+                let fy=y+py; if fy<0||fy>=sh { continue; }
+                for px in 0..w {
+                    let fx=x+px; if fx<0||fx>=sw { continue; }
+                    if cr>0 {
+                        let cdx=if px<cr{cr-px}else if px>=w-cr{px-(w-cr-1)}else{0};
+                        let cdy=if py<cr{cr-py}else if py>=h-cr{py-(h-cr-1)}else{0};
+                        if cdx>0&&cdy>0&&cdx*cdx+cdy*cdy>r2 { continue; }
+                    }
+                    let gpx=(px/gs) as u32; let gpy=(py/gs) as u32;
+                    let hash=(gpx.wrapping_mul(1664525)^gpy.wrapping_mul(1013904223))&0xFF;
+                    let pa=alpha*hash/255; let ia=255-pa;
+                    if pa==0 { continue; }
+                    let di=(fy*s+fx) as usize;
+                    let dst=unsafe{fb.add(di).read_volatile()};
+                    let db=(dst&0xFF) as u32; let dg=((dst>>8)&0xFF) as u32; let dr=((dst>>16)&0xFF) as u32;
+                    let nr=(sr_*pa+dr*ia)/255; let ng=(sg_*pa+dg*ia)/255; let nb=(sb_*pa+db*ia)/255;
+                    unsafe{fb.add(di).write_volatile(0xFF000000|(nr<<16)|(ng<<8)|nb);}
                 }
             }
             0
