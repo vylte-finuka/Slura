@@ -1,647 +1,1226 @@
-# Slura OS — Lunée Kernel
+# Slura OS — Lunée Kernel & Plugin Figma — Spec Pixel-Perfect
 
 **Vyft Ltd · 2026**  
-Système d'exploitation UEFI custom. Kernel `lunee-ker` en Rust `no_std` ciblant `x86_64-unknown-uefi`.  
-Langage applicatif : **Maratine** (`.mara` → OVC LLVM IR → exécuté par l'interpréteur intégré).
+Kernel UEFI `lunee-ker` · Rust `no_std` · `x86_64-unknown-uefi`  
+Langage applicatif : **Maratine** (`.mara` → OVC bytecode → interprété par le kernel)
 
 ---
 
-## Architecture
+## Table des matières
+
+1. [Architecture](#1-architecture)
+2. [Langage Mara — Référence complète](#2-langage-mara--référence-complète)
+3. [Scaling — Système de coordonnées](#3-scaling--système-de-coordonnées)
+4. [API GPU — Référence exhaustive](#4-api-gpu--référence-exhaustive)
+5. [Règles critiques pixel-perfect](#5-règles-critiques-pixel-perfect)
+6. [Pipeline d'assets Figma](#6-pipeline-dassets-figma)
+7. [Plugin TypeScript — Codegen complet](#7-plugin-typescript--codegen-complet)
+8. [Patterns UI — Recettes prêtes à l'emploi](#8-patterns-ui--recettes-prêtes-à-lemploi)
+9. [Limitations connues et contournements](#9-limitations-connues-et-contournements)
+10. [Sécurité](#10-sécurité)
+
+---
+
+## 1. Architecture
 
 ```
 slr_clk_bt/
-├── x64/amd64/esp/           ← Image ESP bootable
-│   ├── EFI/BOOT/BOOTX64.EFI ← Sélecteur de boot
-│   ├── slr_clk_bt.efi       ← Kernel Lunée (entry point UEFI)
-│   ├── sources/             ← Drivers .slul compilés
+├── x64/amd64/esp/
+│   ├── EFI/BOOT/BOOTX64.EFI     ← Sélecteur de boot UEFI
+│   ├── slr_clk_bt.efi            ← Kernel Lunée
+│   ├── sources/                  ← Drivers .slul compilés
 │   └── SDC/slu64/
-│       ├── DrivRequirment/  ← Drivers système
-│       ├── apps/            ← Applications installées
-│       └── assets/          ← Polices, images
-├── SluGpu.slul/             ← Driver GPU (Maratine + Rust HAL)
-├── SluKeyMouse.slul/        ← Driver clavier/souris
-├── SluFontConf.slul/        ← Chargeur de polices TTF
-├── SRFSMan.slul/            ← Système de fichiers SRFS
-├── SluEnvSys.slul/          ← Variables d'environnement
-├── CryptoAssetSupport.slul/ ← Wallet crypto
-└── ShiLauncher.marep/       ← Application launcher principale
+│       ├── DrivRequirment/       ← Drivers système
+│       ├── apps/                 ← Applications installées
+│       └── assets/               ← Polices, images système
+├── SluGpu.slul/                  ← Driver GPU (Mara + Rust HAL)
+├── SluKeyMouse.slul/             ← Driver clavier/souris
+├── SluFontConf.slul/             ← Chargeur polices TTF (stb_truetype)
+├── SRFSMan.slul/                 ← Système de fichiers SRFS
+├── SluEnvSys.slul/               ← Variables d'environnement
+├── CryptoAssetSupport.slul/      ← Wallet crypto
+└── ShiLauncher.marep/            ← Launcher principale
 crates/vuc-core/lunee-ker/src/
-├── ovc_exec.rs              ← Interpréteur OVC + dispatch DrvAPIInterCon
-├── kernel_runtime.rs        ← Boucle de rendu principale
-├── bundle_loader/           ← Chargeur .marep et .slul
-│   ├── marep_loader.rs      ← Auto-install assets → SDC:/apps/
-│   ├── slul_loader.rs       ← Chargeur de drivers
-│   └── zip_reader.rs        ← Décompresseur ZIP (stored + DEFLATE)
+├── ovc_exec.rs                   ← Interpréteur OVC + dispatch DrvAPIInterCon
+├── kernel_runtime.rs             ← Boucle de rendu
+└── bundle_loader/
+    ├── marep_loader.rs           ← Auto-install assets → SDC:/apps/
+    ├── slul_loader.rs            ← Chargeur drivers
+    └── zip_reader.rs             ← Décompresseur ZIP
 ```
+
+**Framebuffer GOP UEFI** : 1440 × 1037 pixels (résolution design de référence : 1440 × 1024), ARGB 32 bpp.  
+**GPU physique** : Mali-G68 MP2.
 
 ---
 
-## Build
+## 2. Langage Mara — Référence complète
 
-```powershell
-# Kernel UEFI
-cargo build -p lunee-ker --lib --target x86_64-unknown-uefi --release
+### 2.1 Types
 
-# Full pipeline (kernel + drivers + ISO)
-# → utiliser la tâche VS Code : "🚀 Full Slura build (kernel + drivers + ISO)"
-```
+| Type | Description |
+|---|---|
+| `<i32>` | Entier signé 32 bits — **seul type numérique disponible** |
+| `<ptr>` | Pointeur opaque (handles SVG, polices) |
+| `string` | Chaîne de caractères littérale |
 
----
+**Pas de float.** Toute valeur décimale doit être émise en fixed-point entier (×1000 ou ×10000 selon le contexte).
 
-## API GPU — `SluGpu.slul` / `DrvAPIInterCon`
-
-Toutes les fonctions GPU sont exposées depuis Maratine via `rel op` dans `GpuImpl.mara`  
-et dispatchées côté kernel dans `ovc_exec.rs`.  
-Le framebuffer est le GOP UEFI (1440 × 1037, ARGB 32 bpp).
-
-> **Miroir pixel-perfect Figma → Slura OS** — Mali-G68 MP2  
-> Toutes les fonctions ci-dessous sont obligatoires. Sans l'une d'elles le rendu n'est pas un miroir à 100%.
-
-### Rendu confirmé sur device (ShiXbook)
-
-| Élément | Statut | Fonctions impliquées |
-|---|---|---|
-| Wallpaper PNG plein écran | ✅ Visible | `ImageLoad` + `ImageDraw` (fast-path opaque) |
-| Dock bar frosted glass | ✅ Visible | `GpuSetOpacity(77)` + `GpuDrawRoundedRectAlpha` |
-| Dock icons losanges (6) | ✅ Visibles | `GpuSetTransform2D` pivot + `GpuDrawRoundedRectAlpha` |
-| PNG icons dans les losanges | ✅ Visibles | `ImageDraw` Porter-Duff + GPU_OPACITY |
-| Gesture bar gradient | 🔧 Partiel | `GpuDrawLinearGradient` |
-| Shi Windows SVG wave | 🔧 À implémenter | `SvgLoad` + `SvgDraw` |
-
-### Compositing
-
-| # | Fonction | Impact si absente |
-|---|---|---|
-| 1 | `ImageDraw(handle, x, y, w, h)` — Porter-Duff Over par canal : `out = (src·α + dst·(255−α)) / 255`. `handle` = `i32` retourné par `ImageLoad`. GPU_OPACITY module le canal alpha du PNG : `a = png_alpha * GPU_OPACITY / 255`. | Fond blanc sur toute image transparente |
-| 2 | `GpuSetOpacity(opacity)` / `GpuResetOpacity()` — sémantique SET (pas de stack) : `final_alpha = color_alpha * GPU_OPACITY / 255`. | `0x33B9B9B9` rendu plein au lieu de 20% transparent |
-| 3 | `GpuSetBlendMode(mode)` / `GpuResetBlendMode()` — 12 modes (0 NORMAL…11 EXCLUSION) | Calques blend mode = rendu plat incorrect |
-
-### Formes et géométrie
-
-| # | Fonction | Impact si absente |
-|---|---|---|
-| 4 | `SvgLoad(path)→ptr` / `SvgDraw(svg, x, y, w, h)` / `SvgFree(svg)` | Shi Windows, gesture bar, beziers = rectangles pleins |
-| 5 | `GpuDrawRoundedRectFull(x, y, w, h, rTL, rTR, rBL, rBR, color)` | Coins asymétriques Figma = valeur moyenne incorrecte |
-| 6 | `GpuSetTransform2D(cos, sin, neg_sin, cos, pivot_x, pivot_y)` / `GpuResetTransform()` — valeurs ×10000 ; args 4–5 = **pivot** (centre de rotation en pixels), le kernel calcule la translation affine en interne | Éléments rotatifs dessinés droits |
-
-### Effets visuels
-
-| # | Fonction | Impact si absente |
-|---|---|---|
-| 7 | `GpuBackgroundBlur(x, y, w, h, r, radius)` — capture GOP → blur σ=radius/3 → reblit | Dock pill = rectangle plat, pas de verre dépoli |
-| 8 | `GpuGaussianBlur(x, y, w, h, radius)` — blur in-place sur la région | LAYER_BLUR Figma = bords incorrectement nets |
-| 9 | `GpuDrawDropShadow(x, y, w, h, cr, offX, offY, blurR, color)` | Icônes et dock sans ombre = aspect 2D plat |
-| 10 | `GpuDrawInnerShadow(x, y, w, h, cr, offX, offY, blurR, color)` | Inner shadows Figma absentes |
-| 11 | `GpuDrawGlow(x, y, w, h, r, glowColor, glowRadius, intensity)` — SDF rounded rect + falloff linéaire | LED strip dorée Shixbook absente |
-
-### Typographie
-
-| # | Fonction | Impact si absente |
-|---|---|---|
-| 12 | `GpuDrawTextFontAlign(x, y, maxW, text, fg, bg, font, size, align)` — align : 0=left 1=center 2=right | Titres centrés Figma = alignés à gauche |
-| 13 | `GpuDrawTextFontFull(x, y, text, fg, bg, font, size, letterSp, lineH, align, deco)` — deco : 0=none 1=underline 2=strikethrough | Espacement lettres, line-height, soulignement incorrects |
-
-### Dégradés
-
-| # | Fonction | Impact si absente |
-|---|---|---|
-| 14 | `GpuDrawLinearGradient(x, y, w, h, r, angleDeg, c1, pos1, c2, pos2, stopCount)` — pos 0–1000 | Dégradés = couleur uniforme du premier stop |
-| 15 | `GpuDrawRadialGradient(x, y, w, h, radius, c1, pos1, c2, pos2, stopCount)` — centre = rect center, pos 0–1000 | Dégradés radiaux Figma incorrects |
-| 16 | `GpuDrawEllipse(x, y, w, h, color)` | Formes elliptiques invisibles |
-| 17 | `GpuDrawGrainNoise(x, y, w, h, radius, color, grainSize)` — hash déterministe | Effet grain absent (navbar gesture) |
-
-### Masques et clip
-
-| # | Fonction | Impact si absente |
-|---|---|---|
-| 18 | `GpuPushClip(x, y, w, h, r)` / `GpuPopClip()` | Contenu débordant hors des conteneurs |
-| 19 | `GpuCaptureMask(x, y, w, h)→ptr` / `GpuApplyAlphaMask(mask)` | Masques alpha Figma non appliqués |
-
-### Images
-
-| # | Fonction | Impact si absente |
-|---|---|---|
-| 18 | `GpuDrawRotatedImage(img, cx, cy, w, h, angleDeg)` | Images avec rotation dessinées droites |
-
-### Rendu de base
-
-| Fonction | Paramètres | Description |
-|---|---|---|
-| `GpuDrawRect` | `x, y, w, h, color` | Rectangle uni-couleur (ARGB) |
-| `GpuDrawRoundedRectAlpha` | `x, y, w, h, r, color` | Rectangle arrondi avec alpha |
-| `GpuDrawRoundedRectFull` | `x, y, w, h, rTL, rTR, rBL, rBR, color` | Coins arrondis par coin |
-| `GpuFlushRenderContext` | — | Flush du framebuffer GOP |
-| `GpuFill` | `color` | Remplissage écran entier |
-
-### Opacité & Blend modes
-
-| Fonction | Paramètres | Description |
-|---|---|---|
-| `GpuSetOpacity` | `opacity` (0–255) | Opacité globale pour tous les draws suivants |
-| `GpuResetOpacity` | — | Remet l'opacité à 255 |
-| `GpuSetBlendMode` | `mode` | Mode de fusion (voir table ci-dessous) |
-| `GpuResetBlendMode` | — | Remet le mode à NORMAL (0) |
-
-**Modes de fusion (`mode`)** :
-
-| Valeur | Nom | Formule |
-|---|---|---|
-| 0 | NORMAL | `src·α + dst·(1−α)` |
-| 1 | MULTIPLY | `src·dst/255` |
-| 2 | SCREEN | `1−(1−src)(1−dst)` |
-| 3 | OVERLAY | Multiply si dst < 128, Screen sinon |
-| 4 | DARKEN | `min(src, dst)` |
-| 5 | LIGHTEN | `max(src, dst)` |
-| 6 | COLOR_DODGE | `dst / (1−src)` |
-| 7 | COLOR_BURN | `1 − (1−dst) / src` |
-| 8 | HARD_LIGHT | Overlay inversé source/dest |
-| 9 | SOFT_LIGHT | Formule Pegtop |
-| 10 | DIFFERENCE | `|src − dst|` |
-| 11 | EXCLUSION | `src + dst − 2·src·dst` |
-
-### Transformation 2D
-
-| Fonction | Paramètres | Description |
-|---|---|---|
-| `GpuSetTransform2D` | `cos, sin, neg_sin, cos, pivot_x, pivot_y` | Rotation affine 2×2 (×10000) autour d'un pivot. Le kernel calcule `tx/ty` en interne : `tx = (px*(10000−cos) + py*sin) / 10000` |
-| `GpuResetTransform` | — | Remet la matrice à l'identité |
-
-Identité : `GpuSetTransform2D(10000, 0, 0, 10000, 0, 0)`.  
-Rotation 45° autour de (cx, cy) : `GpuSetTransform2D(7071, 7071, -7071, 7071, cx, cy)`.  
-Rotation 46° (dock diamonds) : `GpuSetTransform2D(6947, 7193, -7193, 6947, cx, cy)`.  
-Args 4–5 sont le **pivot** (centre de l'élément en px écran) — pas la translation Figma.  
-La transformation s'applique à tous les draws jusqu'au prochain `GpuResetTransform()`.
-
-### Images
-
-| Fonction | Paramètres | Description |
-|---|---|---|
-| `ImageLoad` | `path` | Charge un PNG depuis SRFS → `i32` handle (1–8, cache LRU). Chemin : `SDC:/apps/<App>/…` |
-| `ImageDraw` | `handle i32, x, y, w, h` | Blit nearest-neighbour + Porter-Duff Over. GPU_OPACITY appliqué au canal alpha PNG. |
-| `GpuDrawRotatedImage` | `handle i32, cx, cy, w, h, angleDeg` | Dessin d'image avec rotation (inverse mapping) |
-
-### Gradients
-
-| Fonction | Paramètres | Description |
-|---|---|---|
-| `GpuDrawLinearGradient` | `x, y, w, h, r, angleDeg, c1, pos1, c2, pos2, stopCount` | Gradient linéaire 2 stops |
-| `GpuDrawRadialGradient` | `x, y, w, h, cx, cy, r, c1, c2` | Gradient radial |
-| `GpuDrawGradientStroke` | `x, y, w, h, r, weight, stops_ptr, stopCount` | Contour avec gradient |
-
-### Effets
-
-| Fonction | Paramètres | Description |
-|---|---|---|
-| `GpuGaussianBlur` | `x, y, w, h, radius` | Flou gaussien (approximation box blur 3 passes) |
-| `GpuBackgroundBlur` | `x, y, w, h, r, radius` | Flou de fond (shape arrondie) |
-| `GpuProgressiveBlur` | `x, y, w, h, rMin, rMax` | Flou progressif du haut vers le bas |
-| `GpuDrawDropShadow` | `x, y, w, h, cr, offX, offY, blurR, color` | Ombre portée externe |
-| `GpuDrawInnerShadow` | `x, y, w, h, cr, offX, offY, blurR, color` | Ombre interne |
-
-### Clip & Masque
-
-| Fonction | Paramètres | Description |
-|---|---|---|
-| `GpuPushClip` | `x, y, w, h [, r]` | Empile une zone de clip |
-| `GpuPopClip` | — | Dépile la zone de clip courante |
-| `GpuCaptureMask` | `x, y, w, h` | Capture la région → handle masque |
-| `GpuApplyAlphaMask` | `handle` | Applique la luminance du masque comme alpha |
-
-### Bruit & Texture
-
-| Fonction | Paramètres | Description |
-|---|---|---|
-| `GpuDrawNoisePatch` | `x, y, w, h, r, alpha, seed` | Bruit gris aléatoire (Xorshift) |
-| `GpuDrawColoredNoise` | `x, y, w, h, r, alpha, seed, hue` | Bruit coloré |
-
-### Contours (strokes)
-
-| Fonction | Paramètres | Description |
-|---|---|---|
-| `GpuDrawStroke` | `x, y, w, h, r, weight, align, color` | Contour rectangle (inside/center/outside) |
-| `GpuDrawDashedStroke` | `x, y, w, h, r, weight, dash, gap, color` | Contour pointillé |
-| `GpuDrawGradientStroke` | `x, y, w, h, r, weight, stops_ptr, stopCount` | Contour dégradé |
-
-### Texte
-
-| Fonction | Paramètres | Description |
-|---|---|---|
-| `GpuDrawText` | `x, y, text, fg, bg` | Texte bitmap 8×16 (CP437) |
-| `GpuDrawTextFont` | `x, y, text, fg, bg, font, size` | Texte TTF via stb_truetype pipeline |
-| `GpuDrawTextFontAlign` | `x, y, maxW, text, fg, bg, font, size, align` | Texte TTF aligné (0=gauche, 1=centre, 2=droite) |
-| `GpuDrawTextFontFull` | `x, y, text, fg, bg, font, size, letterSp, lineH, align, deco` | Texte complet (espacement, retours, décorations) |
-
-### SVG
-
-| Fonction | Paramètres | Description |
-|---|---|---|
-| `SvgLoad` | `path` | Charge un fichier SVG depuis SRFS → handle |
-| `SvgDraw` | `handle, x, y, w, h` | Rend le SVG à l'écran (rect, circle, ellipse, line, polygon, path M/L/H/V/Z) |
-| `SvgFree` | `handle` | Libère le slot SVG |
-
-### Divers
-
-| Fonction | Paramètres | Description |
-|---|---|---|
-| `TouchGetEvent` | — | Retourne 0 (pas de touch en UEFI boot) |
-
----
-
-## Figma → Mara Bridge
-
-Le plugin Figma exporte un design vers du code Maratine exécutable nativement sur Slura OS, avec état lié aux services système réels.
-
-### Pipeline
-
-```
-Figma  →  Plugin TS  →  JSON tree  →  marai gen  →  .mara  →  marai build  →  .marep  →  Slura OS
-```
-
-### Règles de codegen obligatoires (plugin → Mara buildable)
-
-Mara n'a que des entiers (`i32`). Le plugin **doit** appliquer ces transformations avant d'émettre du code :
-
-| Source Figma | Règle de génération | Exemple |
-|---|---|---|
-| Coordonnée flottante (`570.5`) | `Math.round(v)` → `i32` | `570.5` → `571` |
-| Pivot de rotation (`pivot_x`, `pivot_y`) | Centre de l'élément en px écran — **pas** les champs `tx/ty` de la transform matrix Figma | `node.x + node.width/2` → `571` |
-| Valeur négative composée (`--7071`) | Calculer la valeur finale : `-(-7071) = 7071` | émettre `7071` |
-| Valeur `-0` | Émettre `0` | `-0` → `0` |
-| Opacité flottante (`0.30 * 255`) | `Math.round(opacity * 255)` | `0.30` → `77` |
-| `sin`/`cos` de rotation (×10000) | `Math.round(Math.cos(deg * Math.PI/180) * 10000)` | `46°` → `6947` |
-
-En TypeScript dans le plugin :
-
-```typescript
-// Utilitaires à utiliser pour toute valeur numérique émise en Mara
-const i32 = (v: number): number => Math.round(v);
-const cosFixed = (deg: number): number => Math.round(Math.cos(deg * Math.PI / 180) * 10000);
-const sinFixed = (deg: number): number => Math.round(Math.sin(deg * Math.PI / 180) * 10000);
-
-// Matrice 2D pour une rotation autour du centre de l'élément (pivot).
-// pivotX/Y = centre de l'élément en pixels écran (absoluteBoundingBox.x + w/2, y + h/2).
-// Ne pas passer les champs tx/ty de la transform matrix Figma — ce sont des valeurs différentes.
-function rotationMatrix(deg: number, pivotX: number, pivotY: number): string {
-    const cos = cosFixed(deg), sin = sinFixed(deg);
-    return `${cos}, ${sin}, ${-sin}, ${cos}, ${i32(pivotX)}, ${i32(pivotY)}`;
-}
-// Emit:  <DrvAPIInterCon***GpuSetTransform2D***>(${rotationMatrix(deg, pivotX, pivotY)});
-```
-
-### Mapping layer Figma → GPU Mara
-
-| Layer Figma | Appel Mara (SluGpu) | Propriétés exportées |
-|---|---|---|
-| `FRAME` | `GpuDrawRoundedRectFull` + `GpuBackgroundBlur` si blur | x, y, w, h, cornerRadius, fills[0], backgroundBlur |
-| `TEXT` | `GpuDrawTextFontAlign` / `GpuDrawTextFontFull` | characters, fontSize, fills, textAlignHorizontal, letterSpacing, lineHeight |
-| `RECTANGLE` + image | `ImageLoad` + `ImageDraw` | fills[0] (IMAGE) → path SRFS |
-| `RECTANGLE` + DROP_SHADOW | `GpuDrawDropShadow` | effect.offset.x/y, effect.radius, effect.color |
-| `RECTANGLE` + INNER_SHADOW | `GpuDrawInnerShadow` | idem, rendu après le rect parent |
-| Gradient linéaire | `GpuDrawLinearGradient` | gradientStops, gradientTransform → angleDeg |
-| `VECTOR` / `BOOLEAN_OPERATION` | `SvgLoad` + `SvgDraw` | Exporté en SVG via l'API Figma |
-| Blend mode | `GpuSetBlendMode` + `GpuResetBlendMode` | MULTIPLY→1, SCREEN→2, OVERLAY→3… |
-| Opacity | `GpuSetOpacity` + `GpuResetOpacity` | layer.opacity → 0–255 |
-| `COMPONENT` (instance) | `rel op` paramétré | Chaque component Figma devient un `rel op` réutilisable |
-
-### Structure du `.marep` généré
-
-```
-MonApp.marep/
-├── Maraset.yaml
-├── RAbstractallowing.xml
-├── base/
-│   ├── OEntry.mara       ← point d'entrée généré
-│   ├── Components.mara   ← un rel op par Component Figma
-│   └── State.mara        ← liaisons services OS
-└── MonApp.slasset/
-    ├── wallpaper.png     ← assets exportés depuis Figma
-    └── icons/*.svg
-```
-
-### Liaison état réel (OS services)
-
-Les variables Mara se lient aux services système. **Mara n'a pas de variables globales** : toutes les `var` doivent être déclarées à l'intérieur d'un `rel op`. Le plugin génère les variables d'état directement au début du `rel op OEntry`, avant la boucle de rendu.
-
-| Service | Fonctions clés | Données |
-|---|---|---|
-| `SluPwManSrv` | `GetBatteryLevel()`, `IsCharging()` | Batterie 0–100, état charge |
-| `SluFSInfo` | `GetFreePercent("SDC:")`, `ListMountPoints()` | Espace disque |
-| `SluNotifSrv` | `GetCount()`, `GetBody(i)`, `GetAppName(i)` | Notifications actives |
-| `SluEnvSys` | `Get("DEVICE_NAME")`, `Get("OS_VERSION")` | Variables système |
-| `SluAppRegistry` | `GetInstalledCount()`, `GetApp(i)` | Apps installées |
-| `SluTimeSrv` | `GetTimeString()`, `GetDateString()` | Horloge système |
-
-### Organisation des fichiers générés
-
-`Components.mara` ne contient que des `rel op` (pas de variables). Les variables d'état vivent dans `OEntry.mara` :
-
-```text
-MonApp.marep/
-├── Maraset.yaml
-├── RAbstractallowing.xml
-├── base/
-│   ├── OEntry.mara       ← vars d'état + boucle de rendu
-│   └── Components.mara   ← un rel op par Component Figma (pas de var)
-└── MonApp.slasset/
-    ├── wallpaper.png
-    └── icons/*.svg
-```
-
-### Composants Mara (un `rel op` par Component Figma)
-
-`Components.mara` ne contient que des `rel op` paramétrés — jamais de `var` au niveau fichier :
+### 2.2 Variables
 
 ```mara
-// Component "NotifCard" Figma → rel op paramétré
-rel op NotifCard: [x i32, y i32, appName string, body string, time string, iconHandle i32] [
-    let W: i32 = 456; let H: i32 = 112; let R: i32 = 12;
-    GpuDrawDropShadow(x, y, W, H, R, 0, 4, 20, 0x28000000);
-    GpuDrawRoundedRectFull(x, y, W, H, R, R, R, R, 0xFFFFFFFF);
-    GpuDrawTextFont(x+14, y+16, time, 0xFF888888, 0, font, 13);
-    ImageDraw(iconHandle, x+64, y+13, 20, 20);
-    GpuDrawTextFont(x+90, y+16, appName, 0xFF1A1A1A, 0, font, 13);
-    GpuDrawTextFontFull(x+54, y+44, body, 0xFF555555, 0, font, 13, 0, 20, 0, 0);
+let x: <i32> = 42;        // immuable — ne peut pas être réassignée
+var y: <i32> = 0;         // mutable — peut être réassignée avec =
+
+let h: <ptr> = nullptr;   // pointeur nul
+```
+
+> **Règle** : `var` et `let` ne peuvent être déclarés **qu'à l'intérieur** d'un `rel op` ou `rel cl`.  
+> Aucune variable globale n'existe en dehors d'une fonction.
+
+### 2.3 Fonctions
+
+```mara
+// rel op = fonction publique (exportée)
+rel op NomFonction: [param1 i32, param2 string] [
+    let r: <i32> = param1 + 1;
+    ret r;
+];
+
+// rel cl = closure / fonction locale (non exportée)
+rel cl Helper: [x i32] [
+    ret x * 2;
 ];
 ```
 
-### Boucle de rendu avec refresh état OS (OEntry.mara)
-
-Les variables d'état sont déclarées avec `var` (mutable) **à l'intérieur** du `rel op OEntry`, avant la boucle :
+### 2.4 Structures de contrôle
 
 ```mara
-rel op OEntry: [] [
-    let font: ptr = FontLoad("SDC:/assets/fonts/brsonomasemibold.ttf");
+if (condition) [ ... ];
+if (a && b) [ ... ];
+if (a || b) [ ... ];
 
-    // ── État réel — initialisé une fois, rafraîchi chaque frame ──
-    var battLevel:  i32    = <SluPwManSrv***GetBatteryLevel***>();
-    var isCharging: i32    = <SluPwManSrv***IsCharging***>();
-    var timeStr:    string = <SluTimeSrv***GetTimeString***>();
-    var notifCount: i32    = <SluNotifSrv***GetCount***>();
-    var deviceName: string = <SluEnvSys***Get***>("DEVICE_NAME");
-    var activeTab:  i32    = 0;
-
-    while (1) [
-        // rendu ...
-        GpuFlushRenderContext();
-
-        // Refresh état OS chaque frame
-        battLevel  = <SluPwManSrv***GetBatteryLevel***>();
-        notifCount = <SluNotifSrv***GetCount***>();
-        timeStr    = <SluTimeSrv***GetTimeString***>();
-    ];
+while (1) [
+    // boucle infinie
 ];
+```
+
+### 2.5 Appels API kernel
+
+Syntaxe `DrvAPIInterCon` — dispatch direct vers le kernel OVC :
+
+```mara
+let result: <i32> = <DrvAPIInterCon***NomFonction***>(arg1, arg2);
+let _: <i32> = <DrvAPIInterCon***GpuDrawRect***>(x, y, w, h, color);
+```
+
+Le `let _: <i32> = ...` est le pattern standard pour ignorer la valeur de retour.
+
+### 2.6 Interdictions syntaxiques
+
+| Interdit | Alternative |
+|---|---|
+| `x--` | `x = x - 1` |
+| `-0` | `0` |
+| Variables globales | Déclarer dans `rel op` |
+| Floats | Fixed-point ×1000 |
+| `log:` | Pas de log en Mara — utiliser le debug kernel |
+
+### 2.7 Structure d'un `.marep`
+
+```
+MonApp.marep/
+├── Maraset.yaml            ← Métadonnées + design_size
+├── RAbstractallowing.xml   ← Signature AuthARoot
+├── base/
+│   ├── TemplateView.mara   ← Renderer principal
+│   └── Components.mara     ← Un rel op par Component Figma
+└── MonApp.slasset/
+    ├── img1.png            ← Wallpaper
+    ├── img2.png …          ← Icônes (RGBA obligatoire)
+    └── vec1.svg …          ← Vecteurs
+```
+
+**`TemplateView.mara` doit exposer deux rel op :**
+
+```mara
+#base <std***ComTpe***SlulFrmt***[ DrvAPIInterCon ]>;
+#base <MaratineKit>;
+
+rel op Render: [ctx string, fnt ptr] [
+    // tout le code de rendu ici
+    let gpuResult: <i32> = <DrvAPIInterCon***GpuFlushRenderContext***>(ctx);
+    if (gpuResult != 0) [ ret 1; ];
+    ret 0;
+];
+
+rel op Destroy: [] [ ret 0; ];
 ```
 
 ---
 
-## Pipeline de chargement `.marep`
+## 3. Scaling — Système de coordonnées
 
-1. Lecture du bundle ZIP depuis l'ESP (SimpleFileSystem)
-2. Vérification AuthARoot (SRID dans `Maraset.yaml` ↔ `RAbstractallowing.xml`)
-3. **Auto-install assets** → `SDC:/apps/<AppName>/` (avant exécution OVC)
-4. Exécution OVC via `exec_marep` (entry point `OEntry`)
+### 3.1 Principe
 
----
-
-## Scaling proportionnel — React Native style
-
-Le plugin Figma génère les coordonnées sur la base du design cible (ex : 1440×1024).
-À l'exécution OVC, les coordonnées sont scalées dynamiquement selon les dimensions réelles de l'écran :
+Slura OS tourne sur plusieurs résolutions d'écran. Le design Figma est exporté à `1440 × 1024` px. À l'exécution, toutes les coordonnées sont scalées proportionnellement.
 
 ```mara
 let sw: <i32> = <DrvAPIInterCon***GpuGetWidth***>();
 let sh: <i32> = <DrvAPIInterCon***GpuGetHeight***>();
-let scaleW: <i32> = (sw * 1000) / 1440;
-let scaleH: <i32> = (sh * 1000) / 1024;
-var scale:  <i32> = scaleW;
-if (scaleH < scaleW) [ scale = scaleH; ];
-let offX: <i32> = (sw - (1440 * scale) / 1000) / 2;
-let offY: <i32> = (sh - (1024 * scale) / 1000) / 2;
+let sW: <i32> = (sw * 1000) / 1440;   // facteur horizontal ×1000
+let sH: <i32> = (sh * 1000) / 1024;   // facteur vertical ×1000
 ```
 
-**Formule coordonnée scalée :** `(v * scale + 500) / 1000` — arrondi au plus proche (round-to-nearest).
+### 3.2 Formule de scaling (arrondi au plus proche)
 
-Le plugin doit émettre `Math.round(v * scale / 1000)` pour toutes les valeurs numériques.
-Les dimensions design (`designW`, `designH`) sont extraites de `Maraset.yaml → metadata.design_size`.
+```
+coord_écran = (valeur_design × scale + 500) / 1000
+```
 
-### Fill-screen vs fit-screen
+**Exemples :**
+```mara
+// x=526 design → écran
+let x: <i32> = ((526 * sW + 500) / 1000);
 
-Deux modes de scaling existent selon le type d'élément :
+// Rayon moyen (évite la distorsion)
+let r: <i32> = (((30 * sW + 500) / 1000 + (30 * sH + 500) / 1000) / 2);
+```
+
+### 3.3 Fill-screen vs Fit-screen
 
 | Mode | Formule | Usage |
 |---|---|---|
-| **fill-screen** (non-uniforme) | `scaleX = sw*1000/1440`, `scaleY = sh*1000/1024` (indépendants) | Fond d'écran, wallpaper PNG — étire pour couvrir sans bandes |
-| **fit-screen** (uniforme) | `scale = min(scaleX, scaleY)` + `offX`/`offY` | UI overlay, composants — préserve les proportions Figma |
+| **fill-screen** | `sW = sw*1000/1440`, `sH = sh*1000/1024` (indépendants) | Wallpaper PNG — couvre sans bandes noires |
+| **fit-screen uniforme** | `scale = min(sW, sH)` + offset centrage | UI overlay — préserve proportions Figma |
 
-Pour un wallpaper plein écran :
+Pour le wallpaper plein écran :
 ```mara
-let scaleX: <i32> = (sw * 1000) / 1440;
-let scaleY: <i32> = (sh * 1000) / 1024;
-// ImageDraw utilise scaleX/scaleY indépendamment via drawW/drawH
 let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, 0, 0, sw, sh);
 ```
 
+### 3.4 Plugin TypeScript — Scaling
+
+```typescript
+const sW = (screenW * 1000) / 1440;
+const sH = (screenH * 1000) / 1024;
+const sc = (v: number, axis: 'x' | 'y') =>
+    Math.floor((v * (axis === 'x' ? sW : sH) + 500) / 1000);
+const scR = (r: number) =>
+    Math.floor(((r * sW + 500) / 1000 + (r * sH + 500) / 1000) / 2);
+
+// Emit dans le code Mara :
+// `((${vDesign} * sW + 500) / 1000)` pour x/w
+// `((${vDesign} * sH + 500) / 1000)` pour y/h
+// `(((${r} * sW + 500) / 1000 + (${r} * sH + 500) / 1000) / 2)` pour r
+```
+
 ---
 
-## État MVP — ce qui a été corrigé / ce qui reste
+## 4. API GPU — Référence exhaustive
 
-### ✅ Corrigé
+### 4.1 Contrôle d'état (stateful — persistent jusqu'au Reset)
 
-| # | Fichier | Bug | Fix |
-| --- | --- | --- | --- |
-| 1 | `TemplateView.mara` | `var im: <ptr>` type mismatch OVC | → `var im: <i32> = 0` |
-| 2 | `TemplateView.mara` | Double-alpha dock `0x4DF5E3E1` dans GpuSetOpacity(77) → 9% | → `0xFFF5E3E1` |
-| 3 | `TemplateView.mara` | S_SHI_WINDOWS + GpuDrawRoundedRectAlpha Shi Windows absents | → Restaurés |
-| 4 | `TemplateView.mara` | Wallpaper hors-écran y=-17, h=1037 | → `ImageDraw(im, 0, 0, sw, sh)` |
-| 5 | `TemplateView.mara` | ShiContacts 136° (2e transform écrasait 90°) | → Supprimé, seul 90° |
-| 6 | `TemplateView.mara` | Triple GpuSetOpacity/GpuResetOpacity redondants | → Un seul par groupe |
-| 7 | `TemplateView.mara` | `log:` syntaxe invalide Mara | → Supprimé |
-| 8 | `TemplateView.mara` | Handles SVG déclarés `<ptr>` | → `<i32>` |
-| 9 | `TemplateView.mara` | `fnt` param kernel = null (SRFS_CACHE vide avant Render) → DrawText=0 | → `FontLoad("SDC:/slu64/assets/fonts/brsonomasemibold.ttf")` appelé directement |
-| 10 | `DrvAPIInterCon.mara` | `GpuDrawTextFontAlign` absent du stdlib | → Ajouté |
-
-### 🔧 Reste pour MVP pixel-perfect
-
-| Priorité | Problème visible | Cause racine | Résolution |
-| --- | --- | --- | --- |
-| **P1** | Coins blancs sur icônes (img4–img10) | PNGs sans canal alpha depuis Figma | Re-exporter Figma : `Export PNG` avec fond transparent (décocher "Include background") |
-| **P1** | Shi Windows quasi-invisible | Gris `0xFFE0E0E0` à 70% sur wallpaper blanc = ~97% blanc | Changer tint : `0xFF8BAFC2` (bleu-gris Figma) ou augmenter opacité → `GpuSetOpacity(200)` |
-| **P2** | Barre noire sysbar au-dessus du texte | `GpuDrawRect(…, 0xFF000000)` debug bg | Remplacer par `0x00000000` (transparent) ou supprimer la ligne |
-| **P2** | x64 `.marep` bootable pas mis à jour | Archive ZIP compilée indépendante | Rebundle via pipeline build (tâche VS Code) |
-| **P3** | SVG wave vec3 non visible | Clipping hors zone Shi Windows | Vérifier dimensions vec3.svg vs zone (-14, 0, 1462, 892) |
-
-### Règle FontLoad dans un marep (plugin Figma → codegen)
-
-`srfs_font_ptr()` (kernel) retourne le premier slot SRFS — souvent null au démarrage.  
-**Toujours charger la police directement dans le `rel op Render`**, pas via le paramètre `fnt` :
+#### `GpuSetOpacity(alpha i32)` / `GpuResetOpacity()`
 
 ```mara
-let font: <ptr> = <DrvAPIInterCon***FontLoad***>("SDC:/slu64/assets/fonts/brsonomasemibold.ttf");
-// Puis passer font (pas fnt) à GpuDrawTextFont / GpuDrawTextFontAlign
+let _: <i32> = <DrvAPIInterCon***GpuSetOpacity***>(77);    // 30%
+// draws...
+let _: <i32> = <DrvAPIInterCon***GpuResetOpacity***>();
 ```
 
-Plugin TS — codegen obligatoire :
+**Sémantique SET** — remplace l'opacité courante, pas de stack.  
+**Effet** : `final_alpha = (color_alpha * GPU_OPACITY) / 255`  
+**⚠️ DOUBLE-ALPHA** : voir §5.1.
 
-```typescript
-// En tête de Render, avant tout draw texte
-emit(`let font: <ptr> = <DrvAPIInterCon***FontLoad***>("SDC:/slu64/assets/fonts/${fontFile}");`);
-// Chaque draw texte utilise `font`, jamais `fnt`
+---
+
+#### `GpuSetTransform2D(cosA, sinA, negSinA, cosB, cx, cy)` / `GpuResetTransform()`
+
+```mara
+// Rotation 46° autour du centre de l'élément
+let _: <i32> = <DrvAPIInterCon***GpuSetTransform2D***>(6947, 7193, -7193, 6947, cx, cy);
+// draws...
+let _: <i32> = <DrvAPIInterCon***GpuResetTransform***>();
+```
+
+- Valeurs en **fixed-point ×10000** : `cos(46°)=6947`, `sin(46°)=7193`
+- `cx`, `cy` = **pivot = centre de l'élément en pixels écran** (post-scale)
+- La translation interne est calculée par le kernel :  
+  `tx = (cx*(10000-cosA) + cy*sinA) / 10000`  
+  `ty = (cy*(10000-cosA) - cx*sinA) / 10000`
+- Appliqué à tous les draws jusqu'à `GpuResetTransform()`
+
+**Angles prédéfinis :**
+
+| Angle | cos (×10000) | sin (×10000) |
+|---|---|---|
+| 0° | 10000 | 0 |
+| 45° | 7071 | 7071 |
+| 46° (dock diamonds) | 6947 | 7193 |
+| 90° (ShiContacts) | 0 | 10000 |
+| 135° | -7071 | 7071 |
+
+**⚠️ FORWARD TRANSFORM GAPS** : voir §5.3.
+
+---
+
+#### `GpuSetBlendMode(mode i32)` / `GpuResetBlendMode()`
+
+| mode | Nom | Formule |
+|---|---|---|
+| 0 | NORMAL (défaut) | `src·α + dst·(1−α)` |
+| 1 | MULTIPLY | `src·dst/255` |
+| 2 | SCREEN | `1−(1−src)(1−dst)` |
+| 3 | OVERLAY | Multiply si dst<128, Screen sinon |
+| 4 | DARKEN | `min(src, dst)` |
+| 5 | LIGHTEN | `max(src, dst)` |
+| 6 | COLOR_DODGE | `dst / (1−src)` |
+| 7 | COLOR_BURN | `1 − (1−dst) / src` |
+| 8 | HARD_LIGHT | Overlay inversé |
+| 9 | SOFT_LIGHT | Formule Pegtop |
+| 10 | DIFFERENCE | `\|src − dst\|` |
+| 11 | EXCLUSION | `src + dst − 2·src·dst` |
+
+---
+
+### 4.2 Primitives de dessin
+
+#### `GpuDrawRect(x, y, w, h, color)` → `i32`
+Rectangle plein ARGB. GPU_OPACITY et GPU_TRANSFORM appliqués.
+
+#### `GpuDrawRoundedRectAlpha(x, y, w, h, r, color)` → `i32`
+Rectangle arrondi avec Porter-Duff alpha blending.  
+`color` = ARGB 0xAARRGGBB. `r` = rayon de coin uniforme (tous les 4 coins).  
+GPU_OPACITY appliqué : `final_alpha = (color_alpha * GPU_OPACITY) / 255`.
+
+#### `GpuDrawRoundedRectFull(x, y, w, h, rTL, rTR, rBL, rBR, color)` → `i32`
+Coins arrondis **individuellement**. Utiliser quand Figma exporte des `cornerRadius` asymétriques.
+
+#### `GpuDrawRoundedRectSolid(x, y, w, h, r, color)` → `i32`
+Identique à `GpuDrawRoundedRectAlpha` mais force alpha=255.
+
+#### `GpuDrawEllipse(x, y, w, h, color)` → `i32`
+Ellipse pleine ARGB. Porter-Duff alpha blending.
+
+#### `GpuFill(color)` → `i32`
+Remplit tout le framebuffer. Utilisé comme fond avant le premier draw.
+
+---
+
+### 4.3 Images
+
+#### `ImageLoad(path string)` → `i32`
+Charge un PNG depuis SRFS. Retourne un handle `i32` (1–8, cache LRU).  
+Chemin : `"SDC:/apps/<AppName>/<AppName>.slasset/imgN.png"`
+
+**Cache LRU 8 slots.** Toujours réutiliser une seule `var im: <i32> = 0`.
+
+```mara
+// CORRECT
+var im: <i32> = 0;
+im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/App/App.slasset/img1.png");
+let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ...);
+im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/App/App.slasset/img2.png");
+let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ...);
+```
+
+#### `ImageDraw(handle, x, y, drawW, drawH)` → `i32`
+Blit nearest-neighbour + Porter-Duff Over.  
+GPU_OPACITY module le canal alpha PNG : `a = png_alpha * GPU_OPACITY / 255`.  
+**⚠️ PNG SANS ALPHA** : voir §9.2.
+
+#### `GpuDrawRotatedImage(handle, cx, cy, dw, dh, angleDeg)` → `i32`
+Dessin d'image avec rotation par inverse mapping (anticrénelage naturel, pas de trous).  
+`cx`, `cy` = centre de l'image sur l'écran. `angleDeg` = angle en degrés.  
+**Préférer à `GpuSetTransform2D + ImageDraw` pour les images — résultat sans gaps.**
+
+---
+
+### 4.4 Texte
+
+#### `FontLoad(path string)` → `ptr`
+Charge une police TTF depuis SRFS.  
+**⚠️ APPELER DIRECTEMENT dans `rel op Render`** — ne jamais utiliser le paramètre `fnt` du kernel (null au démarrage, SRFS_CACHE vide).
+
+```mara
+// CORRECT — toujours en début de Render
+let font: <ptr> = <DrvAPIInterCon***FontLoad***>("SDC:/slu64/assets/fonts/brsonomasemibold.ttf");
+```
+
+#### `GpuDrawTextFont(x, y, text, fgColor, bgColor, fontHandle, size)` → `i32`
+Texte aligné à gauche.
+
+#### `GpuDrawTextFontAlign(x, y, maxW, text, fgColor, bgColor, fontHandle, size, align)` → `i32`
+Texte avec alignement dans une largeur max.  
+`align` : 0=gauche 1=centre 2=droite.
+
+#### `GpuDrawTextFontFull(x, y, text, fgColor, bgColor, fontHandle, size, letterSp, lineH, align, deco)` → `i32`
+Texte complet. `letterSp`=espacement lettres en px. `lineH`=hauteur de ligne en px.  
+`deco` : 0=aucun 1=souligné 2=barré.
+
+---
+
+### 4.5 SVG
+
+#### `SvgLoad(path string)` → `ptr`
+Charge un SVG depuis SRFS. Handle `<ptr>` (pas `<i32>`).
+
+#### `SvgDraw(handle, x, y, w, h)` → `i32`
+Rend le SVG mis à l'échelle pour remplir (w × h).
+
+#### `SvgFree(handle)` → `i32`
+Libère le slot SVG du cache kernel.
+
+**⚠️ SUPPORT SVG PARTIEL** : voir §9.3.
+
+---
+
+### 4.6 Effets visuels
+
+#### `GpuBackgroundBlur(x, y, w, h, r, sigma)` → `i32`
+Flou gaussien (box blur 3 passes) en place sur le framebuffer courant.  
+`r` = rayon de coin de clip (0 = rectangle). `sigma` = rayon du flou [1–16].
+
+**⚠️ ORDRE OBLIGATOIRE** : appeler **avant** le tint/overlay. Le blur opère sur les pixels déjà rendus.
+
+```mara
+// CORRECT — blur d'abord, tint ensuite
+let _: <i32> = <DrvAPIInterCon***GpuBackgroundBlur***>(x, y, w, h, r, 8);
+let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(x, y, w, h, r, 0xFFE0E0E0);
+
+// FAUX — tint d'abord, blur ensuite (le fill est incorporé dans le blur)
+let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(x, y, w, h, r, 0xFFE0E0E0); // ← ERREUR
+let _: <i32> = <DrvAPIInterCon***GpuBackgroundBlur***>(x, y, w, h, r, 8);
+```
+
+#### `GpuDrawDropShadow(x, y, w, h, cr, ox, oy, blur, color)` → `i32`
+Ombre portée avec box blur.  
+**⚠️ ARTEFACT box_blur** : le blur s'étend hors de la zone (`sx-blur, sy_-blur`). Visible comme bande sombre rectangulaire si `blur ≥ oy`.  
+**→ Préférer `GpuDrawGlow` ou `GpuDrawLinearGradient` pour les shadows dock/card** — voir §9.4.
+
+#### `GpuDrawGlow(x, y, w, h, r, glowColor, glowRadius, intensity)` → `i32`
+Lueur extérieure SDF + falloff linéaire. **Aucun artefact.**  
+`glowColor` = ARGB (canal alpha ignoré — `intensity` contrôle l'opacité).  
+`glowRadius` = rayon en pixels screen. `intensity` [0–255] = opacité max à l'arête.  
+**Ignoré par GPU_OPACITY** — indépendant du contexte GpuSetOpacity.  
+**Symétrique** (haut+bas+côtés). Pour shadow directionnelle : utiliser `GpuDrawLinearGradient`.
+
+#### `GpuDrawLinearGradient(x, y, w, h, r, angleDeg, c1, p1, c2, p2, stopCount)` → `i32`
+`angleDeg` : 0=gauche→droite, -90=haut→bas, 90=bas→haut, 180=droite→gauche.  
+`c1/c2` = ARGB. `p1/p2` = position [0–1000]. `stopCount` = 2.
+
+**Shadow directionnelle sous un élément (bas uniquement) :**
+```mara
+// Bande gradient de 12px sous le dock — aucun artefact
+let _: <i32> = <DrvAPIInterCon***GpuDrawLinearGradient***>(
+    dkX, (dkY + dkH), dkW, 12, 0, -90,
+    0x30000000, 0, 0x00000000, 1000, 2
+);
+```
+
+#### `GpuDrawRadialGradient(x, y, w, h, radius, c1, p1, c2, p2, stopCount)` → `i32`
+Gradient radial centré sur le rect. `radius` = rayon en pixels.
+
+#### `GpuDrawNoisePatch(x, y, w, h, r, alpha, seed)` → `i32`
+Bruit grain xorshift procédural. `alpha` [0–255] = opacité du grain. `seed` = graine initiale.
+
+#### `GpuDrawGrainNoise(x, y, w, h, radius, color, grainSize)` → `i32`
+Bruit hash déterministe. `color` = ARGB. `grainSize` : 1=ultra-fin, 2=fin, 4=grossier.
+
+#### `GpuDrawStroke(x, y, w, h, r, weight, color)` → `i32`
+Contour rectangle arrondi. `weight` = épaisseur. `color` = ARGB.
+
+---
+
+### 4.7 Masques et clip
+
+#### `GpuPushClip(x, y, w, h [, r])` / `GpuPopClip()`
+Empile une zone de clip arrondie. Tous les draws suivants sont clippés à cette zone.
+
+---
+
+### 4.8 Ordre de rendu standard
+
+```
+1. ImageDraw(wallpaper, 0, 0, sw, sh)                  ← fond plein écran
+2. GpuDrawLinearGradient(shadow strip)                  ← ombres directionnelles
+3. GpuDrawGlow(dock/card bounds)                        ← halo symétrique
+4. GpuBackgroundBlur → GpuSetOpacity → GpuDrawRoundedRectAlpha → GpuResetOpacity
+5. GpuSetTransform2D → 4× GpuDrawRoundedRectAlpha → GpuResetTransform
+6. ImageDraw (icônes, logos)
+7. GpuDrawTextFontAlign (textes)
+8. GpuFlushRenderContext(ctx)                           ← commit framebuffer
 ```
 
 ---
 
-## Règles pixel-perfect — génération plugin MVP
+## 5. Règles critiques pixel-perfect
 
-### 1. Règle double-alpha (CRITIQUE)
+### 5.1 ⚠️ Règle Double-Alpha (CRITIQUE)
 
-Quand un bloc utilise `GpuSetOpacity(v)`, l'opacité effective est `color_alpha * v / 255`.  
-**Toute couleur de remplissage à l'intérieur d'un bloc `GpuSetOpacity` DOIT avoir `0xFF` en alpha.**
+**`GpuSetOpacity(v)` multiplie `color_alpha` de la couleur passée à `GpuDrawRoundedRectAlpha`.**
 
-```
-// FAUX — double-multiplication : 0x4D * 77 / 255 = 9% au lieu de 30%
+`final_alpha = (color_alpha × GPU_OPACITY) / 255`
+
+**FAUX :**
+```mara
+// 0x4D=77 dans la couleur ET GpuSetOpacity(77) → 77*77/255 = 23 (9%)
 let color: <i32> = 0x4DF5E3E1;
-GpuSetOpacity(77); GpuDrawRoundedRectAlpha(..., color); GpuResetOpacity();
+let _: <i32> = <DrvAPIInterCon***GpuSetOpacity***>(77);
+let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(..., color);
+let _: <i32> = <DrvAPIInterCon***GpuResetOpacity***>();
+```
 
-// CORRECT — l'opacité 30% est entièrement portée par GpuSetOpacity(77)
+**CORRECT :**
+```mara
+// 0xFF dans la couleur → l'opacité 30% est portée uniquement par GpuSetOpacity(77)
 let color: <i32> = 0xFFF5E3E1;
-GpuSetOpacity(77); GpuDrawRoundedRectAlpha(..., color); GpuResetOpacity();
+let _: <i32> = <DrvAPIInterCon***GpuSetOpacity***>(77);
+let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(..., color);
+let _: <i32> = <DrvAPIInterCon***GpuResetOpacity***>();
 ```
 
-Plugin TS : extraire `layer.opacity` → `GpuSetOpacity(Math.round(opacity * 255))`, forcer `fills[0].color.a = 1.0` dans la couleur émise.
+**Règle plugin** : toute couleur d'un layer avec `opacity < 1.0` → `GpuSetOpacity(Math.round(opacity*255))` + forcer `0xFF` en alpha ARGB.  
+Exception : couleurs avec transparence ARGB propre (ex: `0x33B9B9B9`) → **ne jamais** les envelopper dans un GpuSetOpacity.
 
-### 2. Ordre de rendu minimal MVP
+---
+
+### 5.2 ⚠️ Ordre GpuBackgroundBlur (CRITIQUE)
+
+Le blur opère **en place** sur les pixels déjà dessinés dans le GOP framebuffer.
 
 ```
-1. ImageDraw(wallpaper, 0, 0, sw, sh)          ← fond plein écran
-2. GpuDrawRoundedRectAlpha(dock…)               ← panneaux vitrés
-3. GpuSetOpacity(v) / draw / GpuResetOpacity()  ← éléments semi-transparents
-4. GpuSetTransform2D(…) / draw / GpuResetTransform() ← éléments tournés
-5. GpuDrawTextFontAlign(…)                      ← textes
-6. GpuFlushRenderContext(ctx)                   ← commit framebuffer
+RÈGLE : GpuBackgroundBlur AVANT le tint/overlay
+TOUJOURS : blur → fill → svg/texte → GpuResetOpacity
 ```
 
-### 3. `GpuSetOpacity` : sémantique SET (pas de stack)
+Si le fill est dessiné avant le blur, la couleur solide est incorporée dans le flou et le résultat est un rectangle grisé indistinct.
 
-Chaque appel **remplace** l'opacité courante — il n'y a pas de push/pop.  
-Toujours appeler `GpuResetOpacity()` exactement **une fois** après le dernier draw du groupe.  
-Ne jamais émettre deux `GpuSetOpacity` consécutifs sans `GpuResetOpacity` entre eux.
+---
 
-### 4. `GpuSetTransform2D` : pivot = centre de l'élément
+### 5.3 ⚠️ Forward Transform Gaps (rotation)
 
-Args 4–5 = `pivot_x`, `pivot_y` = centre de l'élément en pixels écran **après scaling**.
+`GpuSetTransform2D` + `GpuDrawRoundedRectAlpha` utilise un **forward mapping** : pour chaque pixel source `(x+col, y+row)`, le kernel écrit au pixel de sortie `(fx, fy)`. À 46°, le taux de couverture ≈ 51% → trous visibles ("effiloché").
+
+**Correction : 4-pass draw**
+
+Appeler `GpuDrawRoundedRectAlpha` 4 fois avec des décalages de 1px en x et/ou y. Les 4 projections couvrent des positions de sortie différentes → couverture ~100%.
+
+```mara
+let _: <i32> = <DrvAPIInterCon***GpuSetTransform2D***>(6947, 7193, -7193, 6947, cx, cy);
+// Pass 1 : (x, y)
+let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(x, y, w, h, r, color);
+// Pass 2 : (x+1, y+1)
+let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>((x + 1), (y + 1), w, h, r, color);
+// Pass 3 : (x+1, y)
+let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>((x + 1), y, w, h, r, color);
+// Pass 4 : (x, y+1)
+let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(x, (y + 1), w, h, r, color);
+let _: <i32> = <DrvAPIInterCon***GpuResetTransform***>();
+```
+
+**Note sur l'accumulation d'alpha :** pour les couleurs avec `alpha=0xFF`, chaque pixel ne peut être écrit qu'une fois à 100% — pas d'accumulation. Pour les couleurs semi-transparentes (ex: `0x33B9B9B9`=20%), 4 passes accumulent : `1-(1-0.2)^4 ≈ 59%`. Ajuster la couleur source en conséquence si nécessaire.
+
+---
+
+### 5.4 ⚠️ GpuSetTransform2D — Pivot = centre écran
+
+Args 4–5 = pivot en **pixels écran post-scale**, pas les coordonnées Figma brutes.
 
 ```typescript
-// Plugin TS
-const pivotX = i32((node.absoluteBoundingBox.x + node.width  / 2) * scale / 1000);
-const pivotY = i32((node.absoluteBoundingBox.y + node.height / 2) * scale / 1000);
+// Plugin TS — pivot pour un élément Figma
+const pivotX = Math.round((node.absoluteBoundingBox.x + node.width  / 2) * scaleW / 1000);
+const pivotY = Math.round((node.absoluteBoundingBox.y + node.height / 2) * scaleH / 1000);
 // → GpuSetTransform2D(cos, sin, -sin, cos, pivotX, pivotY)
 ```
 
-Ne jamais passer `node.relativeTransform[0][2]` / `[1][2]` (champs `tx/ty` Figma) — ce sont des valeurs différentes.
+Ne jamais passer `node.relativeTransform[0][2]` / `[1][2]` (champs `tx/ty` Figma — valeurs différentes du pivot).
 
 ---
 
-## Plugin Figma — Réponses aux questions de rendu
+### 5.5 ⚠️ Rayon de coin et forme rotée
 
-### Q1 — Pivot GpuSetTransform2D : design px ou écran px ?
+Un carré de 45×45px avec `r=16` (35% du côté) est quasi-circulaire après rotation → perd l'aspect losange.
 
-**Écran pixels, post-scale.** Le kernel lit `args[4]` et `args[5]` comme des coordonnées d'écran absolues.
+| r / taille | Apparence après rotation 45° |
+|---|---|
+| 0% | Diamant parfait (angles vifs) |
+| 11% (r=5 sur 45px) | Diamant avec coins légèrement arrondis ✅ |
+| 35% (r=16 sur 45px) | Quasi-ovale ❌ |
+| 50%+ | Cercle ❌ |
+
+**Règle** : `r` pour les éléments rotatifs ≤ 15% de la taille.
+
+---
+
+### 5.6 ⚠️ Coins arrondis asymétriques (barre d'état)
+
+`GpuDrawRoundedRectAlpha` arrondit les **4 coins** uniformément. Pour une barre en haut de l'écran (y=0) avec seulement les coins bas arrondis :
+
+```mara
+// TECHNIQUE : étendre le rect vers y<0 — les coins supérieurs se trouvent hors-écran
+// Le guard `fy < 0 { continue }` du kernel les clippe silencieusement
+let r: <i32> = 8;
+let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(
+    0, (0 - r), w, (h + r), r, color
+);
+// Résultat : bords haut droits (contre l'écran), coins bas arrondis ✅
+```
+
+---
+
+### 5.7 ⚠️ FontLoad — Ne jamais utiliser `fnt`
+
+Le paramètre `fnt ptr` de `rel op Render: [ctx string, fnt ptr]` est **null au démarrage** (SRFS_CACHE vide avant la première frame). Toujours appeler `FontLoad` directement.
+
+```mara
+rel op Render: [ctx string, fnt ptr] [
+    // CORRECT
+    let font: <ptr> = <DrvAPIInterCon***FontLoad***>("SDC:/slu64/assets/fonts/brsonomasemibold.ttf");
+    // Utiliser font (pas fnt) dans GpuDrawTextFontAlign
+];
+```
+
+---
+
+### 5.8 ⚠️ IMAGE_CACHE — 8 slots LRU
+
+Le cache image kernel est limité à 8 handles. Si plus de 8 `ImageLoad` sont actifs simultanément, les handles les moins récents sont évincés et renvoient 0 à l'usage suivant.
+
+**Pattern correct :**
+```mara
+// Une seule variable im réutilisée — séquentiel, jamais de références croisées
+var im: <i32> = 0;
+im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/.../img1.png");
+let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ...);
+// im peut maintenant être réutilisée — img1 reste en cache seulement si < 8 autres loads
+im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/.../img2.png");
+let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ...);
+```
+
+---
+
+### 5.9 ⚠️ GpuSetOpacity — Sémantique SET (pas de stack)
+
+Chaque `GpuSetOpacity` **remplace** l'opacité courante. Il n'y a pas de push/pop.
+
+```mara
+// CORRECT
+let _: <i32> = <DrvAPIInterCon***GpuSetOpacity***>(77);
+// draws à 30%
+let _: <i32> = <DrvAPIInterCon***GpuResetOpacity***>();
+// draws à 100%
+let _: <i32> = <DrvAPIInterCon***GpuSetOpacity***>(178);
+// draws à 70%
+let _: <i32> = <DrvAPIInterCon***GpuResetOpacity***>();
+
+// FAUX — deux SetOpacity sans Reset entre eux
+let _: <i32> = <DrvAPIInterCon***GpuSetOpacity***>(77);
+let _: <i32> = <DrvAPIInterCon***GpuSetOpacity***>(178); // ← écrase 77 sans Reset
+```
+
+---
+
+## 6. Pipeline d'assets Figma
+
+### 6.1 Export PNG
+
+**Toujours exporter en PNG avec canal alpha (RGBA 32-bit).** Sans alpha, les pixels transparents deviennent blancs → coins blancs visibles sur les icônes.
+
+| Paramètre Figma | Valeur |
+|---|---|
+| Format | PNG |
+| Fond | Transparent (décocher "Include background color") |
+| Profondeur | 32-bit (automatique si PNG) |
+| Résolution | 1× (la mise à l'échelle est faite par le kernel) |
+
+Nommage : `img1.png`, `img2.png`... (indices 1-based utilisés dans `ImageLoad`).
+
+### 6.2 Export SVG
+
+Avant export SVG, dans Figma :
+1. **Flatten** le vecteur (Ctrl+E) — simplifie les paths complexes
+2. **Outline Stroke** si contours — les strokes vectoriels deviennent des fills
+3. Vérifier qu'aucun path ne contient de commande `C/S/Q/A` (cubic bezier non supporté)
+4. Remplacer `stroke="url(#gradientId)"` par une couleur fixe
+
+**Support SVG :**
+
+| Commande | Supporté |
+|---|---|
+| `M`, `m`, `L`, `l` | ✅ |
+| `H`, `h`, `V`, `v` | ✅ |
+| `Z`, `z` | ✅ |
+| `rect`, `circle`, `ellipse`, `line`, `polygon` | ✅ |
+| `C`, `S`, `Q`, `A` (courbes) | ❌ ignoré |
+| `stroke="url(#...)"` | ❌ transparent |
+| `<filter>`, `<feGaussianBlur>` | ❌ ignoré |
+
+**Alternative pour formes complexes** : exporter en PNG RGBA et utiliser `ImageLoad + ImageDraw`.
+
+### 6.3 Chemins SRFS
+
+```
+SDC:/apps/<AppName>/<AppName>.slasset/img1.png
+SDC:/apps/<AppName>/<AppName>.slasset/vec1.svg
+SDC:/slu64/assets/fonts/brsonomasemibold.ttf
+```
+
+Toujours utiliser le format `SDC:/...` (pas de `/` relatif).
+
+---
+
+## 7. Plugin TypeScript — Codegen complet
+
+### 7.1 Utilitaires de base
 
 ```typescript
-// FAUX — pivot en coordonnées design brutes
-emit(`GpuSetTransform2D(${cos}, ${sin}, ${-sin}, ${cos}, ${i32(pivotX)}, ${i32(pivotY)})`);
+// ── Constantes design ────────────────────────────────────────────────
+const DESIGN_W = 1440;
+const DESIGN_H = 1024;
 
-// CORRECT — pivot scalé vers l'écran
-const px = i32((node.absoluteBoundingBox.x + node.width  / 2) * scaleX / 1000);
-const py = i32((node.absoluteBoundingBox.y + node.height / 2) * scaleY / 1000);
-emit(`GpuSetTransform2D(${cos}, ${sin}, ${-sin}, ${cos}, ${px}, ${py})`);
+// ── Émetteur de code ─────────────────────────────────────────────────
+const lines: string[] = [];
+const emit = (line: string) => lines.push(line);
+
+// ── Conversion numérique Figma → i32 ─────────────────────────────────
+const i32 = (v: number): number => Math.round(v);
+
+// ── Facteurs d'échelle (runtime, pas compile-time) ────────────────────
+// Mara génère des expressions scalées inline — le plugin émet le pattern :
+// ((designValue * sW + 500) / 1000) pour x/w
+// ((designValue * sH + 500) / 1000) pour y/h
+const sx = (v: number) => `((${i32(v)} * sW + 500) / 1000)`;
+const sy = (v: number) => `((${i32(v)} * sH + 500) / 1000)`;
+const sr = (r: number) => `(((${i32(r)} * sW + 500) / 1000 + (${i32(r)} * sH + 500) / 1000) / 2)`;
+
+// ── Conversion couleur Figma → ARGB i32 ──────────────────────────────
+const toARGB = (r: number, g: number, b: number, a: number): string => {
+    const ri = Math.round(r * 255);
+    const gi = Math.round(g * 255);
+    const bi = Math.round(b * 255);
+    const ai = Math.round(a * 255);
+    return `0x${ai.toString(16).padStart(2,'0').toUpperCase()}` +
+           `${ri.toString(16).padStart(2,'0').toUpperCase()}` +
+           `${gi.toString(16).padStart(2,'0').toUpperCase()}` +
+           `${bi.toString(16).padStart(2,'0').toUpperCase()}`;
+};
+
+// Couleur avec alpha FORCÉ à 0xFF (pour blocs GpuSetOpacity)
+const toARGBOpaque = (r: number, g: number, b: number): string =>
+    toARGB(r, g, b, 1.0);
+
+// ── Opacité Figma → GpuSetOpacity ────────────────────────────────────
+const toOpacity = (figmaOpacity: number): number =>
+    Math.round(figmaOpacity * 255);
+
+// ── Pivot pour GpuSetTransform2D ─────────────────────────────────────
+const pivot = (node: SceneNode) => {
+    const bb = (node as LayoutMixin).absoluteBoundingBox!;
+    return {
+        x: sx(bb.x + bb.width  / 2),
+        y: sy(bb.y + bb.height / 2),
+    };
+};
+
+// ── Matrice de rotation ───────────────────────────────────────────────
+const cosFixed = (deg: number) => Math.round(Math.cos(deg * Math.PI / 180) * 10000);
+const sinFixed = (deg: number) => Math.round(Math.sin(deg * Math.PI / 180) * 10000);
+
+const emitRotation = (deg: number, pivotX: string, pivotY: string) => {
+    const cos = cosFixed(deg), sin = sinFixed(deg);
+    emit(`        let _: <i32> = <DrvAPIInterCon***GpuSetTransform2D***>(${cos}, ${sin}, ${-sin}, ${cos}, ${pivotX}, ${pivotY});`);
+};
 ```
 
-### Q2 — `0x33B9B9B9` (alpha=20%) dans les diamonds dock
+### 7.2 Génération de l'en-tête Render
 
-Les couches concentrique du diamond (S_SHILOOKER, SHILOOKER_1…) ont leur propre alpha ARGB — elles ne doivent **PAS** être enveloppées dans `GpuSetOpacity`. L'opacité 30% s'applique uniquement au fond `GpuDrawRoundedRectAlpha` de la dock bar, pas aux icônes à l'intérieur.
+```typescript
+const emitHeader = (designW: number, designH: number) => {
+    emit(`#base <std***ComTpe***SlulFrmt***[ DrvAPIInterCon ]>;`);
+    emit(`#base <MaratineKit>;`);
+    emit(``);
+    emit(`rel op Render: [ctx string, fnt ptr] [`);
+    emit(`    var im: <i32> = 0;`);
+    emit(``);
+    emit(`    let sw: <i32> = <DrvAPIInterCon***GpuGetWidth***>();`);
+    emit(`    let sh: <i32> = <DrvAPIInterCon***GpuGetHeight***>();`);
+    emit(`    let sW: <i32> = (sw * 1000) / ${designW};`);
+    emit(`    let sH: <i32> = (sh * 1000) / ${designH};`);
+    emit(``);
+    emit(`    let font: <ptr> = <DrvAPIInterCon***FontLoad***>("SDC:/slu64/assets/fonts/brsonomasemibold.ttf");`);
+};
+```
+
+### 7.3 Mapping Layer Figma → Appel Mara
+
+#### RECTANGLE / FRAME sans effet
+
+```typescript
+const emitRect = (node: RectangleNode | FrameNode, imgIndex?: number) => {
+    const bb = node.absoluteBoundingBox!;
+    const x = sx(bb.x), y = sy(bb.y), w = sx(bb.width), h = sy(bb.height);
+    const r = sr('cornerRadius' in node ? (node.cornerRadius as number) || 0 : 0);
+    const fill = node.fills[0];
+
+    if (fill?.type === 'IMAGE') {
+        emit(`        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/APP/APP.slasset/img${imgIndex}.png");`);
+        emit(`        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ${x}, ${y}, ${w}, ${h});`);
+        return;
+    }
+
+    const opacity = node.opacity ?? 1.0;
+    const color = fill?.type === 'SOLID'
+        ? (opacity < 1 ? toARGBOpaque(fill.color.r, fill.color.g, fill.color.b)
+                       : toARGB(fill.color.r, fill.color.g, fill.color.b, fill.opacity ?? 1))
+        : '0x00000000';
+
+    if (opacity < 1.0 && opacity > 0) {
+        emit(`        let _: <i32> = <DrvAPIInterCon***GpuSetOpacity***>(${toOpacity(opacity)});`);
+        emit(`        let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(${x}, ${y}, ${w}, ${h}, ${r}, ${color});`);
+        emit(`        let _: <i32> = <DrvAPIInterCon***GpuResetOpacity***>();`);
+    } else {
+        emit(`        let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(${x}, ${y}, ${w}, ${h}, ${r}, ${color});`);
+    }
+};
+```
+
+#### FRAME avec Background Blur (frosted glass)
+
+```typescript
+const emitFrostedGlass = (node: FrameNode, imgIndex?: number) => {
+    const bb = node.absoluteBoundingBox!;
+    const x = sx(bb.x), y = sy(bb.y), w = sx(bb.width), h = sy(bb.height);
+    const cr = 'cornerRadius' in node ? (node.cornerRadius as number) || 0 : 0;
+    const r = sr(cr);
+    const opacity = node.opacity ?? 1.0;
+    const fill = node.fills[0] as SolidPaint;
+    const color = toARGBOpaque(fill.color.r, fill.color.g, fill.color.b);
+    const blurEffect = node.effects?.find(e => e.type === 'BACKGROUND_BLUR') as BlurEffect;
+    const sigma = blurEffect ? Math.round(blurEffect.radius / 2) : 3;
+
+    // ⚠️ Coins bas uniquement (si y=0, arête haute contre l'écran) :
+    const atScreenTop = Math.round(bb.y) === 0;
+    const yExpr = atScreenTop ? `(0 - ${r})` : y;
+    const hExpr = atScreenTop ? `(${h} + ${r})` : h;
+
+    emit(`        let _: <i32> = <DrvAPIInterCon***GpuSetOpacity***>(${toOpacity(opacity)});`);
+    emit(`        let _: <i32> = <DrvAPIInterCon***GpuBackgroundBlur***>(${x}, ${y}, ${w}, ${h}, ${r}, ${sigma});`);
+    emit(`        let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(${x}, ${yExpr}, ${w}, ${hExpr}, ${r}, ${color});`);
+    emit(`        let _: <i32> = <DrvAPIInterCon***GpuResetOpacity***>();`);
+};
+```
+
+#### DROP_SHADOW (Figma effect)
+
+```typescript
+const emitDropShadow = (node: SceneNode, effect: DropShadowEffect) => {
+    const bb = (node as LayoutMixin).absoluteBoundingBox!;
+    const w = sx(bb.width), h = sy(bb.height);
+    const cr = 'cornerRadius' in node ? sr((node as any).cornerRadius || 0) : '0';
+    const c = effect.color;
+    const color = toARGB(c.r, c.g, c.b, c.a);
+    const blur = Math.round(effect.radius);
+    const oy = Math.round(effect.offset.y);
+
+    // ⚠️ Choisir GpuDrawLinearGradient (ombre directionnelle bas uniquement, sans artefact)
+    // plutôt que GpuDrawDropShadow (box_blur → artefact si blur ≥ oy)
+    if (oy > 0 && Math.round(effect.offset.x) === 0) {
+        // Shadow strictement sous l'élément → gradient strip
+        const dkY = sy(bb.y);
+        const dkX = sx(bb.x);
+        const shadowAlpha = Math.round(c.a * 48);
+        const shadowColor = `0x${shadowAlpha.toString(16).padStart(2,'0').toUpperCase()}000000`;
+        emit(`        let _: <i32> = <DrvAPIInterCon***GpuDrawLinearGradient***>(${dkX}, (${dkY} + ${h}), ${w}, ${Math.max(blur * 2, 8)}, 0, -90, ${shadowColor}, 0, 0x00000000, 1000, 2);`);
+    } else {
+        // Shadow multi-directionnelle → GpuDrawDropShadow
+        const ox = Math.round(effect.offset.x);
+        const x = sx(bb.x), y = sy(bb.y);
+        emit(`        let _: <i32> = <DrvAPIInterCon***GpuDrawDropShadow***>(${x}, ${y}, ${w}, ${h}, ${cr}, ${ox}, ${oy}, ${blur}, ${color});`);
+    }
+};
+```
+
+#### VECTOR / SVG
+
+```typescript
+const emitSvg = (node: VectorNode, vecIndex: number) => {
+    const bb = node.absoluteBoundingBox!;
+    const x = sx(bb.x), y = sy(bb.y), w = sx(bb.width), h = sy(bb.height);
+    const varName = `svg${vecIndex}`;
+    emit(`        let ${varName}: <ptr> = <DrvAPIInterCon***SvgLoad***>("SDC:/apps/APP/APP.slasset/vec${vecIndex}.svg");`);
+    emit(`        let _: <i32> = <DrvAPIInterCon***SvgDraw***>(${varName}, ${x}, ${y}, ${w}, ${h});`);
+    emit(`        let _: <i32> = <DrvAPIInterCon***SvgFree***>(${varName});`);
+};
+```
+
+#### Élément ROTATIF (GpuSetTransform2D + 4-pass fill)
+
+```typescript
+const emitRotatedRect = (
+    node: SceneNode,
+    rotDeg: number,
+    color: string,
+    varColor: string
+) => {
+    const bb = (node as LayoutMixin).absoluteBoundingBox!;
+    const x = sx(bb.x), y = sy(bb.y), w = sx(bb.width), h = sy(bb.height);
+    const { x: cx, y: cy } = pivot(node);
+    // ⚠️ Rayon ≤ 15% de la taille pour garder la forme losange
+    const rDesign = Math.min(('cornerRadius' in node ? (node as any).cornerRadius || 0 : 0),
+                             Math.round(bb.width * 0.12));
+    const r = sr(rDesign);
+    const cos = cosFixed(rotDeg), sin = sinFixed(rotDeg);
+
+    emit(`        // [${varColor} — ${rotDeg}° / 4-pass anti-gap]`);
+    emit(`        let _: <i32> = <DrvAPIInterCon***GpuSetTransform2D***>(${cos}, ${sin}, ${-sin}, ${cos}, ${cx}, ${cy});`);
+    emit(`        let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(${x}, ${y}, ${w}, ${h}, ${r}, ${color});`);
+    emit(`        let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>((${x} + 1), (${y} + 1), ${w}, ${h}, ${r}, ${color});`);
+    emit(`        let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>((${x} + 1), ${y}, ${w}, ${h}, ${r}, ${color});`);
+    emit(`        let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(${x}, (${y} + 1), ${w}, ${h}, ${r}, ${color});`);
+    emit(`        let _: <i32> = <DrvAPIInterCon***GpuResetTransform***>();`);
+};
+```
+
+#### TEXT
+
+```typescript
+const emitText = (node: TextNode, font: string = 'font') => {
+    const bb = node.absoluteBoundingBox!;
+    const x = sx(bb.x), y = sy(bb.y), w = sx(bb.width);
+    const fill = node.fills[0] as SolidPaint;
+    const fg = toARGB(fill.color.r, fill.color.g, fill.color.b, fill.opacity ?? 1);
+    const size = sr(node.fontSize as number);
+    const align = node.textAlignHorizontal === 'CENTER' ? 1
+                : node.textAlignHorizontal === 'RIGHT'  ? 2 : 0;
+    const text = (node.characters as string).replace(/"/g, '\\"');
+    emit(`        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(${x}, ${y}, ${w}, "${text}", ${fg}, 0x00000000, ${font}, ${size}, ${align});`);
+};
+```
+
+#### LINEAR_GRADIENT fill
+
+```typescript
+const emitLinearGradient = (node: SceneNode, fill: GradientPaint) => {
+    const bb = (node as LayoutMixin).absoluteBoundingBox!;
+    const x = sx(bb.x), y = sy(bb.y), w = sx(bb.width), h = sy(bb.height);
+    const cr = 'cornerRadius' in node ? sr((node as any).cornerRadius || 0) : '0';
+
+    // Calculer l'angle depuis la transform Figma
+    const t = fill.gradientTransform;
+    const angleRad = Math.atan2(t[1][0], t[0][0]);
+    const angleDeg = Math.round(angleRad * 180 / Math.PI);
+
+    const s0 = fill.gradientStops[0];
+    const s1 = fill.gradientStops[1] || s0;
+    const c1 = toARGB(s0.color.r, s0.color.g, s0.color.b, s0.color.a);
+    const c2 = toARGB(s1.color.r, s1.color.g, s1.color.b, s1.color.a);
+    const p1 = Math.round(s0.position * 1000);
+    const p2 = Math.round(s1.position * 1000);
+
+    emit(`        let _: <i32> = <DrvAPIInterCon***GpuDrawLinearGradient***>(${x}, ${y}, ${w}, ${h}, ${cr}, ${angleDeg}, ${c1}, ${p1}, ${c2}, ${p2}, 2);`);
+};
+```
+
+### 7.4 Pied de fichier
+
+```typescript
+const emitFooter = () => {
+    emit(`    let gpuResult: <i32> = <DrvAPIInterCon***GpuFlushRenderContext***>(ctx);`);
+    emit(`    if (gpuResult != 0) [ ret 1; ];`);
+    emit(`    ret 0;`);
+    emit(`];`);
+    emit(``);
+    emit(`rel op Destroy: [] [ ret 0; ];`);
+};
+```
+
+### 7.5 Traversée des layers (ordre peintre)
+
+```typescript
+const processLayers = (nodes: readonly SceneNode[], imgCounter = {n: 1}, vecCounter = {n: 1}) => {
+    // Figma : du bas vers le haut dans le panel Layers = ordre de rendu de fond vers avant-plan
+    const ordered = [...nodes].reverse();
+
+    for (const node of ordered) {
+        if (!node.visible) continue;
+
+        // DROP_SHADOW effect → émettre en premier (sous l'élément)
+        if ('effects' in node) {
+            for (const effect of (node as GeometryMixin).effects || []) {
+                if (effect.type === 'DROP_SHADOW' && effect.visible) {
+                    emitDropShadow(node, effect as DropShadowEffect);
+                }
+            }
+        }
+
+        switch (node.type) {
+            case 'RECTANGLE':
+                const rect = node as RectangleNode;
+                if (rect.fills[0]?.type === 'IMAGE') {
+                    emitRect(rect, imgCounter.n++);
+                } else if (rect.fills[0]?.type === 'GRADIENT_LINEAR') {
+                    emitLinearGradient(rect, rect.fills[0] as GradientPaint);
+                } else {
+                    emitRect(rect);
+                }
+                break;
+
+            case 'FRAME': {
+                const frame = node as FrameNode;
+                const hasBlur = frame.effects?.some(e => e.type === 'BACKGROUND_BLUR' && e.visible);
+                if (hasBlur) {
+                    emitFrostedGlass(frame);
+                } else {
+                    emitRect(frame);
+                }
+                // Récursion sur les enfants
+                if ('children' in frame) processLayers(frame.children, imgCounter, vecCounter);
+                break;
+            }
+
+            case 'VECTOR':
+            case 'BOOLEAN_OPERATION':
+            case 'STAR':
+            case 'POLYGON':
+                emitSvg(node as VectorNode, vecCounter.n++);
+                break;
+
+            case 'TEXT':
+                emitText(node as TextNode);
+                break;
+
+            case 'COMPONENT':
+            case 'INSTANCE':
+                // Traiter comme FRAME
+                emitRect(node as FrameNode);
+                if ('children' in node) processLayers((node as FrameNode).children, imgCounter, vecCounter);
+                break;
+        }
+    }
+};
+```
+
+---
+
+## 8. Patterns UI — Recettes prêtes à l'emploi
+
+### 8.1 Wallpaper plein écran (fill-screen)
 
 ```mara
-// FAUX — GpuSetOpacity(77) englobe les diamonds eux-mêmes
-GpuSetOpacity(77);
-GpuSetTransform2D(...); GpuDrawRoundedRectAlpha(..., 0x33B9B9B9); GpuResetTransform();
-GpuResetOpacity();  // → alpha effectif : 51 * 77 / 255 = 15% (trop dim)
-
-// CORRECT — GpuSetOpacity(77) ne s'applique QU'AU fond de la dock bar
-GpuSetOpacity(77);
-GpuDrawRoundedRectAlpha(..., 0xFFF5E3E1);  // dock bar background
-GpuResetOpacity();
-// Puis les diamonds sans GpuSetOpacity — leur alpha est dans la couleur ARGB
-GpuSetTransform2D(...); GpuDrawRoundedRectAlpha(..., 0x33B9B9B9); GpuResetTransform();
+im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/App/App.slasset/img1.png");
+let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, 0, 0, sw, sh);
 ```
 
-Plugin TS : `GpuSetOpacity` ne s'émet QUE si `node.opacity < 1.0 && node.type !== "COMPONENT"`. Les enfants héritent de l'opacité via leur couleur ARGB — ne pas propager `GpuSetOpacity` aux sous-couches.
-
-### Q3 — GpuSetOpacity affecte-t-il GpuDrawDropShadow ?
-
-**OUI** — `GPU_OPACITY` est appliqué au canal alpha de la couleur shadow : `final_alpha = color_alpha * GPU_OPACITY / 255`. Shadow `0x40000000` (α=64) sous `GpuSetOpacity(77)` → α effectif = `64 * 77 / 255 = 19`. Très subtil mais correct pour l'ombre de la dock pill.
-
-### Q4 — GpuBackgroundBlur : ordre et comportement
-
-`GpuBackgroundBlur` blurs **in-place** les pixels déjà dans le GOP framebuffer. Il capture et réécrit la même zone.
-
-**Ordre obligatoire (frosted glass) :**
+### 8.2 Dock pill frosted glass avec shadow
 
 ```mara
-// 1. Blur le fond (wallpaper seul à ce stade)
-GpuBackgroundBlur(x, y, w, h, r, radius);
-// 2. Tint sur le fond flouté
-GpuDrawRoundedRectAlpha(x, y, w, h, r, 0xFFE0E0E0);  // 0xFF — opacité via GpuSetOpacity
-// 3. SVG overlay (si nécessaire)
-SvgDraw(handle, x, y, w, h);
+let dkX: <i32> = ((526 * sW + 500) / 1000);
+let dkY: <i32> = ((900 * sH + 500) / 1000);
+let dkW: <i32> = ((405 * sW + 500) / 1000);
+let dkH: <i32> = ((80 * sH + 500) / 1000);
+let dkR: <i32> = (((30 * sW + 500) / 1000 + (30 * sH + 500) / 1000) / 2);
+
+// Shadow directionnelle — gradient strip sous le dock
+let _: <i32> = <DrvAPIInterCon***GpuDrawLinearGradient***>(dkX, (dkY + dkH), dkW, 12, 0, -90, 0x30000000, 0, 0x00000000, 1000, 2);
+
+// Dock bar à 30% (double-alpha rule : color alpha = 0xFF)
+let _: <i32> = <DrvAPIInterCon***GpuSetOpacity***>(77);
+let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(dkX, dkY, dkW, dkH, dkR, 0xFFF5E3E1);
+let _: <i32> = <DrvAPIInterCon***GpuResetOpacity***>();
 ```
 
-**FAUX** — DrawRoundedRect avant BackgroundBlur (le fill solide est incorporé dans le blur → résultat grisé indistinct).
+### 8.3 Barre sysbar frosted glass (coins bas arrondis seulement)
 
-### Q5 — SvgDraw : support des paths Figma
+```mara
+let swR: <i32> = (((8 * sW + 500) / 1000 + (8 * sH + 500) / 1000) / 2);
+let swW: <i32> = ((1440 * sW + 500) / 1000);
+let swH: <i32> = ((30 * sH + 500) / 1000);
 
-Le renderer SVG supporte uniquement : `rect`, `circle`, `ellipse`, `line`, `polygon`, `polyline`, `path (M/m L/l H/h V/v Z/z)`.
+let _: <i32> = <DrvAPIInterCon***GpuSetOpacity***>(178);
+let _: <i32> = <DrvAPIInterCon***GpuBackgroundBlur***>(0, 0, swW, swH, swR, 3);
+// y=(0-swR) → coins supérieurs hors-écran, seuls les coins bas sont arrondis
+let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(0, (0 - swR), swW, (swH + swR), swR, 0xFFE0E0E0);
+let _: <i32> = <DrvAPIInterCon***GpuResetOpacity***>();
+```
 
-**Non supporté** : commandes `C` (cubic bézier), `S`, `Q`, `A` — ignorées silencieusement.  
-**Non supporté** : `stroke="url(#...)"` (gradient stroke) → stroke = transparent.  
-**Non supporté** : `<filter>`, `<feGaussianBlur>`, `<feBlend>`, `<feTurbulence>`.
+### 8.4 Icône losange (rotated rounded rect + 4-pass)
 
-**Impact sur les SVGs actuels :**
+```mara
+// cx, cy = centre du losange en pixels écran
+let cx: <i32> = ((571 * sW + 500) / 1000);
+let cy: <i32> = ((940 * sH + 500) / 1000);
+let dx: <i32> = ((548 * sW + 500) / 1000);
+let dy: <i32> = ((917 * sH + 500) / 1000);
+let dw: <i32> = ((45 * sW + 500) / 1000);
+let dh: <i32> = ((45 * sH + 500) / 1000);
+let dr: <i32> = (((5 * sW + 500) / 1000 + (5 * sH + 500) / 1000) / 2);  // r ≤ 12% de taille
 
-| Fichier | Contenu | Résultat sur device |
-| --- | --- | --- |
-| vec2.svg (gesture bar) | `<path d="M6.5 2.5H221.5" stroke="url(#gradient)">` | Ligne tracée (M+H ✅) mais stroke invisible (URL gradient ❌) |
-| vec3.svg (Shi Windows top) | `<path d="M1431 0H7C-1 0 -8 7 -8 16V29H1448V16C1448 7 1440 0 1431 0Z">` | Contient `C` → portion courbe ignorée → forme incorrecte |
-| vec5.svg (ShiSettings button) | À vérifier | Inconnu |
+let _: <i32> = <DrvAPIInterCon***GpuSetTransform2D***>(6947, 7193, -7193, 6947, cx, cy);
+let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(dx, dy, dw, dh, dr, 0xFFFFDDC0);
+let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>((dx + 1), (dy + 1), dw, dh, dr, 0xFFFFDDC0);
+let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>((dx + 1), dy, dw, dh, dr, 0xFFFFDDC0);
+let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(dx, (dy + 1), dw, dh, dr, 0xFFFFDDC0);
+let _: <i32> = <DrvAPIInterCon***GpuResetTransform***>();
 
-**Solution pour vec2.svg** — remplacer le gradient stroke par une couleur fixe dans le SVG :
+// Icône centrée (non rotée)
+im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/App/App.slasset/img4.png");
+let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ((544 * sW + 500) / 1000), ((913 * sH + 500) / 1000), ((57 * sW + 500) / 1000), ((57 * sH + 500) / 1000));
+```
 
+### 8.5 Card notification (shadow + rounded rect + texte)
+
+```mara
+// Shadow
+let _: <i32> = <DrvAPIInterCon***GpuDrawDropShadow***>(
+    ((30 * sW + 500) / 1000), ((200 * sH + 500) / 1000),
+    ((456 * sW + 500) / 1000), ((112 * sH + 500) / 1000),
+    (((12 * sW + 500) / 1000 + (12 * sH + 500) / 1000) / 2),
+    0, 4, 8, 0x28000000
+);
+// Card background blanc opaque
+let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(
+    ((30 * sW + 500) / 1000), ((200 * sH + 500) / 1000),
+    ((456 * sW + 500) / 1000), ((112 * sH + 500) / 1000),
+    (((12 * sW + 500) / 1000 + (12 * sH + 500) / 1000) / 2),
+    0xFFFFFFFF
+);
+// Texte
+let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(
+    ((44 * sW + 500) / 1000), ((216 * sH + 500) / 1000),
+    ((428 * sW + 500) / 1000),
+    "ShiSettings • SluPwManSrv", 0xFF1A1A1A, 0x00000000,
+    font, (((13 * sW + 500) / 1000 + (13 * sH + 500) / 1000) / 2), 0
+);
+```
+
+### 8.6 Élément semi-transparent (layer opacity Figma)
+
+```mara
+// Layer opacity = 0.20 (20%) → GpuSetOpacity(51)
+// Couleur alpha = 0xFF (pas double-alpha)
+let _: <i32> = <DrvAPIInterCon***GpuSetOpacity***>(51);
+let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(x, y, w, h, r, 0xFFB9B9B9);
+let _: <i32> = <DrvAPIInterCon***GpuResetOpacity***>();
+```
+
+### 8.7 Image avec blend mode (MULTIPLY)
+
+```mara
+let _: <i32> = <DrvAPIInterCon***GpuSetBlendMode***>(1);   // MULTIPLY
+im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/App/App.slasset/overlay.png");
+let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, x, y, w, h);
+let _: <i32> = <DrvAPIInterCon***GpuResetBlendMode***>();
+```
+
+---
+
+## 9. Limitations connues et contournements
+
+### 9.1 `GpuDrawDropShadow` — Artefact box_blur
+
+**Problème** : la zone de box_blur s'étend à `(sx-blur, sy_-blur, w+2*blur, h+2*blur)`. Quand `blur ≥ oy`, le blur monte au-dessus de l'élément → bande sombre rectangulaire visible.
+
+**Contournement A — Shadow directionnelle (sous seulement) :**
+```mara
+// GpuDrawLinearGradient — aucun artefact
+GpuDrawLinearGradient(dkX, (dkY + dkH), dkW, 12, 0, -90, 0x30000000, 0, 0x00000000, 1000, 2);
+```
+
+**Contournement B — Halo symétrique propre :**
+```mara
+// GpuDrawGlow — SDF + falloff linéaire, aucun artefact box_blur
+GpuDrawGlow(x, y, w, h, r, 0x000000, 10, 45);
+```
+
+**Utiliser `GpuDrawDropShadow` uniquement quand `oy > blur`** (le blur region commence SOUS le bord supérieur de l'élément) et avec des valeurs faibles (`blur ≤ 4`, `color_alpha ≤ 0x40`).
+
+---
+
+### 9.2 PNG sans canal alpha — Coins blancs
+
+ImageDraw utilise Porter-Duff OVER sur le canal alpha du PNG (octet [3]). Si le PNG est en RGB sans alpha, l'octet [3] = 255 → tous les pixels opaques → coins blancs visibles.
+
+**Solution** : Re-exporter depuis Figma en PNG RGBA avec fond transparent.  
+**Test rapide** : ouvrir le PNG dans un éditeur d'image — si les coins sont blancs, il manque l'alpha.
+
+---
+
+### 9.3 Support SVG limité
+
+| Non supporté | Contournement |
+|---|---|
+| Commandes `C/S/Q/A` (courbes de Bézier) | Flatten dans Figma → `M/L/H/V/Z` seulement |
+| `stroke="url(#gradientId)"` | Remplacer par couleur fixe dans le SVG |
+| `<filter>`, `<feGaussianBlur>` | Supprimer, utiliser `GpuBackgroundBlur` côté Mara |
+| Formes complexes | Exporter en PNG RGBA + `ImageDraw` |
+
+**Exemple de correction SVG (stroke gradient → couleur fixe) :**
 ```xml
-<!-- Dans vec2.svg, remplacer stroke="url(#...)" par -->
+<!-- Avant (invalide) -->
+<path d="M6.5 2.5H221.5" stroke="url(#paint0_linear)"/>
+
+<!-- Après (supporté) -->
 <path d="M6.5 2.5H221.5" stroke="#878787" stroke-width="5" stroke-linecap="round"/>
 ```
 
-**Solution pour les paths bézier Figma** — export SVG simplifié : dans Figma, avant export, "Flatten" le vecteur (Ctrl+E), puis utiliser "Outline stroke". Les paths complexes avec C doivent être convertis en polygones approximatifs (l'outil Figma `Vectorize` / `Flatten` peut parfois réduire la complexité).
+---
 
-**Alternative** — pour les formes wave complexes, exporter en PNG avec fond transparent et utiliser `ImageLoad + ImageDraw` à la place de `SvgLoad + SvgDraw`.
+### 9.4 Forward Transform Gaps (rotation)
 
-### Q6 — ImageDraw y<0 (hors écran) et transparence PNG
-
-**y<0 clipping** : ✅ géré par le kernel pixel par pixel — `if fy < 0 || fy >= sh { continue; }`. Les zones hors framebuffer sont simplement sautées.
-
-**PNG alpha / coins blancs** : ImageDraw utilise Porter-Duff OVER sur le canal alpha du PNG (octets `so+3`). Si le PNG a été exporté sans canal alpha (3 canaux RGB), l'octet alpha est 255 → coins opaques blancs/colorés. Solution : re-exporter depuis Figma avec fond transparent (PNG 32-bit RGBA).
-
-```typescript
-// Plugin TS — pour les PNGs sketch (icônes dock) :
-// Export depuis Figma : clic droit → Export → PNG → "Include 'Ignore overlapping layers'" décoché
-// → Le fond devient transparent dans le PNG → Porter-Duff rend les coins corrects
-```
+**Cause** : forward mapping → trous à environ 50% de couverture à 46°.  
+**Solution** : 4-pass draw — voir §5.3.  
+**Alternative propre** : utiliser `GpuDrawRotatedImage` pour les images (inverse mapping, pas de trous).
 
 ---
 
-## Sécurité
+### 9.5 DrawText=0 — FontLoad retourne null
 
-`PRIMARY_VALIDATOR_PRIVKEY` est une constante de validation — ne pas modifier.
+Si `GpuDrawTextFontAlign` ne dessine rien (`DrawText=0` dans le debug kernel), `FontLoad` a retourné `nullptr`. Causes :
+1. Le chemin SRFS est incorrect (`SDC:/...`)
+2. Le fichier n'existe pas dans l'asset bundle
+3. Le format TTF n'est pas supporté (utiliser un TTF standard, pas OTF)
+
+**Debug** : chercher dans `SDC:/slu64/assets/fonts/` les polices disponibles.
+
+---
+
+### 9.6 IMAGE_CACHE — Éviction LRU
+
+Si plus de 8 `ImageLoad` sont actifs simultanément dans le même `rel op Render`, les handles les plus anciens sont invalides. Toujours utiliser **une seule `var im: <i32>`** réutilisée séquentiellement.
+
+---
+
+## 10. Sécurité
+
+`PRIMARY_VALIDATOR_PRIVKEY` est une constante de validation intégrée dans le kernel. **Ne jamais modifier.**
+
+Pipeline de chargement `.marep` :
+1. Lecture du bundle ZIP depuis l'ESP (SimpleFileSystem UEFI)
+2. Vérification AuthARoot (`Maraset.yaml` SRID ↔ `RAbstractallowing.xml`)
+3. Auto-install assets → `SDC:/apps/<AppName>/`
+4. Exécution OVC via `exec_marep` (entry point `OEntry` → `Render`)
+
+---
+
+## État pixel-perfect — Checklist avant build
+
+| ✓ | Vérification |
+|---|---|
+| ☐ | Wallpaper `ImageDraw(im, 0, 0, sw, sh)` — pas de h=1037 hardcodé |
+| ☐ | Toute couleur dans bloc `GpuSetOpacity` a alpha `0xFF` en ARGB (pas double-alpha) |
+| ☐ | `GpuBackgroundBlur` AVANT `GpuDrawRoundedRectAlpha` pour chaque frosted glass |
+| ☐ | `GpuSetOpacity` suivi exactement d'un `GpuResetOpacity` par groupe |
+| ☐ | `GpuSetTransform2D` suivi de 4-pass fill + `GpuResetTransform` |
+| ☐ | Rayon de coin des éléments rotatifs ≤ 15% de la taille |
+| ☐ | Barre sysbar à y=0 : `y=(0-r), h=(h+r)` pour cacher coins supérieurs |
+| ☐ | Shadow dock : `GpuDrawLinearGradient` (pas `GpuDrawDropShadow` si blur ≥ oy) |
+| ☐ | `FontLoad` appelé directement dans `Render`, pas via `fnt` |
+| ☐ | Une seule `var im: <i32> = 0` réutilisée pour toutes les images |
+| ☐ | PNGs exportés RGBA (fond transparent dans Figma) |
+| ☐ | SVGs sans commandes `C/S/Q/A` (Flatten dans Figma avant export) |
+| ☐ | Pivot `GpuSetTransform2D` = centre de l'élément en pixels écran (post-scale) |
 
 ---
 

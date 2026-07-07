@@ -235,6 +235,16 @@ pub fn render_from_marep(
         Err(_) => return,
     };
 
+    // Sélectionne le mode GOP de plus grande résolution disponible. Sans ça, le kernel garde le mode
+    // laissé actif par le firmware au boot (souvent un mode par défaut conservateur, pas la résolution
+    // native de l'écran) — le rendu remplit correctement CE mode, mais le mode lui-même ne couvre pas
+    // tout l'affichage physique, d'où des bandes noires sur les bords malgré un rendu interne responsive.
+    let best_mode = gop.modes(st.boot_services())
+        .max_by_key(|m| { let (mw, mh) = m.info().resolution(); mw * mh });
+    if let Some(mode) = best_mode {
+        let _ = gop.set_mode(&mode);
+    }
+
     let info   = gop.current_mode_info();
     let (w, h) = info.resolution();
     let stride = info.stride() as i32;
@@ -264,10 +274,8 @@ pub fn render_from_marep(
     let ret = ovc_exec::exec_marep(&mod_refs, &ctx);
 
     // Affichage permanent — stall UEFI en boucle (pas de spin_loop qui monopolise le CPU).
+    // Pas d'écriture stdout ici : le texte console UEFI se superpose au framebuffer graphique.
     core::mem::forget(gop);
-    let (fills, rects, texts) = ovc_exec::gpu_counters();
-    let _ = write!(st.stdout(), "[RENDER] done GpuFill={} DrawRect={} DrawText={}\r\n",
-                   fills, rects, texts);
     let _ = ret;
     loop {
         st.boot_services().stall(30_000_000); // 30s par cycle

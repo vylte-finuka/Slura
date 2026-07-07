@@ -647,6 +647,81 @@ fn box_blur_region(fb: *mut u32, stride: i32, x: i32, y: i32, w: i32, h: i32, r:
     for py in 0..h { for px in 0..w { unsafe { fb.add(((y+py)*stride+x+px) as usize).write_volatile(buf[(py*w+px) as usize]); } } }
 }
 
+/// Flou d'arrière-plan découpé selon un rectangle arrondi tourné (transformation active).
+/// Même box blur 3-pass que box_blur_region, mais appliqué sur la bbox destination du rect
+/// tourné (coins transformés vers l'avant) et écrit UNIQUEMENT sur les pixels dont la
+/// transformation inverse retombe dans le rectangle arrondi source — le flou lit ses voisins
+/// normalement (pas d'artefact de bord), mais ne "fuit" pas hors de la silhouette tournée.
+fn box_blur_region_masked_rotated(
+    fb: *mut u32, stride: i32, sw: i32, sh: i32,
+    x: i32, y: i32, w: i32, h: i32, radius: i32,
+    t: [i32; 6], blur_r: i32,
+) {
+    if w <= 0 || h <= 0 || blur_r <= 0 { return; }
+    let (ta, tb, tc, td, ttx, tty) = (t[0], t[1], t[2], t[3], t[4], t[5]);
+    let corners = [(x, y), (x + w, y), (x, y + h), (x + w, y + h)];
+    let mut min_fx = i32::MAX; let mut max_fx = i32::MIN;
+    let mut min_fy = i32::MAX; let mut max_fy = i32::MIN;
+    for &(cx, cy) in corners.iter() {
+        let fx = ta * cx / 10000 + tc * cy / 10000 + ttx;
+        let fy = tb * cx / 10000 + td * cy / 10000 + tty;
+        if fx < min_fx { min_fx = fx; } if fx > max_fx { max_fx = fx; }
+        if fy < min_fy { min_fy = fy; } if fy > max_fy { max_fy = fy; }
+    }
+    min_fx = min_fx.max(0); max_fx = max_fx.min(sw - 1);
+    min_fy = min_fy.max(0); max_fy = max_fy.min(sh - 1);
+    let bw = max_fx - min_fx + 1;
+    let bh = max_fy - min_fy + 1;
+    if bw <= 0 || bh <= 0 { return; }
+    let total = (bw * bh) as usize;
+    if total > 512 * 512 { return; }
+    let mut buf: alloc::vec::Vec<u32> = alloc::vec::Vec::with_capacity(total);
+    for py in 0..bh { for px in 0..bw {
+        buf.push(unsafe { fb.add(((min_fy + py) * stride + min_fx + px) as usize).read_volatile() });
+    }}
+    for _ in 0..3 {
+        let src = buf.clone();
+        for py in 0..bh as usize { for px in 0..bw as usize {
+            let x0 = (px as i32 - blur_r).max(0) as usize; let x1 = (px as i32 + blur_r).min(bw - 1) as usize; let cnt = (x1 - x0 + 1) as u32;
+            let (mut sr, mut sg, mut sb) = (0u32, 0u32, 0u32);
+            for sx in x0..=x1 { let c = src[py * bw as usize + sx]; sr += (c >> 16) & 0xFF; sg += (c >> 8) & 0xFF; sb += c & 0xFF; }
+            buf[py * bw as usize + px] = 0xFF000000 | ((sr / cnt) << 16) | ((sg / cnt) << 8) | (sb / cnt);
+        }}
+    }
+    for _ in 0..3 {
+        let src = buf.clone();
+        for py in 0..bh as usize { for px in 0..bw as usize {
+            let y0 = (py as i32 - blur_r).max(0) as usize; let y1 = (py as i32 + blur_r).min(bh - 1) as usize; let cnt = (y1 - y0 + 1) as u32;
+            let (mut sr, mut sg, mut sb) = (0u32, 0u32, 0u32);
+            for sy in y0..=y1 { let c = src[sy * bw as usize + px]; sr += (c >> 16) & 0xFF; sg += (c >> 8) & 0xFF; sb += c & 0xFF; }
+            buf[py * bw as usize + px] = 0xFF000000 | ((sr / cnt) << 16) | ((sg / cnt) << 8) | (sb / cnt);
+        }}
+    }
+    let (ta64, tb64, tc64, td64) = (ta as i64, tb as i64, tc as i64, td as i64);
+    let det = ta64 * td64 - tc64 * tb64;
+    if det == 0 { return; }
+    let r2 = radius * radius;
+    for py in 0..bh {
+        for px in 0..bw {
+            let fx = min_fx + px; let fy = min_fy + py;
+            let dx = (fx - ttx) as i64;
+            let dy = (fy - tty) as i64;
+            let lx = ((td64 * dx - tc64 * dy) * 10000 / det) as i32 - x;
+            let ly = ((-tb64 * dx + ta64 * dy) * 10000 / det) as i32 - y;
+            if lx < 0 || lx >= w || ly < 0 || ly >= h { continue; }
+            if radius > 0 {
+                let el = radius - lx; let er = lx - (w - radius) + 1;
+                let cdx = if el > 0 { el } else if er > 0 { er } else { 0 };
+                let et = radius - ly; let eb = ly - (h - radius) + 1;
+                let cdy = if et > 0 { et } else if eb > 0 { eb } else { 0 };
+                if cdx > 0 && cdy > 0 && cdx * cdx + cdy * cdy > r2 { continue; }
+            }
+            let idx = (fy * stride + fx) as usize;
+            unsafe { fb.add(idx).write_volatile(buf[(py * bw + px) as usize]); }
+        }
+    }
+}
+
 pub fn reset_gpu_counters() {
     unsafe { GPU_FILLS = 0; GPU_RECTS = 0; GPU_TEXTS = 0; }
 }
@@ -2541,27 +2616,80 @@ fn dispatch(
                     let sg = ((c >>  8) & 0xFF) as u32;
                     let sb = ( c        & 0xFF) as u32;
                     let ia = 255 - alpha;
-                    for row in 0..h {
-                        let et  = radius - row;
-                        let eb  = row - (h - radius) + 1;
-                        let cdy = if et > 0 { et } else if eb > 0 { eb } else { 0 };
-                        for col in 0..w {
-                            let el  = radius - col;
-                            let er  = col - (w - radius) + 1;
-                            let cdx = if el > 0 { el } else if er > 0 { er } else { 0 };
-                            if cdx > 0 && cdy > 0 && cdx * cdx + cdy * cdy > r2 { continue; }
-                            let (fx, fy) = unsafe { gpu_transform_point(x + col, y + row) };
-                            if fx < 0 || fx >= sw || fy < 0 || fy >= sh { continue; }
-                            let idx = (fy * s + fx) as usize;
-                            let dst = unsafe { fb.add(idx).read_volatile() };
-                            let db  = (dst        & 0xFF) as u32;
-                            let dg  = ((dst >>  8) & 0xFF) as u32;
-                            let dr  = ((dst >> 16) & 0xFF) as u32;
-                            let nr  = (sr * alpha + dr * ia) / 255;
-                            let ng  = (sg * alpha + dg * ia) / 255;
-                            let nb  = (sb * alpha + db * ia) / 255;
-                            let blended: u32 = 0xFF000000 | (nr << 16) | (ng << 8) | nb;
-                            unsafe { fb.add(idx).write_volatile(blended); }
+                    if unsafe { GPU_TRANSFORM_ACTIVE } {
+                        // Mapping arrière (rotation inverse) — le mapping avant (un pixel source →
+                        // un pixel destination) laisse des trous en damier sur les rectangles tournés :
+                        // une rotation déplace chaque pas source d'~1px destination dans une direction
+                        // diagonale, et l'arrondi entier fait sauter certains pixels destination d'une
+                        // ligne de balayage à l'autre. On parcourt ici les pixels de la bbox destination
+                        // (coins du rect tourné vers l'avant) et on retrouve le pixel source par
+                        // transformation inverse — couverture exhaustive, aucun trou possible.
+                        let t = unsafe { GPU_TRANSFORM };
+                        let (ta, tb, tc, td, ttx, tty) = (t[0], t[1], t[2], t[3], t[4], t[5]);
+                        let corners = [(x, y), (x + w, y), (x, y + h), (x + w, y + h)];
+                        let mut min_fx = i32::MAX; let mut max_fx = i32::MIN;
+                        let mut min_fy = i32::MAX; let mut max_fy = i32::MIN;
+                        for &(cx, cy) in corners.iter() {
+                            let fx = ta * cx / 10000 + tc * cy / 10000 + ttx;
+                            let fy = tb * cx / 10000 + td * cy / 10000 + tty;
+                            if fx < min_fx { min_fx = fx; } if fx > max_fx { max_fx = fx; }
+                            if fy < min_fy { min_fy = fy; } if fy > max_fy { max_fy = fy; }
+                        }
+                        min_fx = min_fx.max(0); max_fx = max_fx.min(sw - 1);
+                        min_fy = min_fy.max(0); max_fy = max_fy.min(sh - 1);
+                        let (ta64, tb64, tc64, td64) = (ta as i64, tb as i64, tc as i64, td as i64);
+                        let det = ta64 * td64 - tc64 * tb64;
+                        if det != 0 {
+                            for fy in min_fy..=max_fy {
+                                for fx in min_fx..=max_fx {
+                                    let dx = (fx - ttx) as i64;
+                                    let dy = (fy - tty) as i64;
+                                    let lx = ((td64 * dx - tc64 * dy) * 10000 / det) as i32 - x;
+                                    let ly = ((-tb64 * dx + ta64 * dy) * 10000 / det) as i32 - y;
+                                    if lx < 0 || lx >= w || ly < 0 || ly >= h { continue; }
+                                    if radius > 0 {
+                                        let el = radius - lx; let er = lx - (w - radius) + 1;
+                                        let cdx = if el > 0 { el } else if er > 0 { er } else { 0 };
+                                        let et = radius - ly; let eb = ly - (h - radius) + 1;
+                                        let cdy = if et > 0 { et } else if eb > 0 { eb } else { 0 };
+                                        if cdx > 0 && cdy > 0 && cdx * cdx + cdy * cdy > r2 { continue; }
+                                    }
+                                    let idx = (fy * s + fx) as usize;
+                                    let dst = unsafe { fb.add(idx).read_volatile() };
+                                    let db  = (dst        & 0xFF) as u32;
+                                    let dg  = ((dst >>  8) & 0xFF) as u32;
+                                    let dr  = ((dst >> 16) & 0xFF) as u32;
+                                    let nr  = (sr * alpha + dr * ia) / 255;
+                                    let ng  = (sg * alpha + dg * ia) / 255;
+                                    let nb  = (sb * alpha + db * ia) / 255;
+                                    let blended: u32 = 0xFF000000 | (nr << 16) | (ng << 8) | nb;
+                                    unsafe { fb.add(idx).write_volatile(blended); }
+                                }
+                            }
+                        }
+                    } else {
+                        for row in 0..h {
+                            let et  = radius - row;
+                            let eb  = row - (h - radius) + 1;
+                            let cdy = if et > 0 { et } else if eb > 0 { eb } else { 0 };
+                            for col in 0..w {
+                                let el  = radius - col;
+                                let er  = col - (w - radius) + 1;
+                                let cdx = if el > 0 { el } else if er > 0 { er } else { 0 };
+                                if cdx > 0 && cdy > 0 && cdx * cdx + cdy * cdy > r2 { continue; }
+                                let (fx, fy) = unsafe { gpu_transform_point(x + col, y + row) };
+                                if fx < 0 || fx >= sw || fy < 0 || fy >= sh { continue; }
+                                let idx = (fy * s + fx) as usize;
+                                let dst = unsafe { fb.add(idx).read_volatile() };
+                                let db  = (dst        & 0xFF) as u32;
+                                let dg  = ((dst >>  8) & 0xFF) as u32;
+                                let dr  = ((dst >> 16) & 0xFF) as u32;
+                                let nr  = (sr * alpha + dr * ia) / 255;
+                                let ng  = (sg * alpha + dg * ia) / 255;
+                                let nb  = (sb * alpha + db * ia) / 255;
+                                let blended: u32 = 0xFF000000 | (nr << 16) | (ng << 8) | nb;
+                                unsafe { fb.add(idx).write_volatile(blended); }
+                            }
                         }
                     }
                 }
@@ -2989,7 +3117,22 @@ fn dispatch(
         "DrvAPIInterCon___GpuBackgroundBlur___" => {
             if args.len() >= 6 {
                 let fb = ctx.fb; let s = ctx.stride;
-                if !fb.is_null() { box_blur_region(fb,s,args[0] as i32,args[1] as i32,args[2] as i32,args[3] as i32,(args[5] as i32).clamp(1,16)); }
+                let blur_r = (args[5] as i32).clamp(1, 16);
+                if !fb.is_null() {
+                    if unsafe { GPU_TRANSFORM_ACTIVE } {
+                        // Transformation active (rotation) : flou découpé selon le rectangle arrondi
+                        // tourné, cf. box_blur_region_masked_rotated — args[4] sert ici de rayon de
+                        // coin pour le masque (ignoré côté rectangle plat ci-dessous).
+                        let t = unsafe { GPU_TRANSFORM };
+                        box_blur_region_masked_rotated(
+                            fb, s, ctx.width, ctx.height,
+                            args[0] as i32, args[1] as i32, args[2] as i32, args[3] as i32, args[4] as i32,
+                            t, blur_r,
+                        );
+                    } else {
+                        box_blur_region(fb, s, args[0] as i32, args[1] as i32, args[2] as i32, args[3] as i32, blur_r);
+                    }
+                }
             } 0
         },
         "DrvAPIInterCon___GpuProgressiveBlur___" => {
