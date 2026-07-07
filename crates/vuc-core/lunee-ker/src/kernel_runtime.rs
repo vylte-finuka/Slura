@@ -239,8 +239,24 @@ pub fn render_from_marep(
     // laissé actif par le firmware au boot (souvent un mode par défaut conservateur, pas la résolution
     // native de l'écran) — le rendu remplit correctement CE mode, mais le mode lui-même ne couvre pas
     // tout l'affichage physique, d'où des bandes noires sur les bords malgré un rendu interne responsive.
+    //
+    // Le rendu (.mara) étire indépendamment en X et Y pour remplir 100% de l'écran (sW/sH distincts,
+    // "full-stretch responsive") — donc si le mode le plus grand a un ratio d'aspect très différent du
+    // design (1440:1024 ≈ 1.406), tout apparaît déformé (ex: les losanges du dock deviennent ovales).
+    // On préfère donc le plus grand mode dont le ratio reste proche du design (±15%), et seulement si
+    // aucun mode ne s'en approche, on retombe sur le plus grand mode disponible tout court.
+    const DESIGN_W: i64 = 1440;
+    const DESIGN_H: i64 = 1024;
+    let aspect_close = |mw: usize, mh: usize| -> bool {
+        if mh == 0 { return false; }
+        let ratio_permille = (mw as i64 * DESIGN_H * 1000) / (mh as i64 * DESIGN_W);
+        (850..=1150).contains(&ratio_permille)
+    };
     let best_mode = gop.modes(st.boot_services())
-        .max_by_key(|m| { let (mw, mh) = m.info().resolution(); mw * mh });
+        .filter(|m| { let (mw, mh) = m.info().resolution(); aspect_close(mw, mh) })
+        .max_by_key(|m| { let (mw, mh) = m.info().resolution(); mw * mh })
+        .or_else(|| gop.modes(st.boot_services())
+            .max_by_key(|m| { let (mw, mh) = m.info().resolution(); mw * mh }));
     if let Some(mode) = best_mode {
         let _ = gop.set_mode(&mode);
     }
