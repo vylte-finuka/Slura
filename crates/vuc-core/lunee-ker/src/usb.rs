@@ -162,8 +162,9 @@ fn control_transfer(
 
     xhci.ring_doorbell(slot_id, 1); // DCI 1 = EP0 control
 
-    // Attend la Transfer Event de la Status Stage (marquée IOC).
-    for _ in 0..500 {
+    // Attend la Transfer Event de la Status Stage (marquée IOC). Borné court
+    // (~150ms) pour ne pas figer l'affichage si un device ne répond pas.
+    for _ in 0..150 {
         if let Some(trb) = xhci.poll_event(st, 1) {
             if trb.trb_type() == TRB_TRANSFER_EVENT {
                 let completion_code = (trb.status >> 24) as u8;
@@ -204,23 +205,21 @@ pub fn enumerate_and_setup_hid(
             xhci.write_portsc(port, portsc_preserve(portsc) | PORTSC_PP);
         }
     }
-    st.boot_services().stall(50_000); // 50ms : stabilisation alimentation + détection de connexion
+    st.boot_services().stall(30_000); // 30ms : stabilisation alimentation + détection de connexion
 
     for port in 1..=max_ports {
         let mut portsc = xhci.read_portsc(port);
-        // Attend l'apparition de la connexion (CCS=1) jusqu'à ~100ms : après un HCRST le
-        // device peut mettre quelques dizaines de ms à se ré-annoncer sur le port.
+        // Court sursis de détection (≤15ms) : après un HCRST le device peut mettre
+        // quelques ms à se ré-annoncer. Borné court pour ne PAS retarder l'affichage
+        // sur les ports vides (sinon écran noir plusieurs secondes au boot).
         if (portsc & PORTSC_CCS) == 0 {
             let mut connected = false;
-            for _ in 0..100 {
+            for _ in 0..15 {
                 st.boot_services().stall(1000);
                 portsc = xhci.read_portsc(port);
                 if (portsc & PORTSC_CCS) != 0 { connected = true; break; }
             }
-            if !connected {
-                serial_log(alloc::format!("[USB] port {} : rien connecte (PORTSC={:#x})\r\n", port, portsc).as_bytes());
-                continue;
-            }
+            if !connected { continue; } // port vide : on n'en logue plus rien (silencieux)
         }
         serial_log(alloc::format!("[USB] port {} : device connecte (PORTSC={:#x})\r\n", port, portsc).as_bytes());
 
@@ -241,7 +240,7 @@ pub fn enumerate_and_setup_hid(
 
         // Enable Slot.
         xhci.submit_command(0, 0, TRB_ENABLE_SLOT_CMD << 10);
-        let Some((cc, slot_id)) = wait_command_completion(st, xhci, 1000) else {
+        let Some((cc, slot_id)) = wait_command_completion(st, xhci, 300) else {
             serial_log(alloc::format!("[USB] port {} : timeout Enable Slot, abandon\r\n", port).as_bytes());
             continue;
         };
@@ -315,7 +314,7 @@ fn setup_device(
 
     // Address Device.
     xhci.submit_command(input_ctx as u64, 0, (TRB_ADDRESS_DEV_CMD << 10) | ((slot_id as u32) << 24));
-    let Some((cc, _)) = wait_command_completion(st, xhci, 1000) else {
+    let Some((cc, _)) = wait_command_completion(st, xhci, 300) else {
         serial_log(b"[USB] timeout Address Device\r\n");
         return None;
     };
@@ -355,7 +354,7 @@ fn setup_device(
             mmio_write32(input_ctx, ep0_off + 4, (EP_TYPE_CONTROL << 3) | ((real_mps0 as u32) << 16));
         }
         xhci.submit_command(input_ctx as u64, 0, (TRB_EVAL_CONTEXT_CMD << 10) | ((slot_id as u32) << 24));
-        let _ = wait_command_completion(st, xhci, 1000);
+        let _ = wait_command_completion(st, xhci, 300);
     }
 
     // Descripteur complet (18 octets) pour logguer VID/PID.
@@ -466,7 +465,7 @@ fn setup_device(
     }
 
     xhci.submit_command(input_ctx as u64, 0, (TRB_CONFIG_EP_CMD << 10) | ((slot_id as u32) << 24));
-    let Some((cc, _)) = wait_command_completion(st, xhci, 1000) else {
+    let Some((cc, _)) = wait_command_completion(st, xhci, 300) else {
         serial_log(b"[USB] timeout Configure Endpoint\r\n");
         return None;
     };
