@@ -73,6 +73,13 @@ pub struct XhciController {
     pub command_enqueue_index: usize,
     /// Producer Cycle State courant de l'anneau de commande.
     pub command_pcs: bool,
+    /// CSZ (HCCPARAMS1 bit 2) : si vrai, les contextes device/input font 64
+    /// octets au lieu de 32 → usb.rs double tous les offsets de contexte. QEMU
+    /// met 0, mais beaucoup de contrôleurs réels exigent 64 (product-grade).
+    pub context_size_64: bool,
+    /// Taille des entrées de contexte (32 ou 64) — dérivée de context_size_64,
+    /// pré-calculée pour usb.rs.
+    pub ctx_entry_size: u64,
 }
 
 // pub(crate) : réutilisés tels quels par usb.rs pour manipuler les anneaux de
@@ -119,6 +126,76 @@ pub(crate) fn wait_bit(st: &mut SystemTable<Boot>, base: *mut u8, offset: u64, m
     false
 }
 
+// ── Capacités étendues (xHCI Spec §7) ───────────────────────────────────────
+const XECP_ID_LEGACY: u32 = 1;     // USB Legacy Support Capability
+const USBLEGSUP_BIOS_OWNED: u32 = 1 << 16;
+const USBLEGSUP_OS_OWNED:   u32 = 1 << 24;
+
+/// Prise de possession BIOS→OS (xHCI Spec §7.1.1) : parcourt la liste chaînée
+/// des capacités étendues depuis xECP, trouve l'USB Legacy Support Capability,
+/// pose OS_OWNED et attend que BIOS_OWNED se libère. Indispensable sur vrai
+/// matériel (le firmware SMM tient sinon le contrôleur et interfère avec nos
+/// écritures) ; no-op propre si la capacité est absente (cas QEMU fréquent).
+fn usb_legacy_handoff(st: &mut SystemTable<Boot>, base: *mut u8, ext_cap_ptr_dwords: u32) {
+    if ext_cap_ptr_dwords == 0 {
+        serial_log(b"[XHCI-INIT] pas de capacites etendues (xECP=0), handoff ignore\r\n");
+        return;
+    }
+    // xECP est un offset en DWORDs depuis la base des registres de capacité (BAR0).
+    let mut off = (ext_cap_ptr_dwords as u64) * 4;
+    for _ in 0..64 { // borne dure : jamais de liste chaînée infinie
+        let cap = unsafe { mmio_read32(base, off) };
+        if cap == 0 || cap == 0xFFFF_FFFF { break; }
+        let cap_id = cap & 0xFF;
+        let next = (cap >> 8) & 0xFF;
+        if cap_id == XECP_ID_LEGACY {
+            let legsup = unsafe { mmio_read32(base, off) };
+            if (legsup & USBLEGSUP_BIOS_OWNED) == 0 {
+                serial_log(b"[XHCI-INIT] Legacy Support present, deja OS-owned\r\n");
+                return;
+            }
+            unsafe { mmio_write32(base, off, legsup | USBLEGSUP_OS_OWNED); }
+            // Attend que le BIOS relâche (borné à 1s).
+            for _ in 0..1000 {
+                let v = unsafe { mmio_read32(base, off) };
+                if (v & USBLEGSUP_BIOS_OWNED) == 0 {
+                    serial_log(b"[XHCI-INIT] USB Legacy handoff BIOS->OS reussi\r\n");
+                    // Désactive les SMI legacy (USBLEGCTLSTS à off+4) pour éviter
+                    // que le firmware ne reprenne la main via une interruption SMM.
+                    unsafe { mmio_write32(base, off + 4, 0xE000_00FF); } // clear/ack SMI sources
+                    return;
+                }
+                st.boot_services().stall(1000);
+            }
+            serial_log(b"[XHCI-INIT] timeout handoff (BIOS ne relache pas) - on continue quand meme\r\n");
+            return;
+        }
+        if next == 0 { break; }
+        off += (next as u64) * 4;
+    }
+}
+
+/// Alloue les Scratchpad Buffers exigés par le contrôleur (xHCI Spec §4.20) :
+/// un tableau de N pointeurs 64-bit (aligné page), chacun pointant sur une page
+/// de travail zéro. L'adresse du tableau est écrite dans DCBAA[0]. Sans ça, un
+/// contrôleur avec Max Scratchpad Bufs > 0 n'exécute AUCUNE commande. Retourne
+/// false si une allocation échoue.
+fn setup_scratchpad(st: &mut SystemTable<Boot>, dcbaa: *mut u8, count: u32, page_size: u32) -> bool {
+    if count == 0 { return true; } // rien à faire (cas QEMU)
+    let page_size = page_size.max(4096) as usize;
+    let pages_for_array = ((count as usize * 8) + page_size - 1) / page_size;
+    let Some(array) = alloc_pages_zeroed(st, pages_for_array.max(1)) else { return false; };
+    for i in 0..count as usize {
+        // Une page de travail par buffer (page_size arrondi au multiple de PAGE_SIZE).
+        let bpages = (page_size + PAGE_SIZE - 1) / PAGE_SIZE;
+        let Some(buf) = alloc_pages_zeroed(st, bpages) else { return false; };
+        unsafe { mmio_write64(array, (i * 8) as u64, buf as u64); }
+    }
+    unsafe { mmio_write64(dcbaa, 0, array as u64); } // DCBAA[0] = Scratchpad Buffer Array
+    serial_log(alloc::format!("[XHCI-INIT] {} scratchpad buffer(s) alloue(s)\r\n", count).as_bytes());
+    true
+}
+
 /// Exécute la séquence d'initialisation xHCI Spec §4.2. Retourne `None` (sans
 /// avoir démarré le contrôleur) si une étape échoue ou dépasse son délai.
 pub fn init_xhci(
@@ -142,6 +219,10 @@ pub fn init_xhci(
         "[XHCI-DBG] bar0={:#x} op_base={:#x} rt_base={:#x} db_base={:#x}\r\n",
         base as u64, op_base as u64, rt_base as u64, db_base as u64
     ).as_bytes());
+
+    // 0. Prise de possession BIOS→OS AVANT toute écriture matérielle (sinon le
+    // firmware SMM peut interférer). No-op propre si la capacité est absente.
+    usb_legacy_handoff(st, base, caps.ext_cap_ptr_dwords);
 
     // 1. Attendre que le contrôleur soit prêt (CNR = Controller Not Ready → 0).
     if !wait_bit(st, op_base, USBSTS, USBSTS_CNR, 0, 2000) {
@@ -177,6 +258,14 @@ pub fn init_xhci(
         serial_log(b"[XHCI-INIT] allocation DCBAA echouee\r\n");
         return None;
     };
+
+    // 4b. Scratchpad Buffers (product-grade) : DCBAA[0] doit pointer sur le
+    // tableau de scratchpad AVANT DCBAAP/démarrage si le contrôleur en exige.
+    if !setup_scratchpad(st, dcbaa, caps.max_scratchpad_bufs, caps.page_size_bytes) {
+        serial_log(b"[XHCI-INIT] allocation scratchpad echouee, abandon\r\n");
+        return None;
+    }
+
     unsafe { mmio_write64(op_base, DCBAAP, dcbaa as u64); }
 
     // 5. Nombre de slots activés — borné à 8, largement suffisant pour
@@ -244,6 +333,8 @@ pub fn init_xhci(
         max_slots_enabled,
         event_ring, event_ring_trbs: EVT_RING_TRBS, event_dequeue_index: 0, event_ccs: true,
         command_ring, command_ring_trbs: CMD_RING_TRBS, command_enqueue_index: 0, command_pcs: true,
+        context_size_64: caps.context_size_64,
+        ctx_entry_size: if caps.context_size_64 { 64 } else { 32 },
     })
 }
 

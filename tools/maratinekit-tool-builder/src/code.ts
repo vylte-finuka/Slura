@@ -15,7 +15,9 @@ interface GenerateMsg {
   isDesktop: boolean;
 }
 
-type UiFile = { path: string; text?: string; bytes?: Uint8Array };
+// centerCrop : l'UI recadre le PNG sur son contenu et le centre dans un canvas
+// carré (via Canvas) avant de l'ajouter au zip — utilisé pour l'icône du dock.
+type UiFile = { path: string; text?: string; bytes?: Uint8Array; centerCrop?: boolean };
 
 function sanitizeAppName(raw: string): string {
   const cleaned = raw.replace(/[^A-Za-z0-9]/g, "");
@@ -53,8 +55,11 @@ async function generate(msg: GenerateMsg): Promise<void> {
   const meta: AppMeta = {
     appName,
     isDesktop: msg.isDesktop,
-    hasAssets: result.pngs.length > 0 || result.svgs.length > 0 || result.cursorRefPng !== null,
-    iconFile: result.pngs.length > 0 ? "img1.png" : null,
+    hasAssets: result.pngs.length > 0 || result.svgs.length > 0 || result.cursorRefPng !== null || result.iconPng !== null,
+    // Icône du dock : le nœud "AppIcon" s'il existe (recadré+centré, nommé <App>.png,
+    // convention lue par app_registry.rs). Sinon pas d'icône (le dock dessine juste le
+    // losange vide) — on n'utilise PLUS img1 (le wallpaper) par défaut, c'était un mauvais choix.
+    iconFile: result.iconPng ? `${appName}.png` : null,
   };
 
   const files: UiFile[] = [
@@ -72,6 +77,11 @@ async function generate(msg: GenerateMsg): Promise<void> {
   });
   if (result.cursorRefPng) {
     files.push({ path: `${appName}.slasset/HIDcursor_reference.png`, bytes: result.cursorRefPng });
+  }
+  // Icône du dock : marquée centerCrop → l'UI la recadre sur son contenu et la centre
+  // dans un canvas carré (aucun décalage), nommée <App>.png (référencée par Maraset icon:).
+  if (result.iconPng) {
+    files.push({ path: `${appName}.slasset/${appName}.png`, bytes: result.iconPng, centerCrop: true });
   }
 
   figma.ui.postMessage({ type: "files", appName, files });

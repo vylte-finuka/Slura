@@ -29,6 +29,7 @@ export interface ClassifyResult {
   pngs: Uint8Array[];   // img1.png, img2.png, ... (ordre de traversée)
   svgs: Uint8Array[];   // vec1.svg, ...
   cursorRefPng: Uint8Array | null; // export PNG de référence du nœud HIDcursor (le .sluc reste manuel)
+  iconPng: Uint8Array | null;      // export PNG du nœud "AppIcon" → icône du dock (recadrée+centrée par l'UI)
   hasCursor: boolean;
   hasText: boolean;
 }
@@ -154,6 +155,14 @@ async function classifyNode(node: SceneNode, ctx: Ctx): Promise<DrawOp[]> {
     ctx.result.cursorRefPng = await (node as ExportMixin).exportAsync({ format: "PNG" });
     return out; // dessin remplacé par le boilerplate curseur en fin de Render
   }
+  // Nœud "AppIcon" (ou "[icon]") = icône du dock. Exporté puis recadré+centré par
+  // l'UI (Canvas) → aucun padding transparent asymétrique, contenu parfaitement
+  // centré dans un canvas carré (corrige le "décalage" des icônes exportées brutes).
+  // Nœud marqueur : PAS dessiné dans l'écran (placez-le hors cadre ou masqué).
+  if (node.name === "AppIcon" || node.name.includes("[icon]")) {
+    ctx.result.iconPng = await (node as ExportMixin).exportAsync({ format: "PNG" });
+    return out;
+  }
   const launchMatch = node.name.match(/\[launch:([A-Za-z0-9_]+)\]/);
   if (launchMatch) {
     ctx.result.launches.push({ x: r.x, y: r.y, w: r.w, h: r.h, app: launchMatch[1] });
@@ -244,7 +253,7 @@ export async function classifyFrame(root: FrameNode | ComponentNode | InstanceNo
   const bb = root.absoluteBoundingBox;
   const result: ClassifyResult = {
     ops: [], launches: [], pngs: [], svgs: [],
-    cursorRefPng: null, hasCursor: false, hasText: false,
+    cursorRefPng: null, iconPng: null, hasCursor: false, hasText: false,
   };
   const ctx: Ctx = { rootX: bb ? bb.x : 0, rootY: bb ? bb.y : 0, result };
 

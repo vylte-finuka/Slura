@@ -10,12 +10,21 @@
 //  crates/vuc-core/lunee-ker/src/{pci,acpi}.rs, étapes 1/1b/2 faites).
 //
 //  UefiPointerGetState/UefiReadKey/UefiPollKey (DrvManSpec, ovc_exec.rs)
-//  renvoient déjà de VRAIES données HID, pollées chaque frame par
-//  render_from_marep — pas des valeurs simulées. Source actuelle : le
-//  firmware (EFI_SIMPLE_POINTER_PROTOCOL / EFI_ABSOLUTE_POINTER_PROTOCOL /
-//  EFI_SIMPLE_TEXT_INPUT_PROTOCOL). Deviendra le pilote HID natif une fois
-//  les étapes 3-6 terminées (init xHCI, énumération USB, report
-//  descriptors) — même interface exportée ici, source différente.
+//  renvoient de VRAIES données HID, pollées chaque frame par
+//  render_from_marep — pas des valeurs simulées.
+//
+//  SOURCE (product-grade, étapes 3-6 FAITES) : le pilote HID NATIF Slura —
+//  init xHCI (HCRST + Legacy handoff BIOS->OS + Scratchpad Buffers + contextes
+//  32/64o selon CSZ), énumération USB (alimentation des ports, Enable Slot,
+//  Address Device, EP0 MaxPacket réel via Evaluate Context, Configure Endpoint)
+//  et polling boot protocol clavier/souris (crates/vuc-core/lunee-ker/src/
+//  {pci,xhci,usb}.rs). ctx.pointer_x/y/btn et key_code sont alimentés par ces
+//  rapports natifs. Le firmware (EFI_SIMPLE_POINTER/ABSOLUTE_POINTER) ne sert
+//  plus qu'en repli tant que le contrôleur n'a pas été réinitialisé ; après le
+//  HCRST c'est le natif seul. Même interface exportée ici, source native.
+//
+//  Format packé du raw pointeur = X:12 [31:20] | Y:12 [19:8] | Btn:8 [7:0]
+//  (identique à DrvManSpec___UefiPointerGetState___ dans ovc_exec.rs).
 //
 //  UefiSetKeyMode : EFI_SIMPLE_TEXT_INPUT_PROTOCOL standard n'a pas de
 //  notion de "mode" clavier — accusé de réception uniquement.

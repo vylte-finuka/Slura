@@ -451,6 +451,17 @@ pub fn render_from_marep(
             _xhci_ctrl = crate::xhci::init_xhci(st, image_handle, xhci, &caps);
             if let Some(ref mut ctrl) = _xhci_ctrl {
                 hid_devices = crate::usb::enumerate_and_setup_hid(st, ctrl, caps.max_ports);
+                // ATTENTION (correction d'un commentaire précédent FAUX) : init_xhci a
+                // fait un HCRST qui a RETIRÉ le contrôleur au pilote USB du firmware.
+                // Les protocoles EFI_SIMPLE_POINTER/ABSOLUTE_POINTER ne répondent donc
+                // PLUS, que l'énumération native réussisse ou non. Si 0 device HID natif,
+                // la souris est indisponible (seul le clavier ConIn survit) — on le signale
+                // clairement au lieu de prétendre que le firmware « reste maître ».
+                if hid_devices.is_empty() {
+                    crate::ovc_exec::serial_log(
+                        b"[USB] AUCUN device HID natif configure : souris indisponible (firmware retire par le HCRST, clavier ConIn seul actif)\r\n"
+                    );
+                }
             }
         }
     }
@@ -497,8 +508,8 @@ pub fn render_from_marep(
                     let nx = (((state.current_x.saturating_sub(minx)) * (w as u64 - 1)) / rx) as i32;
                     let ny = (((state.current_y.saturating_sub(miny)) * (h as u64 - 1)) / ry) as i32;
                     crate::ovc_exec::serial_log(alloc::format!(
-                        "[HID] abs=({},{}) status={:?} -> cursor=({},{})\r\n",
-                        state.current_x, state.current_y, status, nx, ny
+                        "[HID] abs=({},{}) active_buttons={:#x} status={:?} -> cursor=({},{})\r\n",
+                        state.current_x, state.current_y, state.active_buttons, status, nx, ny
                     ).as_bytes());
                     cursor_x = nx.clamp(0, w as i32 - 1);
                     cursor_y = ny.clamp(0, h as i32 - 1);
@@ -522,6 +533,11 @@ pub fn render_from_marep(
                     cursor_x = (cursor_x + state.relative_movement[0]).clamp(0, w as i32 - 1);
                     cursor_y = (cursor_y + state.relative_movement[1]).clamp(0, h as i32 - 1);
                     pointer_btn |= (state.button[0] as i32) | ((state.button[1] as i32) << 1);
+                    if state.button[0] || state.button[1] {
+                        crate::ovc_exec::serial_log(alloc::format!(
+                            "[HID] rel BOUTON btn0={} btn1={}\r\n", state.button[0], state.button[1]
+                        ).as_bytes());
+                    }
                     if state.relative_movement[0] != 0 || state.relative_movement[1] != 0 {
                         crate::ovc_exec::serial_log(alloc::format!(
                             "[HID] rel=({},{}) -> cursor=({},{})\r\n",

@@ -47,6 +47,7 @@ const TRB_NORMAL:           u32 = 1;
 const TRB_ENABLE_SLOT_CMD:  u32 = 9;
 const TRB_ADDRESS_DEV_CMD:  u32 = 11;
 const TRB_CONFIG_EP_CMD:    u32 = 12;
+const TRB_EVAL_CONTEXT_CMD: u32 = 13;
 const TRB_TRANSFER_EVENT:   u32 = 32;
 const TRB_CMD_COMPLETION:   u32 = 33;
 const TRB_PORT_STATUS_CHG:  u32 = 34;
@@ -192,16 +193,37 @@ pub fn enumerate_and_setup_hid(
 ) -> alloc::vec::Vec<HidDevice> {
     let mut devices = alloc::vec::Vec::new();
 
+    // Après HCRST, alimenter TOUS les ports (PP=1) AVANT de tester la connexion :
+    // le bit CCS n'est VALIDE qu'une fois le port sous tension (xHCI Spec §4.19.1.1),
+    // et la détection de connexion prend quelques ms. Sans ça, CCS lu à 0 partout juste
+    // après le reset → "0 device(s)" (bug observé au boot : la souris existe côté
+    // firmware mais aucun port ne remonte CCS car les ports sortent du HCRST non alimentés).
     for port in 1..=max_ports {
         let portsc = xhci.read_portsc(port);
-        if (portsc & PORTSC_CCS) == 0 { continue; } // rien de branché sur ce port
-        serial_log(alloc::format!("[USB] port {} : device connecte (PORTSC={:#x})\r\n", port, portsc).as_bytes());
-
-        // Alimenter le port si nécessaire, puis reset.
         if (portsc & PORTSC_PP) == 0 {
             xhci.write_portsc(port, portsc_preserve(portsc) | PORTSC_PP);
-            st.boot_services().stall(20_000); // 20ms, le temps que l'alimentation se stabilise
         }
+    }
+    st.boot_services().stall(50_000); // 50ms : stabilisation alimentation + détection de connexion
+
+    for port in 1..=max_ports {
+        let mut portsc = xhci.read_portsc(port);
+        // Attend l'apparition de la connexion (CCS=1) jusqu'à ~100ms : après un HCRST le
+        // device peut mettre quelques dizaines de ms à se ré-annoncer sur le port.
+        if (portsc & PORTSC_CCS) == 0 {
+            let mut connected = false;
+            for _ in 0..100 {
+                st.boot_services().stall(1000);
+                portsc = xhci.read_portsc(port);
+                if (portsc & PORTSC_CCS) != 0 { connected = true; break; }
+            }
+            if !connected {
+                serial_log(alloc::format!("[USB] port {} : rien connecte (PORTSC={:#x})\r\n", port, portsc).as_bytes());
+                continue;
+            }
+        }
+        serial_log(alloc::format!("[USB] port {} : device connecte (PORTSC={:#x})\r\n", port, portsc).as_bytes());
+
         let cur = xhci.read_portsc(port);
         xhci.write_portsc(port, portsc_preserve(cur) | PORTSC_PR);
         if !wait_bit(st, xhci.op_base, crate::xhci::PORTSC_BASE + (port as u64 - 1) * crate::xhci::PORTSC_STRIDE, 1 << 21, 1 << 21, 500) {
@@ -266,16 +288,19 @@ fn setup_device(
 
     // Input Context : Input Control Context (32) + Slot Context (32) + EP0..EP15 (32 chacun).
     // 1 page suffit largement (33*32=1056 octets max).
+    // Taille d'entrée de contexte = 32 OU 64 selon CSZ (product-grade) : tous les
+    // offsets de contexte en dépendent. Input Control @0, Slot @ces, EP0 @2*ces.
+    let ces = xhci.ctx_entry_size;
     let input_ctx = alloc_pages_zeroed(st, 1)?;
     unsafe {
         // Input Control Context : Add Context flags (DWORD1) = slot(bit0) | EP0(bit1).
         mmio_write32(input_ctx, 4, 0b11);
-        // Slot Context à l'offset 32 : DWORD0 = Context Entries=1 (bits[31:27]), Speed (bits[23:20]).
-        let slot_off = 32u64;
+        // Slot Context : DWORD0 = Context Entries=1 (bits[31:27]), Speed (bits[23:20]).
+        let slot_off = ces;
         mmio_write32(input_ctx, slot_off, (1u32 << 27) | (speed << 20));
         mmio_write32(input_ctx, slot_off + 4, (port as u32) << 16); // Root Hub Port Number
-        // EP0 Context à l'offset 64 : DWORD1 = EP Type=4 (Control) | MaxPacketSize.
-        let ep0_off = 64u64;
+        // EP0 Context : DWORD1 = EP Type=4 (Control) | MaxPacketSize.
+        let ep0_off = 2 * ces;
         mmio_write32(input_ctx, ep0_off + 4, (EP_TYPE_CONTROL << 3) | ((ep0_max_packet as u32) << 16));
         // DWORD2 = TR Dequeue Pointer (low, avec DCS=1) — l'anneau est aligné
         // page donc les 4 bits bas sont déjà à 0, on peut juste OR le DCS.
@@ -299,8 +324,41 @@ fn setup_device(
         return None;
     }
 
-    // GET_DESCRIPTOR(Device) — 18 octets, juste pour logguer VID/PID (pas
-    // utilisé pour la suite, la classe HID est lue au niveau interface).
+    // GET_DESCRIPTOR(Device) — d'abord 8 octets pour lire bMaxPacketSize0 (offset 7)
+    // et corriger le contexte EP0 si notre supposition de taille était fausse
+    // (product-grade : Full Speed peut valoir 8/16/32/64). Sinon les transferts EP0
+    // suivants peuvent échouer (babble/packet mismatch) sur un vrai device.
+    let mut dev_head = [0u8; 8];
+    if control_transfer(
+        st, xhci, slot_id, ep0_ring, &mut ep0_idx, &mut ep0_pcs,
+        0x80, 6, 0x0100, 0, Some(&mut dev_head), true,
+    ).is_none() {
+        serial_log(b"[USB] GET_DESCRIPTOR(Device, 8o) echoue\r\n");
+        return None;
+    }
+    let raw_mps0 = dev_head[7];
+    // Full/Low Speed : valeur directe (8/16/32/64). SuperSpeed : 2^bMaxPacketSize0
+    // (=512 si 9). High Speed : toujours 64. 0 = on garde notre supposition.
+    let real_mps0: u16 = if raw_mps0 == 0 { ep0_max_packet }
+        else if speed >= 4 { 1u16 << (raw_mps0 as u16) }
+        else if speed == 3 { 64 }
+        else { raw_mps0 as u16 };
+    if real_mps0 != ep0_max_packet {
+        serial_log(alloc::format!("[USB] EP0 MaxPacket corrige {} -> {} (Evaluate Context)\r\n", ep0_max_packet, real_mps0).as_bytes());
+        // Evaluate Context : seule la MaxPacketSize d'EP0 est évaluée (xHCI §4.6.7) —
+        // NE PAS toucher au TR Dequeue Pointer (ignoré par cette commande, et l'anneau
+        // EP0 est déjà en cours d'utilisation, index != 0).
+        unsafe {
+            zero(input_ctx, PAGE_SIZE);
+            mmio_write32(input_ctx, 4, 0b10); // Add Context : EP0 uniquement
+            let ep0_off = 2 * ces;
+            mmio_write32(input_ctx, ep0_off + 4, (EP_TYPE_CONTROL << 3) | ((real_mps0 as u32) << 16));
+        }
+        xhci.submit_command(input_ctx as u64, 0, (TRB_EVAL_CONTEXT_CMD << 10) | ((slot_id as u32) << 24));
+        let _ = wait_command_completion(st, xhci, 1000);
+    }
+
+    // Descripteur complet (18 octets) pour logguer VID/PID.
     let mut dev_desc = [0u8; 18];
     if control_transfer(
         st, xhci, slot_id, ep0_ring, &mut ep0_idx, &mut ep0_pcs,
@@ -391,12 +449,12 @@ fn setup_device(
     unsafe { install_link_trb(intr_ring, INTR_RING_TRBS); }
 
     unsafe {
-        zero(input_ctx, PAGE_SIZE.min(1056));
+        zero(input_ctx, PAGE_SIZE); // toute la page (contextes 64o = 33*64=2112 o)
         mmio_write32(input_ctx, 4, 0b1 | (1 << dci)); // Add Context : slot + cette EP
-        let slot_off = 32u64;
+        let slot_off = ces;
         mmio_write32(input_ctx, slot_off, (dci << 27) | (speed << 20)); // Context Entries = dci
         mmio_write32(input_ctx, slot_off + 4, (port as u32) << 16);
-        let ep_off = 32 + (dci as u64) * 32;
+        let ep_off = ces + (dci as u64) * ces; // EP DCI n @ (1+n)*ctx_entry_size
         // Interval xHCI = exposant en base 2 d'unités de 125us. bInterval est
         // en ms pour Low/Full Speed (~8 unités de 125us par ms) — approximation
         // volontaire (cf. doc module), suffisant pour un clavier/souris boot.

@@ -4,11 +4,48 @@
 
 import JSZip from "jszip";
 
-type UiFile = { path: string; text?: string; bytes?: Uint8Array };
+type UiFile = { path: string; text?: string; bytes?: Uint8Array; centerCrop?: boolean };
 
 const statusEl = document.getElementById("status") as HTMLDivElement;
 const appNameEl = document.getElementById("appname") as HTMLInputElement;
 const desktopEl = document.getElementById("desktop") as HTMLInputElement;
+const iconRatioEl = document.getElementById("iconratio") as HTMLInputElement | null;
+
+// Recadre un PNG sur son contenu (alpha > seuil) puis le centre dans un canvas
+// CARRÉ, sans padding asymétrique → l'icône du dock est parfaitement centrée quel
+// que soit le padding de l'export Figma (corrige le "défaut de décalage").
+//   ratio = fraction du canvas occupée par le contenu (0.48 ≈ petite icône, verre
+//   du losange visible autour ; 1.0 = l'icône remplit le losange).
+async function cropCenterSquarePng(bytes: Uint8Array, ratio: number): Promise<Uint8Array> {
+  const blob = new Blob([bytes as unknown as BlobPart], { type: "image/png" });
+  const bmp = await createImageBitmap(blob);
+  const w = bmp.width, h = bmp.height;
+  const c = document.createElement("canvas");
+  c.width = w; c.height = h;
+  const cx = c.getContext("2d")!;
+  cx.drawImage(bmp, 0, 0);
+  const data = cx.getImageData(0, 0, w, h).data;
+  let minX = w, minY = h, maxX = -1, maxY = -1;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (data[(y * w + x) * 4 + 3] > 10) {
+        if (x < minX) minX = x; if (x > maxX) maxX = x;
+        if (y < minY) minY = y; if (y > maxY) maxY = y;
+      }
+    }
+  }
+  if (maxX < minX) return bytes; // image vide → inchangée
+  const cw = maxX - minX + 1, ch = maxY - minY + 1;
+  const side = Math.max(cw, ch);
+  const canvas = Math.max(1, Math.round(side / Math.min(1, Math.max(0.1, ratio))));
+  const out = document.createElement("canvas");
+  out.width = canvas; out.height = canvas;
+  const octx = out.getContext("2d")!;
+  octx.imageSmoothingEnabled = true;
+  octx.drawImage(bmp, minX, minY, cw, ch, (canvas - cw) / 2, (canvas - ch) / 2, cw, ch);
+  const outBlob: Blob = await new Promise((res) => out.toBlob((b) => res(b!), "image/png"));
+  return new Uint8Array(await outBlob.arrayBuffer());
+}
 
 document.getElementById("generate")!.addEventListener("click", () => {
   statusEl.textContent = "Génération en cours...";
@@ -31,9 +68,12 @@ document.getElementById("cancel")!.addEventListener("click", () => {
 async function downloadZip(appName: string, files: UiFile[]): Promise<void> {
   const zip = new JSZip();
   const root = zip.folder(`${appName}.marep`)!;
+  const ratio = iconRatioEl && iconRatioEl.value ? Number(iconRatioEl.value) : 0.48;
   for (const f of files) {
     if (f.bytes !== undefined) {
-      root.file(f.path, f.bytes);
+      // L'icône (centerCrop) est recadrée+centrée avant d'entrer dans le zip.
+      const bytes = f.centerCrop ? await cropCenterSquarePng(f.bytes, ratio) : f.bytes;
+      root.file(f.path, bytes);
     } else {
       root.file(f.path, f.text ?? "");
     }

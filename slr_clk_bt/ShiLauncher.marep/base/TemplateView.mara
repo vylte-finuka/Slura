@@ -1,4 +1,4 @@
-#base <std***ComTpe***SlulFrmt***[ DrvAPIInterCon ]>;
+#base <std***ComTpe***SlulFrmt***[ DrvAPIInterCon ]>;2252
 #base <MaratineKit>;
 
 // Renderer stateless — images chargées inline avant chaque draw (cache OVC = 8 slots max)
@@ -18,6 +18,10 @@ rel op Render: [ctx string, fnt ptr] [
     // du design (1440:1024), ça la déforme (ex: les losanges rallongés en ovale/lame).
     // sU garde toute forme "carrée-dans-le-design" carrée quel que soit le ratio écran.
     let sU: <i32> = (sW + sH) / 2;
+
+    // --- Variables pour le dock dynamique et l'icône du lanceur ---
+    var launcherIconPath: <ptr> = nullptr;
+    let appCount: <i32> = <DrvAPIInterCon***AppRegistryCount***()>;
 
     // ── Mara Stylesheet ──────────────────────────────────────────────────────
     // Alpha porté par GpuSetOpacity → couleur ARGB avec alpha=0xFF (jamais dupliquer)
@@ -75,10 +79,14 @@ rel op Render: [ctx string, fnt ptr] [
         // variance mesurée (~18) sur cette zone précise.
         let _: <i32> = <DrvAPIInterCon***GpuDrawNoisePatch***>(((604 * sW + 500) / 1000), ((1000 * sH + 500) / 1000), ((228 * sW + 500) / 1000), ((5 * sH + 500) / 1000), (((3 * sW + 500) / 1000 + (2 * sH + 500) / 1000) / 2), 64, 42);
 
-        // [Dock dimensions]
-        let dkX: <i32> = ((526 * sW + 500) / 1000);
+        // [Dock dimensions] — extensible, centré, avec le padding du design Figma (node 1:3 :
+        // barre 405px pour 6 icones de 63px = 378 d'icones + ~27 de padding, ~14px de chaque cote).
+        let dockPad: <i32> = 14;
+        let dockDesignWidth: <i32> = (appCount * 63) + (dockPad * 2); // icones + padding gauche/droite
+        let dockLeftDesign: <i32>  = (1440 - dockDesignWidth) / 2;    // centre horizontalement sur 1440px
+        let dkX: <i32> = ((dockLeftDesign * sW + 500) / 1000);
         let dkY: <i32> = ((900 * sH + 500) / 1000);
-        let dkW: <i32> = ((405 * sW + 500) / 1000);
+        let dkW: <i32> = ((dockDesignWidth * sW + 500) / 1000);
         let dkH: <i32> = ((80 * sH + 500) / 1000);
         let dkR: <i32> = (((30 * sW + 500) / 1000 + (30 * sH + 500) / 1000) / 2);
 
@@ -125,13 +133,9 @@ rel op Render: [ctx string, fnt ptr] [
         // [Shi Windows sysbar — frosted glass — blur FIRST, tint AFTER]
         // rTL=rTR=swR (raccorde le coin arrondi de la fenêtre "Shixbook screen", rounded-tl/tr Figma),
         // rBL=rBR=0 (flush contre le wallpaper en dessous) — via GpuDrawRoundedRectFull (4 rayons indépendants)
-        let swR: <i32> = (((16 * sW + 500) / 1000 + (16 * sH + 500) / 1000) / 2);
-        let swW: <i32> = ((1440 * sW + 500) / 1000);
-        let swH: <i32> = ((30 * sH + 500) / 1000);
-        let _: <i32> = <DrvAPIInterCon***GpuSetOpacity***>(178);
-        let _: <i32> = <DrvAPIInterCon***GpuBackgroundBlur***>(0, 0, swW, swH, swR, 3);
-        let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectFull***>(0, 0, swW, swH, swR, swR, 0, 0, S_SHI_WINDOWS);
-        let _: <i32> = <DrvAPIInterCon***GpuResetOpacity***>();
+        // (barre « Shi Windows » pleine largeur retiree : n'apparait plus par defaut ;
+        //  elle est desormais dessinee PAR fenetre ouverte dans LAPrevent.mara, fusionnee
+        //  a l'app marep et dimensionnee a sa largeur.)
 
         // [Dimensions partagées losanges du dock — rounded-[16px] sur size-[44.574px] côté Figma]
         // sU (pas sW/sH séparés) : ce sont des CARRÉS pivotés — largeur ≠ hauteur les
@@ -139,6 +143,11 @@ rel op Render: [ctx string, fnt ptr] [
         let dmW: <i32> = ((45 * sU + 500) / 1000);
         let dmH: <i32> = ((45 * sU + 500) / 1000);
         let dmR: <i32> = ((16 * sU + 500) / 1000);
+
+        // [Dock] — pilotée dynamiquement depuis le Maraset de l'appli ──
+        // On récupère l'icône déclarée dans le Maraset de chaque app (ici, on la capture pour le lanceur
+        // lui‑même afin de l'afficher dans le sysbar). Cette approche évite tout hard‑codage.
+        // launcherIconPath est déclarée comme var en haut de la fonction
 
         // ── Dock DYNAMIQUE : piloté par le registre d'apps installées ──────────────
         // Plus aucune icône hardcodée (ShiLooker/ShiDialer/ShiMessages/… supprimées) :
@@ -149,6 +158,13 @@ rel op Render: [ctx string, fnt ptr] [
         let mx: <i32> = <DrvAPIInterCon***PointerGetX***>();
         let my: <i32> = <DrvAPIInterCon***PointerGetY***>();
         let pbtn: <i32> = <DrvAPIInterCon***PointerGetBtn***>();
+
+        // Repli clavier : le bouton souris n'est pas toujours remonté par le protocole
+        // pointeur firmware (le MOUVEMENT passe, pas le clic). Le clavier (ConIn), lui,
+        // fonctionne toujours → survoler un losange + Entrée (code 13) = lancer l'app.
+        // (Le diagnostic série est fait côté noyau : PointerGetBtn/KeyGetCode/FindByName
+        //  loggent [DIAG] — `log:` en Maratine n'écrit PAS sur le port série.)
+        let kc: <i32> = <DrvAPIInterCon***KeyGetCode***>();
 
         // Occlusion : un clic au-dessus d'une fenêtre ouverte ne perce pas jusqu'au dock.
         let wcountDock: <i32> = <DrvAPIInterCon***WindowManCount***()>;
@@ -163,30 +179,74 @@ rel op Render: [ctx string, fnt ptr] [
             oj = oj + 1;
         ];
 
-        let appCount: <i32> = <DrvAPIInterCon***AppRegistryCount***()>;
+        // App du dock la PLUS PROCHE du curseur en X — Entrée lance CETTE app, sans exiger
+        // d'alignement précis (souris firmware muette dans ce setup : le log ne montre AUCUN
+        // [HID] abs=/rel= ; seul le clavier remonte). Flèches Gauche/Droite déplacent le
+        // curseur d'une cellule à l'autre, puis Entrée lance l'app visée. mx (écran) ramené
+        // en design via /sW, divisé par le pas de 63px ; +31 pour arrondir à la cellule la + proche.
+        let mxDesign: <i32> = (mx * 1000) / sW;
+        let firstCellDesign: <i32> = dockLeftDesign + dockPad + 31;
+        var nearestAi: <i32> = ((mxDesign - firstCellDesign) + 31) / 63;
+        if (nearestAi < 0) [ nearestAi = 0; ];
+        if (nearestAi >= appCount) [ nearestAi = appCount - 1; ];
+
         var ai: <i32> = 0;
         loop (ai < appCount) [
-            let dgx: <i32> = 548 + (ai * 63);            // X design du losange (espacement dock ≈ 63)
-            let ix: <i32> = ((dgx * sW + 500) / 1000);
-            let iy: <i32> = ((917 * sH + 500) / 1000);
-            let pvx: <i32> = (((dgx + 23) * sW + 500) / 1000);
-            let pvy: <i32> = ((940 * sH + 500) / 1000);
+            // Chaque app occupe UNE cellule de 63px (design) ; l'icône est centrée DANS sa
+            // cellule → le dock s'étend proprement sans débordement quel que soit appCount
+            // (cohérent à l'extension). cellCx = centre X design de la cellule ai.
+            let cellCx: <i32> = dockLeftDesign + dockPad + (ai * 63) + 31;
+            let pvx: <i32> = ((cellCx * sW + 500) / 1000);   // centre X du losange (pixels ecran)
+            let pvy: <i32> = ((940 * sH + 500) / 1000);       // centre Y du losange (pixels ecran)
+            // Losange ET icone centres EXACTEMENT sur (pvx,pvy), tout en pixels ecran :
+            // plus de melange sW/sH (position) + sU (taille) qui faisait deriver l'icone
+            // du centre quand le ratio ecran differe du design. Valable pour TOUTE app.
+            let ix: <i32> = pvx - (dmW / 2);
+            let iy: <i32> = pvy - (dmH / 2);
 
             // Losange (fond translucide + liseré verre), pivoté 46° — commun à toutes les apps.
             let _: <i32> = <DrvAPIInterCon***GpuSetTransform2D***>(6947, 7193, -7193, 6947, pvx, pvy);
-            let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>((ix - ((1 * sU + 500) / 1000)), (iy - ((1 * sU + 500) / 1000)), (dmW + ((2 * sU + 500) / 1000)), (dmH + ((2 * sU + 500) / 1000)), (dmR + ((1 * sU + 500) / 1000)), 0x66FFFFFF);
+            let x1: <i32> = ix - ((1 * sU + 500) / 1000);
+            let y1: <i32> = iy - ((1 * sU + 500) / 1000);
+            let w1: <i32> = dmW + ((2 * sU + 500) / 1000);
+            let h1: <i32> = dmH + ((2 * sU + 500) / 1000);
+            let r1: <i32> = dmR + ((1 * sU + 500) / 1000);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(x1, y1, w1, h1, r1, 0x66FFFFFF);
             let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(ix, iy, dmW, dmH, dmR, S_SHILOOKER);
             let _: <i32> = <DrvAPIInterCon***GpuResetTransform***>();
 
-            // Icône de l'app (si le registre en fournit une) — dessinée droite, centrée sur le pivot.
+            // Icône de l'app (si le registre en fournit une) — droite, centrée sur le pivot,
+            // 57px comme le design Figma (node I28:22;28:4 = 56.568px : l'icône déborde
+            // légèrement du losange 45px, c'est voulu). Centre icône = pivot (cellCx, 940).
             let iconPath: <ptr> = <DrvAPIInterCon***AppRegistryGetIconPath***>(ai);
             if (iconPath != nullptr) [
                 im = <DrvAPIInterCon***ImageLoad***>(iconPath);
-                let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, (((dgx - 5) * sW + 500) / 1000), ((912 * sH + 500) / 1000), ((57 * sU + 500) / 1000), ((57 * sU + 500) / 1000));
+                // Taille visible d'origine (57px, icône NON recadrée avec son padding
+                // transparent → contenu visible ~26px) : l'icône est plus petite que le
+                // losange, le verre du losange reste visible autour — look préféré.
+                // Centrée sur le pivot (pvx,pvy) en pixels écran.
+                let iconW: <i32> = ((57 * sU + 500) / 1000);
+                let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, (pvx - (iconW / 2)), (pvy - (iconW / 2)), iconW, iconW);
             ];
 
-            // Lancement au clic (sauf occlusion), idempotent.
-            if (occluded == false && (pbtn & 1) != 0 && mx >= ix && mx <= (ix + dmW) && my >= iy && my <= (iy + dmH)) [
+            // Clic sur le LOSANGE : hit-test centré sur le pivot visuel ± demi-diagonale
+            // (dmW*0.7 ≈ demi-étendue d'un carré pivoté 45°) — colle au losange dessiné, pas
+            // à la boîte pré-rotation. Idempotent (WindowManFindByName), bloqué si occlusion.
+            // Souris : survol précis X+Y + clic. Clavier Entrée : alignement X SEUL
+            // (viser le Y d'un petit losange au clavier est trop dur — au test le curseur
+            // était en (830,1081), X aligné à TestApp mais Y sous les losanges). overX
+            // couvre toute la largeur de la cellule (±hitH ≈ 31px = demi-cellule 63px).
+            // Lancement : survol du losange en X (tolérant, toute la cellule) + clic OU
+            // Entrée. Le clic est désormais AUSSI tolérant que Entrée (X seul, pas de Y
+            // précis). Raccourcis chiffres RETIRÉS : dans cet environnement la touche '2'
+            // envoie le scancode Flèche-Bas (→ déplaçait le curseur au lieu de lancer).
+            let hitH: <i32> = (dmW * 7) / 10;
+            let overX: <bool> = (mx >= (pvx - hitH) && mx <= (pvx + hitH));
+            let overY: <bool> = (my >= (pvy - hitH) && my <= (pvy + hitH));
+            // Clic souris façon macOS : cliquer SUR le losange (survol X ET Y + bouton) →
+            // l'app s'ouvre. Le pilote HID natif remonte maintenant le bouton (product-grade).
+            // Repli clavier : Entrée lance l'app la PLUS PROCHE (ai == nearestAi), sans survol.
+            if (occluded == false && ((overX && overY && (pbtn & 1) != 0) || (kc == 13 && ai == nearestAi))) [
                 let nm: <ptr> = <DrvAPIInterCon***AppRegistryGetName***>(ai);
                 let existing: <i32> = <DrvAPIInterCon***WindowManFindByName***>(nm);
                 if (existing < 0) [ let _: <i32> = <DrvAPIInterCon***WindowManLaunch***>(nm); ];
@@ -196,44 +256,39 @@ rel op Render: [ctx string, fnt ptr] [
         ];
 
         // [ShiSettings sysbar button — frosted glass] — icône carrée 23×23 : sU pour la taille.
-        let _: <i32> = <DrvAPIInterCon***GpuBackgroundBlur***>(((569 * sW + 500) / 1000), ((2 * sH + 500) / 1000), ((23 * sU + 500) / 1000), ((23 * sU + 500) / 1000), 0, 2);
-        let svg5: <ptr> = <DrvAPIInterCon***SvgLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/vec5.svg");
-        let _: <i32> = <DrvAPIInterCon***SvgDraw***>(svg5, ((569 * sW + 500) / 1000), ((2 * sH + 500) / 1000), ((23 * sU + 500) / 1000), ((23 * sU + 500) / 1000));
-        let _: <i32> = <DrvAPIInterCon***SvgFree***>(svg5);
+        // (bandeau haut retire du bureau : chrome de fenetre desormais dans LAPrevent)
 
         // [Sysbar title text — FontLoad direct (fnt kernel param = null avant render)]
         // "SDC:/X" → traduit en "SDC/slu64/X" par srfs_load_on_demand — PAS "SDC/X". L'ancien
         // chemin "SDC:/slu64/assets/..." doublait donc "slu64" (→ SDC/slu64/slu64/assets/...,
         // introuvable). Le fichier réel est dans esp/SDC/slu64/assets/fonts/ (cf. LAPrevent.mara).
-        let font: <ptr> = <DrvAPIInterCon***FontLoad***>("SDC:/assets/fonts/brsonomasemibold.ttf");
-        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((604 * sW + 500) / 1000), ((7 * sH + 500) / 1000), ((209 * sW + 500) / 1000), "ShiLooker  - Notifications & Widgets", S_SHILOOKER___NOTIFICA, S_SHILOOKER___NOTIFICA_1, font, (((12 * sW + 500) / 1000 + (12 * sH + 500) / 1000) / 2), 0);
+        // (titre d'app hardcode retire : appartient a la fenetre, pas au bureau)
+
+        // --- Affichage dynamique de l'icône déclarée dans le Maraset du lanceur ---
+        if (launcherIconPath != nullptr) [
+            im = <DrvAPIInterCon***ImageLoad***>(launcherIconPath);
+            let iconSize: <i32> = ((20 * sU + 500) / 1000);   // 20 px dans le design, mis à l'échelle
+            let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im,
+                (((604 * sW + 500) / 1000) - iconSize - 4),   // 4 px de marge intérieure
+                ((7 * sH + 500) / 1000),
+                iconSize,
+                iconSize);
+        ];
 
         // [Sysbar icon "agrandir" — opacity 31%]
         // img11-16 (6 fragments diagonaux formant le contour carré) fusionnés en une seule image
         // composite (img11_increase_merged.png, alpha-compositée hors-ligne en respectant les positions
         // relatives exactes de chaque fragment) — un seul ImageDraw au lieu de six.
-        let _: <i32> = <DrvAPIInterCon***GpuSetOpacity***>(79);
-        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img11_increase_merged.png");
-        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ((1362 * sW + 500) / 1000), ((-7 * sH + 500) / 1000), ((47 * sU + 500) / 1000), ((45 * sU + 500) / 1000));
-        let _: <i32> = <DrvAPIInterCon***GpuResetOpacity***>();
-        let _: <i32> = <DrvAPIInterCon***GpuSetOpacity***>(79);
         // img17.png avait son encre (le vrai trait visible) décentrée dans son canvas 120×94 — l'encre
         // ne mesurait que 34×4px native, positionnée près du haut, alors que le canvas entier (utilisé
         // tel quel) faisait croire à un contenu centré. D'où le décalage "tordu" par rapport aux 2 autres
         // boutons. Recadré hors-ligne sur la vraie zone d'encre (+padding) → img17_reduce_cropped.png,
         // positionné pour un centre d'encre à (1353,17), aligné avec "increase" et "close".
-        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img17_reduce_cropped.png");
-        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ((1343 * sW + 500) / 1000), ((14 * sH + 500) / 1000), ((21 * sU + 500) / 1000), ((6 * sU + 500) / 1000));
-        let _: <i32> = <DrvAPIInterCon***GpuResetOpacity***>();
-        let _: <i32> = <DrvAPIInterCon***GpuSetOpacity***>(79);
-        // img18+img19 avaient CHACUN leur encre décentrée du même décalage (23.5,-28.5px natif) par
+        // img18+img19 avaient CHACUN leur encre décentrée du même décalaje (23.5,-28.5px natif) par
         // rapport à leur propre canvas — ma première fusion centrait les canvas (pas l'encre), ce qui
         // reproduisait ce décalage dans le résultat final. Refait : chaque source recadrée sur sa propre
         // zone d'encre (+padding) AVANT fusion, puis composées centrées l'une sur l'autre — le X tombe
         // maintenant exactement au centre de img18_close_x.png (32×32). Centre d'encre visé : (1422,17).
-        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img18_close_x.png");
-        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ((1414 * sW + 500) / 1000), ((9 * sH + 500) / 1000), ((16 * sU + 500) / 1000), ((16 * sU + 500) / 1000));
-        let _: <i32> = <DrvAPIInterCon***GpuResetOpacity***>();
 
         // [ShiMouse — curseur vectoriel natif Slura, remplace l'ancien img20.png raster]
         // HIDcursor.sluc est une reproduction pixel-exacte de img20.png, stockée à sa

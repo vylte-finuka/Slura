@@ -216,6 +216,14 @@ pub struct XhciCapabilities {
     pub ext_cap_ptr_dwords: u32,
     pub doorbell_offset: u32,
     pub runtime_offset: u32,
+    /// Max Scratchpad Buffers (HCSPARAMS2 bits Hi[25:21]:Lo[31:27]) — nombre de
+    /// pages de travail que le contrôleur EXIGE que l'OS lui fournisse via
+    /// DCBAA[0]. QEMU met 0, mais beaucoup de contrôleurs réels demandent >0 et
+    /// n'exécutent AUCUNE commande tant qu'elles ne sont pas allouées (product-grade).
+    pub max_scratchpad_bufs: u32,
+    /// Page Size supporté (PAGESIZE op reg §5.4.3) — taille de page attendue
+    /// par le contrôleur pour les scratchpad buffers (généralement 4 Ko).
+    pub page_size_bytes: u32,
 }
 
 /// Parcourt tous les devices PCI (lecture seule) et logue vendor/device/classe
@@ -333,17 +341,20 @@ pub fn read_xhci_capabilities(
 
     // HCSPARAMS1 (0x04) : MaxSlots[7:0] | MaxIntrs[18:8] | MaxPorts[31:24].
     let mut hcsparams1 = [0u32; 1];
+    // HCSPARAMS2 (0x08) : ... | Max Scratchpad Bufs Hi[25:21] | Max Scratchpad Bufs Lo[31:27].
+    let mut hcsparams2 = [0u32; 1];
     // HCCPARAMS1 (0x10) : AC64[0] | ... | CSZ[2] | ... | xECP[31:16] (DWORDS).
     let mut hccparams1 = [0u32; 1];
     // DBOFF (0x14) / RTSOFF (0x18) : offsets en octets depuis BAR0.
     let mut dboff  = [0u32; 1];
     let mut rtsoff = [0u32; 1];
     let ok = pci_io.read_mem32(0, 0x04, &mut hcsparams1)
+        && pci_io.read_mem32(0, 0x08, &mut hcsparams2)
         && pci_io.read_mem32(0, 0x10, &mut hccparams1)
         && pci_io.read_mem32(0, 0x14, &mut dboff)
         && pci_io.read_mem32(0, 0x18, &mut rtsoff);
     if !ok {
-        serial_log(b"[XHCI] lecture des registres de capacite (HCSPARAMS1/HCCPARAMS1/DBOFF/RTSOFF) echouee\r\n");
+        serial_log(b"[XHCI] lecture des registres de capacite (HCSPARAMS1/2/HCCPARAMS1/DBOFF/RTSOFF) echouee\r\n");
         return None;
     }
 
@@ -351,9 +362,23 @@ pub fn read_xhci_capabilities(
     let max_intrs = ((hcsparams1[0] >> 8) & 0x7FF) as u16;
     let max_ports = ((hcsparams1[0] >> 24) & 0xFF) as u8;
 
+    // Max Scratchpad Buffers = Hi[25:21] << 5 | Lo[31:27] (xHCI Spec §5.3.4).
+    let sp_hi = (hcsparams2[0] >> 21) & 0x1F;
+    let sp_lo = (hcsparams2[0] >> 27) & 0x1F;
+    let max_scratchpad_bufs = (sp_hi << 5) | sp_lo;
+
     let ac64             = (hccparams1[0] & 0x1) != 0;
     let context_size_64  = (hccparams1[0] & 0x4) != 0;
     let ext_cap_ptr_dwords = hccparams1[0] >> 16;
+
+    // PAGESIZE (op reg §5.4.3, à op_base+0x08 = cap_length+0x08 depuis BAR0) : bit n
+    // positionné = page de 2^(n+12) octets supportée. On prend la plus petite (bit le
+    // plus bas). Défaut sûr = 4 Ko si lecture impossible.
+    let mut pagesize = [0u32; 1];
+    let page_size_bytes = if pci_io.read_mem32(0, (cap_length as u64) + 0x08, &mut pagesize) {
+        let bit = (pagesize[0] & 0xFFFF).trailing_zeros();
+        1u32 << (bit + 12)
+    } else { 4096 };
 
     // Bits bas réservés à masquer avant usage (xHCI Spec §5.3.7/§5.3.8).
     let doorbell_offset = dboff[0] & !0x3;
@@ -367,9 +392,14 @@ pub fn read_xhci_capabilities(
         "[XHCI] AC64={} ContextSize64={} xECP={:#x} DBOFF={:#x} RTSOFF={:#x}\r\n",
         ac64, context_size_64, ext_cap_ptr_dwords, doorbell_offset, runtime_offset
     ).as_bytes());
+    serial_log(alloc::format!(
+        "[XHCI] MaxScratchpadBufs={} PageSize={} octets\r\n",
+        max_scratchpad_bufs, page_size_bytes
+    ).as_bytes());
 
     Some(XhciCapabilities {
         cap_length, hci_version, max_slots, max_intrs, max_ports,
         ac64, context_size_64, ext_cap_ptr_dwords, doorbell_offset, runtime_offset,
+        max_scratchpad_bufs, page_size_bytes,
     })
 }

@@ -141,9 +141,6 @@ qemu-system-x86_64 \
     -device    virtio-vga \
     -display   sdl,gl=off \
     -device    qemu-xhci \
-    -device    usb-tablet \
-    -device    usb-mouse \
-    -device    usb-kbd \
     -drive     if=pflash,format=raw,readonly=on,file="${OVMF_CODE}",id=ovmf_code \
     -drive     if=pflash,format=raw,file="${OVMF_VARS}",id=ovmf_vars \
     -global    driver=efi-pflash.0,property=secure-boot,value=0 \

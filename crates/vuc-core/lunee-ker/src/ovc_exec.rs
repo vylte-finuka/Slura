@@ -4289,10 +4289,23 @@ fn dispatch(
         // chaque frame dans render_from_marep) — coordonnées en pixels écran réels.
         "DrvAPIInterCon___PointerGetX___"   => ctx.pointer_x as i64,
         "DrvAPIInterCon___PointerGetY___"   => ctx.pointer_y as i64,
-        "DrvAPIInterCon___PointerGetBtn___" => ctx.pointer_btn as i64,
+        "DrvAPIInterCon___PointerGetBtn___" => {
+            // DIAG : ne log QUE quand un bouton est réellement pressé (pas de spam par frame).
+            // Confirme si l'état du bouton pointeur atteint bien la couche Maratine.
+            if ctx.pointer_btn != 0 {
+                serial_log(alloc::format!("[DIAG] PointerGetBtn = {}\r\n", ctx.pointer_btn).as_bytes());
+            }
+            ctx.pointer_btn as i64
+        },
 
         // ── Clavier HID réel (EFI_SIMPLE_TEXT_INPUT_PROTOCOL / ConIn) ────────
-        "DrvAPIInterCon___KeyGetCode___" => ctx.key_code as i64,
+        "DrvAPIInterCon___KeyGetCode___" => {
+            // DIAG : ne log QUE quand une touche est reçue (Entree = 13).
+            if ctx.key_code != 0 {
+                serial_log(alloc::format!("[DIAG] KeyGetCode = {}\r\n", ctx.key_code).as_bytes());
+            }
+            ctx.key_code as i64
+        },
 
         // ── Bureau à fenêtres — primitives bas niveau, pilotées depuis Maratine
         // (LAPrevent.mara/TemplateView.mara). RUNNING_APPS est la seule source de
@@ -4321,9 +4334,13 @@ fn dispatch(
         "DrvAPIInterCon___WindowManFindByName___" => {
             if args.is_empty() || args[0] == 0 { return -1; }
             let name = unsafe { read_cstr(args[0] as *const u8) };
-            unsafe {
+            let res = unsafe {
                 RUNNING_APPS.iter().position(|a| a.name == name).map(|i| i as i64).unwrap_or(-1)
-            }
+            };
+            // DIAG : appelé uniquement quand un lancement est tenté (survol + clic/Entree),
+            // donc pas de spam. Confirme que la chaîne dock→lancement est bien atteinte.
+            serial_log(alloc::format!("[DIAG] WindowManFindByName(\"{}\") -> {}\r\n", name, res).as_bytes());
+            res
         },
 
         // ── Registre d'apps installées (dock dynamique, piloté par TemplateView.mara) ──

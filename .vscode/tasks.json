@@ -287,18 +287,6 @@
         // les découvre et affiche leur icône dans le dock (comme un vrai système :
         // une app n'apparaît au dock QUE si elle est installée).
         {
-            "label": "marai build: TestApp.marep",
-            "type": "process",
-            "command": "powershell.exe",
-            "args": [ "-NoProfile", "-Command",
-                "marai build TestApp.marep -O --arch=x64 \"--out-dir=${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\"" ],
-            "options": { "cwd": "${workspaceFolder}/slr_clk_bt" },
-            "dependsOn": ["make: ESP dirs"],
-            "group": "build",
-            "presentation": { "reveal": "always", "panel": "shared" },
-            "problemMatcher": []
-        },
-        {
             "label": "marai build: ShiLooker.marep",
             "type": "process",
             "command": "powershell.exe",
@@ -385,20 +373,6 @@
             "args": [
                 "-NoProfile", "-Command",
                 "$src = '${workspaceFolder}\\slr_clk_bt\\ShiLooker.marep'; $dst = '${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\SDC\\slu64\\apps\\ShiLooker'; New-Item -ItemType Directory -Force \"$dst\\ShiLooker.slasset\" | Out-Null; Copy-Item -Force \"$src\\Maraset.yaml\" \"$dst\\Maraset.yaml\"; if (Test-Path \"$src\\ShiLooker.slasset\") { Copy-Item -Force -Recurse \"$src\\ShiLooker.slasset\\*\" \"$dst\\ShiLooker.slasset\" }; Write-Host 'ShiLooker installe → apps/ShiLooker'"
-            ],
-            "options": { "cwd": "${workspaceFolder}" },
-            "dependsOn": ["make: ESP dirs"],
-            "group": "build",
-            "presentation": { "reveal": "always", "panel": "shared" },
-            "problemMatcher": []
-        },
-        {
-            "label": "install: TestApp → apps SRFS",
-            "type": "process",
-            "command": "powershell.exe",
-            "args": [
-                "-NoProfile", "-Command",
-                "$src = '${workspaceFolder}\\slr_clk_bt\\TestApp.marep'; $dst = '${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\SDC\\slu64\\apps\\TestApp'; New-Item -ItemType Directory -Force $dst | Out-Null; Copy-Item -Force \"$src\\Maraset.yaml\" \"$dst\\Maraset.yaml\"; if (Test-Path \"$src\\TestApp.slasset\") { New-Item -ItemType Directory -Force \"$dst\\TestApp.slasset\" | Out-Null; Copy-Item -Force -Recurse \"$src\\TestApp.slasset\\*\" \"$dst\\TestApp.slasset\" }; Write-Host 'TestApp installe → apps/TestApp'"
             ],
             "options": { "cwd": "${workspaceFolder}" },
             "dependsOn": ["make: ESP dirs"],
@@ -493,9 +467,9 @@
                 "copy: ShiLauncher.slasset → SRFS",
                 "copy: vezcurproxy.ca + vezcurproxy.sol → SRFS",
                 "marai image: create install.slin",
-                "marai build: TestApp.marep",
                 "marai build: ShiLooker.marep",
                 "install: ShiLooker → apps SRFS",
+                "marai build: TestApp.marep",
                 "install: TestApp → apps SRFS"
             ],
             "group": "build",
@@ -622,19 +596,19 @@
 
         // Jalon 1 du plan bureau à fenêtres (rosy-waddling-gosling.md) : rebuild
         // kernel + ShiLauncher.marep (LAPrevent.mara/TemplateView.mara pilotent
-        // maintenant la boucle de fenêtres) + TestApp.marep + image ESP +
+        // maintenant la boucle de fenêtres) + image ESP +
         // lancement QEMU en une seule commande. Ne touche pas au pipeline
         // "🚀 Full Slura build".
         {
-            "label": "🧪 build + test jalon1 fenetres (kernel + ShiLauncher + TestApp + ShiLooker)",
+            "label": "🧪 build + test jalon1 fenetres (kernel + ShiLauncher + ShiLooker)",
             "dependsOn": [
                 "🔧 build kernel only",
                 "marai build: ShiLauncher.marep",
                 "copy: ShiLauncher.slasset → SRFS",
-                "marai build: TestApp.marep",
                 "marai build: ShiLooker.marep",
-                "install: TestApp → apps SRFS",
                 "install: ShiLooker → apps SRFS",
+                "marai build: TestApp.marep",
+                "install: TestApp → apps SRFS",
                 "5️⃣ make: esp image",
                 "6️⃣ qemu: run UEFI test"
             ],
@@ -652,7 +626,12 @@
 
         {
             "label": "🌐 Full Slura + Platform Engine (kernel + blockchain + ISO)",
-            "dependsOn": [ "make: booter.iso", "copy: vuc-platform-engine → esp" ],
+            // SEQUENCE (pas parallèle) : la copie du moteur DOIT précéder la création de
+            // l'ISO, sinon "make: booter.iso" empaquette esp/ avant que vuc_platform_engine.efi
+            // n'y soit déposé → le moteur manquerait dans l'ISO. Le noyau le charge au runtime
+            // via LoadImage(\vuc_platform_engine.efi) depuis la racine de l'ESP.
+            "dependsOn": [ "copy: vuc-platform-engine → esp", "make: booter.iso" ],
+            "dependsOrder": "sequence",
             "group": "build",
             "problemMatcher": []
         }
