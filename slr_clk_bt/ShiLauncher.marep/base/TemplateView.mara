@@ -11,6 +11,13 @@ rel op Render: [ctx string, fnt ptr] [
     let sh: <i32> = <DrvAPIInterCon***GpuGetHeight***>();
     let sW: <i32> = (sw * 1000) / 1440;
     let sH: <i32> = (sh * 1000) / 1024;
+    // Échelle uniforme (moyenne sW/sH) — pour tout élément dont la forme doit rester
+    // proportionnée (carré, icône, rotation) : sW/sH séparés stretchent le layout pour
+    // couvrir tout l'écran (voulu pour le fond d'écran et le placement), mais appliqués
+    // à la TAILLE d'une forme carrée/pivotée quand l'écran n'a pas exactement le ratio
+    // du design (1440:1024), ça la déforme (ex: les losanges rallongés en ovale/lame).
+    // sU garde toute forme "carrée-dans-le-design" carrée quel que soit le ratio écran.
+    let sU: <i32> = (sW + sH) / 2;
 
     // ── Mara Stylesheet ──────────────────────────────────────────────────────
     // Alpha porté par GpuSetOpacity → couleur ARGB avec alpha=0xFF (jamais dupliquer)
@@ -127,94 +134,79 @@ rel op Render: [ctx string, fnt ptr] [
         let _: <i32> = <DrvAPIInterCon***GpuResetOpacity***>();
 
         // [Dimensions partagées losanges du dock — rounded-[16px] sur size-[44.574px] côté Figma]
-        let dmW: <i32> = ((45 * sW + 500) / 1000);
-        let dmH: <i32> = ((45 * sH + 500) / 1000);
-        let dmR: <i32> = (((16 * sW + 500) / 1000 + (16 * sH + 500) / 1000) / 2);
+        // sU (pas sW/sH séparés) : ce sont des CARRÉS pivotés — largeur ≠ hauteur les
+        // transformerait en losanges allongés dès que l'écran n'a pas le ratio du design.
+        let dmW: <i32> = ((45 * sU + 500) / 1000);
+        let dmH: <i32> = ((45 * sU + 500) / 1000);
+        let dmR: <i32> = ((16 * sU + 500) / 1000);
 
-        // [ShiLooker diamond — 46° / 4-pass anti-gap]
-        let lkX: <i32> = ((548 * sW + 500) / 1000);
-        let lkY: <i32> = ((917 * sH + 500) / 1000);
-        // rgba(185,185,185,0.2) — PAS de flou d'arrière-plan : vérifié en échantillonnant les pixels
-        // réels du rendu Figma composité (node 28:23 avec wallpaper). Fond du dock mesuré ≈(179,194,215),
-        // blend plat 20% gris(185,185,185) prédit ≈(180,192,209) → mesure réelle du losange ShiLooker
-        // (179,190,202) : quasi identique. C'est un simple alpha blend, le flou précédemment ajouté
-        // (théorie basée sur un export isolé à fond blanc, non représentatif) était superflu — retiré.
-        // GpuSetTransform2D(cos,sin,-sin,cos,pivotX,pivotY) — le kernel convertit déjà le pivot en
-        // translation affine en interne (ovc_exec.rs::GpuSetTransform2D) ; pivot = centre du losange (cx,cy).
-        let _: <i32> = <DrvAPIInterCon***GpuSetTransform2D***>(6947, 7193, -7193, 6947, ((571 * sW + 500) / 1000), ((940 * sH + 500) / 1000));
-        // "Effet de verre" demandé : une bordure/liseré clair sur le contour, suggérant l'épaisseur du
-        // verre. GpuDrawStroke ne suit pas la rotation (segments rectangulaires droits, cf. plus haut) —
-        // simulé à la place en dessinant une forme légèrement plus grande en blanc semi-transparent
-        // AVANT le remplissage normal (même pivot/rotation, rasteriseur tourné donc correctement rond) :
-        // seul un fin liseré dépassant du remplissage reste visible, comme un contour classique.
-        // Offset de bordure mis à l'échelle via sW/sH (comme tout le reste du fichier) plutôt qu'un
-        // décalage brut de "1px" fixe — sinon la bordure resterait à 1 pixel physique sur un écran 4K
-        // au lieu de s'agrandir proportionnellement avec le reste de l'interface (non-responsive).
-        let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>((lkX - ((1 * sW + 500) / 1000)), (lkY - ((1 * sH + 500) / 1000)), (dmW + ((2 * sW + 500) / 1000)), (dmH + ((2 * sH + 500) / 1000)), (dmR + (((1 * sW + 500) / 1000 + (1 * sH + 500) / 1000) / 2)), 0x66FFFFFF);
-        // Rasteriseur corrigé (mapping arrière, cf. ovc_exec.rs::GpuDrawRoundedRectAlpha) : couverture
-        // complète en un seul passage, le hack "4-pass anti-gap" (copies à +1px) n'est plus nécessaire.
-        let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(lkX, lkY, dmW, dmH, dmR, S_SHILOOKER);
-        let _: <i32> = <DrvAPIInterCon***GpuResetTransform***>();
-        // Icône recentrée sur le vrai centre du losange (571,940) — l'encre de img4.png est elle-même
-        // bien centrée dans son canvas (vérifié, décalage négligeable), le souci était juste la position
-        // de dessin (544,913) légèrement décalée du pivot réel (571,940) pour un icône 57×57.
-        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img4.png");
-        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ((543 * sW + 500) / 1000), ((912 * sH + 500) / 1000), ((57 * sW + 500) / 1000), ((57 * sH + 500) / 1000));
+        // ── Dock DYNAMIQUE : piloté par le registre d'apps installées ──────────────
+        // Plus aucune icône hardcodée (ShiLooker/ShiDialer/ShiMessages/… supprimées) :
+        // le dock itère AppRegistryCount() et n'affiche QUE les apps réellement
+        // installées sous SDC/slu64/apps/<App>/ (app_registry.rs). Un clic lance l'app
+        // par son nom (AppRegistryGetName), idempotent via WindowManFindByName.
+        // mx/my/pbtn lus ici une seule fois, réutilisés plus bas par le curseur.
+        let mx: <i32> = <DrvAPIInterCon***PointerGetX***>();
+        let my: <i32> = <DrvAPIInterCon***PointerGetY***>();
+        let pbtn: <i32> = <DrvAPIInterCon***PointerGetBtn***>();
 
-        // [ShiSettings sysbar button — frosted glass]
-        let _: <i32> = <DrvAPIInterCon***GpuBackgroundBlur***>(((569 * sW + 500) / 1000), ((2 * sH + 500) / 1000), ((23 * sW + 500) / 1000), ((23 * sH + 500) / 1000), 0, 2);
+        // Occlusion : un clic au-dessus d'une fenêtre ouverte ne perce pas jusqu'au dock.
+        let wcountDock: <i32> = <DrvAPIInterCon***WindowManCount***()>;
+        var occluded: <bool> = false;
+        var oj: <i32> = 0;
+        loop (oj < wcountDock) [
+            let owx: <i32> = <DrvAPIInterCon***WindowManGetX***>(oj);
+            let owy: <i32> = <DrvAPIInterCon***WindowManGetY***>(oj);
+            let oww: <i32> = <DrvAPIInterCon***WindowManGetW***>(oj);
+            let owh: <i32> = <DrvAPIInterCon***WindowManGetH***>(oj);
+            if (mx >= owx && mx <= (owx + oww) && my >= (owy - 28) && my <= (owy + owh)) [ occluded = true; ];
+            oj = oj + 1;
+        ];
+
+        let appCount: <i32> = <DrvAPIInterCon***AppRegistryCount***()>;
+        var ai: <i32> = 0;
+        loop (ai < appCount) [
+            let dgx: <i32> = 548 + (ai * 63);            // X design du losange (espacement dock ≈ 63)
+            let ix: <i32> = ((dgx * sW + 500) / 1000);
+            let iy: <i32> = ((917 * sH + 500) / 1000);
+            let pvx: <i32> = (((dgx + 23) * sW + 500) / 1000);
+            let pvy: <i32> = ((940 * sH + 500) / 1000);
+
+            // Losange (fond translucide + liseré verre), pivoté 46° — commun à toutes les apps.
+            let _: <i32> = <DrvAPIInterCon***GpuSetTransform2D***>(6947, 7193, -7193, 6947, pvx, pvy);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>((ix - ((1 * sU + 500) / 1000)), (iy - ((1 * sU + 500) / 1000)), (dmW + ((2 * sU + 500) / 1000)), (dmH + ((2 * sU + 500) / 1000)), (dmR + ((1 * sU + 500) / 1000)), 0x66FFFFFF);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(ix, iy, dmW, dmH, dmR, S_SHILOOKER);
+            let _: <i32> = <DrvAPIInterCon***GpuResetTransform***>();
+
+            // Icône de l'app (si le registre en fournit une) — dessinée droite, centrée sur le pivot.
+            let iconPath: <ptr> = <DrvAPIInterCon***AppRegistryGetIconPath***>(ai);
+            if (iconPath != nullptr) [
+                im = <DrvAPIInterCon***ImageLoad***>(iconPath);
+                let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, (((dgx - 5) * sW + 500) / 1000), ((912 * sH + 500) / 1000), ((57 * sU + 500) / 1000), ((57 * sU + 500) / 1000));
+            ];
+
+            // Lancement au clic (sauf occlusion), idempotent.
+            if (occluded == false && (pbtn & 1) != 0 && mx >= ix && mx <= (ix + dmW) && my >= iy && my <= (iy + dmH)) [
+                let nm: <ptr> = <DrvAPIInterCon***AppRegistryGetName***>(ai);
+                let existing: <i32> = <DrvAPIInterCon***WindowManFindByName***>(nm);
+                if (existing < 0) [ let _: <i32> = <DrvAPIInterCon***WindowManLaunch***>(nm); ];
+            ];
+
+            ai = ai + 1;
+        ];
+
+        // [ShiSettings sysbar button — frosted glass] — icône carrée 23×23 : sU pour la taille.
+        let _: <i32> = <DrvAPIInterCon***GpuBackgroundBlur***>(((569 * sW + 500) / 1000), ((2 * sH + 500) / 1000), ((23 * sU + 500) / 1000), ((23 * sU + 500) / 1000), 0, 2);
         let svg5: <ptr> = <DrvAPIInterCon***SvgLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/vec5.svg");
-        let _: <i32> = <DrvAPIInterCon***SvgDraw***>(svg5, ((569 * sW + 500) / 1000), ((2 * sH + 500) / 1000), ((23 * sW + 500) / 1000), ((23 * sH + 500) / 1000));
+        let _: <i32> = <DrvAPIInterCon***SvgDraw***>(svg5, ((569 * sW + 500) / 1000), ((2 * sH + 500) / 1000), ((23 * sU + 500) / 1000), ((23 * sU + 500) / 1000));
         let _: <i32> = <DrvAPIInterCon***SvgFree***>(svg5);
 
         // [Sysbar title text — FontLoad direct (fnt kernel param = null avant render)]
-        let font: <ptr> = <DrvAPIInterCon***FontLoad***>("SDC:/slu64/assets/fonts/brsonomasemibold.ttf");
+        // "SDC:/X" → traduit en "SDC/slu64/X" par srfs_load_on_demand — PAS "SDC/X". L'ancien
+        // chemin "SDC:/slu64/assets/..." doublait donc "slu64" (→ SDC/slu64/slu64/assets/...,
+        // introuvable). Le fichier réel est dans esp/SDC/slu64/assets/fonts/ (cf. LAPrevent.mara).
+        let font: <ptr> = <DrvAPIInterCon***FontLoad***>("SDC:/assets/fonts/brsonomasemibold.ttf");
         let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((604 * sW + 500) / 1000), ((7 * sH + 500) / 1000), ((209 * sW + 500) / 1000), "ShiLooker  - Notifications & Widgets", S_SHILOOKER___NOTIFICA, S_SHILOOKER___NOTIFICA_1, font, (((12 * sW + 500) / 1000 + (12 * sH + 500) / 1000) / 2), 0);
-
-        // [ShiDialer diamond — 46° / 4-pass anti-gap]
-        let dlX: <i32> = ((611 * sW + 500) / 1000);
-        let dlY: <i32> = ((919 * sH + 500) / 1000);
-        let _: <i32> = <DrvAPIInterCon***GpuSetTransform2D***>(6947, 7193, -7193, 6947, ((634 * sW + 500) / 1000), ((942 * sH + 500) / 1000));
-        let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(dlX, dlY, dmW, dmH, dmR, S_SHIDIALER);
-        let _: <i32> = <DrvAPIInterCon***GpuResetTransform***>();
-        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img6.png");
-        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ((600 * sW + 500) / 1000), ((908 * sH + 500) / 1000), ((68 * sW + 500) / 1000), ((68 * sH + 500) / 1000));
-
-        // [ShiMessages diamond — 46° / 4-pass anti-gap]
-        let msX: <i32> = ((674 * sW + 500) / 1000);
-        let msY: <i32> = ((917 * sH + 500) / 1000);
-        let _: <i32> = <DrvAPIInterCon***GpuSetTransform2D***>(6947, 7193, -7193, 6947, ((697 * sW + 500) / 1000), ((940 * sH + 500) / 1000));
-        let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(msX, msY, dmW, dmH, dmR, S_SHIMESSAGES);
-        let _: <i32> = <DrvAPIInterCon***GpuResetTransform***>();
-        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img7.png");
-        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ((667 * sW + 500) / 1000), ((910 * sH + 500) / 1000), ((60 * sW + 500) / 1000), ((60 * sH + 500) / 1000));
-
-        // [ShiContacts diamond — Figma: -136° ; équivalent visuel à -46° (mod 90° sur un carré à coins uniformes)]
-        let ctX: <i32> = ((737 * sW + 500) / 1000);
-        let ctY: <i32> = ((917 * sH + 500) / 1000);
-        let _: <i32> = <DrvAPIInterCon***GpuSetTransform2D***>(6947, 7193, -7193, 6947, ((760 * sW + 500) / 1000), ((940 * sH + 500) / 1000));
-        let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(ctX, ctY, dmW, dmH, dmR, S_SHICONTACTS);
-        let _: <i32> = <DrvAPIInterCon***GpuResetTransform***>();
-        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img8.png");
-        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ((738 * sW + 500) / 1000), ((916 * sH + 500) / 1000), ((44 * sW + 500) / 1000), ((52 * sH + 500) / 1000));
-
-        // [ShiBrowser diamond — 46° / 4-pass anti-gap]
-        let brX: <i32> = ((800 * sW + 500) / 1000);
-        let brY: <i32> = ((917 * sH + 500) / 1000);
-        let _: <i32> = <DrvAPIInterCon***GpuSetTransform2D***>(6947, 7193, -7193, 6947, ((823 * sW + 500) / 1000), ((940 * sH + 500) / 1000));
-        let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(brX, brY, dmW, dmH, dmR, S_SHIBROWSER);
-        let _: <i32> = <DrvAPIInterCon***GpuResetTransform***>();
-        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img9.png");
-        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ((796 * sW + 500) / 1000), ((915 * sH + 500) / 1000), ((54 * sW + 500) / 1000), ((49 * sH + 500) / 1000));
-
-        // [ShiSettings diamond — 46° / 4-pass anti-gap]
-        let stX: <i32> = ((863 * sW + 500) / 1000);
-        let stY: <i32> = ((917 * sH + 500) / 1000);
-        let _: <i32> = <DrvAPIInterCon***GpuSetTransform2D***>(6947, 7193, -7193, 6947, ((886 * sW + 500) / 1000), ((940 * sH + 500) / 1000));
-        let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(stX, stY, dmW, dmH, dmR, S_SHISETTINGS);
-        let _: <i32> = <DrvAPIInterCon***GpuResetTransform***>();
-        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img10.png");
-        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ((856 * sW + 500) / 1000), ((910 * sH + 500) / 1000), ((60 * sW + 500) / 1000), ((60 * sH + 500) / 1000));
 
         // [Sysbar icon "agrandir" — opacity 31%]
         // img11-16 (6 fragments diagonaux formant le contour carré) fusionnés en une seule image
@@ -222,7 +214,7 @@ rel op Render: [ctx string, fnt ptr] [
         // relatives exactes de chaque fragment) — un seul ImageDraw au lieu de six.
         let _: <i32> = <DrvAPIInterCon***GpuSetOpacity***>(79);
         im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img11_increase_merged.png");
-        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ((1362 * sW + 500) / 1000), ((-7 * sH + 500) / 1000), ((47 * sW + 500) / 1000), ((45 * sH + 500) / 1000));
+        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ((1362 * sW + 500) / 1000), ((-7 * sH + 500) / 1000), ((47 * sU + 500) / 1000), ((45 * sU + 500) / 1000));
         let _: <i32> = <DrvAPIInterCon***GpuResetOpacity***>();
         let _: <i32> = <DrvAPIInterCon***GpuSetOpacity***>(79);
         // img17.png avait son encre (le vrai trait visible) décentrée dans son canvas 120×94 — l'encre
@@ -231,7 +223,7 @@ rel op Render: [ctx string, fnt ptr] [
         // boutons. Recadré hors-ligne sur la vraie zone d'encre (+padding) → img17_reduce_cropped.png,
         // positionné pour un centre d'encre à (1353,17), aligné avec "increase" et "close".
         im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img17_reduce_cropped.png");
-        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ((1343 * sW + 500) / 1000), ((14 * sH + 500) / 1000), ((21 * sW + 500) / 1000), ((6 * sH + 500) / 1000));
+        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ((1343 * sW + 500) / 1000), ((14 * sH + 500) / 1000), ((21 * sU + 500) / 1000), ((6 * sU + 500) / 1000));
         let _: <i32> = <DrvAPIInterCon***GpuResetOpacity***>();
         let _: <i32> = <DrvAPIInterCon***GpuSetOpacity***>(79);
         // img18+img19 avaient CHACUN leur encre décentrée du même décalage (23.5,-28.5px natif) par
@@ -240,23 +232,23 @@ rel op Render: [ctx string, fnt ptr] [
         // zone d'encre (+padding) AVANT fusion, puis composées centrées l'une sur l'autre — le X tombe
         // maintenant exactement au centre de img18_close_x.png (32×32). Centre d'encre visé : (1422,17).
         im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img18_close_x.png");
-        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ((1414 * sW + 500) / 1000), ((9 * sH + 500) / 1000), ((16 * sW + 500) / 1000), ((16 * sH + 500) / 1000));
+        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ((1414 * sW + 500) / 1000), ((9 * sH + 500) / 1000), ((16 * sU + 500) / 1000), ((16 * sU + 500) / 1000));
         let _: <i32> = <DrvAPIInterCon***GpuResetOpacity***>();
 
-        // [ShiMouse — sans opacity]
-        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img20.png");
-        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ((180 * sW + 500) / 1000), ((360 * sH + 500) / 1000), ((38 * sW + 500) / 1000), ((38 * sH + 500) / 1000));
+        // [ShiMouse — curseur vectoriel natif Slura, remplace l'ancien img20.png raster]
+        // HIDcursor.sluc est une reproduction pixel-exacte de img20.png, stockée à sa
+        // résolution native 77×77, mais CursorLoad (ovc_exec.rs) la ré-échantillonne TOUJOURS à
+        // STANDARD_CURSOR_SIZE=32×32 façon Windows, quelle que soit la résolution native
+        // du fichier — moyenne de zone alpha-pondérée, pas un étirement runtime (un <rect>
+        // de 1px redimensionné au vol tronque à 0px de large : bug déjà rencontré, le
+        // curseur avait totalement disparu). CursorDraw dessine donc toujours en 1:1.
+        // Curseur : réutilise mx/my déjà lus en tête du dock (pas de re-déclaration).
+        let cur: <i32> = <DrvAPIInterCon***CursorLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc");
+        let _: <i32> = <DrvAPIInterCon***CursorDraw***>(cur, mx, my);
+        let _: <i32> = <DrvAPIInterCon***CursorFree***>(cur);
 
-    // Hotspots prototype (TouchGetEvent = no-op en UEFI)
-    var _state1: <i32> = 0;
-    var _state2: <i32> = 0;
-    let touch: <i32> = <DrvAPIInterCon***TouchGetEvent***>();
-    if (touch != 0) [
-        let tx: <i32> = touch & 0xFFFF;
-        let ty: <i32> = (touch >> 16) & 0xFFFF;
-        if (tx >= 600 && tx <= 668 && ty >= 908 && ty <= 976) [ _state1 = 1; ];
-        if (tx >= 1378 && tx <= 1466 && ty >= -26 && ty <= 59) [ _state2 = 1; ];
-    ];
+    // Le lancement d'apps se fait désormais dans la boucle du dock dynamique (plus haut) :
+    // chaque icône du registre est cliquable, avec occlusion. Plus de bloc hardcodé ici.
 
     let gpuResult: <i32> = <DrvAPIInterCon***GpuFlushRenderContext***>(ctx);
     if (gpuResult != 0) [ ret 1; ];

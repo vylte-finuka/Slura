@@ -50,20 +50,29 @@ pub fn load_and_run(
     st:           &mut SystemTable<Boot>,
     image_handle: Handle,
 ) -> Result<i32, BundleError> {
-    let bundle = find_and_read(st, image_handle)?;
-    run_ovc(st, image_handle, &bundle)
+    let (_, modules) = load_marep_modules(st, image_handle, HOME_MAREP)?;
+    crate::kernel_runtime::render_from_marep(st, image_handle, &modules);
+    Ok(0)
+}
+
+/// Extrait la valeur d'une clé scalaire simple `key: valeur` depuis le YAML plat de
+/// Maraset.yaml (une ligne, sans gestion de nesting/indentation — suffisant pour les
+/// clés du bloc `metadata.attributes` : SRID, icon, display_name...).
+fn extract_yaml_scalar<'a>(yaml: &'a [u8], key: &str) -> Option<&'a str> {
+    let text = core::str::from_utf8(yaml).ok()?;
+    let prefix = alloc::format!("{}:", key);
+    for line in text.lines() {
+        if let Some(rest) = line.trim().strip_prefix(prefix.as_str()) {
+            let v = rest.trim().trim_matches('"');
+            if !v.is_empty() { return Some(v); }
+        }
+    }
+    None
 }
 
 /// Extrait le SRID depuis Maraset.yaml (`SRID: SRID_xxx`).
 fn extract_srid<'a>(yaml: &'a [u8]) -> &'a str {
-    if let Ok(text) = core::str::from_utf8(yaml) {
-        for line in text.lines() {
-            if let Some(rest) = line.trim().strip_prefix("SRID:") {
-                return rest.trim();
-            }
-        }
-    }
-    "SRID_unknown"
+    extract_yaml_scalar(yaml, "SRID").unwrap_or("SRID_unknown")
 }
 
 /// Vérifie AuthARoot : le SRID du manifeste doit figurer dans RAbstractallowing.xml.
@@ -71,16 +80,31 @@ fn verify_auth_root(xml: &[u8], srid: &str) -> bool {
     core::str::from_utf8(xml).map(|t| t.contains(srid)).unwrap_or(false)
 }
 
-fn run_ovc(st: &mut SystemTable<Boot>, image_handle: Handle, bundle: &[u8])
-    -> Result<i32, BundleError>
-{
-    let zip = ZipReader::new(bundle)?;
+/// Charge un `.marep` situé à `path` : lit le bundle, vérifie AuthARoot (log
+/// seulement, non bloquant), découvre dynamiquement tous les `base/*.ovc`,
+/// installe les assets (+ `Maraset.yaml`) sur l'ESP. Retourne `(app_name, modules)`
+/// — modules **possédés** (`String`/`Vec<u8>`, pas des emprunts sur `bundle`) pour
+/// pouvoir être conservés après le retour de cette fonction, ex. exécuté aux côtés
+/// d'un autre `.marep` déjà chargé (plan bureau à fenêtres, jalon 1 étape 3).
+pub fn load_marep_modules(
+    st:           &mut SystemTable<Boot>,
+    image_handle: Handle,
+    path:         &uefi::CStr16,
+) -> Result<(alloc::string::String, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<u8>)>), BundleError> {
+    let bundle = find_and_read(st, image_handle, path)?;
+    let zip = ZipReader::new(&bundle)?;
 
     // ── AuthARoot : vérification SRID ────────────────────────────────────────
     let maraset  = zip.extract_file("Maraset.yaml").unwrap_or_default();
     let xml      = zip.extract_file("RAbstractallowing.xml").unwrap_or_default();
     let srid     = extract_srid(&maraset);
     let auth_ok  = verify_auth_root(&xml, srid);
+
+    // Métadonnées lanceur (étape 1/N vers un bureau à fenêtres) — pas encore
+    // consommées par le rendu, juste extraites et logguées pour valider le
+    // format avant que le registre d'apps (app_registry.rs) ne s'en serve.
+    let icon         = extract_yaml_scalar(&maraset, "icon").unwrap_or("");
+    let display_name = extract_yaml_scalar(&maraset, "display_name").unwrap_or("");
 
     {
         use core::fmt::Write;
@@ -89,6 +113,7 @@ fn run_ovc(st: &mut SystemTable<Boot>, image_handle: Handle, bundle: &[u8])
         } else {
             let _ = st.stdout().write_str("[AuthARoot] WARN: SRID non verifie\r\n");
         }
+        let _ = write!(st.stdout(), "[MARASET] srid={} icon={} name={}\r\n", srid, icon, display_name);
     }
 
     // ── OVC ──────────────────────────────────────────────────────────────────
@@ -105,7 +130,7 @@ fn run_ovc(st: &mut SystemTable<Boot>, image_handle: Handle, bundle: &[u8])
     // OEntry est le seul point d'entrée universel ; les autres sont passés pour
     // la résolution cross-module dans exec_marep.
     let ovc_names: alloc::vec::Vec<alloc::string::String> = zip.list_ovc_modules();
-    let mut modules: alloc::vec::Vec<(&str, alloc::vec::Vec<u8>)> = alloc::vec::Vec::new();
+    let mut modules: alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<u8>)> = alloc::vec::Vec::new();
 
     for name_owned in &ovc_names {
         let bytes = {
@@ -117,7 +142,7 @@ fn run_ovc(st: &mut SystemTable<Boot>, image_handle: Handle, bundle: &[u8])
             }
         };
         if !bytes.is_empty() {
-            modules.push((name_owned.as_str(), bytes));
+            modules.push((name_owned.clone(), bytes));
         }
     }
 
@@ -132,26 +157,23 @@ fn run_ovc(st: &mut SystemTable<Boot>, image_handle: Handle, bundle: &[u8])
     // Les fichiers assets (*.slasset/) sont copiés dans SDC/slu64/apps/<AppName>/
     // avant que l'OVC tourne, de sorte que les ImageLoad("SDC:/apps/...") réussissent.
     let app_name = zip.find_app_name().unwrap_or_else(|| alloc::string::String::from("App"));
-    install_assets_to_esp(st, image_handle, &zip, &app_name);
+    install_assets_to_esp(st, image_handle, &zip, &app_name, &maraset);
 
-    // Exécution via exec_marep — OEntry() est le seul point d'entrée.
-    // Aucun nom de fonction ou de module hardcodé dans ce code Rust.
-    crate::kernel_runtime::render_from_marep(st, image_handle, &modules);
-    Ok(0)
+    Ok((app_name, modules))
 }
 
 // ── Lecture ───────────────────────────────────────────────────────────────────
 
 /// Parcourt tous les volumes SimpleFileSystem et retourne les octets du
-/// premier `home.marep` trouvé.
-fn find_and_read(st: &mut SystemTable<Boot>, image_handle: Handle) -> Result<Vec<u8>, BundleError> {
+/// premier `.marep` trouvé à `path`.
+fn find_and_read(st: &mut SystemTable<Boot>, image_handle: Handle, path: &uefi::CStr16) -> Result<Vec<u8>, BundleError> {
     let handles = st
         .boot_services()
         .find_handles::<SimpleFileSystem>()
         .map_err(|_| BundleError::UefiError)?;
 
     for &fs_handle in handles.iter() {
-        if let Ok(bytes) = read_from_volume(st, image_handle, fs_handle) {
+        if let Ok(bytes) = read_from_volume(st, image_handle, fs_handle, path) {
             return Ok(bytes);
         }
     }
@@ -163,6 +185,7 @@ fn read_from_volume(
     st:           &mut SystemTable<Boot>,
     image_handle: Handle,
     fs_handle:    Handle,
+    path:         &uefi::CStr16,
 ) -> Result<Vec<u8>, BundleError> {
     // GET_PROTOCOL : accès non-exclusif — évite l'échec si OVMF tient le protocole.
     let mut fs = unsafe {
@@ -180,7 +203,7 @@ fn read_from_volume(
     let mut root = fs.open_volume().map_err(|_| BundleError::UefiError)?;
 
     let fh = root
-        .open(HOME_MAREP, FileMode::Read, FileAttribute::empty())
+        .open(path, FileMode::Read, FileAttribute::empty())
         .map_err(|_| BundleError::FileNotFound)?;
 
     let mut file = match fh.into_type().map_err(|_| BundleError::UefiError)? {
@@ -219,6 +242,7 @@ fn install_assets_to_esp(
     image_handle: Handle,
     zip:          &super::zip_reader::ZipReader<'_>,
     app_name:     &str,
+    maraset:      &[u8],
 ) {
     use uefi::proto::media::{
         file::{File, FileAttribute, FileMode, FileType},
@@ -226,7 +250,7 @@ fn install_assets_to_esp(
     };
 
     let assets = zip.list_all_assets();
-    if assets.is_empty() { return; }
+    if assets.is_empty() && maraset.is_empty() { return; }
 
     let handles = match st.boot_services().find_handles::<SimpleFileSystem>() {
         Ok(h) => h,
@@ -256,6 +280,15 @@ fn install_assets_to_esp(
                     app_name, rel_path.replace('/', "\\"));
                 esp_ensure_parent_dirs(&mut root, &dest);
                 if esp_write_file(&mut root, &dest, data) { w += 1; }
+            }
+            // Copie Maraset.yaml à côté du .slasset installé — permet à
+            // app_registry.rs de découvrir icône/nom sans rouvrir le .marep zip
+            // (dont le fichier source n'est de toute façon plus accessible une
+            // fois l'app installée sur l'ESP).
+            if !maraset.is_empty() {
+                let dest = alloc::format!("SDC\\slu64\\apps\\{}\\Maraset.yaml", app_name);
+                esp_ensure_parent_dirs(&mut root, &dest);
+                let _ = esp_write_file(&mut root, &dest, maraset);
             }
             w
             // fs et root droppés ici → borrow sur st libéré

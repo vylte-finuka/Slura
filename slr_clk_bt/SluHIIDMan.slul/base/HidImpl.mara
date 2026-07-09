@@ -1,0 +1,52 @@
+//===================================================================
+//  HidImpl.mara – Entrée/sortie HID unifiée (SluHIIDMan)
+//  Auteur : Vyft Ltd — 2026
+//  Noms = symboles exportés dans RAbstractallowing.xml
+//
+//  Remplace MouseImpl.mara + KeyboardImpl.mara (fusionnés) : souris et
+//  clavier sont tous deux des devices de classe USB HID (Human Interface
+//  Device) — un seul point d'entrée Mara pour les deux, cohérent avec le
+//  pilote natif en construction côté kernel (xHCI + USB + classe HID,
+//  crates/vuc-core/lunee-ker/src/{pci,acpi}.rs, étapes 1/1b/2 faites).
+//
+//  UefiPointerGetState/UefiReadKey/UefiPollKey (DrvManSpec, ovc_exec.rs)
+//  renvoient déjà de VRAIES données HID, pollées chaque frame par
+//  render_from_marep — pas des valeurs simulées. Source actuelle : le
+//  firmware (EFI_SIMPLE_POINTER_PROTOCOL / EFI_ABSOLUTE_POINTER_PROTOCOL /
+//  EFI_SIMPLE_TEXT_INPUT_PROTOCOL). Deviendra le pilote HID natif une fois
+//  les étapes 3-6 terminées (init xHCI, énumération USB, report
+//  descriptors) — même interface exportée ici, source différente.
+//
+//  UefiSetKeyMode : EFI_SIMPLE_TEXT_INPUT_PROTOCOL standard n'a pas de
+//  notion de "mode" clavier — accusé de réception uniquement.
+//===================================================================
+
+#base <std***ComTpe***SlulFrmt***DrvManSpec>;
+
+// ── Pointeur (souris) ──────────────────────────────────────────────────────
+// Format packé du raw : X:12 bits [31:20] | Y:12 bits [19:8] | Btn:8 bits [7:0].
+
+rel op PointerGetState: [] [
+    ret <DrvManSpec***UefiPointerGetState***>();
+];
+
+rel op PointerGetX: [] [
+    let raw: <i32> = <DrvManSpec***UefiPointerGetState***>();
+    ret (raw >> 20) & 0xFFF;
+];
+
+rel op PointerGetY: [] [
+    let raw: <i32> = <DrvManSpec***UefiPointerGetState***>();
+    ret (raw >> 8) & 0xFFF;
+];
+
+rel op PointerGetBtn: [] [
+    let raw: <i32> = <DrvManSpec***UefiPointerGetState***>();
+    ret raw & 0xFF;
+];
+
+// ── Clavier ────────────────────────────────────────────────────────────────
+
+rel op KeyboardReadKey: [] [ ret <DrvManSpec***UefiReadKey***>();               ];
+rel op KeyboardPoll:    [] [ ret <DrvManSpec***UefiPollKey***>();               ];
+rel op KeyboardSetMode: [mode i32] [ ret <DrvManSpec***UefiSetKeyMode***>(mode); ];

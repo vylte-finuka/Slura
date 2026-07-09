@@ -39,12 +39,12 @@ rm -f "${PROJ_ROOT}/qemu.log" "${PROJ_ROOT}/ovmf.log" 2>/dev/null || true
 #   │
 #   ├── sources/
 #   │   ├── SluGpu.slul           ← driver GOP framebuffer
-#   │   ├── SluKeyMouse.slul      ← driver clavier + pointeur
+#   │   ├── SluHIIDMan.slul       ← driver HID (clavier + pointeur), ACPI/UEFI standard
 #   │   ├── SluFontConf.slul      ← driver polices TrueType/OTF/WOFF
 #   │   ├── SRFSMan.slul          ← driver Slura File System (SRFS v2)
 #   │   └── install.slin          ← image SRFS (SDC:\) contenant :
 #   │         ├── slu64/assets/fonts/brsonomasemibold.ttf
-#   │         └── slu64/DrivRequirment/{SluGpu,SluKeyMouse,SluFontConf,SRFSMan}.slul
+#   │         └── slu64/DrivRequirment/{SluGpu,SluHIIDMan,SluFontConf,SRFSMan}.slul
 #   │
 #   ├── EFI/
 #   │   └── BOOT/
@@ -58,7 +58,7 @@ rm -f "${PROJ_ROOT}/qemu.log" "${PROJ_ROOT}/ovmf.log" 2>/dev/null || true
 #       → LoadImage(\slr_clk_bt.efi)
 #         → Lunee kernel
 #           → slul_loader  : sources\SluGpu.slul        [AuthARoot SRID_slugpu_001]
-#           → slul_loader  : sources\SluKeyMouse.slul   [AuthARoot SRID_slulkm_001]
+#           → slul_loader  : sources\SluHIIDMan.slul    [AuthARoot SRID_sluhiidman_001]
 #           → slul_loader  : sources\SluFontConf.slul   [AuthARoot SRID_slufontconf_001]
 #           → slul_loader  : sources\SRFSMan.slul        [AuthARoot SRID_srfsman_001]
 #           → marep_loader : HelloSlura.marep            [AuthARoot SRID_helloslura_001]
@@ -85,7 +85,7 @@ if [ ! -f "${ESP_DIR}/slr_clk_bt.efi" ]; then
 fi
 
 # Vérifications drivers
-for drv in SluGpu SluKeyMouse SRFSMan; do
+for drv in SluGpu SluHIIDMan SRFSMan; do
     if [ ! -f "${ESP_DIR}/sources/${drv}.slul" ]; then
         echo "⚠️   sources/${drv}.slul manquant"
     fi
@@ -125,6 +125,14 @@ fi
 
 # -----------------------------------------------------------------
 # 3️⃣  Lancement QEMU avec OVMF (UEFI)
+# -nodefaults supprime aussi le clavier/souris i8042 par défaut — sans
+# souris USB explicite, OVMF n'expose aucun protocole pointeur et
+# SluHIIDMan.slul n'a rien à interroger (curseur figé).
+# usb-tablet (absolu, EFI_ABSOLUTE_POINTER_PROTOCOL) est prioritaire côté
+# kernel : position écran directe, aucun besoin de "grab" la fenêtre QEMU.
+# usb-mouse (relatif, EFI_SIMPLE_POINTER_PROTOCOL) reste présent en repli
+# — c'est ce qu'une souris PS/2 ou USB standard expose sur matériel réel,
+# donc utile pour tester ce chemin de code aussi (exige alors le grab).
 # -----------------------------------------------------------------
 qemu-system-x86_64 \
     -nodefaults \
@@ -132,6 +140,10 @@ qemu-system-x86_64 \
     -m         1024M \
     -device    virtio-vga \
     -display   sdl,gl=off \
+    -device    qemu-xhci \
+    -device    usb-tablet \
+    -device    usb-mouse \
+    -device    usb-kbd \
     -drive     if=pflash,format=raw,readonly=on,file="${OVMF_CODE}",id=ovmf_code \
     -drive     if=pflash,format=raw,file="${OVMF_VARS}",id=ovmf_vars \
     -global    driver=efi-pflash.0,property=secure-boot,value=0 \

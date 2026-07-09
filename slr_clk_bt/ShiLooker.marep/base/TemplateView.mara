@@ -1,0 +1,88 @@
+#base <std***ComTpe***SlulFrmt***[ DrvAPIInterCon ]>;
+#base <MaratineKit>;
+
+// Généré par MaratineKit tool's builder (plugin Figma) — design 1440×862.
+// Renderer stateless : une seule var im réutilisée (cache image kernel = 8 slots).
+rel op Render: [ctx string, fnt ptr] [
+    var im: <i32> = 0;
+    // ── Full-stretch responsive — généré par MaratineKit tool's builder ──
+    let sw: <i32> = <DrvAPIInterCon***GpuGetWidth***>();
+    let sh: <i32> = <DrvAPIInterCon***GpuGetHeight***>();
+    let sW: <i32> = (sw * 1000) / 1440;
+    let sH: <i32> = (sh * 1000) / 862;
+    let sU: <i32> = (sW + sH) / 2;
+
+        let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectFull***>(((0 * sW + 500) / 1000), ((0 * sH + 500) / 1000), ((1440 * sW + 500) / 1000), ((862 * sH + 500) / 1000), (((0 * sW + 500) / 1000 + (0 * sH + 500) / 1000) / 2), (((0 * sW + 500) / 1000 + (0 * sH + 500) / 1000) / 2), (((16 * sW + 500) / 1000 + (16 * sH + 500) / 1000) / 2), (((16 * sW + 500) / 1000 + (16 * sH + 500) / 1000) / 2), 0xFF548C9B);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawDropShadow***>(((1313 * sW + 500) / 1000), ((220 * sH + 500) / 1000), ((68 * sW + 500) / 1000), ((50 * sH + 500) / 1000), (((8 * sW + 500) / 1000 + (8 * sH + 500) / 1000) / 2), 0, 4, 4, 0x40000000);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(((1313 * sW + 500) / 1000), ((220 * sH + 500) / 1000), ((68 * sW + 500) / 1000), ((50 * sH + 500) / 1000), (((8 * sW + 500) / 1000 + (8 * sH + 500) / 1000) / 2), 0xFF5960DA);
+        let svg1: <ptr> = <DrvAPIInterCon***SvgLoad***>("SDC:/apps/ShiLooker/ShiLooker.slasset/vec1.svg");
+        let _: <i32> = <DrvAPIInterCon***SvgDraw***>(svg1, ((1313 * sW + 500) / 1000), ((215 * sH + 500) / 1000), ((40 * sW + 500) / 1000), ((0 * sH + 500) / 1000));
+        let _: <i32> = <DrvAPIInterCon***SvgFree***>(svg1);
+        // Police unique du kernel (la famille/style Figma réels sont ignorés — limitation v1)
+        var font: <ptr> = <DrvAPIInterCon***FontLoad***>("SDC:/assets/fonts/brsonomasemibold.ttf");
+        if (font == nullptr) [ font = <DrvAPIInterCon***FontGetDefault***>(); ];
+        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((1297 * sW + 500) / 1000), ((288 * sH + 500) / 1000), ((99 * sW + 500) / 1000), "Vyft’s suite", 0xFF000000, 0x00000000, font, ((18 * sU + 500) / 1000), 0);
+        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLooker/ShiLooker.slasset/img1.png");
+        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ((1319 * sW + 500) / 1000), ((217 * sH + 500) / 1000), ((56 * sW + 500) / 1000), ((56 * sH + 500) / 1000));
+        let _: <i32> = <DrvAPIInterCon***GpuDrawDropShadow***>(((1313 * sW + 500) / 1000), ((338 * sH + 500) / 1000), ((68 * sW + 500) / 1000), ((50 * sH + 500) / 1000), (((8 * sW + 500) / 1000 + (8 * sH + 500) / 1000) / 2), 0, 4, 4, 0x40000000);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(((1313 * sW + 500) / 1000), ((338 * sH + 500) / 1000), ((68 * sW + 500) / 1000), ((50 * sH + 500) / 1000), (((8 * sW + 500) / 1000 + (8 * sH + 500) / 1000) / 2), 0xFF565656);
+        let svg2: <ptr> = <DrvAPIInterCon***SvgLoad***>("SDC:/apps/ShiLooker/ShiLooker.slasset/vec2.svg");
+        let _: <i32> = <DrvAPIInterCon***SvgDraw***>(svg2, ((1313 * sW + 500) / 1000), ((333 * sH + 500) / 1000), ((40 * sW + 500) / 1000), ((0 * sH + 500) / 1000));
+        let _: <i32> = <DrvAPIInterCon***SvgFree***>(svg2);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((1323 * sW + 500) / 1000), ((403 * sH + 500) / 1000), ((46 * sW + 500) / 1000), "Apps", 0xFF000000, 0x00000000, font, ((18 * sU + 500) / 1000), 0);
+        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLooker/ShiLooker.slasset/img2.png");
+        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ((1322 * sW + 500) / 1000), ((338 * sH + 500) / 1000), ((49 * sW + 500) / 1000), ((49 * sH + 500) / 1000));
+        let _: <i32> = <DrvAPIInterCon***GpuSetOpacity***>(178);
+        let svg3: <ptr> = <DrvAPIInterCon***SvgLoad***>("SDC:/apps/ShiLooker/ShiLooker.slasset/vec3.svg");
+        let _: <i32> = <DrvAPIInterCon***SvgDraw***>(svg3, ((1345 * sW + 500) / 1000), ((61 * sH + 500) / 1000), ((33 * sW + 500) / 1000), ((0 * sH + 500) / 1000));
+        let _: <i32> = <DrvAPIInterCon***SvgFree***>(svg3);
+        let _: <i32> = <DrvAPIInterCon***GpuResetOpacity***>();
+        let _: <i32> = <DrvAPIInterCon***GpuSetOpacity***>(178);
+        let svg4: <ptr> = <DrvAPIInterCon***SvgLoad***>("SDC:/apps/ShiLooker/ShiLooker.slasset/vec4.svg");
+        let _: <i32> = <DrvAPIInterCon***SvgDraw***>(svg4, ((598 * sW + 500) / 1000), ((61 * sH + 500) / 1000), ((243 * sW + 500) / 1000), ((0 * sH + 500) / 1000));
+        let _: <i32> = <DrvAPIInterCon***SvgFree***>(svg4);
+        let _: <i32> = <DrvAPIInterCon***GpuResetOpacity***>();
+        let _: <i32> = <DrvAPIInterCon***GpuDrawDropShadow***>(((1313 * sW + 500) / 1000), ((512 * sH + 500) / 1000), ((68 * sW + 500) / 1000), ((33 * sH + 500) / 1000), (((8 * sW + 500) / 1000 + (8 * sH + 500) / 1000) / 2), 0, 4, 4, 0x40000000);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(((1313 * sW + 500) / 1000), ((512 * sH + 500) / 1000), ((68 * sW + 500) / 1000), ((33 * sH + 500) / 1000), (((8 * sW + 500) / 1000 + (8 * sH + 500) / 1000) / 2), 0xFFE0E0E0);
+        let svg5: <ptr> = <DrvAPIInterCon***SvgLoad***>("SDC:/apps/ShiLooker/ShiLooker.slasset/vec5.svg");
+        let _: <i32> = <DrvAPIInterCon***SvgDraw***>(svg5, ((1327 * sW + 500) / 1000), ((540 * sH + 500) / 1000), ((40 * sW + 500) / 1000), ((0 * sH + 500) / 1000));
+        let _: <i32> = <DrvAPIInterCon***SvgFree***>(svg5);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((1243 * sW + 500) / 1000), ((563 * sH + 500) / 1000), ((208 * sW + 500) / 1000), "SDC (C:)", 0xFF000000, 0x00000000, font, ((18 * sU + 500) / 1000), 1);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((1172 * sW + 500) / 1000), ((12 * sH + 500) / 1000), ((268 * sW + 500) / 1000), "Apps, folders  & disks", 0xFF000000, 0x00000000, font, ((26 * sU + 500) / 1000), 0);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((572 * sW + 500) / 1000), ((12 * sH + 500) / 1000), ((294 * sW + 500) / 1000), "Notifications & widgets", 0xFF000000, 0x00000000, font, ((26 * sU + 500) / 1000), 0);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((701 * sW + 500) / 1000), ((431 * sH + 500) / 1000), ((331 * sW + 500) / 1000), "No widget, try add one here.", 0xFFB7B7B7, 0x00000000, font, ((24 * sU + 500) / 1000), 0);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((28 * sW + 500) / 1000), ((14 * sH + 500) / 1000), ((233 * sW + 500) / 1000), "ShiLooker", 0xFF000000, 0x00000000, font, ((48 * sU + 500) / 1000), 0);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((28 * sW + 500) / 1000), ((112 * sH + 500) / 1000), ((181 * sW + 500) / 1000), "Notfications", 0xFF000000, 0x00000000, font, ((30 * sU + 500) / 1000), 0);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((1172 * sW + 500) / 1000), ((105 * sH + 500) / 1000), ((76 * sW + 500) / 1000), "Apps", 0xFF000000, 0x00000000, font, ((30 * sU + 500) / 1000), 0);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((31 * sW + 500) / 1000), ((155 * sH + 500) / 1000), ((70 * sW + 500) / 1000), "Today", 0xFF000000, 0x00000000, font, ((24 * sU + 500) / 1000), 0);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((1172 * sW + 500) / 1000), ((163 * sH + 500) / 1000), ((257 * sW + 500) / 1000), "Last installation today", 0xFF000000, 0x00000000, font, ((24 * sU + 500) / 1000), 0);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((1172 * sW + 500) / 1000), ((431 * sH + 500) / 1000), ((77 * sW + 500) / 1000), "Disks", 0xFF000000, 0x00000000, font, ((30 * sU + 500) / 1000), 0);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((572 * sW + 500) / 1000), ((112 * sH + 500) / 1000), ((123 * sW + 500) / 1000), "Widgets", 0xFF000000, 0x00000000, font, ((30 * sU + 500) / 1000), 0);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((1010 * sW + 500) / 1000), ((807 * sH + 500) / 1000), ((112 * sW + 500) / 1000), "Vyft Mobile", 0xFF2D2D2D, 0x00000000, font, ((20 * sU + 500) / 1000), 0);
+        let svg6: <ptr> = <DrvAPIInterCon***SvgLoad***>("SDC:/apps/ShiLooker/ShiLooker.slasset/vec6.svg");
+        let _: <i32> = <DrvAPIInterCon***SvgDraw***>(svg6, ((28 * sW + 500) / 1000), ((191 * sH + 500) / 1000), ((516 * sW + 500) / 1000), ((127 * sH + 500) / 1000));
+        let _: <i32> = <DrvAPIInterCon***SvgFree***>(svg6);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((42 * sW + 500) / 1000), ((205 * sH + 500) / 1000), ((50 * sW + 500) / 1000), "10:45", 0xFFC1BFC0, 0x00000000, font, ((20 * sU + 500) / 1000), 0);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((96 * sW + 500) / 1000), ((205 * sH + 500) / 1000), ((11 * sW + 500) / 1000), "•", 0xFF2D2D2D, 0x00000000, font, ((20 * sU + 500) / 1000), 0);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((151 * sW + 500) / 1000), ((205 * sH + 500) / 1000), ((266 * sW + 500) / 1000), "ShiSettings • SluPwManSrv", 0xFF2D2D2D, 0x00000000, font, ((20 * sU + 500) / 1000), 0);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((151 * sW + 500) / 1000), ((248 * sH + 500) / 1000), ((407 * sW + 500) / 1000), "Device is actually on the sector, is completely charged (100%)", 0xFF2D2D2D, 0x00000000, font, ((16 * sU + 500) / 1000), 0);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(((52 * sW + 500) / 1000), ((240 * sH + 500) / 1000), ((48 * sW + 500) / 1000), ((48 * sH + 500) / 1000), (((15 * sW + 500) / 1000 + (15 * sH + 500) / 1000) / 2), 0xFFE0E0E0);
+        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLooker/ShiLooker.slasset/img3.png");
+        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ((57 * sW + 500) / 1000), ((226 * sH + 500) / 1000), ((39 * sW + 500) / 1000), ((82 * sH + 500) / 1000));
+        let svg7: <ptr> = <DrvAPIInterCon***SvgLoad***>("SDC:/apps/ShiLooker/ShiLooker.slasset/vec7.svg");
+        let _: <i32> = <DrvAPIInterCon***SvgDraw***>(svg7, ((111 * sW + 500) / 1000), ((200 * sH + 500) / 1000), ((34 * sW + 500) / 1000), ((34 * sH + 500) / 1000));
+        let _: <i32> = <DrvAPIInterCon***SvgFree***>(svg7);
+        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLooker/ShiLooker.slasset/img4.png");
+        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ((1159 * sW + 500) / 1000), ((811 * sH + 500) / 1000), ((7 * sW + 500) / 1000), ((15 * sH + 500) / 1000));
+        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLooker/ShiLooker.slasset/img5.png");
+        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ((1130 * sW + 500) / 1000), ((807 * sH + 500) / 1000), ((19 * sW + 500) / 1000), ((25 * sH + 500) / 1000));
+        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((17 * sW + 500) / 1000), ((807 * sH + 500) / 1000), ((50 * sW + 500) / 1000), "10:45", 0xFF2D2D2D, 0x00000000, font, ((20 * sU + 500) / 1000), 0);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((96 * sW + 500) / 1000), ((807 * sH + 500) / 1000), ((201 * sW + 500) / 1000), "Wed, 2026, 03th May", 0xFF2D2D2D, 0x00000000, font, ((20 * sU + 500) / 1000), 0);
+
+    let gpuResult: <i32> = <DrvAPIInterCon***GpuFlushRenderContext***>(ctx);
+    if (gpuResult != 0) [ ret 1; ];
+    ret 0;
+];
+
+// Destroy sans params — attendu par le framework OVC après chaque Render
+rel op Destroy: [] [ ret 0; ];

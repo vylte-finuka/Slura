@@ -34,7 +34,7 @@ slr_clk_bt/
 │       ├── apps/                 ← Applications installées
 │       └── assets/               ← Polices, images système
 ├── SluGpu.slul/                  ← Driver GPU (Mara + Rust HAL)
-├── SluKeyMouse.slul/             ← Driver clavier/souris
+├── SluHIIDMan.slul/              ← Driver HID (clavier/souris), ACPI/UEFI standard
 ├── SluFontConf.slul/             ← Chargeur polices TTF (stb_truetype)
 ├── SRFSMan.slul/                 ← Système de fichiers SRFS
 ├── SluEnvSys.slul/               ← Variables d'environnement

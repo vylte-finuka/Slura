@@ -1,6 +1,32 @@
 //===================================================================
-//  APrevent.mara – Cycle de vie SluKeyMouse
+//  APrevent.mara – Cycle de vie SluHIIDMan
 //  Auteur : Vyft Ltd — 2026
+//
+//  État réel du pilote HID (2026, en cours de construction par étapes,
+//  voir crates/vuc-core/lunee-ker/src/{pci,acpi}.rs) :
+//    - PointerGetX/Y/Btn et KeyboardReadKey/Poll (HidImpl.mara, entrée/sortie
+//      HID unifiée souris+clavier) renvoient déjà de VRAIES données HID à
+//      chaque frame — pas des valeurs simulées. Aujourd'hui, leur origine est le
+//      firmware UEFI (EFI_SIMPLE_POINTER_PROTOCOL / EFI_ABSOLUTE_POINTER_
+//      PROTOCOL / EFI_SIMPLE_TEXT_INPUT_PROTOCOL), pollés une fois par
+//      frame dans kernel_runtime.rs::render_from_marep et exposés via
+//      ExecCtx (pointer_x/y/btn, key_code) puis DrvManSpec***UefiPointer
+//      GetState/UefiReadKey/UefiPollKey***.
+//    - Un pilote HID natif Slura (xHCI + USB + classe HID, sans dépendre
+//      des protocoles firmware) est en construction en parallèle :
+//      étape 1 PCI (pci.rs, fait), étape 1b ACPI RSDP/XSDT/MCFG (acpi.rs,
+//      fait), étape 2 registres de capacité xHCI (pci.rs, fait). Restent :
+//      étape 3 init xHCI (anneaux commande/événement), étape 4 énumération
+//      USB, étape 5 pilote de classe HID (report descriptors), étape 6
+//      brancher ces rapports réels sur pointer_x/y/btn/key_code à la place
+//      des protocoles firmware ci-dessus.
+//    - KeyboardInit/PointerInit ci-dessous restent de simples accusés de
+//      réception : l'accès matériel (GOP, HID, PCI/xHCI) est kernel-only et
+//      n'a lieu QUE dans render_from_marep (après ouverture du GOP), jamais
+//      pendant ce cycle de vie APrevent (qui tourne avec un contexte nul,
+//      avant même que le matériel graphique soit prêt) — cf. slul_loader.rs.
+//      Une fois l'étape 6 terminée, ils pourront déclencher l'init xHCI une
+//      seule fois ici plutôt que de re-poller le firmware à chaque frame.
 //===================================================================
 
 #base <std***ComTpe***SlulFrmt***[ MathSafety, DrvManSpec ]>;
@@ -13,28 +39,32 @@ rel op APrevent: <[string CycleActivity]>t [
 
     rel op OnPowerOn: [arch string] [
         Architecture = arch;
-        log: "SluKeyMouse: demarrage driver clavier + pointeur";
+        log: "SluHIIDMan: demarrage driver clavier + pointeur";
         let drvResult: <i32> = self***onDriverInit();
         if (drvResult != 0) [
-            log: "SluKeyMouse: onDriverInit echoue";
+            log: "SluHIIDMan: onDriverInit echoue";
             ret drvResult;
         ];
-        log: "SluKeyMouse: driver pret";
+        log: "SluHIIDMan: driver pret";
         ret 0;
     ];
 
+    // Accusés de réception pour l'instant (cf. bloc de commentaires ci-dessus) —
+    // PAS des no-op côté données : le pointeur/clavier fonctionnent déjà
+    // réellement via ExecCtx, juste pas encore initialisés depuis ce point du
+    // cycle de vie tant que le pilote xHCI natif (étapes 3-6) n'est pas prêt.
     rel cl onDriverInit: [] [
         let _: <i32> = <DrvManSpec***KeyboardInit***>();
         let _: <i32> = <DrvManSpec***PointerInit***>();
-        log: "SluKeyMouse: entrees initialisees";
+        log: "SluHIIDMan: entrees initialisees";
         ret 0;
     ];
 
     rel op OnPowerOff: [] [
-        log: "SluKeyMouse: driver arrete";
+        log: "SluHIIDMan: driver arrete";
         ret 0;
     ];
 
-    rel op OnSuspend: [] [ log: "SluKeyMouse: suspension"; ret 0; ];
-    rel op OnResume:  [] [ log: "SluKeyMouse: reprise";    ret 0; ];
+    rel op OnSuspend: [] [ log: "SluHIIDMan: suspension"; ret 0; ];
+    rel op OnResume:  [] [ log: "SluHIIDMan: reprise";    ret 0; ];
 ];

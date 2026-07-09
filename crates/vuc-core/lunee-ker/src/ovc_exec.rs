@@ -2,7 +2,7 @@
 // ___ Lunée Kernel — OVC Executor (LLVM IR minimal, no_std) ___
 //
 //! Interpréteur LLVM IR texte pour les OVC Vyft (GpuImpl.ovc, APrevent.ovc…).
-//! Supporte le sous-ensemble utilisé par SluGpu.slul / SluKeyMouse.slul.
+//! Supporte le sous-ensemble utilisé par SluGpu.slul / SluHIIDMan.slul.
 //!
 //! Toutes les valeurs sont des i64 (pointeurs = entiers via inttoptr).
 //! Les appels `DrvManSpec___*` et `printf` sont dispatché via `ExecCtx`.
@@ -34,6 +34,14 @@ static mut IMAGE_CACHE_TICK: u32 = 0;
 static mut UEFI_ST_PTR:     *mut core::ffi::c_void = core::ptr::null_mut();
 static mut UEFI_IMG_HANDLE: usize = 0;
 
+// Fenêtres applicatives ouvertes (bureau à fenêtres) — source de vérité pour les
+// builtins DrvAPIInterCon***WindowMan...***, pilotés depuis LAPrevent.mara. La
+// LOGIQUE de fenêtrage (quand déplacer/redimensionner/fermer/lancer) vit en
+// Maratine ; cette liste + les primitives ci-dessous (buffer, exec_marep imbriqué,
+// composition) sont la seule part Rust, dans le même esprit que les autres caches
+// process-wide de ce fichier (SRFS_CACHE, IMAGE_CACHE...).
+static mut RUNNING_APPS: Vec<crate::window_manager::RunningApp> = Vec::new();
+
 /// Initialise les handles UEFI pour le chargement dynamique des assets.
 /// Appelé par kernel_runtime avant exec_marep.
 pub fn init_uefi_handles(st_ptr: *mut core::ffi::c_void, image_handle: usize) {
@@ -43,9 +51,12 @@ pub fn init_uefi_handles(st_ptr: *mut core::ffi::c_void, image_handle: usize) {
 /// Charge un fichier depuis l'ESP UEFI via le chemin SRFS `SDC:\...` à la demande.
 /// Utilise le SystemTable stocké par init_uefi_handles.
 fn srfs_load_on_demand(path_ptr: i64) -> i64 {
+    // Chargeur SRFS générique — partagé par ImageLoad, SvgLoad, FontLoad ET CursorLoad.
+    // Le tag "[SRFS]" (pas "[FONT]") reflète ça : ce n'est PAS une lecture de police,
+    // juste des octets bruts quel que soit le type de fichier demandé.
     if path_ptr == 0 { return 0; }
 
-    serial_log(b"[FONT] uefi_read: ");
+    serial_log(b"[SRFS] uefi_read: ");
     serial_log(b"\r\n");
 
     // Extract the null-terminated string from the pointer
@@ -61,19 +72,19 @@ fn srfs_load_on_demand(path_ptr: i64) -> i64 {
         }
     }
     if len == 0 {
-        serial_log(b"[FONT] Empty path\r\n");
+        serial_log(b"[SRFS] Empty path\r\n");
         return 0;
     }
     let bytes = unsafe { core::slice::from_raw_parts(c_str_ptr, len) };
     let rel = match core::str::from_utf8(bytes) {
         Ok(s) => s,
         Err(_) => {
-            serial_log(b"[FONT] Invalid UTF-8 in path\r\n");
+            serial_log(b"[SRFS] Invalid UTF-8 in path\r\n");
             return 0;
         }
     };
 
-    serial_log(b"[FONT] Path: ");
+    serial_log(b"[SRFS] Path: ");
     serial_log(rel.as_bytes());
     serial_log(b"\r\n");
 
@@ -89,14 +100,14 @@ fn srfs_load_on_demand(path_ptr: i64) -> i64 {
 
     let st_raw = unsafe { UEFI_ST_PTR };
     if st_raw.is_null() {
-        serial_log(b"[FONT] ST_PTR null! init_uefi_handles non appele\r\n");
+        serial_log(b"[SRFS] ST_PTR null! init_uefi_handles non appele\r\n");
         return 0;
     }
 
     let data = match unsafe { srfs_uefi_read(st_raw, &uefi_rel_owned) } {
         Some(d) => d,
         None => {
-            serial_log(b"[FONT] FontLoad: fichier non trouve\r\n");
+            serial_log(b"[SRFS] fichier introuvable\r\n");
             return 0;
         }
     };
@@ -539,6 +550,182 @@ static mut MASK_CACHE: [Option<(i32, i32, i32, i32, Vec<u8>)>; 4] = [None, None,
 // ── Cache SVG chargés (SvgLoad / SvgDraw / SvgFree) ──────────────────────────
 static mut SVG_CACHE: [Option<Vec<u8>>; 8] = [None, None, None, None, None, None, None, None];
 
+// ── Curseurs Slura natifs (.sluc statique / .slun animé) ─────────────────────
+// Format texte maison, cohérent avec le reste du projet (OVC/Maraset/RAbstract-
+// allowing sont aussi du texte) : quelques lignes d'en-tête clé:valeur, puis une
+// ou plusieurs frames au sous-ensemble SVG déjà supporté par svg_render (mêmes
+// éléments que vec5.svg etc.), séparées par une ligne "@frame" pour les .slun.
+//
+// # Slura Cursor v1              (.sluc — statique)
+// hotspot: 12,8
+// size: 32,32
+// <svg viewBox="0 0 32 32"> ... </svg>
+//
+// # Slura Cursor Anim v1         (.slun — animé : loading/busy/boot)
+// hotspot: 16,16
+// size: 32,32
+// frame-ms: 83
+// <svg viewBox="0 0 32 32"> ... </svg>
+// @frame
+// <svg viewBox="0 0 32 32"> ... </svg>
+struct CursorAsset {
+    hotspot_x: i32,
+    hotspot_y: i32,
+    width:     i32,
+    height:    i32,
+    /// 0 = statique (une seule frame). >0 = durée d'une frame en ms.
+    frame_ms:  i32,
+    frames:    Vec<String>,
+}
+static mut CURSOR_CACHE: [Option<CursorAsset>; 4] = [None, None, None, None];
+/// Compteur de frames — avancé une fois par frame rendue (reset_gpu_counters,
+/// appelé une fois par tick ~16ms par render_from_marep). Sert à choisir la
+/// frame courante des curseurs animés sans dépendre d'une horloge murale.
+static mut CURSOR_TICK: u64 = 0;
+
+/// Parse un .sluc/.slun : en-tête clé:valeur puis corps découpé en frames sur
+/// les lignes "@frame" (une seule frame implicite si absent, cas .sluc statique).
+fn parse_cursor(text: &str) -> Option<CursorAsset> {
+    let mut hotspot_x = 0i32;
+    let mut hotspot_y = 0i32;
+    let mut width  = 32i32;
+    let mut height = 32i32;
+    let mut frame_ms = 0i32;
+
+    let mut lines = text.lines();
+    let mut body_lines: Vec<&str> = Vec::new();
+    for line in &mut lines {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') { continue; }
+        if let Some(v) = t.strip_prefix("hotspot:") {
+            let mut p = v.split(',');
+            hotspot_x = p.next().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+            hotspot_y = p.next().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+        } else if let Some(v) = t.strip_prefix("size:") {
+            let mut p = v.split(',');
+            width  = p.next().and_then(|s| s.trim().parse().ok()).unwrap_or(32);
+            height = p.next().and_then(|s| s.trim().parse().ok()).unwrap_or(32);
+        } else if let Some(v) = t.strip_prefix("frame-ms:") {
+            frame_ms = v.trim().parse().unwrap_or(0);
+        } else {
+            // Première ligne qui n'est pas de l'en-tête reconnu : début du corps.
+            body_lines.push(line);
+            break;
+        }
+    }
+    body_lines.extend(lines);
+
+    let mut frames: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for line in body_lines {
+        if line.trim() == "@frame" {
+            if !current.trim().is_empty() { frames.push(current.clone()); }
+            current.clear();
+        } else {
+            current.push_str(line);
+            current.push('\n');
+        }
+    }
+    if !current.trim().is_empty() { frames.push(current); }
+    if frames.is_empty() { return None; }
+
+    Some(CursorAsset { hotspot_x, hotspot_y, width, height, frame_ms, frames })
+}
+
+/// Taille standard d'un curseur, façon Windows (flèche par défaut à 100%) —
+/// tout .sluc/.slun chargé est ramené à cette taille, quelle que soit sa
+/// résolution native d'origine.
+const STANDARD_CURSOR_SIZE: i32 = 32;
+
+/// Moyenne alpha-pondérée de la zone [x0,x1)×[y0,y1) d'une grille ARGB dense.
+/// Pondérer par alpha évite d'assombrir les bords avec la couleur de fond
+/// transparente (mêmes maths que le pipeline de conversion PNG hors-ligne).
+fn average_region(grid: &[u32], src_w: i32, x0: i32, x1: i32, y0: i32, y1: i32) -> (u32, u32, u32, u32) {
+    let (mut rs, mut gs, mut bs, mut as_, mut n) = (0u64, 0u64, 0u64, 0u64, 0u64);
+    for yy in y0..y1 {
+        for xx in x0..x1 {
+            let c = grid[(yy * src_w + xx) as usize];
+            let a = (c >> 24) & 0xFF; let r = (c >> 16) & 0xFF; let g = (c >> 8) & 0xFF; let b = c & 0xFF;
+            rs += r as u64 * a as u64; gs += g as u64 * a as u64; bs += b as u64 * a as u64;
+            as_ += a as u64; n += 1;
+        }
+    }
+    if as_ == 0 { return (0, 0, 0, 0); }
+    ((rs / as_) as u32, (gs / as_) as u32, (bs / as_) as u32, (as_ / n.max(1)) as u32)
+}
+
+/// Ré-échantillonne (moyenne de zone) une frame composée de <rect> pixel-exacts
+/// (format émis par notre propre pipeline de conversion PNG→.sluc) de src×src
+/// vers dst×dst, ré-encodés en <rect> RLE horizontaux. Retourne None si la frame
+/// ne contient aucun <rect> exploitable — contenu vectoriel (circle/polygon/path),
+/// laissé à sa taille native : il se redimensionne correctement via le mécanisme
+/// SVG générique (sx/sy), contrairement à des rects de 1px qui tronquent à 0.
+fn resample_rect_frame(svg: &str, src_w: i32, src_h: i32, dst: i32) -> Option<String> {
+    if src_w <= 0 || src_h <= 0 || dst <= 0 { return None; }
+    let mut grid: Vec<u32> = alloc::vec![0u32; (src_w * src_h) as usize];
+    let mut found_rect = false;
+
+    let mut pos = 0usize;
+    while let Some(lt) = svg[pos..].find('<') {
+        let abs = pos + lt;
+        let gt = svg[abs..].find('>').map(|g| abs + g + 1).unwrap_or(svg.len());
+        let tag = &svg[abs..gt];
+        if tag.starts_with("<rect") {
+            found_rect = true;
+            let x = svg_num(svg_attr(tag, "x")) / 1000;
+            let y = svg_num(svg_attr(tag, "y")) / 1000;
+            let w = svg_num(svg_attr(tag, "width")) / 1000;
+            let h = svg_num(svg_attr(tag, "height")) / 1000;
+            let color = svg_color(svg_attr(tag, "fill"));
+            for py in y..(y + h) {
+                if py < 0 || py >= src_h { continue; }
+                for px in x..(x + w) {
+                    if px < 0 || px >= src_w { continue; }
+                    grid[(py * src_w + px) as usize] = color;
+                }
+            }
+        }
+        pos = gt;
+        if pos >= svg.len() { break; }
+    }
+    if !found_rect { return None; }
+
+    let map_range = |i: i32, src: i32| -> (i32, i32) {
+        let a0 = i * src / dst;
+        let num = (i + 1) * src;
+        let mut a1 = num / dst;
+        if num % dst != 0 { a1 += 1; }
+        (a0, a1.max(a0 + 1).min(src))
+    };
+
+    let mut out = String::new();
+    out.push_str(&alloc::format!("<svg viewBox=\"0 0 {} {}\">\n", dst, dst));
+    for dy in 0..dst {
+        let (sy0, sy1) = map_range(dy, src_h);
+        let mut dx = 0i32;
+        while dx < dst {
+            let (sx0, sx1) = map_range(dx, src_w);
+            let (r, g, b, a) = average_region(&grid, src_w, sx0, sx1, sy0, sy1);
+            let mut run = 1i32;
+            loop {
+                let ndx = dx + run;
+                if ndx >= dst { break; }
+                let (nsx0, nsx1) = map_range(ndx, src_w);
+                if average_region(&grid, src_w, nsx0, nsx1, sy0, sy1) != (r, g, b, a) { break; }
+                run += 1;
+            }
+            if a > 0 {
+                out.push_str(&alloc::format!(
+                    "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"1\" fill=\"#{:02X}{:02X}{:02X}{:02X}\"/>\n",
+                    dx, dy, run, r, g, b, a));
+            }
+            dx += run;
+        }
+    }
+    out.push_str("</svg>\n");
+    Some(out)
+}
+
 static SIN_Q1: [i16; 91] = [
        0,   17,   35,   52,   70,   87,  105,  122,  139,  156,
      174,  191,  208,  225,  242,  259,  276,  292,  309,  326,
@@ -723,7 +910,25 @@ fn box_blur_region_masked_rotated(
 }
 
 pub fn reset_gpu_counters() {
-    unsafe { GPU_FILLS = 0; GPU_RECTS = 0; GPU_TEXTS = 0; }
+    unsafe { GPU_FILLS = 0; GPU_RECTS = 0; GPU_TEXTS = 0; CURSOR_TICK += 1; }
+}
+
+/// Remet à zéro l'état GPU process-wide (opacité, blend mode, transformation
+/// 2D, pile de clip). Ces `static mut` (ligne ~529) sont partagés par TOUS les
+/// appels `exec_marep` — jusqu'ici sans conséquence puisqu'un seul appel avait
+/// lieu par tick ; à appeler avant CHAQUE appel `exec_marep` dès qu'un 2e
+/// `.marep` tourne dans le même tick (plan bureau à fenêtres, jalon 1 étape 3),
+/// pour qu'un `Set*` sans `Reset*` côté Mara dans une app ne fuite pas vers
+/// l'autre. Ne protège pas un plantage à mi-`Render`, avant son propre
+/// `GpuReset*` interne — risque documenté séparément (mémoire projet).
+pub fn reset_gpu_state() {
+    unsafe {
+        GPU_OPACITY = 255;
+        GPU_BLEND_MODE = 0;
+        GPU_TRANSFORM = [10000, 0, 0, 10000, 0, 0];
+        GPU_TRANSFORM_ACTIVE = false;
+        CLIP_DEPTH = 0;
+    }
 }
 pub fn gpu_counters() -> (u32, u32, u32) {
     unsafe { (GPU_FILLS, GPU_RECTS, GPU_TEXTS) }
@@ -774,6 +979,15 @@ fn svg_color(s: &str) -> u32 {
             let g = u8::from_str_radix(core::str::from_utf8(&[rb[1],rb[1]]).unwrap_or("0"), 16).unwrap_or(0);
             let b = u8::from_str_radix(core::str::from_utf8(&[rb[2],rb[2]]).unwrap_or("0"), 16).unwrap_or(0);
             return 0xFF000000 | ((r as u32) << 16) | ((g as u32) << 8) | b as u32;
+        }
+        // #RRGGBBAA — extension non-standard SVG mais nécessaire pour reproduire
+        // fidèlement (pixel-perfect, alpha inclus) un PNG source dans un .sluc/.slun ;
+        // sans elle, tout canal alpha partiel (bords anti-aliasés, ombre floue)
+        // retombe sur le défaut opaque noir de svg_color (cf. plus bas).
+        if h.len() == 8 {
+            let v = u32::from_str_radix(h, 16).unwrap_or(0);
+            let a = v & 0xFF;
+            return (a << 24) | (v >> 8);
         }
     }
     if s.starts_with("rgb(") && s.ends_with(')') {
@@ -1144,6 +1358,17 @@ pub struct ExecCtx {
     /// Sert aux dispatchers DrvManSpec___FSGetSize___ / DrvManSpec___FSRead___.
     pub font:   *const u8,
     pub font_len: usize,
+    /// Position courante du pointeur HID (EFI_SIMPLE_POINTER_PROTOCOL), en pixels
+    /// écran réels — accumulée et bornée à [0,width)×[0,height) par le kernel à
+    /// partir des déplacements relatifs remontés par le device (souris PS/2 ou USB,
+    /// énumérés par le firmware via ACPI, peu importe le port physique).
+    pub pointer_x:   i32,
+    pub pointer_y:   i32,
+    /// Bit 0 = bouton gauche, bit 1 = bouton droit (EFI_SIMPLE_POINTER_PROTOCOL.state.button).
+    pub pointer_btn: i32,
+    /// Dernière touche lue via EFI_SIMPLE_TEXT_INPUT_PROTOCOL (ConIn) : caractère
+    /// Unicode si imprimable, sinon 0x10000 | ScanCode ; 0 si aucune touche en attente.
+    pub key_code: i32,
 }
 
 unsafe impl Send for ExecCtx {}
@@ -1462,7 +1687,9 @@ pub fn exec_module(ovc: &[u8], fns: &[(&str, &[i64])], ctx: &ExecCtx) -> i64 {
 ///
 /// `modules`: liste de `(nom_module, bytes_ovc)` extraits du marep.
 /// Écriture sur COM1 (0x3F8) — visible dans QEMU -serial stdio sans borrow conflict.
-fn serial_log(msg: &[u8]) {
+/// pub : aussi utilisé par kernel_runtime.rs pour les diagnostics HID (détection
+/// souris/clavier), en dehors du contexte d'exécution OVC.
+pub fn serial_log(msg: &[u8]) {
     for &b in msg {
         unsafe {
             core::arch::asm!(
@@ -2156,6 +2383,24 @@ fn exec_fn_raw(ovc: &[u8], fn_name: &str, args: &[i64], ctx: &ExecCtx) -> i64 {
     exec_fn_raw_with_mods(ovc, fn_name, fn_name, args, ctx, &[])
 }
 
+// ── Bureau à fenêtres — accesseurs génériques RUNNING_APPS[i] ────────────────
+// `args[0]` = index de fenêtre pour les deux ; `window_man_set` attend en plus
+// `args[1]` = nouvelle valeur. Index hors bornes → no-op (0/valeur par défaut),
+// jamais de panic — cohérent avec le reste du dispatch (tout builtin mal appelé
+// depuis Maratine renvoie 0 plutôt que de faire planter le rendu).
+fn window_man_get(args: &[i64], f: impl Fn(&crate::window_manager::RunningApp) -> i32) -> i64 {
+    let Some(&i) = args.first() else { return 0; };
+    unsafe { RUNNING_APPS.get(i as usize).map(|a| f(a) as i64).unwrap_or(0) }
+}
+
+fn window_man_set(args: &[i64], f: impl FnOnce(&mut crate::window_manager::RunningApp, i32)) -> i64 {
+    if args.len() < 2 { return 0; }
+    let i = args[0] as usize;
+    let v = args[1] as i32;
+    unsafe { if let Some(a) = RUNNING_APPS.get_mut(i) { f(a, v); } }
+    0
+}
+
 // ── Dispatch des appels externes ──────────────────────────────────────────────
 
 fn dispatch(
@@ -2170,6 +2415,24 @@ fn dispatch(
         "DrvManSpec___GopGetFrameBuffer___"     => ctx.fb as i64,
         "DrvManSpec___GopGetWidth___"           => ctx.width  as i64,
         "DrvManSpec___GopGetHeight___"          => ctx.height as i64,
+
+        // ── DrvManSpec HID (SluHIIDMan.slul) — EFI_SIMPLE_POINTER_PROTOCOL +
+        // EFI_SIMPLE_TEXT_INPUT_PROTOCOL, ouverts et pollés par le kernel dans
+        // render_from_marep (mêmes protocoles standards que le firmware expose
+        // pour tout port HID énuméré via ACPI, PS/2 ou USB). Init = simple accusé
+        // de réception : l'ouverture matérielle réelle a lieu côté kernel, avant
+        // que le premier frame ne soit exécuté.
+        "DrvManSpec___KeyboardInit___" | "DrvManSpec___PointerInit___" => 0,
+        "DrvManSpec___UefiPointerGetState___" => {
+            (((ctx.pointer_x & 0xFFF) as i64) << 20)
+                | (((ctx.pointer_y & 0xFFF) as i64) << 8)
+                | ((ctx.pointer_btn & 0xFF) as i64)
+        },
+        "DrvManSpec___UefiReadKey___" => ctx.key_code as i64,
+        "DrvManSpec___UefiPollKey___" => (ctx.key_code != 0) as i64,
+        // Simple Text Input standard n'a pas de notion de "mode" — accusé de
+        // réception uniquement (pas de fonctionnalité matérielle à fabriquer).
+        "DrvManSpec___UefiSetKeyMode___" => 0,
 
         // ── DrvManSpec Block Device (SRFSMan.slul) ────────────────────────────
         "DrvManSpec___UefiLocateDisk___" => srfs_disk_handle(),
@@ -3892,8 +4155,276 @@ fn dispatch(
             0
         },
 
+        // ── CursorLoad(path_ptr) → handle (1-based) — charge un .sluc/.slun ──
+        "DrvAPIInterCon___CursorLoad___" => {
+            serial_log(b"[CURSOR] CursorLoad\r\n");
+            if args.len() < 1 || args[0] == 0 { serial_log(b"[CURSOR] arg manquant\r\n"); return 0; }
+            let data_ptr = srfs_load_on_demand(args[0]);
+            if data_ptr == 0 { serial_log(b"[CURSOR] fichier non trouve\r\n"); return 0; }
+            let path_p = args[0] as *const u8;
+            let mut plen = 0usize;
+            unsafe { while *path_p.add(plen) != 0 { plen += 1; if plen > 512 { break; } } }
+            let path_s = unsafe { core::str::from_utf8(core::slice::from_raw_parts(path_p, plen)).unwrap_or("") };
+            let raw: Option<Vec<u8>> = unsafe {
+                SRFS_CACHE.iter().find_map(|slot| {
+                    if let Some((ref k, ref d)) = slot {
+                        if keys_match(k.as_str(), path_s) { return Some(d.clone()); }
+                    }
+                    None
+                })
+            };
+            let bytes = match raw {
+                Some(b) => b,
+                None => { serial_log(b"[CURSOR] absent de SRFS_CACHE\r\n"); return 0; }
+            };
+            serial_log(alloc::format!("[CURSOR] {} octets lus\r\n", bytes.len()).as_bytes());
+            let text = match core::str::from_utf8(&bytes) {
+                Ok(t) => t,
+                Err(_) => { serial_log(b"[CURSOR] UTF-8 invalide\r\n"); return 0; }
+            };
+            let mut asset = match parse_cursor(text) {
+                Some(a) => a,
+                None => { serial_log(b"[CURSOR] parse_cursor echoue (aucune frame)\r\n"); return 0; }
+            };
+            serial_log(alloc::format!(
+                "[CURSOR] parse OK size={}x{} hotspot={},{} frames={}\r\n",
+                asset.width, asset.height, asset.hotspot_x, asset.hotspot_y, asset.frames.len()
+            ).as_bytes());
+            // Ramène à la taille standard (façon Windows) quelle que soit la résolution
+            // native de l'asset — un rect de 1px redimensionné au vol tronquerait à 0px
+            // (bug déjà rencontré), donc on ré-échantillonne une fois ici, au chargement.
+            if asset.width != STANDARD_CURSOR_SIZE || asset.height != STANDARD_CURSOR_SIZE {
+                let (sw, sh) = (asset.width, asset.height);
+                let mut resampled: Vec<String> = Vec::new();
+                let mut ok = true;
+                for f in asset.frames.iter() {
+                    match resample_rect_frame(f, sw, sh, STANDARD_CURSOR_SIZE) {
+                        Some(r) => resampled.push(r),
+                        None => { ok = false; break; }
+                    }
+                }
+                if ok {
+                    asset.hotspot_x = asset.hotspot_x * STANDARD_CURSOR_SIZE / sw.max(1);
+                    asset.hotspot_y = asset.hotspot_y * STANDARD_CURSOR_SIZE / sh.max(1);
+                    asset.width  = STANDARD_CURSOR_SIZE;
+                    asset.height = STANDARD_CURSOR_SIZE;
+                    asset.frames = resampled;
+                    serial_log(b"[CURSOR] resample OK vers taille standard\r\n");
+                } else {
+                    serial_log(b"[CURSOR] resample echoue\r\n");
+                }
+            }
+            unsafe {
+                for (i, slot) in CURSOR_CACHE.iter_mut().enumerate() {
+                    if slot.is_none() {
+                        serial_log(alloc::format!("[CURSOR] handle={}\r\n", i + 1).as_bytes());
+                        *slot = Some(asset);
+                        return (i + 1) as i64;
+                    }
+                }
+                serial_log(b"[CURSOR] cache plein, recyclage slot 0 -> handle=1\r\n");
+                CURSOR_CACHE[0] = Some(asset);
+                1
+            }
+        },
+
+        // ── CursorDraw(handle,x,y) — dessine à (x,y) écran, hotspot déduit.
+        // Curseur animé (frame_ms > 0) : frame = (ticks*16ms / frame_ms) % nb_frames,
+        // CURSOR_TICK avance une fois par frame rendue (cf. reset_gpu_counters).
+        // CursorDraw(handle,x,y) dessine à la taille native du fichier ; l'appel
+        // optionnel CursorDraw(handle,x,y,w,h) impose une taille (ex. responsive
+        // sw/sh) — le hotspot est alors mis à l'échelle proportionnellement.
+        "DrvAPIInterCon___CursorDraw___" => {
+            if args.len() < 3 || args[0] <= 0 {
+                serial_log(b"[CURSOR] Draw: handle invalide\r\n");
+                return 0;
+            }
+            let slot = (args[0] as usize).wrapping_sub(1);
+            let drawn = unsafe {
+                match CURSOR_CACHE.get(slot).and_then(|s| s.as_ref()) {
+                    Some(asset) => {
+                        let frame_idx = if asset.frame_ms > 0 && asset.frames.len() > 1 {
+                            let elapsed_ms = CURSOR_TICK.saturating_mul(16);
+                            ((elapsed_ms / asset.frame_ms.max(1) as u64) as usize) % asset.frames.len()
+                        } else { 0 };
+                        let dw = if args.len() >= 5 && args[3] > 0 { args[3] as i32 } else { asset.width };
+                        let dh = if args.len() >= 5 && args[4] > 0 { args[4] as i32 } else { asset.height };
+                        let hx = if asset.width  > 0 { asset.hotspot_x * dw / asset.width  } else { 0 };
+                        let hy = if asset.height > 0 { asset.hotspot_y * dh / asset.height } else { 0 };
+                        let dx = args[1] as i32 - hx;
+                        let dy = args[2] as i32 - hy;
+                        Some((asset.frames[frame_idx].clone(), dx, dy, dw, dh))
+                    }
+                    None => None,
+                }
+            };
+            match drawn {
+                Some((svg_text, dx, dy, dw, dh)) => {
+                    serial_log(alloc::format!(
+                        "[CURSOR] Draw handle={} pos=({},{}) size={}x{} bytes_svg={}\r\n",
+                        args[0], dx, dy, dw, dh, svg_text.len()
+                    ).as_bytes());
+                    svg_render(svg_text.as_bytes(), ctx.fb, ctx.stride, ctx.width, ctx.height, dx, dy, dw, dh);
+                }
+                None => {
+                    serial_log(alloc::format!("[CURSOR] Draw handle={} : slot vide (pas charge)\r\n", args[0]).as_bytes());
+                }
+            }
+            0
+        },
+
+        // ── CursorFree(handle) ────────────────────────────────────────────────
+        "DrvAPIInterCon___CursorFree___" => {
+            if args.len() >= 1 && args[0] > 0 {
+                let slot = (args[0] as usize).wrapping_sub(1);
+                if slot < 4 { unsafe { CURSOR_CACHE[slot] = None; } }
+            }
+            0
+        },
+
         // ── TouchGetEvent() → 0 (pas de touch en UEFI boot) ──────────────────
         "DrvAPIInterCon___TouchGetEvent___" => 0,
+
+        // ── Pointeur HID réel (EFI_SIMPLE_POINTER_PROTOCOL, polled par le kernel
+        // chaque frame dans render_from_marep) — coordonnées en pixels écran réels.
+        "DrvAPIInterCon___PointerGetX___"   => ctx.pointer_x as i64,
+        "DrvAPIInterCon___PointerGetY___"   => ctx.pointer_y as i64,
+        "DrvAPIInterCon___PointerGetBtn___" => ctx.pointer_btn as i64,
+
+        // ── Clavier HID réel (EFI_SIMPLE_TEXT_INPUT_PROTOCOL / ConIn) ────────
+        "DrvAPIInterCon___KeyGetCode___" => ctx.key_code as i64,
+
+        // ── Bureau à fenêtres — primitives bas niveau, pilotées depuis Maratine
+        // (LAPrevent.mara/TemplateView.mara). RUNNING_APPS est la seule source de
+        // vérité côté Rust ; la décision de déplacer/redimensionner/fermer/lancer
+        // une fenêtre est entièrement décidée en Maratine à chaque frame.
+        "DrvAPIInterCon___WindowManCount___" => unsafe { RUNNING_APPS.len() as i64 },
+
+        "DrvAPIInterCon___WindowManGetX___" => window_man_get(args, |a| a.x),
+        "DrvAPIInterCon___WindowManGetY___" => window_man_get(args, |a| a.y),
+        "DrvAPIInterCon___WindowManGetW___" => window_man_get(args, |a| a.content_w),
+        "DrvAPIInterCon___WindowManGetH___" => window_man_get(args, |a| a.content_h),
+
+        "DrvAPIInterCon___WindowManSetX___" => window_man_set(args, |a, v| a.x = v),
+        "DrvAPIInterCon___WindowManSetY___" => window_man_set(args, |a, v| a.y = v),
+        "DrvAPIInterCon___WindowManSetW___" => window_man_set(args, |a, v| a.resize(v, a.content_h)),
+        "DrvAPIInterCon___WindowManSetH___" => window_man_set(args, |a, v| a.resize(a.content_w, v)),
+
+        "DrvAPIInterCon___WindowManClose___" => {
+            if let Some(&i) = args.first() {
+                let i = i as usize;
+                unsafe { if i < RUNNING_APPS.len() { RUNNING_APPS.remove(i); } }
+            }
+            0
+        },
+
+        "DrvAPIInterCon___WindowManFindByName___" => {
+            if args.is_empty() || args[0] == 0 { return -1; }
+            let name = unsafe { read_cstr(args[0] as *const u8) };
+            unsafe {
+                RUNNING_APPS.iter().position(|a| a.name == name).map(|i| i as i64).unwrap_or(-1)
+            }
+        },
+
+        // ── Registre d'apps installées (dock dynamique, piloté par TemplateView.mara) ──
+        // Le dock itère AppRegistryCount() et dessine AppRegistryGetIconPath(i) ; un clic
+        // lance AppRegistryGetName(i). Une app absente du registre (non installée) n'a
+        // aucune entrée — donc pas d'icône au dock, comme un vrai système.
+        "DrvAPIInterCon___AppRegistryCount___" => crate::app_registry::registry_count(),
+        "DrvAPIInterCon___AppRegistryGetName___" => {
+            let i = args.first().copied().unwrap_or(-1);
+            if i < 0 { return 0; }
+            crate::app_registry::registry_name_ptr(i as usize)
+        },
+        "DrvAPIInterCon___AppRegistryGetIconPath___" => {
+            let i = args.first().copied().unwrap_or(-1);
+            if i < 0 { return 0; }
+            crate::app_registry::registry_icon_ptr(i as usize)
+        },
+
+        // WindowManLaunch(nameStr) — charge \<nameStr>.marep à la racine ESP
+        // (convention provisoire, cf. plan) via le même mécanisme UEFI_ST_PTR/
+        // UEFI_IMG_HANDLE déjà utilisé par srfs_load_on_demand pour ImageLoad/
+        // FontLoad. Position/taille par défaut arbitraires pour ce jalon (1
+        // fenêtre à la fois) ; retourne l'index de la nouvelle fenêtre ou -1.
+        "DrvAPIInterCon___WindowManLaunch___" => {
+            if args.is_empty() || args[0] == 0 { return -1; }
+            let name = unsafe { read_cstr(args[0] as *const u8) };
+            let st_raw = unsafe { UEFI_ST_PTR };
+            if st_raw.is_null() {
+                serial_log(b"[WINMAN] ST_PTR null, lancement impossible\r\n");
+                return -1;
+            }
+            let (mut st, img) = unsafe {
+                let st = match uefi::table::SystemTable::<uefi::table::Boot>::from_ptr(st_raw) {
+                    Some(s) => s,
+                    None => return -1,
+                };
+                let img = match uefi::Handle::from_ptr(UEFI_IMG_HANDLE as *mut core::ffi::c_void) {
+                    Some(h) => h,
+                    None => return -1,
+                };
+                (st, img)
+            };
+            let path_str = alloc::format!("\\{}.marep", name);
+            let path_cstring = match uefi::CString16::try_from(path_str.as_str()) {
+                Ok(p) => p,
+                Err(_) => return -1,
+            };
+            match crate::bundle_loader::marep_loader::load_marep_modules(&mut st, img, &path_cstring) {
+                Ok((app_name, modules)) => {
+                    serial_log(alloc::format!("[WINMAN] lancement {} (nom fenetre={}) OK\r\n", app_name, name).as_bytes());
+                    unsafe {
+                        // Fenêtre nommée par le nom DEMANDÉ (name), pas par find_app_name
+                        // (app_name) : garantit que WindowManFindByName(name) matche même
+                        // pour une app sans .slasset (find_app_name renverrait "App").
+                        RUNNING_APPS.push(crate::window_manager::RunningApp::new(name.clone(), modules, 400, 300, 640, 480));
+                        let _ = app_name;
+                        (RUNNING_APPS.len() - 1) as i64
+                    }
+                }
+                Err(_) => {
+                    serial_log(alloc::format!("[WINMAN] lancement {} echoue\r\n", name).as_bytes());
+                    -1
+                }
+            }
+        },
+
+        // WindowManRenderAndComposite(i) — construit un ExecCtx pointé sur le
+        // buffer propre de la fenêtre i (pointeur traduit en coordonnées locales
+        // à partir du ctx de L'APPELANT, c'est-à-dire le bureau), exécute
+        // exec_marep dessus (appel imbriqué — sans risque, cf. plan : mod_texts/
+        // globals sont locaux à chaque appel), puis blitte le résultat dans le
+        // framebuffer de l'appelant. reset_gpu_state() avant ET après : l'état
+        // GPU (opacité/transform/clip) est process-wide, pas par-appel.
+        "DrvAPIInterCon___WindowManRenderAndComposite___" => {
+            let Some(&i) = args.first() else { return -1; };
+            let i = i as usize;
+            unsafe {
+                let Some(app) = RUNNING_APPS.get_mut(i) else { return -1; };
+                let inner_ctx = ExecCtx {
+                    fb: app.buffer.as_mut_ptr(),
+                    width:  app.content_w,
+                    height: app.content_h,
+                    stride: app.content_w,
+                    font:     ctx.font,
+                    font_len: ctx.font_len,
+                    pointer_x: ctx.pointer_x - app.x,
+                    pointer_y: ctx.pointer_y - app.y,
+                    pointer_btn: ctx.pointer_btn,
+                    key_code:    ctx.key_code,
+                };
+                reset_gpu_state();
+                let mod_refs = app.mod_refs();
+                let _ = exec_marep(&mod_refs, &inner_ctx);
+                if !ctx.fb.is_null() {
+                    let dst = core::slice::from_raw_parts_mut(ctx.fb, (ctx.stride * ctx.height).max(0) as usize);
+                    app.blit_into(dst, ctx.stride, ctx.width, ctx.height);
+                }
+                reset_gpu_state();
+            }
+            0
+        },
 
         // MaratineKit UI — stubs (pas de RenderContext en UEFI boot)
         "MaratineKit___UI___TextLabel___New"        => 0,
@@ -4443,6 +4974,7 @@ pub unsafe extern "C" fn exec_module_raw(
     };
     // Contexte nul — l'appelant doit avoir initialisé via slura_mgc_set_ctx
     let ctx = ExecCtx { fb: core::ptr::null_mut(), width: 0, height: 0, stride: 0,
-                        font: core::ptr::null(), font_len: 0 };
+                        font: core::ptr::null(), font_len: 0,
+                        pointer_x: 0, pointer_y: 0, pointer_btn: 0, key_code: 0 };
     exec_module(ovc, &[(fn_name, &[])], &ctx) as i32
 }

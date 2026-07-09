@@ -1,0 +1,50 @@
+#base <std***core***self***[ AppLifecycle, ComponentView, RenderContext ]>;
+#base <std***ComTpe***SlulFrmt***[ DrvAPIInterCon ]>;
+#base <MaratineKit>;
+
+// TestApp — application minimale pour le jalon 1 du bureau à fenêtres
+// (C:\Users\emmer\.claude\plans\rosy-waddling-gosling.md, étape 3) : preuve qu'un
+// 2e .marep tourne via un exec_marep indépendant de celui de ShiLauncher, sans
+// collision de modules (chaque appel exec_marep ne voit que SES propres modules —
+// pas de préfixage de namespace nécessaire, cf. contexte du plan).
+//
+// Dessine un carré qui suit le curseur (prouve que le contexte HID de CET appel
+// exec_marep est bien reçu, indépendamment de celui de ShiLauncher) + un texte fixe.
+// Pas encore de fenêtre/chrome/buffer dédié : étapes suivantes du plan.
+
+rel op LAPrevent: <[string AppLifecycle]>t [
+
+    var Architecture: <string> = "";
+
+    rel op Launch: [arch string] [
+        Architecture = arch;
+        log: "TestApp: demarrage - arch " + arch;
+
+        let ctx: <string> = <MaratineKit***RenderContext***New()>;
+
+        var fnt: <ptr> = <DrvAPIInterCon***FontLoad***>("SDC:/assets/fonts/brsonomasemibold.ttf");
+        if (fnt == nullptr) [
+            fnt = <DrvAPIInterCon***FontGetDefault***>();
+        ];
+
+        var running: <bool> = true;
+        loop (running) [
+            let px: <i32> = <DrvAPIInterCon***PointerGetX***()>;
+            let py: <i32> = <DrvAPIInterCon***PointerGetY***()>;
+
+            let _: <i32> = <DrvAPIInterCon***GpuFill***>(0xFF202030);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawRect***>((px - 40), (py - 40), 80, 80, 0xFFE06C4D);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(20, 20, 400, "Hello Window - TestApp", 0xFFFFFFFF, 0x00000000, fnt, 24, 0);
+
+            let flushResult: <i32> = <DrvAPIInterCon***GpuFlushRenderContext***>(ctx);
+            if (flushResult != 0) [ running = false; ];
+        ];
+
+        log: "TestApp: arrete";
+        ret 0;
+    ];
+
+    rel op onPause: [] [ ret 0; ];
+    rel op onResume: [] [ ret 0; ];
+    rel cl onDestroy: [] [ log: "TestApp: detruit"; ret 0; ];
+];

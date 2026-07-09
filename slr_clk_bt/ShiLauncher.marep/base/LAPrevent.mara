@@ -16,9 +16,14 @@ rel op LAPrevent: <[string AppLifecycle]>t [
         _ctx = <MaratineKit***RenderContext***New()>;
 
         // Assets comme var locales dans Launch — valides pendant toute la boucle
-        var fnt: <ptr> = <DrvAPIInterCon***FontLoad***>("SDC:/boot/assets/font/brsonomasemibold.ttf");
+        // "SDC:/X" est traduit par srfs_load_on_demand (ovc_exec.rs) en chemin ESP réel
+        // "SDC/slu64/X" — PAS "SDC/X" tout court. L'ancien chemin "SDC:/boot/assets/font/..."
+        // pointait donc vers esp/SDC/slu64/boot/assets/font/... qui n'existe pas (le fichier
+        // est copié dans esp/SDC/slu64/assets/fonts/... par la tâche "copy: brsonomasemibold.ttf
+        // → assets") — d'où "fichier introuvable" à chaque frame. Corrigé en conséquence.
+        var fnt: <ptr> = <DrvAPIInterCon***FontLoad***>("SDC:/assets/fonts/brsonomasemibold.ttf");
         if (fnt == nullptr) [
-            fnt = <DrvAPIInterCon***FontLoad***>("SDC:/boot/assets/font/brsonomasemibold.ttf");
+            fnt = <DrvAPIInterCon***FontLoad***>("SDC:/assets/fonts/brsonomasemibold.ttf");
         ];
         if (fnt == nullptr) [ fnt = <DrvAPIInterCon***FontGetDefault***>(); ];
 
@@ -35,6 +40,62 @@ rel op LAPrevent: <[string AppLifecycle]>t [
         loop (running) [
             let _: <i32> = <StateRefresh***()>;
             let renderResult: <i32> = <TemplateView***Render>(_ctx, fnt);
+
+            // ── Bureau à fenêtres (jalon 1) ────────────────────────────────
+            // Toute la logique (composition, chrome, déplacement/redimensionnement/
+            // fermeture) vit ici, en Maratine — le Rust (ovc_exec.rs) ne fournit que
+            // les primitives WindowMan*** (liste RUNNING_APPS, buffer, exec_marep
+            // imbriqué, blit). Le déclencheur de lancement est dans TemplateView.mara
+            // (clic sur l'icône ShiLooker du dock).
+            let wcount: <i32> = <DrvAPIInterCon***WindowManCount***()>;
+            let px: <i32> = <DrvAPIInterCon***PointerGetX***()>;
+            let py: <i32> = <DrvAPIInterCon***PointerGetY***()>;
+            let pbtn: <i32> = <DrvAPIInterCon***PointerGetBtn***()>;
+            var wi: <i32> = 0;
+            loop (wi < wcount) [
+                let wx: <i32> = <DrvAPIInterCon***WindowManGetX***>(wi);
+                let wy: <i32> = <DrvAPIInterCon***WindowManGetY***>(wi);
+                let ww: <i32> = <DrvAPIInterCon***WindowManGetW***>(wi);
+                let wh: <i32> = <DrvAPIInterCon***WindowManGetH***>(wi);
+
+                let _: <i32> = <DrvAPIInterCon***WindowManRenderAndComposite***>(wi);
+
+                // Chrome : bandeau « Shi Windows » (même couleur/coins que le bandeau du
+                // bureau, S_SHI_WINDOWS = 0xFFE0E0E0) redimensionné à la largeur DE CETTE
+                // fenêtre (ww) au lieu de toute la largeur écran — il ne couvre que la
+                // fenêtre concernée, pas le bureau entier. Les icônes increase/reduce/close
+                // existantes du dock sont dessinées par-dessus.
+                let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectFull***>(wx, (wy - 28), ww, 28, 12, 12, 0, 0, 0xFFE0E0E0);
+                let closeIcon: <ptr> = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img18_close_x.png");
+                let _: <i32> = <DrvAPIInterCon***ImageDraw***>(closeIcon, (wx + ww - 28), (wy - 28), 20, 20);
+                let reduceIcon: <ptr> = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img17_reduce_cropped.png");
+                let _: <i32> = <DrvAPIInterCon***ImageDraw***>(reduceIcon, (wx + ww - 56), (wy - 28), 20, 20);
+                let increaseIcon: <ptr> = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img11_increase_merged.png");
+                let _: <i32> = <DrvAPIInterCon***ImageDraw***>(increaseIcon, (wx + ww - 84), (wy - 28), 20, 20);
+
+                // Fermer (bouton close, bande de titre)
+                if ((pbtn & 1) != 0 && px >= (wx + ww - 28) && px <= (wx + ww - 8) && py >= (wy - 28) && py <= (wy - 8)) [
+                    let _: <i32> = <DrvAPIInterCon***WindowManClose***>(wi);
+                ];
+
+                // Redimensionner (coin bas-droit, 16×16)
+                if ((pbtn & 1) != 0 && px >= (wx + ww - 16) && px <= (wx + ww) && py >= (wy + wh - 16) && py <= (wy + wh)) [
+                    let _: <i32> = <DrvAPIInterCon***WindowManSetW***>(wi, (px - wx));
+                    let _: <i32> = <DrvAPIInterCon***WindowManSetH***>(wi, (py - wy));
+                ];
+
+                // Déplacer (bande de titre, hors boutons) — "snap" sur le curseur tant
+                // que le bouton est maintenu (pas de mémoire du delta de saisie entre
+                // frames possible en Maratine pur : seules les <string> class vars
+                // survivent entre appels exec_marep).
+                if ((pbtn & 1) != 0 && px >= wx && px <= (wx + ww - 90) && py >= (wy - 28) && py <= wy) [
+                    let _: <i32> = <DrvAPIInterCon***WindowManSetX***>(wi, (px - (ww / 2)));
+                    let _: <i32> = <DrvAPIInterCon***WindowManSetY***>(wi, (py + 28));
+                ];
+
+                wi = wi + 1;
+            ];
+
             if (renderResult != 0) [ running = false; ];
         ];
 

@@ -9,6 +9,10 @@ heapless = "0.9.3"
 # Dépendances UEFI (nécessaires au kernel)
 uefi          = { version = "0.27.0",  default-features = false, features = ["alloc"] }
 uefi-services = "0.24.0"
+# Types bruts EFI_ABSOLUTE_POINTER_PROTOCOL — la crate `uefi` 0.27 n'a pas de wrapper
+# sûr pour ce protocole (seulement EFI_SIMPLE_POINTER_PROTOCOL, souris relative).
+# Même version que celle déjà utilisée en interne par `uefi` (0.5.1) — Cargo unifie.
+uefi-raw      = "0.5"
 
 # Décompression DEFLATE pour les bundles Maratine (ZIP méthode 8)
 miniz_oxide   = { version = "0.7", default-features = false }
