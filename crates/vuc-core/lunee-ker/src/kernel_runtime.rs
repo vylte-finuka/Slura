@@ -444,24 +444,38 @@ pub fn render_from_marep(
     // Slot, Address Device, descripteurs) + configuration HID boot protocol
     // (clavier/souris) sur les endpoints interrupt trouvés (usb.rs). Best-effort
     // — chaque device qui échoue est loggé et ignoré, sans bloquer le boot.
+    // ── Interrupteur du pilote HID NATIF (décision produit) ────────────────────
+    // false (DÉFAUT) : on NE touche PAS au contrôleur. init_xhci fait un HCRST qui
+    //   coupe l'alimentation des ports et retire la souris au firmware — si
+    //   l'énumération native ne reprend pas parfaitement la main sur le xHCI réel,
+    //   la souris ne se rallume jamais (LED éteinte, curseur mort). Tant que le
+    //   pilote natif n'est pas VALIDÉ sur vrai matériel via log série, on laisse le
+    //   firmware maître : EFI_SIMPLE_POINTER/ABSOLUTE_POINTER fonctionnent, la souris
+    //   s'allume et marche partout (bare-metal + QEMU, sans grab via usb-tablet).
+    // true : active le pilote natif product-grade (xHCI HCRST + énumération USB +
+    //   HID boot protocol). À basculer UNIQUEMENT en environnement où on peut lire le
+    //   log série [USB]/[XHCI] pour diagnostiquer, car il retire le firmware.
+    const USE_NATIVE_HID: bool = false;
+
     let mut _xhci_ctrl = None;
     let mut hid_devices: alloc::vec::Vec<crate::usb::HidDevice> = alloc::vec::Vec::new();
     if let Some(xhci) = _xhci.as_ref() {
+        // Lecture SEULE des capacités (aucune écriture matérielle) — sûr, informatif.
         if let Some(caps) = crate::pci::read_xhci_capabilities(st, image_handle, xhci) {
-            _xhci_ctrl = crate::xhci::init_xhci(st, image_handle, xhci, &caps);
-            if let Some(ref mut ctrl) = _xhci_ctrl {
-                hid_devices = crate::usb::enumerate_and_setup_hid(st, ctrl, caps.max_ports);
-                // ATTENTION (correction d'un commentaire précédent FAUX) : init_xhci a
-                // fait un HCRST qui a RETIRÉ le contrôleur au pilote USB du firmware.
-                // Les protocoles EFI_SIMPLE_POINTER/ABSOLUTE_POINTER ne répondent donc
-                // PLUS, que l'énumération native réussisse ou non. Si 0 device HID natif,
-                // la souris est indisponible (seul le clavier ConIn survit) — on le signale
-                // clairement au lieu de prétendre que le firmware « reste maître ».
-                if hid_devices.is_empty() {
-                    crate::ovc_exec::serial_log(
-                        b"[USB] AUCUN device HID natif configure : souris indisponible (firmware retire par le HCRST, clavier ConIn seul actif)\r\n"
-                    );
+            if USE_NATIVE_HID {
+                _xhci_ctrl = crate::xhci::init_xhci(st, image_handle, xhci, &caps);
+                if let Some(ref mut ctrl) = _xhci_ctrl {
+                    hid_devices = crate::usb::enumerate_and_setup_hid(st, ctrl, caps.max_ports);
+                    if hid_devices.is_empty() {
+                        crate::ovc_exec::serial_log(
+                            b"[USB] AUCUN device HID natif configure : souris indisponible (firmware retire par le HCRST)\r\n"
+                        );
+                    }
                 }
+            } else {
+                crate::ovc_exec::serial_log(
+                    b"[USB] pilote HID natif DESACTIVE (USE_NATIVE_HID=false) : firmware maitre, souris via EFI pointer protocol\r\n"
+                );
             }
         }
     }
