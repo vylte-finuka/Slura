@@ -52,12 +52,29 @@
             "problemMatcher": ["$msCompile"]
         },
         {
+            "label": "clang: compile stb_font.c",
+            "type": "process",
+            "command": "D:/VisualS/VC/Tools/Llvm/x64/bin/clang.exe",
+            "args": [
+                "-c", "-std=c23", "-O2",
+                "-I", "D:/msys64/ucrt64/include",
+                "-I", "D:/VisualS/VC/Tools/Llvm/x64/lib/clang/22/include",
+                "-I", "D:/msys64/ucrt64/include/c++/15.2.0",
+                "-I", "${workspaceFolder}/slr_clk_bt/x64/amd64",
+                "-I", "D:/msys64/ucrt64/include/c++/15.2.0/x86_64-w64-mingw32",
+                "stb_font.c", "-o", "stb_font.obj"
+            ],
+            "options": { "cwd": "${workspaceFolder}/slr_clk_bt/x64/amd64" },
+            "group": "build",
+            "problemMatcher": ["$msCompile"]
+        },
+        {
             "label": "4️⃣ lld-link: create slr_clk_bt.efi",
             "type": "process",
             "command": "D:/VisualS/VC/Tools/Llvm/x64/bin/lld-link.exe",
             "args": [
                 "/MACHINE:X64",
-                "booter.obj", "efi_manager.obj",
+                "booter.obj", "efi_manager.obj", "stb_font.obj",
                 "/WHOLEARCHIVE:${workspaceFolder}\\target\\x86_64-unknown-uefi\\release\\liblunee_ker.a",
                 "/OUT:slr_clk_bt.efi", "/SUBSYSTEM:EFI_APPLICATION",
                 "/ENTRY:efi_main", "/ALIGN:0x1000",
@@ -67,7 +84,8 @@
             "dependsOn": [
                 "1️⃣ cargo: build lunee-ker",
                 "2️⃣ nasm: assemble booter.asm",
-                "3️⃣ clang: compile efi_manager.cpp"
+                "3️⃣ clang: compile efi_manager.cpp",
+                "clang: compile stb_font.c"
             ],
             "group": "build",
             "problemMatcher": []
@@ -125,7 +143,7 @@
             "command": "powershell.exe",
             "args": [
                 "-NoProfile", "-Command",
-                "$e = '${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp'; $s = \"$e\\SDC\\slu64\"; @(\"$e\\EFI\\BOOT\",\"$e\\sources\",\"$e\\boot\\assets\\font\",\"$e\\boot\\font\",\"$s\\assets\\fonts\",\"$s\\assets\\crypto\",\"$s\\contracts\",\"$s\\DrivRequirment\",\"$s\\env\",\"$s\\chain\\pending_txs\",\"$s\\chain\\calls\",\"$s\\chain\\receipts\",\"$s\\chain\\state\\balances\",\"$s\\chain\\metadata\",\"$s\\apps\\ShiLauncher\\ShiLauncher.slasset\") | ForEach-Object { New-Item -ItemType Directory -Force $_ | Out-Null }; Write-Host 'ESP dirs OK'"
+                "$e = '${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp'; $s = \"$e\\SDC\\slu64\"; @(\"$e\\EFI\\BOOT\",\"$e\\sources\",\"$e\\boot\\assets\\font\",\"$e\\boot\\font\",\"$s\\assets\\fonts\",\"$s\\assets\\crypto\",\"$s\\contracts\",\"$s\\DrivRequirment\",\"$s\\env\",\"$s\\chain\\pending_txs\",\"$s\\chain\\calls\",\"$s\\chain\\receipts\",\"$s\\chain\\state\\balances\",\"$s\\chain\\metadata\",\"$s\\apps\\ShiLauncher\\ShiLauncher.slasset\") | ForEach-Item { New-Item -ItemType Directory -Force $_ | Out-Null }; Write-Host 'ESP dirs OK'"
             ],
             "options": { "cwd": "${workspaceFolder}" },
             "group": "build",

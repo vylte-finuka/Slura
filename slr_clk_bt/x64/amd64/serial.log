@@ -1,0 +1,4613 @@
+[2J[01;01H[=3h[2J[01;01H[2J[01;01H[=3h[2J[01;01H[2J[01;01H[=3h[2J[01;01HBdsDxe: loading Boot0001 "UEFI QEMU HARDDISK QM00001 " from PciRoot(0x0)/Pci(0x1F,0x2)/Sata(0x0,0xFFFF,0x0)
+BdsDxe: starting Boot0001 "UEFI QEMU HARDDISK QM00001 " from PciRoot(0x0)/Pci(0x1F,0x2)/Sata(0x0,0xFFFF,0x0)
+[2J[01;01H
+  === Slura OS Boot Selector ===
+
+  [ENTREE]  Slura OS  (slr_clk_bt.efi)
+
+  Appuyez sur une touche pour demarrer...
+
+  Lecture de slr_clk_bt.efi...
+  Demarrage Lunee kernel...
+[SECURITY] Integrity check passed.
+Hardware detected and initialized successfully.
+[AuthARoot] Driver SRID_slugpu_001 OK
+[APrevent] OnPowerOn OK
+[SluGpu] GpuImpl.ovc enregistre
+[AuthARoot] Driver SRID_sluhiidman_001 OK
+[APrevent] OnPowerOn OK
+[AuthARoot] Driver SRID_srfsman_001 OK
+[APrevent] OnPowerOn OK
+[AuthARoot] Driver SRID_slufontconf_001 OK
+[APrevent] OnPowerOn OK
+[SluFontConf] TtfParser+GlyphRasterizer+WoffReader enregistres
+[AuthARoot] Driver SluEnvSys-2026-Vyft OK
+[APrevent] OnPowerOn OK
+[AuthARoot] Driver CryptoAssetSupport-2026-Vyft OK
+[APrevent] OnPowerOn OK
+[HAL] Maratine drivers loaded.
+[RUNTIME] Boot phase completed.
+=== Slura Lunée Kernel v0.1 ===
+[MARATINE] Loading ShiLauncher...
+[AuthARoot] SRID verifie OK
+[MARASET] srid=SRID_shilauncher icon=ShiLauncher.slasset/img4.png name=ShiLauncher
+[MARATINE] 3 modules OVC charges
+[INSTALL] 30/30 assets installes dans SDC/apps/ShiLauncher
+[HID] find_handles::<Pointer> -> 1 handle(s)
+[HID] pointer_ptr OK
+[HID] reset() -> true
+[HID] find_handles::<AbsPointer> -> 1 handle(s)
+[HID] AbsPointer OK bounds=(0,65536,0,65536) reset=SUCCESS
+[PCI] 6 device(s) PCI trouve(s)
+[PCI] 00:00.0 vendor=8086 device=29c0 class=06:00:00
+[PCI] 00:01.0 vendor=1af4 device=1050 class=03:00:00
+[PCI] 00:02.0 vendor=1b36 device=000d class=0c:03:30
+[PCI] -> contrôleur xHCI trouvé en 00:02.0 BAR0=0xc000004000 (64-bit=true)
+[PCI] 00:1f.0 vendor=8086 device=2918 class=06:01:00
+[PCI] 00:1f.2 vendor=8086 device=2922 class=01:06:01
+[PCI] 00:1f.3 vendor=8086 device=2930 class=0c:05:00
+[XHCI] CAPLENGTH=0x40 HCIVERSION=0x100 MaxSlots=64 MaxIntrs=16 MaxPorts=8
+[XHCI] AC64=true ContextSize64=false xECP=0x8 DBOFF=0x2000 RTSOFF=0x1000
+[XHCI] MaxScratchpadBufs=0 PageSize=4096 octets
+[USB] pilote HID natif DESACTIVE (USE_NATIVE_HID=false) : firmware maitre, souris via EFI pointer protocol
+[ACPI] RSDP trouve : revision=2 rsdt=0x3f77d074 xsdt=0x3f77d0e8
+[ACPI] 6 table(s) systeme referencee(s)
+[ACPI] table 'FACP' @ 0x3f779000
+[ACPI] table 'APIC' @ 0x3f778000
+[ACPI] table 'HPET' @ 0x3f777000
+[ACPI] table 'MCFG' @ 0x3f776000
+[ACPI] MCFG: segment=0 bus=0x0-0xff ECAM_base=0xe0000000
+[ACPI] table 'WAET' @ 0x3f775000
+[ACPI] table 'BGRT' @ 0x3f774000
+[REGISTRY] 3 app(s) :
+[REGISTRY]   ShiLauncher (nom=ShiLauncher icon=ShiLauncher.slasset/img4.png srid=SRID_shilauncher)
+[REGISTRY]   ShiLooker (nom=ShiLooker  - Notifications & Widgets icon=ShiLooker.slasset/ShiLooker.png srid=SRID_shilooker)
+[REGISTRY]   TestApp (nom=TestApp icon=TestApp.slasset/TestApp.png srid=SRID_testapp)
+[REGISTRY] dock : 2 app(s) (1 epingle(s) par defaut)
+[HID] get_state_raw() -> NOT_READY (frame 0)
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/assets/fonts/brsonomasemibold.ttf
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,593) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,593) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,593) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,593) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,593) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,593) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,601) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,609) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,617) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,625) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,633) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,641) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,649) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,657) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,665) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,673) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,681) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,689) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,697) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,705) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,713) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,721) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,729) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,737) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,745) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,753) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,761) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,769) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,777) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,785) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,793) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,801) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,809) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,817) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,825) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,833) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,841) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,849) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,857) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,865) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,873) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,881) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,889) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,897) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,905) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,913) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,921) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,929) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,937) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,945) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,953) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,961) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,969) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,977) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,985) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,993) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,1001) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,1009) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,1017) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,1025) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,1033) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,1041) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,1049) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,1057) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,1065) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,1073) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65538
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(790,1081) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65539
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(798,1081) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 65539
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(806,1081) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(806,1081) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(806,1081) size=32x32 bytes_svg=8780
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[DIAG] KeyGetCode = 13
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode fail
+[DIAG] WindowManFindByName("TestApp") -> -1
+[AuthARoot] SRID verifie OK
+[MARASET] srid=SRID_testapp icon=TestApp.slasset/TestApp.png name=TestApp
+[MARATINE] 2 modules OVC charges
+[INSTALL] 1/1 assets installes dans SDC/apps/TestApp
+[WINMAN] lancement TestApp (nom fenetre=TestApp) OK
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(806,1081) size=32x32 bytes_svg=8780
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[CM] WoffReader::Decode
+[FN] WoffReader::Decode
+[CM] WoffReader::GetDecodedSize
+[FN] WoffReader::GetDecodedSize
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[GPU] GpuFill
+[OVC] exec_marep done
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(806,1081) size=32x32 bytes_svg=8780
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[GPU] GpuFill
+[OVC] exec_marep done
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(806,1081) size=32x32 bytes_svg=8780
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[GPU] GpuFill
+[OVC] exec_marep done
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(806,1081) size=32x32 bytes_svg=8780
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[GPU] GpuFill
+[OVC] exec_marep done
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(806,1081) size=32x32 bytes_svg=8780
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[GPU] GpuFill
+[OVC] exec_marep done
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(806,1081) size=32x32 bytes_svg=8780
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[GPU] GpuFill
+[OVC] exec_marep done
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(806,1081) size=32x32 bytes_svg=8780
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[GPU] GpuFill
+[OVC] exec_marep done
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(806,1081) size=32x32 bytes_svg=8780
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[GPU] GpuFill
+[OVC] exec_marep done
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(806,1081) size=32x32 bytes_svg=8780
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[GPU] GpuFill
+[OVC] exec_marep done
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(806,1081) size=32x32 bytes_svg=8780
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[GPU] GpuFill
+[OVC] exec_marep done
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(806,1081) size=32x32 bytes_svg=8780
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[GPU] GpuFill
+[OVC] exec_marep done
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(806,1081) size=32x32 bytes_svg=8780
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[GPU] GpuFill
+[OVC] exec_marep done
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(806,1081) size=32x32 bytes_svg=8780
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[GPU] GpuFill
+[OVC] exec_marep done
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(806,1081) size=32x32 bytes_svg=8780
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[GPU] GpuFill
+[OVC] exec_marep done
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(806,1081) size=32x32 bytes_svg=8780
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[GPU] GpuFill
+[OVC] exec_marep done
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(806,1081) size=32x32 bytes_svg=8780
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[GPU] GpuFill
+[OVC] exec_marep done
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(806,1081) size=32x32 bytes_svg=8780
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[GPU] GpuFill
+[OVC] exec_marep done
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(806,1081) size=32x32 bytes_svg=8780
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[GPU] GpuFill
+[OVC] exec_marep done
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(806,1081) size=32x32 bytes_svg=8780
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[GPU] GpuFill
+[OVC] exec_marep done
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(806,1081) size=32x32 bytes_svg=8780
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[GPU] GpuFill
+[OVC] exec_marep done
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(806,1081) size=32x32 bytes_svg=8780
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[GPU] GpuFill
+[OVC] exec_marep done
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(806,1081) size=32x32 bytes_svg=8780
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[GPU] GpuFill
+[OVC] exec_marep done
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[CM] TemplateView::Render
+[FN] TemplateView::Render
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/ShiLooker/ShiLooker.slasset/ShiLooker.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[CURSOR] CursorLoad
+[SRFS] uefi_read: 
+[SRFS] Path: SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc
+[CURSOR] 42089 octets lus
+[CURSOR] parse OK size=77x77 hotspot=26,19 frames=1
+[CURSOR] resample OK vers taille standard
+[CURSOR] handle=1
+[CURSOR] Draw handle=1 pos=(806,1081) size=32x32 bytes_svg=8780
+[IMG] ImageLoad
+[IMG] path: SDC:/apps/TestApp/TestApp.slasset/TestApp.png
+[IMG] decode PNG
+[IMG] decode OK
+[IMG] ImageDraw
+[IMG] draw done
+[OVC] exec_marep start
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[XM] miss ObtInfo in MaratineKit___PIDActivity
+[XM] miss AuthARoot in MaratineKit
+[XM] miss RenRootUI in MaratineKit
+[CM] LAPrevent::Launch
+[FN] LAPrevent::Launch
+[XM] miss New in MaratineKit___RenderContext
+[FontLoad] path_ptr=
+[FontLoad] cache hit
+[GPU] GpuFill

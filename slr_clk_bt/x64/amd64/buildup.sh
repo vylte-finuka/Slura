@@ -148,7 +148,8 @@ qemu-system-x86_64 \
     -drive     if=pflash,format=raw,file="${OVMF_VARS}",id=ovmf_vars \
     -global    driver=efi-pflash.0,property=secure-boot,value=0 \
     ${BOOT_ARGS} \
-    -serial    stdio \
+    -chardev   stdio,id=ser0,logfile="${PROJ_ROOT}/serial.log",signal=off \
+    -serial    chardev:ser0 \
     -monitor   none \
     -d         int \
     -D         "${PROJ_ROOT}/qemu.log" \

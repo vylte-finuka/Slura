@@ -240,13 +240,16 @@ rel op Render: [ctx string, fnt ptr] [
             // Entrée. Le clic est désormais AUSSI tolérant que Entrée (X seul, pas de Y
             // précis). Raccourcis chiffres RETIRÉS : dans cet environnement la touche '2'
             // envoie le scancode Flèche-Bas (→ déplaçait le curseur au lieu de lancer).
+            // Zone cliquable PAR LOSANGE (dock macOS), PRÉCISE : il faut viser CE losange en
+            // X ET en Y (survol exact) — sinon rien ne s'ouvre. Clic souris OU Entrée, mais
+            // les DEUX exigent overX ET overY (plus de repli X-seul qui ouvrait une fenêtre dès
+            // qu'Entrée était pressé avec le curseur vaguement dans la colonne). Tout est PAR-AI
+            // (pvx/pvy de cette cellule) : aucun `nearestAi` ni `occluded` (constructions que
+            // l'interpréteur OVC évalue mal). Chaque losange = sa propre zone indépendante.
             let hitH: <i32> = (dmW * 7) / 10;
             let overX: <bool> = (mx >= (pvx - hitH) && mx <= (pvx + hitH));
             let overY: <bool> = (my >= (pvy - hitH) && my <= (pvy + hitH));
-            // Clic souris façon macOS : cliquer SUR le losange (survol X ET Y + bouton) →
-            // l'app s'ouvre. Le pilote HID natif remonte maintenant le bouton (product-grade).
-            // Repli clavier : Entrée lance l'app la PLUS PROCHE (ai == nearestAi), sans survol.
-            if (occluded == false && ((overX && overY && (pbtn & 1) != 0) || (kc == 13 && ai == nearestAi))) [
+            if (overX && overY && ((pbtn & 1) != 0 || kc == 13)) [
                 let nm: <ptr> = <DrvAPIInterCon***AppRegistryGetName***>(ai);
                 let existing: <i32> = <DrvAPIInterCon***WindowManFindByName***>(nm);
                 if (existing < 0) [ let _: <i32> = <DrvAPIInterCon***WindowManLaunch***>(nm); ];

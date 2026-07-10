@@ -197,10 +197,15 @@ pub fn srfs_register_file(path: String, data: Vec<u8>) {
 /// Retourne le pointeur + taille de la police TTF si chargée via SRFS.
 pub fn srfs_font_ptr() -> (*const u8, usize) {
     unsafe {
+        // Cherche SPÉCIFIQUEMENT le .ttf (le 1er slot pouvait être une Maraset.yaml ou un
+        // PNG → TtfParser::Load parsait du non-TTF, aucun glyphe). Repli : 1er slot.
         for slot in SRFS_CACHE.iter() {
-            if let Some((_, ref v)) = slot {
-                return (v.as_ptr(), v.len());
+            if let Some((ref k, ref v)) = slot {
+                if k.ends_with(".ttf") || k.ends_with(".TTF") { return (v.as_ptr(), v.len()); }
             }
+        }
+        for slot in SRFS_CACHE.iter() {
+            if let Some((_, ref v)) = slot { return (v.as_ptr(), v.len()); }
         }
     }
     (core::ptr::null(), 0)
@@ -416,6 +421,21 @@ static FONT8X16: [u8; 128 * 16] = build_font8x16();
 static mut FONT_UNITS_PER_EM: u32 = 1000;
 static mut RAST_W: u32 = 0;
 static mut RAST_H: u32 = 0;
+
+// ── Primitives natives stb_truetype (stb_font.obj, wrapper de stb_truetype.h) ──
+// Exposées EXACTEMENT sous les noms que SluFontConf.slul appelle via <stb_*___> ;
+// le dispatch FFI (plus bas) relaie ces builtins vers ces symboles extern "C".
+extern "C" {
+    fn stb_font_init(data: *const u8) -> i32;
+    fn stb_glyph_index(codepoint: i32) -> i32;
+    fn stb_set_current_glyph(gi: i32);
+    fn stb_get_current_glyph() -> i32;
+    fn stb_scale_k(pixel_size: i32) -> i32;
+    fn stb_rasterize(glyph_idx: i32, scale_k: i32) -> *const u8;
+    fn stb_bmp_w() -> i32;
+    fn stb_bmp_h() -> i32;
+    fn stb_bmp_yoff() -> i32;
+}
 
 // Cache de parse_string_consts par (OVC text pointer + taille en octets).
 // La taille discrimine les modules même quand leurs 32 premiers octets sont identiques
@@ -2634,6 +2654,39 @@ fn dispatch(
         "DrvManSpec___RastGetWidth___"  => unsafe { RAST_W as i64 },
         "DrvManSpec___RastGetHeight___" => unsafe { RAST_H as i64 },
 
+        // ── Primitives natives stb_truetype (stb_font.obj) — relais des <stb_*___>
+        // appelés par SluFontConf.slul. Le .slul reste l'orchestration ; ici on fournit
+        // juste les primitives natives (le « pipeline stb » qui manquait au noyau).
+        "stb_font_init___" => {
+            let p = args.first().copied().unwrap_or(0) as *const u8;
+            unsafe { stb_font_init(p) as i64 }
+        },
+        "stb_glyph_index___" => {
+            let cp = args.first().copied().unwrap_or(0) as i32;
+            unsafe { stb_glyph_index(cp) as i64 }
+        },
+        "stb_set_current_glyph___" => {
+            let gi = args.first().copied().unwrap_or(0) as i32;
+            unsafe { stb_set_current_glyph(gi); }
+            0
+        },
+        "stb_get_current_glyph___" => unsafe { stb_get_current_glyph() as i64 },
+        "stb_scale_k___" => {
+            let px = args.first().copied().unwrap_or(0) as i32;
+            unsafe { stb_scale_k(px) as i64 }
+        },
+        "stb_rasterize___" => {
+            let gid = args.first().copied().unwrap_or(0) as i32;
+            let sk  = args.get(1).copied().unwrap_or(0) as i32;
+            let bmp = unsafe { stb_rasterize(gid, sk) };
+            // Publie les dimensions pour que le noyau (GpuDrawTextFont*) puisse blitter.
+            unsafe { RAST_W = stb_bmp_w() as u32; RAST_H = stb_bmp_h() as u32; }
+            bmp as i64
+        },
+        "stb_bmp_w___"    => unsafe { stb_bmp_w() as i64 },
+        "stb_bmp_h___"    => unsafe { stb_bmp_h() as i64 },
+        "stb_bmp_yoff___" => unsafe { stb_bmp_yoff() as i64 },
+
         // ── DrvManSpec Chaîne ─────────────────────────────────────────────────
         "DrvManSpec___StrLen___" => {
             if args.len() >= 1 {
@@ -4318,6 +4371,26 @@ fn dispatch(
         "DrvAPIInterCon___WindowManGetW___" => window_man_get(args, |a| a.content_w),
         "DrvAPIInterCon___WindowManGetH___" => window_man_get(args, |a| a.content_h),
 
+        // Chrome de fenêtre (barre « Shi Windows ») : nom + icône d'app PAR fenêtre, résolus
+        // depuis le registre via le nom de la fenêtre (RunningApp.name). Pointeurs null-terminés
+        // stables (ceux du registre) → utilisables pour GpuDrawText / ImageLoad.
+        "DrvAPIInterCon___WindowManGetName___" => {
+            let Some(&i) = args.first() else { return 0; };
+            let name = match unsafe { RUNNING_APPS.get(i as usize) } { Some(a) => a.name.clone(), None => return 0 };
+            crate::app_registry::registry_name_icon_for(&name).0
+        },
+        "DrvAPIInterCon___WindowManGetIconPath___" => {
+            let Some(&i) = args.first() else { return 0; };
+            let name = match unsafe { RUNNING_APPS.get(i as usize) } { Some(a) => a.name.clone(), None => return 0 };
+            crate::app_registry::registry_name_icon_for(&name).1
+        },
+        // Titre « AppName - CurrentScreen » de la fenêtre i (display_name du registre).
+        "DrvAPIInterCon___WindowManGetTitle___" => {
+            let Some(&i) = args.first() else { return 0; };
+            let name = match unsafe { RUNNING_APPS.get(i as usize) } { Some(a) => a.name.clone(), None => return 0 };
+            crate::app_registry::registry_display_ptr_for(&name)
+        },
+
         "DrvAPIInterCon___WindowManSetX___" => window_man_set(args, |a, v| a.x = v),
         "DrvAPIInterCon___WindowManSetY___" => window_man_set(args, |a, v| a.y = v),
         "DrvAPIInterCon___WindowManSetW___" => window_man_set(args, |a, v| a.resize(v, a.content_h)),
@@ -4332,13 +4405,18 @@ fn dispatch(
         },
 
         "DrvAPIInterCon___WindowManFindByName___" => {
-            if args.is_empty() || args[0] == 0 { return -1; }
+            // DIAG placé AVANT le retour anticipé : confirme que la branche dock→lancement
+            // est atteinte MÊME si le nom est nul (sinon symptôme silencieux : Entrée reçue,
+            // aucun log, rien ne s'ouvre). arg0=0 => AppRegistryGetName a renvoyé nullptr.
+            let arg0 = args.first().copied().unwrap_or(0);
+            if args.is_empty() || args[0] == 0 {
+                serial_log(alloc::format!("[DIAG] WindowManFindByName arg0={:#x} (NUL -> lancement tente mais nom introuvable)\r\n", arg0).as_bytes());
+                return -1;
+            }
             let name = unsafe { read_cstr(args[0] as *const u8) };
             let res = unsafe {
                 RUNNING_APPS.iter().position(|a| a.name == name).map(|i| i as i64).unwrap_or(-1)
             };
-            // DIAG : appelé uniquement quand un lancement est tenté (survol + clic/Entree),
-            // donc pas de spam. Confirme que la chaîne dock→lancement est bien atteinte.
             serial_log(alloc::format!("[DIAG] WindowManFindByName(\"{}\") -> {}\r\n", name, res).as_bytes());
             res
         },
@@ -4435,8 +4513,9 @@ fn dispatch(
                 let mod_refs = app.mod_refs();
                 let _ = exec_marep(&mod_refs, &inner_ctx);
                 if !ctx.fb.is_null() {
+                    let corner_r = args.get(1).copied().unwrap_or(0) as i32; // coins bas arrondis
                     let dst = core::slice::from_raw_parts_mut(ctx.fb, (ctx.stride * ctx.height).max(0) as usize);
-                    app.blit_into(dst, ctx.stride, ctx.width, ctx.height);
+                    app.blit_into(dst, ctx.stride, ctx.width, ctx.height, corner_r);
                 }
                 reset_gpu_state();
             }

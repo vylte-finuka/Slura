@@ -147,8 +147,9 @@ pub fn scan_installed_apps(st: &mut SystemTable<Boot>, image_handle: Handle) -> 
 // les builtins `DrvAPIInterCon***AppRegistry...***` renvoient des pointeurs STABLES
 // consommables directement par ImageLoad/WindowManLaunch (qui lisent jusqu'au `\0`).
 struct RegEntry {
-    name_c: alloc::vec::Vec<u8>, // "<folder>\0"          (nom de lancement)
-    icon_c: alloc::vec::Vec<u8>, // "SDC:/apps/<folder>/<icon_rel>\0" ou vide si pas d'icône
+    name_c: alloc::vec::Vec<u8>,    // "<folder>\0"          (nom de lancement)
+    icon_c: alloc::vec::Vec<u8>,    // "SDC:/apps/<folder>/<icon_rel>\0" ou vide si pas d'icône
+    display_c: alloc::vec::Vec<u8>, // "<display_name>\0"    (titre de la barre « Shi Windows »)
 }
 
 static mut REGISTRY: alloc::vec::Vec<RegEntry> = alloc::vec::Vec::new();
@@ -158,7 +159,7 @@ static mut REGISTRY: alloc::vec::Vec<RegEntry> = alloc::vec::Vec::new();
 /// retirables — comme Finder sur macOS). ShiLooker est le « Finder » de Slura.
 const PINNED_DEFAULTS: &[&str] = &["ShiLooker"];
 
-fn make_entry(folder: &str, icon_rel: &str) -> RegEntry {
+fn make_entry(folder: &str, icon_rel: &str, display: &str) -> RegEntry {
     let mut name_c = alloc::string::String::from(folder).into_bytes();
     name_c.push(0);
     let icon_c = if icon_rel.is_empty() {
@@ -168,7 +169,10 @@ fn make_entry(folder: &str, icon_rel: &str) -> RegEntry {
         s.push(0);
         s
     };
-    RegEntry { name_c, icon_c }
+    let disp = if display.is_empty() { folder } else { display };
+    let mut display_c = alloc::string::String::from(disp).into_bytes();
+    display_c.push(0);
+    RegEntry { name_c, icon_c, display_c }
 }
 
 /// Publie la liste pour consommation par les builtins (appelé une fois au boot).
@@ -181,20 +185,20 @@ pub fn publish_registry(apps: &[AppManifest]) {
     // 1) Défauts épinglés en tête, toujours présents (icône du manifeste scanné si dispo,
     //    sinon convention `<App>.slasset/<App>.png`).
     for &pinned in PINNED_DEFAULTS {
-        let icon_rel = apps
-            .iter()
-            .find(|a| a.folder_name == pinned)
+        let manifest = apps.iter().find(|a| a.folder_name == pinned);
+        let icon_rel = manifest
             .map(|a| a.icon_rel.clone())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| alloc::format!("{}.slasset/{}.png", pinned, pinned));
-        v.push(make_entry(pinned, &icon_rel));
+        let display = manifest.map(|a| a.display_name.clone()).unwrap_or_default();
+        v.push(make_entry(pinned, &icon_rel, &display));
     }
 
     // 2) Autres apps installées (hors shell et hors défauts déjà ajoutés).
     for a in apps {
         if a.folder_name == "ShiLauncher" { continue; }
         if PINNED_DEFAULTS.iter().any(|&p| p == a.folder_name) { continue; }
-        v.push(make_entry(&a.folder_name, &a.icon_rel));
+        v.push(make_entry(&a.folder_name, &a.icon_rel, &a.display_name));
     }
 
     serial_log(alloc::format!(
@@ -220,5 +224,35 @@ pub fn registry_icon_ptr(i: usize) -> i64 {
             .get(i)
             .map(|e| if e.icon_c.is_empty() { 0 } else { e.icon_c.as_ptr() as i64 })
             .unwrap_or(0)
+    }
+}
+
+/// Résout un nom de lancement (folder) → (ptr nom null-terminé, ptr icône null-terminé)
+/// depuis le registre. Sert au chrome de fenêtre (barre « Shi Windows » : titre + icône
+/// d'app PAR fenêtre ouverte). Retourne (0, 0) si le nom est introuvable au registre.
+pub fn registry_name_icon_for(name: &str) -> (i64, i64) {
+    unsafe {
+        for e in REGISTRY.iter() {
+            let nlen = e.name_c.len().saturating_sub(1); // name_c = "<folder>\0"
+            if core::str::from_utf8(&e.name_c[..nlen]).map(|s| s == name).unwrap_or(false) {
+                let icon = if e.icon_c.is_empty() { 0 } else { e.icon_c.as_ptr() as i64 };
+                return (e.name_c.as_ptr() as i64, icon);
+            }
+        }
+        (0, 0)
+    }
+}
+
+/// Ptr null-terminé vers le display_name (titre « AppName - CurrentScreen ») de l'app
+/// `name`, ou 0 si absente. Sert au titre de la barre « Shi Windows ».
+pub fn registry_display_ptr_for(name: &str) -> i64 {
+    unsafe {
+        for e in REGISTRY.iter() {
+            let nlen = e.name_c.len().saturating_sub(1);
+            if core::str::from_utf8(&e.name_c[..nlen]).map(|s| s == name).unwrap_or(false) {
+                return e.display_c.as_ptr() as i64;
+            }
+        }
+        0
     }
 }

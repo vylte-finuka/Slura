@@ -605,13 +605,21 @@ pub fn render_from_marep(
             _ => {}
         }
 
+        // Police recalculée PAR FRAME : au boot (font_ptr/font_len ci-dessus) le cache SRFS
+        // est vide → font_len=0, ce qui faisait échouer TtfParser::Load (aucun glyphe, titre
+        // de fenêtre invisible). Une fois la police chargée par le marep (1re frame), ce
+        // recalcul donne le bon (ptr,len) pour GpuDrawText*.
+        let (frame_font_ptr, frame_font_len) = {
+            let (p, l) = crate::ovc_exec::srfs_font_ptr();
+            if l > 0 { (p, l) } else { (font_ptr, font_len) }
+        };
         let ctx = ovc_exec::ExecCtx {
             fb: back_fb,
             width:    w as i32,
             height:   h as i32,
             stride,
-            font:     font_ptr,
-            font_len,
+            font:     frame_font_ptr,
+            font_len: frame_font_len,
             pointer_x:   cursor_x,
             pointer_y:   cursor_y,
             pointer_btn,
