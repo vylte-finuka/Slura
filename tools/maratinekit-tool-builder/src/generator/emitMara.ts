@@ -24,9 +24,11 @@ function ensureFont(state: EmitState): void {
   if (state.fontDeclared) return;
   state.fontDeclared = true;
   state.lines.push(
-    `        // Police unique du kernel (la famille/style Figma réels sont ignorés — limitation v1)`,
-    `        var font: <ptr> = <DrvAPIInterCon***FontLoad***>("SDC:/assets/fonts/brsonomasemibold.ttf");`,
-    `        if (font == nullptr) [ font = <DrvAPIInterCon***FontGetDefault***>(); ];`
+    `        // Police NOYAU via FontGetDefault() : GpuDrawTextFontAlign rastérise avec`,
+    `        // ctx.font_len (longueur de la police du noyau) ; il FAUT donc lui passer le`,
+    `        // MÊME pointeur (celui de srfs_font_ptr = FontGetDefault), sinon le parseur TTF`,
+    `        // lit une mauvaise taille et ne produit aucun glyphe. (Famille/style Figma ignorés.)`,
+    `        var font: <ptr> = <DrvAPIInterCon***FontGetDefault***>();`
   );
 }
 

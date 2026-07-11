@@ -10,6 +10,21 @@ const statusEl = document.getElementById("status") as HTMLDivElement;
 const appNameEl = document.getElementById("appname") as HTMLInputElement;
 const desktopEl = document.getElementById("desktop") as HTMLInputElement;
 const iconRatioEl = document.getElementById("iconratio") as HTMLInputElement | null;
+const iconFileEl = document.getElementById("iconfile") as HTMLInputElement | null;
+
+// Logo personnalisé : reste côté UI (accès Blob/Canvas). S'il est fourni, il devient
+// l'icône du dock <App>.png (recadrée+centrée comme un nœud AppIcon), prioritaire sur
+// le design. On ne fait qu'informer code.ts de sa présence (hasCustomIcon) pour qu'il
+// écrive la ligne Maraset icon: et NE réémette PAS l'icône du nœud AppIcon.
+let customIconBytes: Uint8Array | null = null;
+if (iconFileEl) {
+  iconFileEl.addEventListener("change", async () => {
+    const f = iconFileEl.files && iconFileEl.files[0];
+    if (!f) { customIconBytes = null; return; }
+    customIconBytes = new Uint8Array(await f.arrayBuffer());
+    statusEl.textContent = `Logo chargé : ${f.name} (${Math.round(f.size / 1024)} Ko) — deviendra l'icône du dock.`;
+  });
+}
 
 // Recadre un PNG sur son contenu (alpha > seuil) puis le centre dans un canvas
 // CARRÉ, sans padding asymétrique → l'icône du dock est parfaitement centrée quel
@@ -55,6 +70,7 @@ document.getElementById("generate")!.addEventListener("click", () => {
         type: "generate",
         appName: appNameEl.value.trim(),
         isDesktop: desktopEl.checked,
+        hasCustomIcon: customIconBytes !== null,
       },
     },
     "*"
@@ -77,6 +93,12 @@ async function downloadZip(appName: string, files: UiFile[]): Promise<void> {
     } else {
       root.file(f.path, f.text ?? "");
     }
+  }
+  // Logo personnalisé : recadré+centré comme une icône AppIcon, écrit en <App>.png
+  // (écrase l'entrée éventuelle du nœud AppIcon — le logo choisi ici est prioritaire).
+  if (customIconBytes) {
+    const iconPng = await cropCenterSquarePng(customIconBytes, ratio);
+    root.file(`${appName}.slasset/${appName}.png`, iconPng);
   }
   const blob = await zip.generateAsync({ type: "blob" });
   const url = URL.createObjectURL(blob);

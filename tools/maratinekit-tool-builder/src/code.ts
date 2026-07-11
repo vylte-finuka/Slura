@@ -13,6 +13,9 @@ interface GenerateMsg {
   type: "generate";
   appName: string;
   isDesktop: boolean;
+  // Un logo a été choisi dans l'UI : il devient l'icône du dock (l'UI l'ajoute au zip
+  // en <App>.png). Prioritaire sur le nœud AppIcon du design.
+  hasCustomIcon?: boolean;
 }
 
 // centerCrop : l'UI recadre le PNG sur son contenu et le centre dans un canvas
@@ -52,14 +55,18 @@ async function generate(msg: GenerateMsg): Promise<void> {
   const result = await classifyFrame(node);
   const templateView = emitTemplateView(result, appName, node.width, node.height);
 
+  // Un logo choisi dans l'UI est prioritaire sur le nœud AppIcon du design.
+  const hasIcon = msg.hasCustomIcon === true || result.iconPng !== null;
   const meta: AppMeta = {
     appName,
+    // Nom du frame Figma = écran courant → titre barre « Shi Windows » "AppName - Screen".
+    screenName: node.name,
     isDesktop: msg.isDesktop,
-    hasAssets: result.pngs.length > 0 || result.svgs.length > 0 || result.cursorRefPng !== null || result.iconPng !== null,
-    // Icône du dock : le nœud "AppIcon" s'il existe (recadré+centré, nommé <App>.png,
-    // convention lue par app_registry.rs). Sinon pas d'icône (le dock dessine juste le
-    // losange vide) — on n'utilise PLUS img1 (le wallpaper) par défaut, c'était un mauvais choix.
-    iconFile: result.iconPng ? `${appName}.png` : null,
+    hasAssets: result.pngs.length > 0 || result.svgs.length > 0 || result.cursorRefPng !== null || hasIcon,
+    // Icône du dock (nommée <App>.png, convention lue par app_registry.rs) : le logo
+    // personnalisé de l'UI s'il existe, sinon le nœud "AppIcon" du design. Sinon pas
+    // d'icône (le dock dessine juste le losange vide).
+    iconFile: hasIcon ? `${appName}.png` : null,
   };
 
   const files: UiFile[] = [
@@ -80,7 +87,9 @@ async function generate(msg: GenerateMsg): Promise<void> {
   }
   // Icône du dock : marquée centerCrop → l'UI la recadre sur son contenu et la centre
   // dans un canvas carré (aucun décalage), nommée <App>.png (référencée par Maraset icon:).
-  if (result.iconPng) {
+  // Ignorée si un logo personnalisé a été choisi (l'UI écrit <App>.png depuis ce logo,
+  // prioritaire) — évite d'écrire deux fois la même entrée.
+  if (result.iconPng && msg.hasCustomIcon !== true) {
     files.push({ path: `${appName}.slasset/${appName}.png`, bytes: result.iconPng, centerCrop: true });
   }
 

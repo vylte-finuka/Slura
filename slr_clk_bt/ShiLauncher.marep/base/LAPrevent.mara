@@ -51,6 +51,11 @@ rel op LAPrevent: <[string AppLifecycle]>t [
             let px: <i32> = <DrvAPIInterCon***PointerGetX***()>;
             let py: <i32> = <DrvAPIInterCon***PointerGetY***()>;
             let pbtn: <i32> = <DrvAPIInterCon***PointerGetBtn***()>;
+            // Dimensions écran + seuils de fenêtrage (Windows 11) — constants par frame.
+            let sw: <i32> = <DrvAPIInterCon***GpuGetWidth***>();
+            let sh: <i32> = <DrvAPIInterCon***GpuGetHeight***>();
+            let dockTop: <i32> = ((900 * sh) / 1024);   // haut du dock (design 1024px) — le maximisé s'arrête au-dessus (dock visible)
+            let maxThresh: <i32> = (sw - 14);           // largeur au-delà de laquelle la fenêtre est considérée MAXIMISÉE
             var wi: <i32> = 0;
             loop (wi < wcount) [
                 let wx: <i32> = <DrvAPIInterCon***WindowManGetX***>(wi);
@@ -102,50 +107,103 @@ rel op LAPrevent: <[string AppLifecycle]>t [
                     let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>((wx + 36), (wy - 20), (ww - 140), winTitle, 0xFF1A1A1A, 0xFFE0E0E0, tfnt, 14, 0);
                 ];
 
-                // Contrôles DROITE (GPU vectoriel garanti, net à toute taille) : réduire (—),
-                // agrandir (□, contour 4 barres), fermer (X, 2 traits pivotés ±45°). Gris-bleu.
+                // Contrôles DROITE — rendus depuis les VRAIS PNG du design (fidèles, sans
+                // effet) : réduire / agrandir / fermer. Pré-redimensionnés hors-ligne en LANCZOS
+                // à leur taille exacte puis dessinés 1:1 (draw_w == img_w) → AUCUN
+                // rééchantillonnage runtime (ImageDraw fait du nearest-neighbor) → pas de
+                // crénelage, pixel-perfect. Fichiers : img_ctl_min/max/close.png (13px de large).
                 let wbCy: <i32> = (wy - 14);
-                let wbCol: <i32> = 0xFF7A828C;
                 let wbMinCx: <i32> = (wx + ww - 74);
-                let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>((wbMinCx - 6), (wbCy - 1), 13, 2, 1, wbCol);
                 let wbMaxCx: <i32> = (wx + ww - 46);
-                let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>((wbMaxCx - 6), (wbCy - 6), 13, 2, 1, wbCol);
-                let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>((wbMaxCx - 6), (wbCy + 5), 13, 2, 1, wbCol);
-                let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>((wbMaxCx - 6), (wbCy - 6), 2, 13, 1, wbCol);
-                let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>((wbMaxCx + 5), (wbCy - 6), 2, 13, 1, wbCol);
                 let wbCloseCx: <i32> = (wx + ww - 18);
-                let _: <i32> = <DrvAPIInterCon***GpuSetTransform2D***>(7071, 7071, -7071, 7071, wbCloseCx, wbCy);
-                let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>((wbCloseCx - 7), (wbCy - 1), 15, 2, 1, wbCol);
-                let _: <i32> = <DrvAPIInterCon***GpuResetTransform***>();
-                let _: <i32> = <DrvAPIInterCon***GpuSetTransform2D***>(7071, -7071, 7071, 7071, wbCloseCx, wbCy);
-                let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>((wbCloseCx - 7), (wbCy - 1), 15, 2, 1, wbCol);
-                let _: <i32> = <DrvAPIInterCon***GpuResetTransform***>();
+                // Réduire (—) : img_ctl_min.png 13×2 (centré)
+                let icMin: <i32> = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img_ctl_min.png");
+                let _: <i32> = <DrvAPIInterCon***ImageDraw***>(icMin, (wbMinCx - 6), (wbCy - 1), 13, 2);
+                // Agrandir (□) : img_ctl_max.png 10×13 (centré)
+                let icMax: <i32> = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img_ctl_max.png");
+                let _: <i32> = <DrvAPIInterCon***ImageDraw***>(icMax, (wbMaxCx - 5), (wbCy - 6), 10, 13);
+                // Fermer (X) : img_ctl_close.png 13×13 (centré)
+                let icClose: <i32> = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img_ctl_close.png");
+                let _: <i32> = <DrvAPIInterCon***ImageDraw***>(icClose, (wbCloseCx - 6), (wbCy - 6), 13, 13);
 
                 // Contenu de l'app composé EN DERNIER, coins bas arrondis (rayon 12).
                 let _: <i32> = <DrvAPIInterCon***WindowManRenderAndComposite***>(wi, 12);
 
-                // Fermer (bouton close, bande de titre)
-                if ((pbtn & 1) != 0 && px >= (wx + ww - 28) && px <= (wx + ww - 8) && py >= (wy - 28) && py <= (wy - 8)) [
+                // ══ Interactions fenêtre — comportement Windows 11 ══════════════════════
+                let winRight:  <i32> = (wx + ww);
+                let winBottom: <i32> = (wy + wh);
+
+                // — FERMER (X)
+                if ((pbtn & 1) != 0 && px >= (wx + ww - 28) && px <= (wx + ww - 8) && py >= (wy - 28) && py <= (wy - 2)) [
                     let _: <i32> = <DrvAPIInterCon***WindowManClose***>(wi);
                 ];
 
-                // Redimensionner (coin bas-droit, 16×16)
-                if ((pbtn & 1) != 0 && px >= (wx + ww - 16) && px <= (wx + ww) && py >= (wy + wh - 16) && py <= (wy + wh)) [
-                    let _: <i32> = <DrvAPIInterCon***WindowManSetW***>(wi, (px - wx));
-                    let _: <i32> = <DrvAPIInterCon***WindowManSetH***>(wi, (py - wy));
+                // — RÉDUIRE (—) : minimise en tuile 100×80 au coin bas-gauche (façon barre des
+                //   tâches). Cliquer AGRANDIR ou glisser la tuile la restaure. Le SetW/SetH est
+                //   idempotent tant que le bouton est tenu → aucun scintillement. (Un vrai
+                //   "hide" nécessiterait un état côté noyau ; resize() borne à 100×80 minimum.)
+                if ((pbtn & 1) != 0 && px >= (wx + ww - 84) && px <= (wx + ww - 64) && py >= (wy - 28) && py <= (wy - 2)) [
+                    let _: <i32> = <DrvAPIInterCon***WindowManSetW***>(wi, 100);
+                    let _: <i32> = <DrvAPIInterCon***WindowManSetH***>(wi, 80);
+                    let _: <i32> = <DrvAPIInterCon***WindowManSetX***>(wi, (12 + wi * 112));
+                    let _: <i32> = <DrvAPIInterCon***WindowManSetY***>(wi, (sh - 92));
                 ];
 
-                // Déplacer (bande de titre, hors boutons) — "snap" sur le curseur tant
-                // que le bouton est maintenu (pas de mémoire du delta de saisie entre
-                // frames possible en Maratine pur : seules les <string> class vars
-                // survivent entre appels exec_marep).
-                if ((pbtn & 1) != 0 && px >= wx && px <= (wx + ww - 90) && py >= (wy - 28) && py <= wy) [
-                    let _: <i32> = <DrvAPIInterCon***WindowManSetX***>(wi, (px - (ww / 2)));
-                    let _: <i32> = <DrvAPIInterCon***WindowManSetY***>(wi, (py + 28));
+                // — AGRANDIR (□) : maximise plein écran, au-dessus du dock. Action idempotente
+                //   (pas de bascule → pas de scintillement en bouton tenu). Restauration = glisser
+                //   la barre de titre vers le bas (geste Windows 11, géré dans le déplacement).
+                if ((pbtn & 1) != 0 && px >= (wx + ww - 56) && px <= (wx + ww - 36) && py >= (wy - 28) && py <= (wy - 2)) [
+                    let _: <i32> = <DrvAPIInterCon***WindowManSetX***>(wi, 3);
+                    let _: <i32> = <DrvAPIInterCon***WindowManSetY***>(wi, 31);
+                    let _: <i32> = <DrvAPIInterCon***WindowManSetW***>(wi, (sw - 6));
+                    let _: <i32> = <DrvAPIInterCon***WindowManSetH***>(wi, (dockTop - 42));
+                ];
+
+                // — REDIMENSIONNER PAR LES BORDS (extension) — marge de saisie 6px, seulement si
+                //   NON maximisée. Bords gauche/droite sur la hauteur du CONTENU (hors barre de
+                //   titre → pas de conflit avec le déplacement) ; bord bas sur la largeur. Les
+                //   coins bas déclenchent naturellement deux bords à la fois.
+                if (ww < maxThresh) [
+                    // Bord DROIT → étend la largeur
+                    if ((pbtn & 1) != 0 && px >= (winRight - 6) && px <= (winRight + 6) && py >= wy && py <= winBottom) [
+                        let _: <i32> = <DrvAPIInterCon***WindowManSetW***>(wi, (px - wx));
+                    ];
+                    // Bord BAS → étend la hauteur
+                    if ((pbtn & 1) != 0 && py >= (winBottom - 6) && py <= (winBottom + 6) && px >= wx && px <= winRight) [
+                        let _: <i32> = <DrvAPIInterCon***WindowManSetH***>(wi, (py - wy));
+                    ];
+                    // Bord GAUCHE → déplace X, ajuste W pour garder le bord droit fixe
+                    if ((pbtn & 1) != 0 && px >= (wx - 6) && px <= (wx + 6) && py >= wy && py <= winBottom) [
+                        let _: <i32> = <DrvAPIInterCon***WindowManSetX***>(wi, px);
+                        let _: <i32> = <DrvAPIInterCon***WindowManSetW***>(wi, (winRight - px));
+                    ];
+                ];
+
+                // — DÉPLACER par la barre de titre (hors boutons et hors marge de bord gauche).
+                //   Si la fenêtre est MAXIMISÉE, on la restaure d'abord à 960×640 centrée sous le
+                //   curseur (geste « tirer depuis le haut » de Windows 11).
+                if ((pbtn & 1) != 0 && px >= (wx + 8) && px <= (wx + ww - 90) && py >= (wy - 28) && py <= wy) [
+                    if (ww >= maxThresh) [
+                        let _: <i32> = <DrvAPIInterCon***WindowManSetW***>(wi, 960);
+                        let _: <i32> = <DrvAPIInterCon***WindowManSetH***>(wi, 640);
+                        let _: <i32> = <DrvAPIInterCon***WindowManSetX***>(wi, (px - 480));
+                        let _: <i32> = <DrvAPIInterCon***WindowManSetY***>(wi, (py + 28));
+                    ];
+                    if (ww < maxThresh) [
+                        let _: <i32> = <DrvAPIInterCon***WindowManSetX***>(wi, (px - (ww / 2)));
+                        let _: <i32> = <DrvAPIInterCon***WindowManSetY***>(wi, (py + 28));
+                    ];
                 ];
 
                 wi = wi + 1;
             ];
+
+            // ── Curseur AU-DESSUS de tout (fenêtres incluses), comme Windows 11 ──
+            // Dessiné APRÈS la composition de toutes les fenêtres → le pointeur passe
+            // toujours devant elles (avant, il était flushé sous les fenêtres).
+            let cur: <i32> = <DrvAPIInterCon***CursorLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc");
+            let _: <i32> = <DrvAPIInterCon***CursorDraw***>(cur, px, py);
+            let _: <i32> = <DrvAPIInterCon***CursorFree***>(cur);
 
             if (renderResult != 0) [ running = false; ];
         ];

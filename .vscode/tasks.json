@@ -185,11 +185,11 @@
             "problemMatcher": ["$rustc"]
         },
         {
-            "label": "cargo: build vuc-platform-engine",
+            "label": "cargo: build vuc-platform-engine (UEFI)",
             "type": "process",
             "command": "cargo",
-            "args": [ "build", "-p", "vuc-platform", "--bin", "vuc-platform-engine",
-                      "--target", "x86_64-pc-windows-msvc", "--release" ],
+            "args": [ "build", "-p", "vuc-platform", "--bin", "vuc-platform-engine-uefi",
+                      "--target", "x86_64-unknown-uefi", "--features", "uefi-kernel", "--release" ],
             "options": { "cwd": "${workspaceFolder}" },
             "group": "build",
             "problemMatcher": ["$rustc"]
@@ -200,10 +200,10 @@
             "command": "powershell.exe",
             "args": [
                 "-NoProfile", "-Command",
-                "Copy-Item -Force '${workspaceFolder}\\target\\x86_64-pc-windows-msvc\\release\\vuc-platform-engine.exe' '${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\vuc_platform_engine.efi'"
+                "Copy-Item -Force '${workspaceFolder}\\target\\x86_64-unknown-uefi\\release\\vuc-platform-engine-uefi.efi' '${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\vuc_platform_engine.efi'"
             ],
             "options": { "cwd": "${workspaceFolder}" },
-            "dependsOn": ["cargo: build vuc-platform-engine"],
+            "dependsOn": ["cargo: build vuc-platform-engine (UEFI)"],
             "group": "build",
             "problemMatcher": []
         },

@@ -22,19 +22,46 @@ rel op LAPrevent: <[string AppLifecycle]>t [
 
         let ctx: <string> = <MaratineKit***RenderContext***New()>;
 
-        var fnt: <ptr> = <DrvAPIInterCon***FontLoad***>("SDC:/assets/fonts/brsonomasemibold.ttf");
-        if (fnt == nullptr) [
-            fnt = <DrvAPIInterCon***FontGetDefault***>();
-        ];
+        // Police NOYAU (FontGetDefault = srfs_font_ptr, accordée à ctx.font_len) — requis
+        // pour GpuDrawTextFontAlign en contexte fenêtré (un autre ptr → glyphes vides).
+        var fnt: <ptr> = <DrvAPIInterCon***FontGetDefault***>();
+
+        // ── Gestionnaire de stablecoin VEZ (réseau TEST) ──────────────────────────
+        // Adresse du gestionnaire (owner) = celle déclarée dans vezcurproxy.ca. Le noyau
+        // (chain_selftest) y seed un solde de démonstration lu par balanceOf.
+        let vezOwner: <string> = "0x53Ae54b11251D5003e9aA51422405bC35A2eF32D";
+        let balPath:  <string> = "SDC:\\chain\\state\\balances\\" + vezOwner + ".json";
+
+        // Émettre une VRAIE transaction "transfer" via le pont chaîne (builtins bas niveau,
+        // identiques à SluChainBridge). Le noyau (ovc_exec::BlockchainQueueTx) l'exécute
+        // SYNCHRONE contre l'ABI vezcurproxy.ca et écrit un reçu ; on relit son status.
+        // Sélecteur 0xa9059cbb = transfer(address,uint256).
+        let txId: <i32> = <DrvAPIInterCon***BlockchainGenTxId***>();
+        let qpath: <string> = "SDC:\\chain\\pending_txs\\" + txId + ".json";
+        let sender: <string> = "0x0000000000000000000000000000000000000000";
+        let calldata: <string> = "0xa9059cbb0000000000000000000000005aaeef00000000000000000000000000000064";
+        let _: <i32> = <DrvAPIInterCon***BlockchainQueueTx***>(qpath, sender, vezOwner, calldata, 0, txId);
+        let rpath: <string> = "SDC:\\chain\\receipts\\" + txId + ".json";
+        log: "TestApp: tx transfer emise id=" + txId;
 
         var running: <bool> = true;
         loop (running) [
             let px: <i32> = <DrvAPIInterCon***PointerGetX***()>;
             let py: <i32> = <DrvAPIInterCon***PointerGetY***()>;
 
-            let _: <i32> = <DrvAPIInterCon***GpuFill***>(0xFF202030);
-            let _: <i32> = <DrvAPIInterCon***GpuDrawRect***>((px - 40), (py - 40), 80, 80, 0xFFE06C4D);
-            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(20, 20, 400, "Hello Window - TestApp", 0xFFFFFFFF, 0x00000000, fnt, 24, 0);
+            // balanceOf (0x70a08231) du gestionnaire — solde VEZ de test seed par le noyau.
+            let vezBal:   <i32> = <DrvAPIInterCon***BlockchainReadBalance***>(balPath);
+            // Status du reçu de la tx transfer (1 = minée, résolue via l'ABI .ca).
+            let txStatus: <i32> = <DrvAPIInterCon***BlockchainReadMeta***>(rpath, "status");
+
+            let _: <i32> = <DrvAPIInterCon***GpuFill***>(0xFF10141C);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(24, 22, 470, "VEZ Stablecoin Manager", 0xFFFFFFFF, 0x00000000, fnt, 26, 0);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(24, 58, 470, "Reseau TEST  -  Contrat VEZproxy (VEZ)", 0xFF9FB4CC, 0x00000000, fnt, 14, 0);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(24, 104, 470, "Solde balanceOf (owner)", 0xFF9FB4CC, 0x00000000, fnt, 15, 0);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(24, 128, 470, "" + vezBal + " VEZ", 0xFF7CFFA0, 0x00000000, fnt, 34, 0);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(24, 188, 470, "TX transfer -> status " + txStatus, 0xFFE0C060, 0x00000000, fnt, 15, 0);
+            // Curseur local (petit repère) prouvant le contexte HID de cet exec_marep.
+            let _: <i32> = <DrvAPIInterCon***GpuDrawRect***>((px - 4), (py - 4), 8, 8, 0xFFE06C4D);
 
             let flushResult: <i32> = <DrvAPIInterCon***GpuFlushRenderContext***>(ctx);
             if (flushResult != 0) [ running = false; ];

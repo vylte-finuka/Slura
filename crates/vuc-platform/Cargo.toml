@@ -3,60 +3,11 @@ name = "vuc-platform"
 version = "0.1.0"
 edition = { workspace = true }
 
-[dependencies]
-tokio = { workspace = true, features = ["full"] }
-serde = { workspace = true, features = ["derive"] }
-bcs = { workspace = true }
-anyhow = "1.0.98"
-hex = "0.4"
-chrono = { workspace = true, features = ["serde"] }
-tracing-subscriber = "0.2.15"
-tracing = { workspace = true }
-rand_chacha = "0.9.0"
-clap = { version = "4.5", features = ["derive"] }
-ipnetwork = "0.20"
-local-ip-address = "0.5"
-miniz_oxide = "0.9.0"
-rand = { workspace = true }
-num-traits = { workspace = true }
-percent-encoding = "2.3.1"
-hashbrown = { workspace = true }
-futures = { workspace = true }
-prometheus = { workspace = true }
-serde_json = { workspace = true }
-jsonrpsee-types = { workspace = true }
-jsonrpsee-server = { workspace = true }
-rayon = { workspace = true }
-vuc-tx = { path = "../vuc-tx" }
-vuc-core = { path = "../vuc-core", features = ["std"] }
-vuc-types = { path = "../vuc-types" }
-vuc-storage = { path = "../vuc-storage" }
-vuc-events = { path = "../vuc-events" }
-fastcrypto = { workspace = true }
-bincode = { workspace = true }
-sha3 = { workspace = true }
-uvm-runtime = { workspace = true }
-reth-trie = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.9.1", package = "reth-trie" }
-reth-primitives = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.9.1", package = "reth-primitives" }
-base64.workspace = true
-lazy_static.workspace = true
-futures-util = "0.3.31"
-k256 = "0.13.4"
-sha_256 = "1.0.1"
-base64-url = "3.0.2"
-rlp = "0.6.1"
-typenum = "1.19.0"
-dotenv = "0.15"
-ethers = "2.0.14"
-alloy-primitives = "1.4.1"
-tiny-keccak = "2.0.2"
-num_cpus = "1.17.0"
-jsonrpsee-http-client = "0.26.0"
-primitive-types = { workspace = true }
-jsonrpsee = { version = "0.26", features = ["server", "http-client", "ws-client", "macros", "client-ws-transport-tls"] }
-tower = "0.5"
-hyper = "1.5"
-tower-http = { version = "0.6", features = ["cors", "compression-full", "sensitive-headers", "trace", "timeout"] }
+# NOTE : PAS de bloc [dependencies] inconditionnel ici. Toutes les deps std/tokio/
+# ethers/reth/jsonrpsee sont déclarées sous [target.'cfg(not(target_os="uefi"))'] plus
+# bas ; les deps uefi (uefi + uefi-services + hashbrown no_std) sous cfg(target_os="uefi").
+# Un ancien bloc [dependencies] inconditionnel faisait fuiter tout le graphe std (dont
+# ethers→rand_core 0.6.4, incompatible avec RawOsError=usize d'UEFI) dans le build uefi.
 
 [lib]
 name       = "vuc_platform"
@@ -67,11 +18,18 @@ path       = "src/lib.rs"
 name = "vuc-platform"
 path = "src/engine_platform.rs"
 
-# Binaire séparé chargé par lunee-ker via LoadImage après le boot UEFI.
-# Contient le full node SluraChain (tokio + jsonrpsee + blockchain).
+# Binaire hôte (Windows/Linux) : full node SluraChain (tokio + jsonrpsee + blockchain).
 [[bin]]
 name = "vuc-platform-engine"
 path = "src/efi_entry.rs"
+
+# Binaire UEFI RÉEL (x86_64-unknown-uefi) chargé par lunee-ker via LoadImage/StartImage.
+# no_std, s'appuie sur kernel_abi::uefi_impl (exec OVC via callback noyau + RPC EFI-TCP4).
+# Ne se compile QUE avec --features uefi-kernel (donc jamais dans les builds hôtes).
+[[bin]]
+name = "vuc-platform-engine-uefi"
+path = "src/uefi_main.rs"
+required-features = ["uefi-kernel"]
 
 [package.metadata]
 license = "Vylte-finuka"
@@ -84,8 +42,10 @@ safe_mode    = []
 # Seuls uefi + hashbrown + uvm-runtime (sans std) sont actifs.
 uefi-kernel  = [
     "dep:uefi",
-    "dep:uefi-services",
-    "hashbrown/nightly",
+    # uefi-services retiré (conflit uefi 0.27/0.33) ; l'allocateur + panic_handler
+    # viennent des features du crate uefi 0.33 lui-même.
+    # hashbrown/nightly retiré : exige le compilateur nightly (#![feature]) ; hashbrown
+    # fonctionne en stable sans, et uefi_impl n'utilise de toute façon pas ses APIs nightly.
 ]
 
 [target.'cfg(not(target_os = "uefi"))'.dependencies]
@@ -105,6 +65,7 @@ miniz_oxide       = "0.9.0"
 rand              = { workspace = true }
 num-traits        = { workspace = true }
 percent-encoding  = "2.3.1"
+hashbrown         = { workspace = true }
 futures           = { workspace = true }
 prometheus        = { workspace = true }
 serde_json        = { workspace = true }
@@ -143,6 +104,8 @@ hyper             = "1.5"
 tower-http        = { version = "0.6", features = ["cors","compression-full","sensitive-headers","trace","timeout"] }
 
 [target.'cfg(target_os = "uefi")'.dependencies]
-uefi              = { version = "0.33",  optional = true, features = ["alloc"] }
-uefi-services     = { version = "0.24",  optional = true }
+# global_allocator + panic_handler + logger : fournissent #[global_allocator] et
+# #[panic_handler] requis par le binaire no_std (plus besoin de uefi-services, qui
+# tirait l'ancienne uefi 0.27 en conflit avec 0.33).
+uefi              = { version = "0.33",  optional = true, features = ["alloc", "global_allocator", "panic_handler", "logger"] }
 hashbrown         = { workspace = true,  default-features = false }

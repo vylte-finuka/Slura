@@ -300,10 +300,9 @@ rel op Render: [ctx string, fnt ptr] [
         // du fichier — moyenne de zone alpha-pondérée, pas un étirement runtime (un <rect>
         // de 1px redimensionné au vol tronque à 0px de large : bug déjà rencontré, le
         // curseur avait totalement disparu). CursorDraw dessine donc toujours en 1:1.
-        // Curseur : réutilise mx/my déjà lus en tête du dock (pas de re-déclaration).
-        let cur: <i32> = <DrvAPIInterCon***CursorLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/HIDcursor.sluc");
-        let _: <i32> = <DrvAPIInterCon***CursorDraw***>(cur, mx, my);
-        let _: <i32> = <DrvAPIInterCon***CursorFree***>(cur);
+        // Curseur : PLUS dessiné ici. Il est rendu par LAPrevent APRÈS la composition de
+        // toutes les fenêtres, pour qu'il passe DEVANT elles (comme Windows 11). Le dessiner
+        // ici le plaçait sous les fenêtres (flush du ctx AVANT la boucle de fenêtres).
 
     // Le lancement d'apps se fait désormais dans la boucle du dock dynamique (plus haut) :
     // chaque icône du registre est cliquable, avec occlusion. Plus de bloc hardcodé ici.

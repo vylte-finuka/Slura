@@ -4861,6 +4861,19 @@ fn dispatch(
                         tx_id, to_str, data_str, value
                     );
                     srfs_write_chain_file(&path_str, json.as_bytes());
+
+                    // ── PROD : exécution SYNCHRONE de la tx contre l'ABI .ca ──────────
+                    // Charge le bundle .ca depuis l'ESP (UEFI_ST_PTR dispo pendant le bureau),
+                    // résout le sélecteur (4 octets de calldata) → méthode, et écrit le reçu
+                    // dans SRFS_CACHE au chemin que GetTxStatus/BlockchainReadMeta liront.
+                    if let Some(ca) = unsafe { srfs_uefi_read(UEFI_ST_PTR, "SDC/slu64/assets/crypto/vezcurproxy.ca") } {
+                        let receipt = crate::chain_ca::execute_tx(&ca, &to_str, &data_str, tx_id);
+                        let rpath = alloc::format!("SDC:\\chain\\receipts\\{}.json", tx_id);
+                        srfs_write_chain_file(&rpath, receipt.as_bytes());
+                        serial_log(alloc::format!("[CHAIN] tx #{} executee via .ca -> recu ecrit\r\n", tx_id).as_bytes());
+                    } else {
+                        serial_log(b"[CHAIN] .ca introuvable, tx non executee\r\n");
+                    }
                 }
             }
             0
@@ -5035,6 +5048,42 @@ fn srfs_read_chain_file(path: &str) -> Option<alloc::vec::Vec<u8>> {
         }
     }
     None
+}
+
+/// Auto-test du chemin d'exécution `.ca` (diagnostic boot). Simule ce qu'un marep fait via
+/// SluChainBridge : charge le bundle `.ca`, exécute une tx `transfer` de démonstration,
+/// écrit le reçu dans SRFS_CACHE, puis le relit par le MÊME chemin que `GetTxStatus` →
+/// prouve le round-trip prod (tx → résolution ABI → reçu → status lisible par le marep).
+pub fn chain_selftest() {
+    let demo_data = "0xa9059cbb0000000000000000000000005aaeef00000000000000000000000000000064";
+    let to = "0x53Ae54b11251D5003e9aA51422405bC35A2eF32D";
+    let id: u32 = 9001;
+    match unsafe { srfs_uefi_read(UEFI_ST_PTR, "SDC/slu64/assets/crypto/vezcurproxy.ca") } {
+        Some(ca) => {
+            let receipt = crate::chain_ca::execute_tx(&ca, to, demo_data, id);
+            let rpath = alloc::format!("SDC:\\chain\\receipts\\{}.json", id);
+            srfs_write_chain_file(&rpath, receipt.as_bytes());
+            serial_log(alloc::format!("[CHAIN-TEST] recu: {}\r\n", receipt).as_bytes());
+            if srfs_read_chain_file(&rpath).is_some() {
+                serial_log(b"[CHAIN-TEST] relecture SRFS OK -> status lisible par le marep\r\n");
+            }
+
+            // ── Stablecoin VEZ en TEST : seed le solde balanceOf du gestionnaire ──
+            // Le .ca déclare balanceOf (0x70a08231) ; on alloue un solde de démonstration
+            // à l'adresse `owner` pour que BlockchainReadBalance/GetBalance le renvoie.
+            if crate::chain_ca::has_balance_of(&ca) {
+                if let Some(owner) = crate::chain_ca::owner_addr(&ca) {
+                    let sym = crate::chain_ca::token_symbol(&ca);
+                    let bal = crate::chain_ca::TEST_VEZ_BALANCE;
+                    let bpath = alloc::format!("SDC:\\chain\\state\\balances\\{}.json", owner);
+                    let bjson = alloc::format!("{{\"balance\":{},\"symbol\":\"{}\",\"test\":true}}", bal, sym);
+                    srfs_write_chain_file(&bpath, bjson.as_bytes());
+                    serial_log(alloc::format!("[CHAIN-TEST] stablecoin {} (test) solde balanceOf owner {} = {}\r\n", sym, owner, bal).as_bytes());
+                }
+            }
+        }
+        None => serial_log(b"[CHAIN-TEST] .ca introuvable\r\n"),
+    }
 }
 
 // ── Bridge C-ABI pour vuc-platform (uefi-kernel feature) ─────────────────────

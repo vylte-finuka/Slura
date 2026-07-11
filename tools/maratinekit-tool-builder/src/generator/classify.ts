@@ -260,7 +260,14 @@ export async function classifyFrame(root: FrameNode | ComponentNode | InstanceNo
   // Fond du frame racine (fill éventuel), puis enfants dans l'ordre de peinture.
   const rootRect = { x: 0, y: 0, w: root.width, h: root.height };
   const { ops: rootFills } = await fillOps(root, rootRect, ctx);
-  result.ops.push(...rootFills);
+  // Fond GARANTI : une app tourne dans son propre buffer fenêtre (non initialisé). Si le
+  // frame n'a AUCUN fill, on peint un fond opaque plein-cadre pour éviter un contenu
+  // « garbage » à l'écran (une vraie app doit toujours avoir une base opaque).
+  if (rootFills.length === 0) {
+    result.ops.push({ kind: "rect", x: 0, y: 0, w: root.width, h: root.height, r: 0, color: 0xff1e1e28, uniform: false });
+  } else {
+    result.ops.push(...rootFills);
+  }
   for (const child of root.children) {
     result.ops.push(...(await classifyNode(child, ctx)));
   }

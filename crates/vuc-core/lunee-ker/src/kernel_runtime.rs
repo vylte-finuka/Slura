@@ -262,6 +262,11 @@ pub fn render_from_marep(
             img_h,
         );
 
+        // Auto-test du chemin d'exécution .ca — ICI car UEFI_ST_PTR vient d'être initialisé
+        // (srfs_uefi_read en a besoin). Le chemin PROD réel est ovc_exec::BlockchainQueueTx,
+        // qui tourne pendant cette même phase quand un marep met une tx en file.
+        crate::ovc_exec::chain_selftest();
+
         // Créer un loader qui capture les handles par valeur (pas par référence)
         let handles: alloc::vec::Vec<uefi::Handle> =
             st.boot_services().find_handles::<SimpleFileSystem>().unwrap_or_default();

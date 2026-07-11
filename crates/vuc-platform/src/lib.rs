@@ -9,6 +9,12 @@
 #[cfg(target_os = "uefi")]
 extern crate alloc;
 
+// Lie le crate `uefi` (features global_allocator + panic_handler activées) même si le
+// code ne l'importe pas directement : sans cette référence, l'artefact staticlib no_std
+// n'inclut pas #[global_allocator]/#[panic_handler] → « no global memory allocator found ».
+#[cfg(target_os = "uefi")]
+extern crate uefi;
+
 // ── Modules std-only ─────────────────────────────────────────────────────────
 #[cfg(not(target_os = "uefi"))]
 pub mod consensus;
@@ -215,7 +221,7 @@ pub mod kernel_abi {
     // =========================================================================
     #[cfg(target_os = "uefi")]
     mod uefi_impl {
-        use alloc::{vec, vec::Vec};
+        use alloc::vec::Vec;
         use core::ffi::c_char;
 
         // ── Registre de l'exécuteur OVC fourni par lunee-ker ─────────────────

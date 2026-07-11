@@ -44,7 +44,7 @@ const mustContain = [
   '<DrvAPIInterCon***SvgLoad***>("SDC:/apps/ShiDemo/ShiDemo.slasset/vec1.svg");',
   "SvgFree***>(svg1);",
   '"Hello Slura", 0xFF000000, 0x00000000, font,',
-  'var font: <ptr> = <DrvAPIInterCon***FontLoad***>("SDC:/assets/fonts/brsonomasemibold.ttf");',
+  'var font: <ptr> = <DrvAPIInterCon***FontGetDefault***>();',
   "GpuBackgroundBlur***>",
   "GpuDrawLinearGradient***>",
   "-90, 0xFF878787, 0, 0xFFB9B9B9, 1000, 2);",

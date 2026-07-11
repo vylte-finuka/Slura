@@ -41,6 +41,10 @@ fn efi_main(image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status
         0x003D,0x000D,0x000A,0x0000,
     ]).unwrap()).unwrap();
 
+    // ── Moteur SluraChain sur l'OS : LoadImage + StartImage du vrai
+    //    vuc_platform_engine.efi (app UEFI). Boot services actifs, AVANT le bureau. ──
+    runtime.launch_platform_engine(&mut system_table, image_handle, "devnet");
+
     // ── Phase 2 : démarrage Maratine — transfert à home.marep ────────────────
     runtime.maratine_phase(&mut system_table, image_handle);
 

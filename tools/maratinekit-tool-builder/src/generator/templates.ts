@@ -31,6 +31,7 @@ function buildStamp(): string {
 
 export interface AppMeta {
   appName: string;       // ex. "ShiNotes" — aussi nom du dossier .slasset
+  screenName: string;    // écran courant (nom du frame Figma) → titre "AppName - Screen"
   isDesktop: boolean;    // variante bureau/shell (boucle WindowMan dans LAPrevent)
   hasAssets: boolean;    // au moins un png/svg exporté
   iconFile: string | null; // ex. "img1.png" (relatif au .slasset), ou null
@@ -39,6 +40,10 @@ export interface AppMeta {
 export function marasetYaml(meta: AppMeta): string {
   const srid = `SRID_${meta.appName.toLowerCase()}`;
   const stamp = buildStamp();
+  // Titre de la barre « Shi Windows » : "AppName - Screen" (le nom du frame = l'écran
+  // courant). Si le frame porte déjà le nom de l'app, on n'ajoute pas de sous-titre.
+  const screen = meta.screenName && meta.screenName !== meta.appName ? meta.screenName : "";
+  const displayTitle = screen ? `${meta.appName}  - ${screen}` : meta.appName;
   const perms = ["gpu.framebuffer", "fs.read"];
   if (meta.hasAssets) perms.push("fs.write");
   const permLines = perms.map((p) => `    - ${p}`).join("\n");
@@ -55,7 +60,7 @@ metadata:
   attributes:
     SRID: ${srid}
     Marav: 0.1 build ${stamp}
-${iconLine}    display_name: "${meta.appName}"
+${iconLine}    display_name: "${displayTitle}"
     description: |
       ${meta.appName} — application Slura OS générée par MaratineKit tool's builder.
     slura_min: 1

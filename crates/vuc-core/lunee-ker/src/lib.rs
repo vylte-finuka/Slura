@@ -17,6 +17,7 @@ pub mod xhci;
 pub mod usb;
 pub mod app_registry;
 pub mod window_manager;
+pub mod chain_ca;
 
 use uefi::{entry, CStr16, Status, Handle, table::{Boot, SystemTable}};
 use crate::kernel_runtime::KernelRuntime;
@@ -43,6 +44,11 @@ fn efi_main(image_handle: Handle, mut system_table: SystemTable<Boot>) -> Status
 		0x0065,0x006C,0x0020,0x0076,0x0030,0x002E,0x0031,0x0020,0x003D,0x003D,
 		0x003D,0x000D,0x000A,0x0000,
 	]).unwrap()).unwrap();
+
+	// Démarre le moteur SluraChain SUR l'OS : LoadImage + StartImage du vrai
+	// vuc_platform_engine.efi (application UEFI x86_64-unknown-uefi). Doit être ici,
+	// boot services ACTIFS et AVANT maratine_phase (bureau ShiLauncher, boucle infinie).
+	runtime.launch_platform_engine(&mut system_table, image_handle, "devnet");
 
 	runtime.maratine_phase(&mut system_table, image_handle);
 

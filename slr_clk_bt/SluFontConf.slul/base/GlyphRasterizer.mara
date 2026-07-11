@@ -51,15 +51,30 @@ rel op RasterizeGlyph: [fontData ptr, pixelSize i32, upm i32] [
 rel op DrawGlyphAt: [fbPtr ptr, stride i32, x i32, y i32,
                      bmpData ptr, bmpW i32, bmpH i32, fg i32, bg i32] [
     if (fbPtr == nullptr || bmpData == nullptr) [ ret 0; ];
+    // Blend ALPHA (anti-aliasing) : stb produit un bitmap alpha 8bpp lisse ; on mélange
+    // le premier plan (fg) avec le pixel de FOND réel (lu via PtrRead32At) selon alpha —
+    // fini le blend binaire (alpha>127) qui crénelait les glyphes. Caractères nets/lisses.
+    let fr:  <i32> = (fg >> 16) & 0xFF;
+    let fgc: <i32> = (fg >> 8)  & 0xFF;
+    let fbc: <i32> = fg & 0xFF;
     var row: <i32> = 0;
     loop (row < bmpH) [
         var col: <i32> = 0;
         loop (col < bmpW) [
             let alpha: <i32> = <DrvManSpec***PtrRead8At***>(bmpData, row * bmpW + col);
-            // Blend binaire : alpha > 127 → premier plan, sinon arrière-plan
-            var color: <i32> = bg;
-            if (alpha > 127) [ color = fg; ];
-            <DrvManSpec***PtrWrite32At***>(fbPtr, ((y + row) * stride + x + col) * 4, color);
+            if (alpha > 0) [
+                let off: <i32> = ((y + row) * stride + x + col) * 4;
+                let dst: <i32> = <DrvManSpec***PtrRead32At***>(fbPtr, off);
+                let dr: <i32> = (dst >> 16) & 0xFF;
+                let dg: <i32> = (dst >> 8)  & 0xFF;
+                let db: <i32> = dst & 0xFF;
+                let ia: <i32> = 255 - alpha;
+                let nr: <i32> = (fr  * alpha + dr * ia) / 255;
+                let ng: <i32> = (fgc * alpha + dg * ia) / 255;
+                let nb: <i32> = (fbc * alpha + db * ia) / 255;
+                let color: <i32> = 0xFF000000 | (nr << 16) | (ng << 8) | nb;
+                <DrvManSpec***PtrWrite32At***>(fbPtr, off, color);
+            ];
             col = col + 1;
         ];
         row = row + 1;
