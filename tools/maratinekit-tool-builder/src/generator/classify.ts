@@ -185,12 +185,33 @@ async function classifyNode(node: SceneNode, ctx: Ctx): Promise<DrawOp[]> {
       const fg = solid ? colorToArgb(solid.color, solid.opacity ?? 1) : 0xff000000;
       const size = typeof t.fontSize === "number" ? Math.round(t.fontSize) : 12;
       const alignMap: Record<string, number> = { LEFT: 0, CENTER: 1, RIGHT: 2, JUSTIFIED: 0 };
-      ops.push({
-        kind: "text",
-        x: r.x, y: r.y, maxW: r.w,
-        content: t.characters.replace(/["\\]/g, "'").replace(/\r?\n/g, " "),
-        fg, size,
-        align: alignMap[t.textAlignHorizontal] ?? 0,
+      const align = alignMap[t.textAlignHorizontal] ?? 0;
+      // Multi-ligne : le kernel (GpuDrawTextFontAlign) ne wrappe PAS — une op par ligne.
+      // \n explicites d'abord ; puis, si le bloc occupe plusieurs lignes dans le design
+      // (hauteur bbox ≥ 1.5×size), wrap par MOTS à la même métrique approx que le kernel
+      // (0.6×size par caractère) pour retrouver les retours du rendu Figma.
+      const raw = t.characters.replace(/["\\]/g, "'");
+      const lineH = Math.round(size * 1.2);
+      const maxChars = Math.max(1, Math.floor(r.w / (size * 0.6)));
+      // Wrap si (a) le bloc occupe plusieurs lignes (hauteur bbox), OU (b) la largeur
+      // estimée déborde nettement la boîte (30 % de marge : un texte auto-width « nowrap »
+      // a une bbox ajustée à son contenu, il ne doit PAS déclencher de faux wrap).
+      const estW = raw.length * size * 0.6;
+      const needWrap = r.h >= size * 1.5 || estW > r.w * 1.3;
+      const lines: string[] = [];
+      for (const para of raw.split(/\r?\n/)) {
+        if (!needWrap || para.length <= maxChars) { lines.push(para); continue; }
+        let cur = "";
+        for (const word of para.split(" ")) {
+          const cand = cur ? `${cur} ${word}` : word;
+          if (cand.length > maxChars && cur) { lines.push(cur); cur = word; }
+          else cur = cand;
+        }
+        if (cur) lines.push(cur);
+      }
+      lines.forEach((content, i) => {
+        if (content.length === 0) return;
+        ops.push({ kind: "text", x: r.x, y: r.y + i * lineH, maxW: r.w, content, fg, size, align });
       });
       break;
     }
@@ -201,7 +222,17 @@ async function classifyNode(node: SceneNode, ctx: Ctx): Promise<DrawOp[]> {
     case "LINE": {
       const bytes = await (node as ExportMixin).exportAsync({ format: "SVG" });
       ctx.result.svgs.push(bytes);
-      ops.push({ kind: "svg", x: r.x, y: r.y, w: r.w, h: r.h, index: ctx.result.svgs.length, uniform: isUniform(r.w, r.h, rot, 0) });
+      // Bounds RENDUS (trait inclus) : une LINE a une bbox de hauteur 0 — toute son
+      // épaisseur vient du stroke (ex. barres soulignées). absoluteRenderBounds = la
+      // zone réellement peinte, qui correspond au viewBox du SVG exporté. Sans ça,
+      // h=0 → SvgDraw invisible.
+      let vx = r.x, vy = r.y, vw = r.w, vh = r.h;
+      const rb = (node as unknown as { absoluteRenderBounds: Rect | null }).absoluteRenderBounds;
+      if (rb && rb.width > 0 && rb.height > 0) {
+        vx = rb.x - ctx.rootX; vy = rb.y - ctx.rootY; vw = rb.width; vh = rb.height;
+      }
+      vw = Math.max(1, vw); vh = Math.max(1, vh);
+      ops.push({ kind: "svg", x: vx, y: vy, w: vw, h: vh, index: ctx.result.svgs.length, uniform: isUniform(vw, vh, rot, 0) });
       break;
     }
     case "ELLIPSE": {

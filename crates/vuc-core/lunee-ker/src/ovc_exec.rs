@@ -4399,7 +4399,12 @@ fn dispatch(
         "DrvAPIInterCon___WindowManClose___" => {
             if let Some(&i) = args.first() {
                 let i = i as usize;
-                unsafe { if i < RUNNING_APPS.len() { RUNNING_APPS.remove(i); } }
+                unsafe {
+                    if i < RUNNING_APPS.len() {
+                        RUNNING_APPS.remove(i);
+                        serial_log(alloc::format!("[WINMAN] fenetre {} FERMEE ({} restante(s))\r\n", i, RUNNING_APPS.len()).as_bytes());
+                    }
+                }
             }
             0
         },
