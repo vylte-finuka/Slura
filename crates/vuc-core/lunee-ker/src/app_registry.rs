@@ -84,8 +84,12 @@ pub fn scan_installed_apps(st: &mut SystemTable<Boot>, image_handle: Handle) -> 
             return result;
         }
     };
+    serial_log(alloc::format!(
+        "[REGISTRY] {} volume(s) SimpleFileSystem a scanner\r\n", handles.len()
+    ).as_bytes());
 
-    'volumes: for &fs_handle in handles.iter() {
+    'volumes: for (vol_i, &fs_handle) in handles.iter().enumerate() {
+        serial_log(alloc::format!("[REGISTRY] volume {} : ouverture...\r\n", vol_i).as_bytes());
         let mut fs = match unsafe {
             st.boot_services().open_protocol::<SimpleFileSystem>(
                 OpenProtocolParams { handle: fs_handle, agent: image_handle, controller: None },
@@ -146,7 +150,16 @@ pub fn scan_installed_apps(st: &mut SystemTable<Boot>, image_handle: Handle) -> 
             result.push(AppManifest { folder_name, display_name, icon_rel, srid, diamond_color, dock_menu_items });
         }
 
-        if !result.is_empty() { break 'volumes; }
+        // Le dossier `\SDC\slu64\apps` a été trouvé et parcouru sur CE volume —
+        // s'arrêter ici, qu'il contienne 0 ou N apps. Avant, on ne s'arrêtait
+        // que si `result` était non vide : un dossier apps présent mais vide
+        // (ou ne contenant que des sous-dossiers sans Maraset.yaml valide)
+        // faisait continuer la boucle sur TOUS les volumes SimpleFileSystem
+        // restants — sans effet sur QEMU/VMware (un seul volume ESP), mais
+        // coûteux sur bare-metal avec plusieurs disques/partitions physiques
+        // (chaque tentative d'accès sur un volume qui ne porte pas SDC a une
+        // latence matérielle réelle, contrairement à un disque virtuel).
+        break 'volumes;
     }
 
     serial_log(alloc::format!("[REGISTRY] {} app(s) :\r\n", result.len()).as_bytes());
