@@ -1,0 +1,31 @@
+//===================================================================
+//  APrevent.mara – Cycle de vie SluDskMan
+//  Projet : SluDskMan.slul
+//  Auteur : Vyft Ltd — 2026
+//  Volontairement mince : ce service ne touche JAMAIS MOUNT_TABLE au
+//  boot (ça reste le rôle exclusif de SRFSMan/NTFSMan, chargés avant
+//  lui — voir l'ordre dans slul_loader.rs). Toute la logique visible
+//  (liste, navigation, création de fichiers, format/mount/unmount)
+//  vit dans ShiLooker.marep, qui appelle directement les FFI
+//  DrvAPIInterCon***Disk...*** exposées par le noyau — ce fichier ne
+//  fait qu'annoncer la présence du service au démarrage.
+//===================================================================
+
+#base <std***ComTpe***SlulFrmt***[ DrvAPIInterCon ]>;
+#base <MaratineKit>;
+#base <MaratineKit***CycleActivity>;
+
+rel op APrevent: <[string CycleActivity]>t [
+
+    var Architecture: <string> = "";
+
+    rel op OnPowerOn: [arch string] [
+        Architecture = arch;
+        log: "SluDskMan: service de gestion des disques pret (detection/mount/unmount reels, format honnete)";
+        ret 0;
+    ];
+
+    rel op OnPowerOff: [] [ log: "SluDskMan: arret"; ret 0; ];
+    rel op OnSuspend:  [] [ log: "SluDskMan: suspension"; ret 0; ];
+    rel op OnResume:   [] [ log: "SluDskMan: reprise"; ret 0; ];
+];

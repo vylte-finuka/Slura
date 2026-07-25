@@ -1,87 +1,827 @@
-#base <std***ComTpe***SlulFrmt***[ DrvAPIInterCon ]>;
+#base <std***ComTpe***SlulFrmt***[ DrvAPIInterCon, DrvManSpec ]>;
 #base <MaratineKit>;
 
-// Généré par MaratineKit tool's builder (plugin Figma) — design 1440×862.
-// Renderer stateless : une seule var im réutilisée (cache image kernel = 8 slots).
+// ShiLooker — vue "Apps, folders & disks" (design Figma 832-4).
+// Notifications + Widgets restent TOUJOURS visibles côte à côte (aucun
+// glissement dessus, rien n'est retiré des assets d'origine vec1..vec7/
+// img1..img5). Seule la colonne de droite change de contenu : elle montre
+// par défaut les tuiles Vyft's suite / Apps / Disks (comme l'original),
+// cliquer une tuile ouvre son contenu à la place des tuiles, et les
+// flèches gauche/droite du CLAVIER (aucune flèche visuelle, aucune zone de
+// clic dédiée) font défiler entre les pages actuellement ouvertes (tuiles
+// + chaque dossier déjà ouvert, ex: Apps et un disque en même temps).
+//
+// État persistant (SCROLL_SCRATCH — slots 8 et 12 réservés ailleurs, voir
+// ContextMenu.mara / SluWWANManSrv, slots 40+ réservés au dock ShiLauncher) :
+//   1 = page courante de la colonne droite (0=tuiles,1=Vyft,2=Apps,3=Disque)
+//   2 = bitmask des pages ouvertes (bit0=Vyft,bit1=Apps,bit2=Disque)
+//   3 = id du disque actuellement affiché par la page Disque (0=SDC,1=A)
+//   4 = type de création +1 (0=aucun dialogue [défaut kernel] ; 1=dossier,
+//       2=txt,3=md,4=bmp — décalé de +1 car SCROLL_SCRATCH vaut 0 par défaut,
+//       qui doit signifier "fermé", pas "type dossier")
+//   5 = bouton gauche à la frame précédente (edge-detect clic, propre à ShiLooker)
+//   6 = key_code brut à la frame précédente (edge-detect flèches clavier)
+//   16 = dernière génération de launch_arg traitée (WindowManGetLaunchArgGen) —
+//        évite de retraiter le même argument de menu contextuel du dock à
+//        chaque frame (LAPrevent::Launch se réexécute en réalité par frame,
+//        voir son commentaire), tout en captant un NOUVEL argument envoyé à
+//        une fenêtre déjà ouverte (WindowManSetLaunchArg, ContextMenu.mara).
 rel op Render: [ctx string, fnt ptr] [
     var im: <i32> = 0;
-    // ── Full-stretch responsive — généré par MaratineKit tool's builder ──
     let sw: <i32> = <DrvAPIInterCon***GpuGetWidth***>();
     let sh: <i32> = <DrvAPIInterCon***GpuGetHeight***>();
     let sW: <i32> = (sw * 1000) / 1440;
     let sH: <i32> = (sh * 1000) / 862;
     let sU: <i32> = (sW + sH) / 2;
 
-        let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectFull***>(((0 * sW + 500) / 1000), ((0 * sH + 500) / 1000), ((1440 * sW + 500) / 1000), ((862 * sH + 500) / 1000), (((0 * sW + 500) / 1000 + (0 * sH + 500) / 1000) / 2), (((0 * sW + 500) / 1000 + (0 * sH + 500) / 1000) / 2), (((16 * sW + 500) / 1000 + (16 * sH + 500) / 1000) / 2), (((16 * sW + 500) / 1000 + (16 * sH + 500) / 1000) / 2), 0xFF548C9B);
+    let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectFull***>(((0 * sW + 500) / 1000), ((0 * sH + 500) / 1000), ((1440 * sW + 500) / 1000), ((862 * sH + 500) / 1000), (((16 * sW + 500) / 1000 + (16 * sH + 500) / 1000) / 2), (((16 * sW + 500) / 1000 + (16 * sH + 500) / 1000) / 2), (((16 * sW + 500) / 1000 + (16 * sH + 500) / 1000) / 2), (((16 * sW + 500) / 1000 + (16 * sH + 500) / 1000) / 2), 0xFF548C9B);
+
+    // ── Entrées + état persistant ───────────────────────────────────────
+    let mx: <i32> = <DrvAPIInterCon***PointerGetX***>();
+    let my: <i32> = <DrvAPIInterCon***PointerGetY***>();
+    let pbtn: <i32> = <DrvAPIInterCon***PointerGetBtn***>();
+    let akc: <i32> = <DrvAPIInterCon***KeyGetCode***>();
+    let tick: <i32> = <DrvAPIInterCon***GpuGetTick***()>;
+
+    let prevBtn: <i32> = <DrvAPIInterCon***ScrollGet***>(5);
+    let clickEdge: <bool> = ((pbtn & 1) != 0 && (prevBtn & 1) == 0);
+    let prevKey: <i32> = <DrvAPIInterCon***ScrollGet***>(6);
+    let leftEdge: <bool> = (akc == 0x10004 && prevKey != 0x10004);
+    let rightEdge: <bool> = (akc == 0x10003 && prevKey != 0x10003);
+    let _: <i32> = <DrvAPIInterCon***ScrollSet***>(5, pbtn);
+    let _: <i32> = <DrvAPIInterCon***ScrollSet***>(6, akc);
+
+    var rightView: <i32> = <DrvAPIInterCon***ScrollGet***>(1);
+    var openFlags: <i32> = <DrvAPIInterCon***ScrollGet***>(2);
+    var selDisk: <i32> = <DrvAPIInterCon***ScrollGet***>(3);
+    var createKind: <i32> = <DrvAPIInterCon***ScrollGet***>(4);
+
+    // ── Argument de lancement (menu contextuel du dock, ex: clic droit sur
+    // l'icône ShiLooker → "New Folder") — traité UNIQUEMENT quand sa génération
+    // change (slot 16), pour ne réagir qu'aux NOUVEAUX arguments : que ce soit
+    // au premier lancement OU pendant que ShiLooker tourne déjà (ContextMenu.mara
+    // route alors vers WindowManSetLaunchArg plutôt que de relancer une seconde
+    // instance — voir son commentaire).
+    let selfIdx: <i32> = <DrvAPIInterCon***WindowManFindByName***>("ShiLooker");
+    if (selfIdx >= 0) [
+        let curGen: <i32> = <DrvAPIInterCon***WindowManGetLaunchArgGen***>(selfIdx);
+        let lastGen: <i32> = <DrvAPIInterCon***ScrollGet***>(16);
+        if (curGen != lastGen) [
+            let _: <i32> = <DrvAPIInterCon***ScrollSet***>(16, curGen);
+            let launchArg: <ptr> = <DrvAPIInterCon***WindowManGetLaunchArg***>(selfIdx);
+
+            let isNewFolder: <i32> = <DrvManSpec***StrEqual***>(launchArg, "New Folder");
+            if (isNewFolder != 0) [
+                let _: <i32> = <DrvAPIInterCon***DiskBrowseReset***>("SDC:");
+                let _: <i32> = <DrvAPIInterCon***TextFieldClear***>();
+                rightView = 3; openFlags = openFlags | 4; selDisk = 0; createKind = 1;
+            ];
+            let isTxt: <i32> = <DrvManSpec***StrEqual***>(launchArg, "txt");
+            if (isTxt != 0) [
+                let _: <i32> = <DrvAPIInterCon***DiskBrowseReset***>("SDC:");
+                let _: <i32> = <DrvAPIInterCon***TextFieldClear***>();
+                rightView = 3; openFlags = openFlags | 4; selDisk = 0; createKind = 2;
+            ];
+            let isMd: <i32> = <DrvManSpec***StrEqual***>(launchArg, "md");
+            if (isMd != 0) [
+                let _: <i32> = <DrvAPIInterCon***DiskBrowseReset***>("SDC:");
+                let _: <i32> = <DrvAPIInterCon***TextFieldClear***>();
+                rightView = 3; openFlags = openFlags | 4; selDisk = 0; createKind = 3;
+            ];
+            let isBmp: <i32> = <DrvManSpec***StrEqual***>(launchArg, "bmp");
+            if (isBmp != 0) [
+                let _: <i32> = <DrvAPIInterCon***DiskBrowseReset***>("SDC:");
+                let _: <i32> = <DrvAPIInterCon***TextFieldClear***>();
+                rightView = 3; openFlags = openFlags | 4; selDisk = 0; createKind = 4;
+            ];
+            let isMountSDC: <i32> = <DrvManSpec***StrEqual***>(launchArg, "Mount SDC");
+            if (isMountSDC != 0) [ let _: <i32> = <DrvAPIInterCon***DiskMount***>(0); ];
+            let isMountA: <i32> = <DrvManSpec***StrEqual***>(launchArg, "Mount A");
+            if (isMountA != 0) [ let _: <i32> = <DrvAPIInterCon***DiskMount***>(1); ];
+            let isUnmountSDC: <i32> = <DrvManSpec***StrEqual***>(launchArg, "Unmount SDC");
+            if (isUnmountSDC != 0) [
+                let _: <i32> = <DrvAPIInterCon***DiskUnmount***>(0);
+                if (selDisk == 0) [ openFlags = openFlags & 3; rightView = 0; ];
+            ];
+            let isUnmountA: <i32> = <DrvManSpec***StrEqual***>(launchArg, "Unmount A");
+            if (isUnmountA != 0) [
+                let _: <i32> = <DrvAPIInterCon***DiskUnmount***>(1);
+                if (selDisk != 0) [ openFlags = openFlags & 3; rightView = 0; ];
+            ];
+
+            // ── Alimentation (menu contextuel Windows-11-style sur l'icône du
+            // dock ShiLooker) — actions immédiates, pas de dialogue : Redemarrer/
+            // Eteindre appellent réellement UEFI ResetSystem (SluPwMan.slul,
+            // ovc_exec.rs::power_restart/power_shutdown) et ne retournent jamais
+            // (le firmware coupe l'exécution ici). Mettre en veille n'agit que si
+            // PowerSleepSupported l'annonce (registres PM1/\_S3 réellement trouvés
+            // dans les tables ACPI au boot) — sinon repli honnête : rien ne se
+            // passe plutôt que de prétendre avoir mis la machine en veille.
+            let isRestart: <i32> = <DrvManSpec***StrEqual***>(launchArg, "Redemarrer");
+            if (isRestart != 0) [ let _: <i32> = <DrvAPIInterCon***PowerRestart***>(); ];
+            let isShutdown: <i32> = <DrvManSpec***StrEqual***>(launchArg, "Eteindre");
+            if (isShutdown != 0) [ let _: <i32> = <DrvAPIInterCon***PowerShutdown***>(); ];
+            let isSleep: <i32> = <DrvManSpec***StrEqual***>(launchArg, "Mettre en veille");
+            if (isSleep != 0) [
+                let sleepOk: <i32> = <DrvAPIInterCon***PowerSleepSupported***>();
+                if (sleepOk != 0) [ let _: <i32> = <DrvAPIInterCon***PowerSleep***>(); ];
+            ];
+        ];
+    ];
+
+    let diskCount: <i32> = <DrvAPIInterCon***MountTableCount***()>;
+
+    // ── Navigation clavier gauche/droite : fait défiler entre les pages
+    // OUVERTES (tuiles + Vyft/Apps/Disque si ouverts), dans cet ordre fixe.
+    // Aucun élément visuel n'est dessiné pour cette navigation.
+    let openVyft: <i32> = openFlags & 1;
+    let openApps: <i32> = openFlags & 2;
+    let openDisk: <i32> = openFlags & 4;
+    if (leftEdge && rightView == 1) [ rightView = 0; ];
+    if (leftEdge && rightView == 2 && openVyft != 0) [ rightView = 1; ];
+    if (leftEdge && rightView == 2 && openVyft == 0) [ rightView = 0; ];
+    if (leftEdge && rightView == 3 && openApps != 0) [ rightView = 2; ];
+    if (leftEdge && rightView == 3 && openApps == 0 && openVyft != 0) [ rightView = 1; ];
+    if (leftEdge && rightView == 3 && openApps == 0 && openVyft == 0) [ rightView = 0; ];
+    if (rightEdge && rightView == 0 && openVyft != 0) [ rightView = 1; ];
+    if (rightEdge && rightView == 0 && openVyft == 0 && openApps != 0) [ rightView = 2; ];
+    if (rightEdge && rightView == 0 && openVyft == 0 && openApps == 0 && openDisk != 0) [ rightView = 3; ];
+    if (rightEdge && rightView == 1 && openApps != 0) [ rightView = 2; ];
+    if (rightEdge && rightView == 1 && openApps == 0 && openDisk != 0) [ rightView = 3; ];
+    if (rightEdge && rightView == 2 && openDisk != 0) [ rightView = 3; ];
+
+    // ═══════════════════════ Colonne gauche : Notifications ═══════════════
+    // (identique à l'origine, position/texte/carte inchangés — rien retiré.)
+    let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((28 * sW + 500) / 1000), ((14 * sH + 500) / 1000), ((233 * sW + 500) / 1000), "ShiLooker", 0xFF000000, 0x00000000, fnt, ((48 * sU + 500) / 1000), 0);
+    let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((28 * sW + 500) / 1000), ((112 * sH + 500) / 1000), ((181 * sW + 500) / 1000), "Notfications", 0xFF000000, 0x00000000, fnt, ((30 * sU + 500) / 1000), 0);
+    let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((31 * sW + 500) / 1000), ((155 * sH + 500) / 1000), ((70 * sW + 500) / 1000), "Today", 0xFF000000, 0x00000000, fnt, ((24 * sU + 500) / 1000), 0);
+    let svg6: <ptr> = <DrvAPIInterCon***SvgLoad***>("SDC:/apps/ShiLooker/ShiLooker.slasset/vec6.svg");
+    let _: <i32> = <DrvAPIInterCon***SvgDraw***>(svg6, ((28 * sW + 500) / 1000), ((191 * sH + 500) / 1000), ((516 * sW + 500) / 1000), ((127 * sH + 500) / 1000));
+    let _: <i32> = <DrvAPIInterCon***SvgFree***>(svg6);
+    let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((42 * sW + 500) / 1000), ((205 * sH + 500) / 1000), ((50 * sW + 500) / 1000), "10:45", 0xFFC1BFC0, 0x00000000, fnt, ((20 * sU + 500) / 1000), 0);
+    let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((96 * sW + 500) / 1000), ((205 * sH + 500) / 1000), ((11 * sW + 500) / 1000), "•", 0xFF2D2D2D, 0x00000000, fnt, ((20 * sU + 500) / 1000), 0);
+    let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((151 * sW + 500) / 1000), ((205 * sH + 500) / 1000), ((266 * sW + 500) / 1000), "ShiSettings • SluPwManSrv", 0xFF2D2D2D, 0x00000000, fnt, ((20 * sU + 500) / 1000), 0);
+    let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((151 * sW + 500) / 1000), ((248 * sH + 500) / 1000), ((407 * sW + 500) / 1000), "Device is actually on the sector, is", 0xFF2D2D2D, 0x00000000, fnt, ((16 * sU + 500) / 1000), 0);
+    let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((151 * sW + 500) / 1000), ((267 * sH + 500) / 1000), ((407 * sW + 500) / 1000), "completely charged (100%)", 0xFF2D2D2D, 0x00000000, fnt, ((16 * sU + 500) / 1000), 0);
+    let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(((52 * sW + 500) / 1000), ((240 * sH + 500) / 1000), ((48 * sW + 500) / 1000), ((48 * sH + 500) / 1000), (((15 * sW + 500) / 1000 + (15 * sH + 500) / 1000) / 2), 0xFFE0E0E0);
+    im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLooker/ShiLooker.slasset/img3.png");
+    let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ((57 * sW + 500) / 1000), ((226 * sH + 500) / 1000), ((39 * sW + 500) / 1000), ((82 * sH + 500) / 1000));
+    let svg7: <ptr> = <DrvAPIInterCon***SvgLoad***>("SDC:/apps/ShiLooker/ShiLooker.slasset/vec7.svg");
+    let _: <i32> = <DrvAPIInterCon***SvgDraw***>(svg7, ((111 * sW + 500) / 1000), ((200 * sH + 500) / 1000), ((34 * sW + 500) / 1000), ((34 * sH + 500) / 1000));
+    let _: <i32> = <DrvAPIInterCon***SvgFree***>(svg7);
+
+    // ═══════════════════════ Colonne centrale : Widgets ════════════════════
+    let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((572 * sW + 500) / 1000), ((12 * sH + 500) / 1000), ((294 * sW + 500) / 1000), "Notifications & widgets", 0xFF000000, 0x00000000, fnt, ((26 * sU + 500) / 1000), 0);
+    let _: <i32> = <DrvAPIInterCon***GpuSetOpacity***>(178);
+    let svg4: <ptr> = <DrvAPIInterCon***SvgLoad***>("SDC:/apps/ShiLooker/ShiLooker.slasset/vec4.svg");
+    let _: <i32> = <DrvAPIInterCon***SvgDraw***>(svg4, ((598 * sW + 500) / 1000), ((53 * sH + 500) / 1000), ((243 * sW + 500) / 1000), ((8 * sH + 500) / 1000));
+    let _: <i32> = <DrvAPIInterCon***SvgFree***>(svg4);
+    let _: <i32> = <DrvAPIInterCon***GpuResetOpacity***>();
+    let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((572 * sW + 500) / 1000), ((112 * sH + 500) / 1000), ((123 * sW + 500) / 1000), "Widgets", 0xFF000000, 0x00000000, fnt, ((30 * sU + 500) / 1000), 0);
+
+
+    // ── Widget ShiCamera (capture photo/vidéo, icône seule) ────────────────────
+    // État (SCROLL_SCRATCH, slots libres après 20-25 pris par VMware) :
+    // 26=menu Photo/Video ouvert, 27=enregistrement vidéo actif,
+    // 28=compteur de throttle capture frame, 29=tick de fin d'affichage (réservé),
+    // 30=edge-detect clic du badge dossier (CaptureFolderPicker a slot 31).
+    let cpX: <i32> = ((572 * sW + 500) / 1000);
+    let cpY: <i32> = ((150 * sH + 500) / 1000);
+    let cpW: <i32> = ((120 * sW + 500) / 1000);
+    let cpH: <i32> = ((120 * sH + 500) / 1000);
+    let cpR: <i32> = (((12 * sW + 500) / 1000 + (12 * sH + 500) / 1000) / 2);
+    let _: <i32> = <DrvAPIInterCon***GpuDrawDropShadow***>(cpX, cpY, cpW, cpH, cpR, 0, 4, 4, 0x40000000);
+    let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(cpX, cpY, cpW, cpH, cpR, 0xFFFFFFFF);
+
+    let camIconW: <i32> = ((64 * sW + 500) / 1000);
+    let camIconH: <i32> = ((32 * sH + 500) / 1000);
+    let camIconX: <i32> = (cpX + (cpW - camIconW) / 2);
+    let camIconY: <i32> = (cpY + (cpH - camIconH) / 2);
+    im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLooker/ShiLooker.slasset/ShiCamera.png");
+    let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, camIconX, camIconY, camIconW, camIconH);
+
+    let recording: <i32> = <DrvAPIInterCon***ScrollGet***>(27);
+    if (recording != 0) [
+        let recDotD: <i32> = ((10 * sU + 500) / 1000);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>((cpX + cpW - recDotD - ((10 * sW + 500) / 1000)), (cpY + ((10 * sH + 500) / 1000)), recDotD, recDotD, (recDotD / 2), 0xFFD64545);
+    ];
+
+    // Badge "choisir un dossier" (coin bas-droit) — carré gris clair + barre
+    // blanche, style cohérent avec tuile disque Figma. Ouvre CaptureFolderPicker.
+    let fbSize: <i32> = ((16 * sU + 500) / 1000);
+    let fbX: <i32> = (cpX + cpW - fbSize - ((6 * sW + 500) / 1000));
+    let fbY: <i32> = (cpY + cpH - fbSize - ((6 * sH + 500) / 1000));
+    let fbR: <i32> = ((3 * sU + 500) / 1000);
+    let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(fbX, fbY, fbSize, fbSize, fbR, 0xFFD8D8D8);
+    let barH: <i32> = ((6 * sU + 500) / 1000);
+    let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>((fbX + ((2 * sU + 500) / 1000)), (fbY + ((1 * sU + 500) / 1000)), (fbSize - ((4 * sU + 500) / 1000)), barH, ((1 * sU + 500) / 1000), 0xFFFFFFFF);
+    let overBadgeX: <bool> = (mx >= fbX && mx <= (fbX + fbSize));
+    let overBadgeY: <bool> = (my >= fbY && my <= (fbY + fbSize));
+    let overBadge: <bool> = (overBadgeX && overBadgeY);
+
+    let prevBadgeBtn: <i32> = <DrvAPIInterCon***ScrollGet***>(30);
+    let badgeClickEdge: <bool> = ((pbtn & 1) != 0 && (prevBadgeBtn & 1) == 0);
+    let _: <i32> = <DrvAPIInterCon***ScrollSet***>(30, pbtn);
+    if (overBadge && badgeClickEdge) [
+        let _: <i32> = <DrvAPIInterCon***ScrollSet***>(26, 0);
+        let _: <i32> = <CaptureFolderPicker***Open***>(cpX, (cpY + cpH + ((8 * sH + 500) / 1000)));
+    ];
+
+    let overCamX: <bool> = (mx >= cpX && mx <= (cpX + cpW));
+    let overCamY: <bool> = (my >= cpY && my <= (cpY + cpH));
+    let cardClick: <bool> = (overCamX && overCamY && (overBadge == false));
+    let menuOpen: <i32> = <DrvAPIInterCon***ScrollGet***>(26);
+
+    // Clic sur le widget (excluant le badge) : enregistrement en cours → arrête
+    // direct (pas de menu). Sinon → ouvre/ferme le choix Photo/Vidéo.
+    if (cardClick && clickEdge && recording != 0) [
+        let _: <i32> = <DrvAPIInterCon***MediaVideoStop***>();
+        let _: <i32> = <DrvAPIInterCon***ScrollSet***>(27, 0);
+    ];
+    if (cardClick && clickEdge && recording == 0) [
+        let nextMenu: <i32> = 1 - menuOpen;
+        let _: <i32> = <DrvAPIInterCon***ScrollSet***>(26, nextMenu);
+        let _: <i32> = <CaptureFolderPicker***Close***>();
+    ];
+
+    // Menu Photo/Vidéo — carte givrée, même séquence que ContextMenu.mara
+    // (flou AVANT le tint, jamais après). mnW découplé de cpW (carré 120 trop étroit).
+    if (menuOpen != 0 && recording == 0) [
+        let mnX: <i32> = cpX;
+        let mnY: <i32> = (cpY + cpH + ((8 * sH + 500) / 1000));
+        let mnW: <i32> = ((180 * sW + 500) / 1000);
+        let mnH: <i32> = ((88 * sH + 500) / 1000);
+        let mnR: <i32> = cpR;
+        let _: <i32> = <DrvAPIInterCon***GpuSetTransform2D***>(10000, 0, 0, 10000, mnX, mnY);
+        let _: <i32> = <DrvAPIInterCon***GpuBackgroundBlur***>(mnX, mnY, mnW, mnH, mnR, 12);
+        let _: <i32> = <DrvAPIInterCon***GpuResetTransform***>();
+        let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(mnX, mnY, mnW, mnH, mnR, 0xE6FFFFFF);
+
+        let rowH: <i32> = (mnH / 2);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>((mnX + ((20 * sW + 500) / 1000)), (mnY + ((14 * sH + 500) / 1000)), (mnW - ((40 * sW + 500) / 1000)), "Photo (PNG)", 0xFF000000, 0x00000000, fnt, ((18 * sU + 500) / 1000), 0);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>((mnX + ((20 * sW + 500) / 1000)), (mnY + rowH + ((14 * sH + 500) / 1000)), (mnW - ((40 * sW + 500) / 1000)), "Video (AVI)", 0xFF000000, 0x00000000, fnt, ((18 * sU + 500) / 1000), 0);
+
+        let overPhotoRow: <bool> = (mx >= mnX && mx <= (mnX + mnW) && my >= mnY && my <= (mnY + rowH));
+        let overVideoRow: <bool> = (mx >= mnX && mx <= (mnX + mnW) && my >= (mnY + rowH) && my <= (mnY + mnH));
+        if (overPhotoRow && clickEdge) [
+            let _: <i32> = <DrvAPIInterCon***MediaCapturePhoto***>();
+            let _: <i32> = <DrvAPIInterCon***ScrollSet***>(26, 0);
+            let _: <i32> = <DrvAPIInterCon***ScrollSet***>(29, (tick + 150));
+        ];
+        if (overVideoRow && clickEdge) [
+            let _: <i32> = <DrvAPIInterCon***MediaVideoStart***>();
+            let _: <i32> = <DrvAPIInterCon***ScrollSet***>(27, 1);
+            let _: <i32> = <DrvAPIInterCon***ScrollSet***>(28, 0);
+            let _: <i32> = <DrvAPIInterCon***ScrollSet***>(26, 0);
+        ];
+        // Clic en dehors du widget ET du menu → ferme.
+        let overMenuY: <bool> = (my >= mnY && my <= (mnY + mnH));
+        if (clickEdge && (overCamX == false) && (overMenuY == false)) [
+            let _: <i32> = <DrvAPIInterCon***ScrollSet***>(26, 0);
+        ];
+    ];
+
+    // Capture périodique pendant l'enregistrement (throttle ~4 fps, pas
+    // chaque frame — voir MediaVideoCaptureFrame côté Rust). Arrêt auto +
+    // sauvegarde si le plafond de frames est atteint.
+    if (recording != 0) [
+        let capTick: <i32> = <DrvAPIInterCon***ScrollGet***>(28);
+        let capNext: <i32> = (capTick + 1);
+        if (capNext >= 15) [
+            let _: <i32> = <DrvAPIInterCon***ScrollSet***>(28, 0);
+            let newCount: <i32> = <DrvAPIInterCon***MediaVideoCaptureFrame***>();
+            if (newCount >= 40) [
+                let _: <i32> = <DrvAPIInterCon***MediaVideoStop***>();
+                let _: <i32> = <DrvAPIInterCon***ScrollSet***>(27, 0);
+            ];
+        ];
+        if (capNext < 15) [
+            let _: <i32> = <DrvAPIInterCon***ScrollSet***>(28, capNext);
+        ];
+    ];
+
+    // Rendu du sélecteur de dossier de capture (toujours visible, indépendant de rightView).
+    let _: <i32> = <CaptureFolderPicker***RenderAndHandle***>(ctx, fnt, mx, my, pbtn, sU);
+
+    // ═══════════════════════ Colonne droite : header (toujours visible) ═══
+    let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((1172 * sW + 500) / 1000), ((12 * sH + 500) / 1000), ((268 * sW + 500) / 1000), "Apps, folders  & disks", 0xFF000000, 0x00000000, fnt, ((26 * sU + 500) / 1000), 0);
+    let _: <i32> = <DrvAPIInterCon***GpuSetOpacity***>(178);
+    let svg3: <ptr> = <DrvAPIInterCon***SvgLoad***>("SDC:/apps/ShiLooker/ShiLooker.slasset/vec3.svg");
+    let _: <i32> = <DrvAPIInterCon***SvgDraw***>(svg3, ((1345 * sW + 500) / 1000), ((53 * sH + 500) / 1000), ((33 * sW + 500) / 1000), ((8 * sH + 500) / 1000));
+    let _: <i32> = <DrvAPIInterCon***SvgFree***>(svg3);
+    let _: <i32> = <DrvAPIInterCon***GpuResetOpacity***>();
+
+    // ── Page 0 : tuiles Vyft's suite / Apps / Disks (défaut, comme l'origine) ──
+    if (rightView == 0) [
+        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((1172 * sW + 500) / 1000), ((105 * sH + 500) / 1000), ((76 * sW + 500) / 1000), "Apps", 0xFF000000, 0x00000000, fnt, ((30 * sU + 500) / 1000), 0);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((1172 * sW + 500) / 1000), ((163 * sH + 500) / 1000), ((257 * sW + 500) / 1000), "Last installation today", 0xFF000000, 0x00000000, fnt, ((24 * sU + 500) / 1000), 0);
+
+        // Tuile "Vyft's suite" — fond granulé façon dock (GpuDrawFloavaBlob
+        // phase=-1 = intérieur uni + bruit, pas de rayures) SOUS l'icône
+        // img1.png, qui elle reste dessinée par-dessus (l'icône du logo est
+        // conservée, seule la texture de fond change — verdict user : garder
+        // les icônes de dossier, juste granuler ce qu'il y a dessous).
         let _: <i32> = <DrvAPIInterCon***GpuDrawDropShadow***>(((1313 * sW + 500) / 1000), ((220 * sH + 500) / 1000), ((68 * sW + 500) / 1000), ((50 * sH + 500) / 1000), (((8 * sW + 500) / 1000 + (8 * sH + 500) / 1000) / 2), 0, 4, 4, 0x40000000);
-        let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(((1313 * sW + 500) / 1000), ((220 * sH + 500) / 1000), ((68 * sW + 500) / 1000), ((50 * sH + 500) / 1000), (((8 * sW + 500) / 1000 + (8 * sH + 500) / 1000) / 2), 0xFF5960DA);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawFloavaBlob***>(((1313 * sW + 500) / 1000), ((220 * sH + 500) / 1000), ((68 * sW + 500) / 1000), ((50 * sH + 500) / 1000), (((8 * sW + 500) / 1000 + (8 * sH + 500) / 1000) / 2), 0xFF5960DA, (0 - 1));
         let svg1: <ptr> = <DrvAPIInterCon***SvgLoad***>("SDC:/apps/ShiLooker/ShiLooker.slasset/vec1.svg");
         let _: <i32> = <DrvAPIInterCon***SvgDraw***>(svg1, ((1313 * sW + 500) / 1000), ((211 * sH + 500) / 1000), ((40 * sW + 500) / 1000), ((4 * sH + 500) / 1000));
         let _: <i32> = <DrvAPIInterCon***SvgFree***>(svg1);
-        // Police NOYAU via FontGetDefault() : GpuDrawTextFontAlign rastérise avec
-        // ctx.font_len (longueur de la police du noyau) ; il FAUT donc lui passer le
-        // MÊME pointeur (celui de srfs_font_ptr = FontGetDefault), sinon le parseur TTF
-        // lit une mauvaise taille et ne produit aucun glyphe. (Famille/style Figma ignorés.)
-        var font: <ptr> = <DrvAPIInterCon***FontGetDefault***>();
-        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((1297 * sW + 500) / 1000), ((288 * sH + 500) / 1000), ((99 * sW + 500) / 1000), "Vyft’s", 0xFF000000, 0x00000000, font, ((18 * sU + 500) / 1000), 0);
-        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((1297 * sW + 500) / 1000), ((310 * sH + 500) / 1000), ((99 * sW + 500) / 1000), "suite", 0xFF000000, 0x00000000, font, ((18 * sU + 500) / 1000), 0);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((1297 * sW + 500) / 1000), ((288 * sH + 500) / 1000), ((99 * sW + 500) / 1000), "Vyft’s", 0xFF000000, 0x00000000, fnt, ((18 * sU + 500) / 1000), 0);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((1297 * sW + 500) / 1000), ((310 * sH + 500) / 1000), ((99 * sW + 500) / 1000), "suite", 0xFF000000, 0x00000000, fnt, ((18 * sU + 500) / 1000), 0);
         im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLooker/ShiLooker.slasset/img1.png");
         let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ((1319 * sW + 500) / 1000), ((217 * sH + 500) / 1000), ((56 * sW + 500) / 1000), ((56 * sH + 500) / 1000));
+        let overVyftX: <bool> = (mx >= ((1313 * sW + 500) / 1000) && mx <= ((1381 * sW + 500) / 1000));
+        let overVyftY: <bool> = (my >= ((220 * sH + 500) / 1000) && my <= ((270 * sH + 500) / 1000));
+        if (overVyftX && overVyftY && clickEdge) [
+            openFlags = openFlags | 1;
+            rightView = 1;
+        ];
+
+        // Tuile "Apps" — même traitement grain granulé que "Vyft's suite" ci-dessus,
+        // icône img2.png conservée par-dessus le fond.
         let _: <i32> = <DrvAPIInterCon***GpuDrawDropShadow***>(((1313 * sW + 500) / 1000), ((338 * sH + 500) / 1000), ((68 * sW + 500) / 1000), ((50 * sH + 500) / 1000), (((8 * sW + 500) / 1000 + (8 * sH + 500) / 1000) / 2), 0, 4, 4, 0x40000000);
-        let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(((1313 * sW + 500) / 1000), ((338 * sH + 500) / 1000), ((68 * sW + 500) / 1000), ((50 * sH + 500) / 1000), (((8 * sW + 500) / 1000 + (8 * sH + 500) / 1000) / 2), 0xFF565656);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawFloavaBlob***>(((1313 * sW + 500) / 1000), ((338 * sH + 500) / 1000), ((68 * sW + 500) / 1000), ((50 * sH + 500) / 1000), (((8 * sW + 500) / 1000 + (8 * sH + 500) / 1000) / 2), 0xFF565656, (0 - 1));
         let svg2: <ptr> = <DrvAPIInterCon***SvgLoad***>("SDC:/apps/ShiLooker/ShiLooker.slasset/vec2.svg");
         let _: <i32> = <DrvAPIInterCon***SvgDraw***>(svg2, ((1313 * sW + 500) / 1000), ((329 * sH + 500) / 1000), ((40 * sW + 500) / 1000), ((4 * sH + 500) / 1000));
         let _: <i32> = <DrvAPIInterCon***SvgFree***>(svg2);
-        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((1323 * sW + 500) / 1000), ((403 * sH + 500) / 1000), ((46 * sW + 500) / 1000), "Apps", 0xFF000000, 0x00000000, font, ((18 * sU + 500) / 1000), 0);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((1323 * sW + 500) / 1000), ((403 * sH + 500) / 1000), ((46 * sW + 500) / 1000), "Apps", 0xFF000000, 0x00000000, fnt, ((18 * sU + 500) / 1000), 0);
         im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLooker/ShiLooker.slasset/img2.png");
         let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ((1322 * sW + 500) / 1000), ((338 * sH + 500) / 1000), ((49 * sW + 500) / 1000), ((49 * sH + 500) / 1000));
-        let _: <i32> = <DrvAPIInterCon***GpuSetOpacity***>(178);
-        let svg3: <ptr> = <DrvAPIInterCon***SvgLoad***>("SDC:/apps/ShiLooker/ShiLooker.slasset/vec3.svg");
-        let _: <i32> = <DrvAPIInterCon***SvgDraw***>(svg3, ((1345 * sW + 500) / 1000), ((53 * sH + 500) / 1000), ((33 * sW + 500) / 1000), ((8 * sH + 500) / 1000));
-        let _: <i32> = <DrvAPIInterCon***SvgFree***>(svg3);
-        let _: <i32> = <DrvAPIInterCon***GpuResetOpacity***>();
-        let _: <i32> = <DrvAPIInterCon***GpuSetOpacity***>(178);
-        let svg4: <ptr> = <DrvAPIInterCon***SvgLoad***>("SDC:/apps/ShiLooker/ShiLooker.slasset/vec4.svg");
-        let _: <i32> = <DrvAPIInterCon***SvgDraw***>(svg4, ((598 * sW + 500) / 1000), ((53 * sH + 500) / 1000), ((243 * sW + 500) / 1000), ((8 * sH + 500) / 1000));
-        let _: <i32> = <DrvAPIInterCon***SvgFree***>(svg4);
-        let _: <i32> = <DrvAPIInterCon***GpuResetOpacity***>();
-        let _: <i32> = <DrvAPIInterCon***GpuDrawDropShadow***>(((1313 * sW + 500) / 1000), ((512 * sH + 500) / 1000), ((68 * sW + 500) / 1000), ((33 * sH + 500) / 1000), (((8 * sW + 500) / 1000 + (8 * sH + 500) / 1000) / 2), 0, 4, 4, 0x40000000);
-        let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(((1313 * sW + 500) / 1000), ((512 * sH + 500) / 1000), ((68 * sW + 500) / 1000), ((33 * sH + 500) / 1000), (((8 * sW + 500) / 1000 + (8 * sH + 500) / 1000) / 2), 0xFFE0E0E0);
-        let svg5: <ptr> = <DrvAPIInterCon***SvgLoad***>("SDC:/apps/ShiLooker/ShiLooker.slasset/vec5.svg");
-        let _: <i32> = <DrvAPIInterCon***SvgDraw***>(svg5, ((1327 * sW + 500) / 1000), ((536 * sH + 500) / 1000), ((40 * sW + 500) / 1000), ((4 * sH + 500) / 1000));
-        let _: <i32> = <DrvAPIInterCon***SvgFree***>(svg5);
-        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((1243 * sW + 500) / 1000), ((563 * sH + 500) / 1000), ((208 * sW + 500) / 1000), "SDC (C:)", 0xFF000000, 0x00000000, font, ((18 * sU + 500) / 1000), 1);
-        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((1172 * sW + 500) / 1000), ((12 * sH + 500) / 1000), ((268 * sW + 500) / 1000), "Apps, folders  & disks", 0xFF000000, 0x00000000, font, ((26 * sU + 500) / 1000), 0);
-        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((572 * sW + 500) / 1000), ((12 * sH + 500) / 1000), ((294 * sW + 500) / 1000), "Notifications & widgets", 0xFF000000, 0x00000000, font, ((26 * sU + 500) / 1000), 0);
-        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((701 * sW + 500) / 1000), ((431 * sH + 500) / 1000), ((331 * sW + 500) / 1000), "No widget, try add one here.", 0xFFB7B7B7, 0x00000000, font, ((24 * sU + 500) / 1000), 0);
-        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((28 * sW + 500) / 1000), ((14 * sH + 500) / 1000), ((233 * sW + 500) / 1000), "ShiLooker", 0xFF000000, 0x00000000, font, ((48 * sU + 500) / 1000), 0);
-        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((28 * sW + 500) / 1000), ((112 * sH + 500) / 1000), ((181 * sW + 500) / 1000), "Notfications", 0xFF000000, 0x00000000, font, ((30 * sU + 500) / 1000), 0);
-        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((1172 * sW + 500) / 1000), ((105 * sH + 500) / 1000), ((76 * sW + 500) / 1000), "Apps", 0xFF000000, 0x00000000, font, ((30 * sU + 500) / 1000), 0);
-        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((31 * sW + 500) / 1000), ((155 * sH + 500) / 1000), ((70 * sW + 500) / 1000), "Today", 0xFF000000, 0x00000000, font, ((24 * sU + 500) / 1000), 0);
-        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((1172 * sW + 500) / 1000), ((163 * sH + 500) / 1000), ((257 * sW + 500) / 1000), "Last installation today", 0xFF000000, 0x00000000, font, ((24 * sU + 500) / 1000), 0);
-        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((1172 * sW + 500) / 1000), ((431 * sH + 500) / 1000), ((77 * sW + 500) / 1000), "Disks", 0xFF000000, 0x00000000, font, ((30 * sU + 500) / 1000), 0);
-        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((572 * sW + 500) / 1000), ((112 * sH + 500) / 1000), ((123 * sW + 500) / 1000), "Widgets", 0xFF000000, 0x00000000, font, ((30 * sU + 500) / 1000), 0);
-        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((1010 * sW + 500) / 1000), ((807 * sH + 500) / 1000), ((112 * sW + 500) / 1000), "Vyft Mobile", 0xFF2D2D2D, 0x00000000, font, ((20 * sU + 500) / 1000), 0);
-        let svg6: <ptr> = <DrvAPIInterCon***SvgLoad***>("SDC:/apps/ShiLooker/ShiLooker.slasset/vec6.svg");
-        let _: <i32> = <DrvAPIInterCon***SvgDraw***>(svg6, ((28 * sW + 500) / 1000), ((191 * sH + 500) / 1000), ((516 * sW + 500) / 1000), ((127 * sH + 500) / 1000));
-        let _: <i32> = <DrvAPIInterCon***SvgFree***>(svg6);
-        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((42 * sW + 500) / 1000), ((205 * sH + 500) / 1000), ((50 * sW + 500) / 1000), "10:45", 0xFFC1BFC0, 0x00000000, font, ((20 * sU + 500) / 1000), 0);
-        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((96 * sW + 500) / 1000), ((205 * sH + 500) / 1000), ((11 * sW + 500) / 1000), "•", 0xFF2D2D2D, 0x00000000, font, ((20 * sU + 500) / 1000), 0);
-        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((151 * sW + 500) / 1000), ((205 * sH + 500) / 1000), ((266 * sW + 500) / 1000), "ShiSettings • SluPwManSrv", 0xFF2D2D2D, 0x00000000, font, ((20 * sU + 500) / 1000), 0);
-        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((151 * sW + 500) / 1000), ((248 * sH + 500) / 1000), ((407 * sW + 500) / 1000), "Device is actually on the sector, is", 0xFF2D2D2D, 0x00000000, font, ((16 * sU + 500) / 1000), 0);
-        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((151 * sW + 500) / 1000), ((267 * sH + 500) / 1000), ((407 * sW + 500) / 1000), "completely charged (100%)", 0xFF2D2D2D, 0x00000000, font, ((16 * sU + 500) / 1000), 0);
-        let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(((52 * sW + 500) / 1000), ((240 * sH + 500) / 1000), ((48 * sW + 500) / 1000), ((48 * sH + 500) / 1000), (((15 * sW + 500) / 1000 + (15 * sH + 500) / 1000) / 2), 0xFFE0E0E0);
-        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLooker/ShiLooker.slasset/img3.png");
-        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ((57 * sW + 500) / 1000), ((226 * sH + 500) / 1000), ((39 * sW + 500) / 1000), ((82 * sH + 500) / 1000));
-        let svg7: <ptr> = <DrvAPIInterCon***SvgLoad***>("SDC:/apps/ShiLooker/ShiLooker.slasset/vec7.svg");
-        let _: <i32> = <DrvAPIInterCon***SvgDraw***>(svg7, ((111 * sW + 500) / 1000), ((200 * sH + 500) / 1000), ((34 * sW + 500) / 1000), ((34 * sH + 500) / 1000));
-        let _: <i32> = <DrvAPIInterCon***SvgFree***>(svg7);
-        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLooker/ShiLooker.slasset/img4.png");
-        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ((1159 * sW + 500) / 1000), ((811 * sH + 500) / 1000), ((7 * sW + 500) / 1000), ((15 * sH + 500) / 1000));
-        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLooker/ShiLooker.slasset/img5.png");
+        let overAppsX: <bool> = (mx >= ((1313 * sW + 500) / 1000) && mx <= ((1381 * sW + 500) / 1000));
+        let overAppsY: <bool> = (my >= ((338 * sH + 500) / 1000) && my <= ((388 * sH + 500) / 1000));
+        if (overAppsX && overAppsY && clickEdge) [
+            openFlags = openFlags | 2;
+            rightView = 2;
+        ];
+
+        // Disques : MÊME tuile 68×33 que le design Figma d'origine (ombre +
+        // rect arrondi 0xFFE0E0E0 + accent vec5 à l'intérieur près du bas, PAS
+        // une carte pleine largeur ni d'icône image — vérifié par capture
+        // Figma 832:4 (node 159:108/900:4) : les tuiles disque sont CÔTE À
+        // CÔTE horizontalement (même Y=499, X = 1187 puis 1306, écart 119px),
+        // PAS empilées verticalement — corrigé (l'ancien dtY += 50 empilait
+        // en colonne, contrairement au design). Pas d'icône stat_sys_storage
+        // dans le design (tuile 68×33 = ombre + rect 0xFFE0E0E0 + trait
+        // d'accent + libellé centré dessous), retirée pour matcher Figma.
+        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((1172 * sW + 500) / 1000), ((431 * sH + 500) / 1000), ((77 * sW + 500) / 1000), "Disks", 0xFF000000, 0x00000000, fnt, ((30 * sU + 500) / 1000), 0);
+        var dti: <i32> = 0;
+        loop (dti < diskCount) [
+            let dtId: <i32> = <DrvAPIInterCon***MountTableGetDiskId***>(dti);
+            let dtLabel: <ptr> = <DrvAPIInterCon***MountTableGetLabel***>(dti);
+            let dtX: <i32> = 1187 + (dti * 119);
+            let dtY: <i32> = 499;
+            let _: <i32> = <DrvAPIInterCon***GpuDrawDropShadow***>(((dtX * sW + 500) / 1000), ((dtY * sH + 500) / 1000), ((68 * sW + 500) / 1000), ((33 * sH + 500) / 1000), (((8 * sW + 500) / 1000 + (8 * sH + 500) / 1000) / 2), 0, 4, 4, 0x40000000);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(((dtX * sW + 500) / 1000), ((dtY * sH + 500) / 1000), ((68 * sW + 500) / 1000), ((33 * sH + 500) / 1000), (((8 * sW + 500) / 1000 + (8 * sH + 500) / 1000) / 2), 0xFFE0E0E0);
+
+            // Trait d'accent en couleur aléatoire (40 palette vives + pastel)
+            let diskSeed: <i32> = (tick * 7919 + dti * 6521) ^ (tick >> 16);
+            let diskColorIdx: <i32> = (diskSeed % 40);
+            var diskAccentColor: <i32> = 0xFFFFFFFF;
+            // Vives (0-19)
+            if (diskColorIdx ==  0) [ diskAccentColor = 0xFFE53935; ];
+            if (diskColorIdx ==  1) [ diskAccentColor = 0xFFFF6F00; ];
+            if (diskColorIdx ==  2) [ diskAccentColor = 0xFFFDD835; ];
+            if (diskColorIdx ==  3) [ diskAccentColor = 0xFF43A047; ];
+            if (diskColorIdx ==  4) [ diskAccentColor = 0xFF1E88E5; ];
+            if (diskColorIdx ==  5) [ diskAccentColor = 0xFF6A1B9A; ];
+            if (diskColorIdx ==  6) [ diskAccentColor = 0xFFC2185B; ];
+            if (diskColorIdx ==  7) [ diskAccentColor = 0xFF00838F; ];
+            if (diskColorIdx ==  8) [ diskAccentColor = 0xFF558B2F; ];
+            if (diskColorIdx ==  9) [ diskAccentColor = 0xFFE91E63; ];
+            if (diskColorIdx == 10) [ diskAccentColor = 0xFF7B1FA2; ];
+            if (diskColorIdx == 11) [ diskAccentColor = 0xFF0097A7; ];
+            if (diskColorIdx == 12) [ diskAccentColor = 0xFFF57C00; ];
+            if (diskColorIdx == 13) [ diskAccentColor = 0xFF00796B; ];
+            if (diskColorIdx == 14) [ diskAccentColor = 0xFF1565C0; ];
+            if (diskColorIdx == 15) [ diskAccentColor = 0xFF880E4F; ];
+            if (diskColorIdx == 16) [ diskAccentColor = 0xFFB71C1C; ];
+            if (diskColorIdx == 17) [ diskAccentColor = 0xFFF57F17; ];
+            if (diskColorIdx == 18) [ diskAccentColor = 0xFF01579B; ];
+            if (diskColorIdx == 19) [ diskAccentColor = 0xFF33691E; ];
+            // Pastel (20-39)
+            if (diskColorIdx == 20) [ diskAccentColor = 0xFFEF9A9A; ];
+            if (diskColorIdx == 21) [ diskAccentColor = 0xFFFFCC80; ];
+            if (diskColorIdx == 22) [ diskAccentColor = 0xFFFFF59D; ];
+            if (diskColorIdx == 23) [ diskAccentColor = 0xFFA5D6A7; ];
+            if (diskColorIdx == 24) [ diskAccentColor = 0xFF90CAF9; ];
+            if (diskColorIdx == 25) [ diskAccentColor = 0xFFCE93D8; ];
+            if (diskColorIdx == 26) [ diskAccentColor = 0xFFF48FB1; ];
+            if (diskColorIdx == 27) [ diskAccentColor = 0xFF80DEEA; ];
+            if (diskColorIdx == 28) [ diskAccentColor = 0xFFC8E6C9; ];
+            if (diskColorIdx == 29) [ diskAccentColor = 0xFFBBDEFB; ];
+            if (diskColorIdx == 30) [ diskAccentColor = 0xFFE1BEE7; ];
+            if (diskColorIdx == 31) [ diskAccentColor = 0xFFF8BBD0; ];
+            if (diskColorIdx == 32) [ diskAccentColor = 0xFFB2DFDB; ];
+            if (diskColorIdx == 33) [ diskAccentColor = 0xFFC5E1A5; ];
+            if (diskColorIdx == 34) [ diskAccentColor = 0xFFF0F4C3; ];
+            if (diskColorIdx == 35) [ diskAccentColor = 0xFFFFE0B2; ];
+            if (diskColorIdx == 36) [ diskAccentColor = 0xFFD1C4E9; ];
+            if (diskColorIdx == 37) [ diskAccentColor = 0xFFC7C7FF; ];
+            if (diskColorIdx == 38) [ diskAccentColor = 0xFFFFCDD2; ];
+            if (diskColorIdx == 39) [ diskAccentColor = 0xFFFFECB3; ];
+            // Trait d'accent dessiné en GPU natif (pas via vec5.svg, dont la
+            // couleur #5960DA est fixe dans le fichier — SvgDraw n'a pas de
+            // paramètre teinte) pour que diskAccentColor s'applique réellement.
+            // Géométrie reprise de vec5.svg : capsule 40×4, rayon 2 (coins ronds).
+            let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>((((dtX + 14) * sW + 500) / 1000), (((dtY + 28) * sH + 500) / 1000), ((40 * sW + 500) / 1000), ((4 * sH + 500) / 1000), 2, diskAccentColor);
+            // Libellé centré sous la tuile (Figma : centré sur dtX+34, milieu de
+            // la tuile 68px large) — GpuDrawTextFontAlign align=1 centre le texte
+            // dans [x, x+maxW], d'où x = (dtX+34) - maxW/2.
+            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>((((dtX + 34 - 104) * sW + 500) / 1000), (((dtY + 51) * sH + 500) / 1000), ((208 * sW + 500) / 1000), dtLabel, 0xFF000000, 0x00000000, fnt, ((18 * sU + 500) / 1000), 1);
+            let overDtX: <bool> = (mx >= ((dtX * sW + 500) / 1000) && mx <= (((dtX + 68) * sW + 500) / 1000));
+            let overDtY: <bool> = (my >= ((dtY * sH + 500) / 1000) && my <= (((dtY + 33) * sH + 500) / 1000));
+            if (overDtX && overDtY && clickEdge) [
+                openFlags = openFlags | 4;
+                selDisk = dtId;
+                rightView = 3;
+                // Reset générique par disk_id (0=SDC, 1=A, 2+=volume physique
+                // réel détecté au boot — voir disk_volumes.rs) : construit le
+                // bon préfixe côté Rust, pas de "if dtId==0/1/2..." en dur qui
+                // casserait dès qu'un 3e disque apparaît.
+                let _: <i32> = <DrvAPIInterCon***DiskBrowseResetForDiskId***>(dtId);
+            ];
+            dti = dti + 1;
+        ];
+        // Plus de "Monter SDC:/A:" affiché ici : les deux disques sont montés
+        // automatiquement au démarrage de ShiLooker (LAPrevent.mara) — la
+        // tuile apparaît directement dès que le montage réel a réussi.
+    ];
+
+    // ── Page 1 : "Vyft's suite" — laissé vide, comme demandé ──
+    if (rightView == 1) [
+        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((1172 * sW + 500) / 1000), ((105 * sH + 500) / 1000), ((248 * sW + 500) / 1000), "Vyft's suite", 0xFF000000, 0x00000000, fnt, ((30 * sU + 500) / 1000), 0);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((1172 * sW + 500) / 1000), ((431 * sH + 500) / 1000), ((248 * sW + 500) / 1000), "This folder is empty.", 0xFFB7B7B7, 0x00000000, fnt, ((24 * sU + 500) / 1000), 0);
+    ];
+
+    // ── Page 2 : "Apps" — tous les diamants d'apps installées, non filtrés ──
+    if (rightView == 2) [
+        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((1172 * sW + 500) / 1000), ((105 * sH + 500) / 1000), ((248 * sW + 500) / 1000), "Apps", 0xFF000000, 0x00000000, fnt, ((30 * sU + 500) / 1000), 0);
+        let appCount: <i32> = <DrvAPIInterCon***AppRegistryCount***()>;
+        let dmW: <i32> = ((45 * sU + 500) / 1000);
+        let dmR: <i32> = ((16 * sU + 500) / 1000);
+        var ai: <i32> = 0;
+        loop (ai < appCount) [
+            let col: <i32> = ai - (((ai / 3) * 3));
+            let row: <i32> = ai / 3;
+            let cellCx: <i32> = 1207 + (col * 78);
+            let cellCy: <i32> = 160 + (row * 78);
+            let pvx: <i32> = ((cellCx * sW + 500) / 1000);
+            let pvy: <i32> = ((cellCy * sH + 500) / 1000);
+            let ix: <i32> = pvx - (dmW / 2);
+            let iy: <i32> = pvy - (dmW / 2);
+            let nm: <ptr> = <DrvAPIInterCon***AppRegistryGetName***>(ai);
+            let diaColor: <i32> = <DrvAPIInterCon***AppRegistryGetDiamondColor***>(ai);
+            let widx: <i32> = <DrvAPIInterCon***WindowManFindByName***>(nm);
+            var diaCos: <i32> = 6947;
+            var diaSin: <i32> = 7193;
+            let _: <i32> = <DrvAPIInterCon***GpuDrawDropShadow***>(ix, iy, dmW, dmW, (dmW / 2), 0, 3, 3, 0x38000000);
+            let _: <i32> = <DrvAPIInterCon***GpuSetTransform2D***>(diaCos, diaSin, (0 - diaSin), diaCos, pvx, pvy);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>((ix - 1), (iy - 1), (dmW + 2), (dmW + 2), (dmR + 1), 0x28FFFFFF);
+            let dRb: <i32> = (diaColor >> 16) & 0xFF;
+            let dGb: <i32> = (diaColor >> 8) & 0xFF;
+            let dBb: <i32> = diaColor & 0xFF;
+            let blobColor: <i32> = (0xFF << 24) | (dRb << 16) | (dGb << 8) | dBb;
+            let _: <i32> = <DrvAPIInterCon***GpuDrawFloavaBlob***>(ix, iy, dmW, dmW, dmR, blobColor, (0 - 1));
+            let _: <i32> = <DrvAPIInterCon***GpuResetTransform***>();
+            let iconPath: <ptr> = <DrvAPIInterCon***AppRegistryGetIconPath***>(ai);
+            if (iconPath != nullptr) [
+                im = <DrvAPIInterCon***ImageLoad***>(iconPath);
+                let iconW: <i32> = ((40 * sU + 500) / 1000);
+                let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, (pvx - (iconW / 2)), (pvy - (iconW / 2)), iconW, iconW);
+            ];
+            let hitH: <i32> = (dmW * 7) / 10;
+            let overX: <bool> = (mx >= (pvx - hitH) && mx <= (pvx + hitH));
+            let overY: <bool> = (my >= (pvy - hitH) && my <= (pvy + hitH));
+            if (overX && overY && ((pbtn & 1) != 0 || akc == 13)) [
+                if (widx < 0) [ let _: <i32> = <DrvAPIInterCon***WindowManLaunch***>(nm); ];
+            ];
+            ai = ai + 1;
+        ];
+    ];
+
+    // ── Page 3 : contenu d'un disque (navigation, création, format/démontage) ──
+    if (rightView == 3) [
+        // En-tête = même libellé compact UNE LIGNE "Nom (Lettre)" que la tuile
+        // de la page racine (MountTableGetLabel) — trouve l'entrée MountTable
+        // correspondant à selDisk.
+        var selLabel: <ptr> = nullptr;
+        var sli: <i32> = 0;
+        loop (sli < diskCount) [
+            let sliId: <i32> = <DrvAPIInterCon***MountTableGetDiskId***>(sli);
+            if (sliId == selDisk) [ selLabel = <DrvAPIInterCon***MountTableGetLabel***>(sli); ];
+            sli = sli + 1;
+        ];
+        if (selLabel != nullptr) [ let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((1172 * sW + 500) / 1000), ((105 * sH + 500) / 1000), ((248 * sW + 500) / 1000), selLabel, 0xFF000000, 0x00000000, fnt, ((26 * sU + 500) / 1000), 0); ];
+
+        let curPath: <ptr> = <DrvAPIInterCon***DiskBrowseGetPath***>();
+        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((1172 * sW + 500) / 1000), ((145 * sH + 500) / 1000), ((248 * sW + 500) / 1000), curPath, 0xFF2D2D2D, 0x00000000, fnt, ((14 * sU + 500) / 1000), 0);
+
+        let isFormatted: <i32> = <DrvAPIInterCon***DiskIsFormattedSession***>(selDisk);
+        if (isFormatted == 0) [ let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((1172 * sW + 500) / 1000), ((178 * sH + 500) / 1000), ((110 * sW + 500) / 1000), "Formater", 0xFF2D2D2D, 0x00000000, fnt, ((14 * sU + 500) / 1000), 0); ];
+        if (isFormatted != 0) [ let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((1172 * sW + 500) / 1000), ((178 * sH + 500) / 1000), ((110 * sW + 500) / 1000), "Formate (session)", 0xFF2D2D2D, 0x00000000, fnt, ((14 * sU + 500) / 1000), 0); ];
+        let overFmtX: <bool> = (mx >= ((1172 * sW + 500) / 1000) && mx <= ((1280 * sW + 500) / 1000));
+        let overFmtY: <bool> = (my >= ((178 * sH + 500) / 1000) && my <= ((194 * sH + 500) / 1000));
+        if (overFmtX && overFmtY && clickEdge) [ let _: <i32> = <DrvAPIInterCon***DiskFormat***>(selDisk); ];
+        // "Démonter" n'est plus un texte direct de l'interface — reste
+        // disponible via le menu contextuel du dock ShiLooker (jump list,
+        // voir dock_menu_items dans Maraset.yaml + LAPrevent.mara).
+
+        // ── Boutons de création (n'ouvrent que le dialogue — la création
+        // réelle se fait via DiskBrowseCreateEntry à la validation Entrée). ──
+        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((1172 * sW + 500) / 1000), ((201 * sH + 500) / 1000), ((110 * sW + 500) / 1000), "+ Dossier", 0xFF2D2D2D, 0x00000000, fnt, ((14 * sU + 500) / 1000), 0);
+        let overNfX: <bool> = (mx >= ((1172 * sW + 500) / 1000) && mx <= ((1250 * sW + 500) / 1000));
+        let overNfY: <bool> = (my >= ((201 * sH + 500) / 1000) && my <= ((217 * sH + 500) / 1000));
+        if (overNfX && overNfY && clickEdge) [
+            let _: <i32> = <DrvAPIInterCon***TextFieldClear***>();
+            // Pré-remplir avec le nom par défaut "Dossier récent"
+            let _: <i32> = <DrvAPIInterCon***TextFieldAppendChar***>(68);  // D
+            let _: <i32> = <DrvAPIInterCon***TextFieldAppendChar***>(111); // o
+            let _: <i32> = <DrvAPIInterCon***TextFieldAppendChar***>(115); // s
+            let _: <i32> = <DrvAPIInterCon***TextFieldAppendChar***>(115); // s
+            let _: <i32> = <DrvAPIInterCon***TextFieldAppendChar***>(105); // i
+            let _: <i32> = <DrvAPIInterCon***TextFieldAppendChar***>(101); // e
+            let _: <i32> = <DrvAPIInterCon***TextFieldAppendChar***>(114); // r
+            let _: <i32> = <DrvAPIInterCon***TextFieldAppendChar***>(32);  // (espace)
+            let _: <i32> = <DrvAPIInterCon***TextFieldAppendChar***>(114); // r
+            let _: <i32> = <DrvAPIInterCon***TextFieldAppendChar***>(233); // é (Unicode 0xE9 = 233)
+            let _: <i32> = <DrvAPIInterCon***TextFieldAppendChar***>(99);  // c
+            let _: <i32> = <DrvAPIInterCon***TextFieldAppendChar***>(101); // e
+            let _: <i32> = <DrvAPIInterCon***TextFieldAppendChar***>(110); // n
+            let _: <i32> = <DrvAPIInterCon***TextFieldAppendChar***>(116); // t
+            createKind = 1;
+        ];
+
+        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((1172 * sW + 500) / 1000), ((221 * sH + 500) / 1000), ((60 * sW + 500) / 1000), "+ txt", 0xFF2D2D2D, 0x00000000, fnt, ((14 * sU + 500) / 1000), 0);
+        let overTxX: <bool> = (mx >= ((1172 * sW + 500) / 1000) && mx <= ((1225 * sW + 500) / 1000));
+        let overTxY: <bool> = (my >= ((221 * sH + 500) / 1000) && my <= ((237 * sH + 500) / 1000));
+        if (overTxX && overTxY && clickEdge) [ let _: <i32> = <DrvAPIInterCon***TextFieldClear***>(); createKind = 2; ];
+
+        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((1232 * sW + 500) / 1000), ((221 * sH + 500) / 1000), ((60 * sW + 500) / 1000), "+ md", 0xFF2D2D2D, 0x00000000, fnt, ((14 * sU + 500) / 1000), 0);
+        let overMdX: <bool> = (mx >= ((1232 * sW + 500) / 1000) && mx <= ((1285 * sW + 500) / 1000));
+        let overMdY: <bool> = (my >= ((221 * sH + 500) / 1000) && my <= ((237 * sH + 500) / 1000));
+        if (overMdX && overMdY && clickEdge) [ let _: <i32> = <DrvAPIInterCon***TextFieldClear***>(); createKind = 3; ];
+
+        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((1292 * sW + 500) / 1000), ((221 * sH + 500) / 1000), ((60 * sW + 500) / 1000), "+ bmp", 0xFF2D2D2D, 0x00000000, fnt, ((14 * sU + 500) / 1000), 0);
+        let overBmX: <bool> = (mx >= ((1292 * sW + 500) / 1000) && mx <= ((1345 * sW + 500) / 1000));
+        let overBmY: <bool> = (my >= ((221 * sH + 500) / 1000) && my <= ((237 * sH + 500) / 1000));
+        if (overBmX && overBmY && clickEdge) [ let _: <i32> = <DrvAPIInterCon***TextFieldClear***>(); createKind = 4; ];
+
+        // ── Dialogue de saisie (nom), affiché uniquement si un type est choisi ──
+        if (createKind >= 1) [
+            let _: <i32> = <DrvAPIInterCon***GpuDrawDropShadow***>(((1172 * sW + 500) / 1000), ((243 * sH + 500) / 1000), ((248 * sW + 500) / 1000), ((30 * sH + 500) / 1000), (((6 * sW + 500) / 1000 + (6 * sH + 500) / 1000) / 2), 0, 4, 4, 0x40000000);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(((1172 * sW + 500) / 1000), ((243 * sH + 500) / 1000), ((248 * sW + 500) / 1000), ((30 * sH + 500) / 1000), (((6 * sW + 500) / 1000 + (6 * sH + 500) / 1000) / 2), 0xFFFFFFFF);
+            let curName: <ptr> = <DrvAPIInterCon***TextFieldGetPtr***>();
+            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((1182 * sW + 500) / 1000), ((252 * sH + 500) / 1000), ((230 * sW + 500) / 1000), curName, 0xFF1A1A1A, 0x00000000, fnt, ((16 * sU + 500) / 1000), 0);
+            if (akc >= 32 && akc <= 126) [ let _: <i32> = <DrvAPIInterCon***TextFieldAppendChar***>(akc); ];
+            if (akc == 8) [ let _: <i32> = <DrvAPIInterCon***TextFieldBackspace***>(); ];
+            if (akc == 0x10017) [ createKind = 0; ];
+            if (akc == 13) [
+                let _: <i32> = <DrvAPIInterCon***DiskBrowseCreateEntry***>((createKind - 1));
+                // Assigner une couleur aléatoire vive+pastel harmonisée de la palette complète (40 couleurs)
+                // si c'est un dossier (createKind == 1)
+                if (createKind == 1) [
+                    let newName: <ptr> = <DrvAPIInterCon***TextFieldGetPtr***>();
+                    // Seed déterministe basée sur le moment (tick) pour variation entre sessions
+                    let seed: <i32> = (tick * 7919) ^ (tick >> 16);
+                    let colorIdx: <i32> = (seed % 40);
+                    var folderColor: <i32> = 0xFFE0E0E0;
+                    // Vives (0-19) : RGB saturés, contraste maximal
+                    if (colorIdx ==  0) [ folderColor = 0xFFE53935; ];
+                    if (colorIdx ==  1) [ folderColor = 0xFFFF6F00; ];
+                    if (colorIdx ==  2) [ folderColor = 0xFFFDD835; ];
+                    if (colorIdx ==  3) [ folderColor = 0xFF43A047; ];
+                    if (colorIdx ==  4) [ folderColor = 0xFF1E88E5; ];
+                    if (colorIdx ==  5) [ folderColor = 0xFF6A1B9A; ];
+                    if (colorIdx ==  6) [ folderColor = 0xFFC2185B; ];
+                    if (colorIdx ==  7) [ folderColor = 0xFF00838F; ];
+                    if (colorIdx ==  8) [ folderColor = 0xFF558B2F; ];
+                    if (colorIdx ==  9) [ folderColor = 0xFFE91E63; ];
+                    if (colorIdx == 10) [ folderColor = 0xFF7B1FA2; ];
+                    if (colorIdx == 11) [ folderColor = 0xFF0097A7; ];
+                    if (colorIdx == 12) [ folderColor = 0xFFF57C00; ];
+                    if (colorIdx == 13) [ folderColor = 0xFF00796B; ];
+                    if (colorIdx == 14) [ folderColor = 0xFF1565C0; ];
+                    if (colorIdx == 15) [ folderColor = 0xFF880E4F; ];
+                    if (colorIdx == 16) [ folderColor = 0xFFB71C1C; ];
+                    if (colorIdx == 17) [ folderColor = 0xFFF57F17; ];
+                    if (colorIdx == 18) [ folderColor = 0xFF01579B; ];
+                    if (colorIdx == 19) [ folderColor = 0xFF33691E; ];
+                    // Pastel (20-39) : RGB désaturés, aspect doux
+                    if (colorIdx == 20) [ folderColor = 0xFFEF9A9A; ];
+                    if (colorIdx == 21) [ folderColor = 0xFFFFCC80; ];
+                    if (colorIdx == 22) [ folderColor = 0xFFFFF59D; ];
+                    if (colorIdx == 23) [ folderColor = 0xFFA5D6A7; ];
+                    if (colorIdx == 24) [ folderColor = 0xFF90CAF9; ];
+                    if (colorIdx == 25) [ folderColor = 0xFFCE93D8; ];
+                    if (colorIdx == 26) [ folderColor = 0xFFF48FB1; ];
+                    if (colorIdx == 27) [ folderColor = 0xFF80DEEA; ];
+                    if (colorIdx == 28) [ folderColor = 0xFFC8E6C9; ];
+                    if (colorIdx == 29) [ folderColor = 0xFFBBDEFB; ];
+                    if (colorIdx == 30) [ folderColor = 0xFFE1BEE7; ];
+                    if (colorIdx == 31) [ folderColor = 0xFFF8BBD0; ];
+                    if (colorIdx == 32) [ folderColor = 0xFFB2DFDB; ];
+                    if (colorIdx == 33) [ folderColor = 0xFFC5E1A5; ];
+                    if (colorIdx == 34) [ folderColor = 0xFFF0F4C3; ];
+                    if (colorIdx == 35) [ folderColor = 0xFFFFE0B2; ];
+                    if (colorIdx == 36) [ folderColor = 0xFFD1C4E9; ];
+                    if (colorIdx == 37) [ folderColor = 0xFFC7C7FF; ];
+                    if (colorIdx == 38) [ folderColor = 0xFFFFCDD2; ];
+                    if (colorIdx == 39) [ folderColor = 0xFFFFECB3; ];
+                    let _: <i32> = <DrvAPIInterCon***FolderColorSet***>(curPath, newName, folderColor);
+                ];
+                createKind = 0;
+            ];
+        ];
+
+        // ── Remonter d'un niveau (si pas déjà à la racine du disque) ──
+        let pathLen: <i32> = <DrvManSpec***StrLen***>(curPath);
+        var atRoot: <bool> = true;
+        if (selDisk == 0 && pathLen > 5) [ atRoot = false; ];
+        if (selDisk != 0 && pathLen > 3) [ atRoot = false; ];
+        var listStartY: <i32> = 283;
+        if (atRoot == false) [
+            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((1172 * sW + 500) / 1000), ((283 * sH + 500) / 1000), ((120 * sW + 500) / 1000), ".. (remonter)", 0xFF2D2D2D, 0x00000000, fnt, ((16 * sU + 500) / 1000), 0);
+            let overUpX: <bool> = (mx >= ((1172 * sW + 500) / 1000) && mx <= ((1300 * sW + 500) / 1000));
+            let overUpY: <bool> = (my >= ((283 * sH + 500) / 1000) && my <= ((301 * sH + 500) / 1000));
+            if (overUpX && overUpY && clickEdge) [ let _: <i32> = <DrvAPIInterCon***DiskBrowseNavigateUp***>(); ];
+            listStartY = 311;
+        ];
+
+        // ── Liste du dossier courant ──
+        let dirCount: <i32> = <DrvAPIInterCon***DiskCacheDirCount***>(curPath);
+        var fi: <i32> = 0;
+        loop (fi < dirCount) [
+            let entryName: <ptr> = <DrvAPIInterCon***DiskCacheDirGetName***>(fi);
+            let rowY: <i32> = listStartY + (fi * 26);
+            let nameLen: <i32> = <DrvManSpec***StrLen***>(entryName);
+            var isFolderEntry: <bool> = false;
+            if (nameLen >= 1) [
+                let lastCh: <i32> = <DrvManSpec***StrCharAt***>(entryName, (nameLen - 1));
+                if (lastCh == 47) [ isFolderEntry = true; ];
+            ];
+            // Icône dossier bicolore — GPU draw (gris 0xFFE0E0E0 + pastille couleur en bas)
+            if (isFolderEntry) [
+                let fColor: <i32> = <DrvAPIInterCon***FolderColorGet***>(curPath, entryName);
+                let iconX: <i32> = ((1172 * sW + 500) / 1000);
+                let iconY: <i32> = ((rowY * sH + 500) / 1000) + ((5 * sH + 500) / 1000);
+                let iconSize: <i32> = ((16 * sU + 500) / 1000);
+                let iconR: <i32> = ((2 * sU + 500) / 1000);
+                // Arrière-plan gris clair (dossier fermé)
+                let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(iconX, iconY, iconSize, iconSize, iconR, 0xFFE0E0E0);
+                // Pastille colorée en bas (représente la couleur d'un vrai dossier)
+                let pastilleX: <i32> = (iconX + ((2 * sW + 500) / 1000));
+                let pastilleY: <i32> = (iconY + ((10 * sH + 500) / 1000));
+                let pastilleW: <i32> = ((12 * sW + 500) / 1000);
+                let pastilleH: <i32> = ((4 * sH + 500) / 1000);
+                let pastilleR: <i32> = ((1 * sU + 500) / 1000);
+                let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(pastilleX, pastilleY, pastilleW, pastilleH, pastilleR, fColor);
+            ];
+            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((1196 * sW + 500) / 1000), ((rowY * sH + 500) / 1000), ((224 * sW + 500) / 1000), entryName, 0xFF2D2D2D, 0x00000000, fnt, ((16 * sU + 500) / 1000), 0);
+            let overFiX: <bool> = (mx >= ((1172 * sW + 500) / 1000) && mx <= ((1420 * sW + 500) / 1000));
+            let overFiY: <bool> = (my >= ((rowY * sH + 500) / 1000) && my <= (((rowY + 18) * sH + 500) / 1000));
+            if (overFiX && overFiY && clickEdge && isFolderEntry) [ let _: <i32> = <DrvAPIInterCon***DiskBrowseNavigateInto***>(entryName); ];
+            // Menu contextuel GÉNÉRIQUE (GlobalMenu en mode contexte, remplace
+            // FolderMenu.mara) — items différents selon dossier/fichier,
+            // ctxId = fi (index de ligne, relu tel quel via
+            // MenuGetGlobalClickedCtxId au clic, voir plus bas). Le libellé de
+            // couleur cliqué est comparé par StrEqual (aucune concaténation
+            // fiable côté Mara, voir README §4.11) plutôt qu'un index recalculé.
+            let rcEntry: <bool> = (pbtn & 2) != 0;
+            if (overFiX && overFiY && rcEntry) [
+                var entryItems: <ptr> = "Renommer";
+                if (isFolderEntry) [ entryItems = "Renommer|Rouge|Orange|Jaune|Vert|Bleu|Violet"; ];
+                let _: <i32> = <GlobalMenu***OpenGlobalWithItems>(((1172 * sW + 500) / 1000), (((rowY + 20) * sH + 500) / 1000), entryItems, fi);
+                // Signale à LAPrevent.mara (chrome partagé) que ce clic droit a déjà
+                // son propre menu contextuel — empêche le menu global "in-app" de
+                // s'ouvrir en même temps (slot SCROLL_SCRATCH 48, voir LAPrevent.mara).
+                let _: <i32> = <DrvAPIInterCon***ScrollSet***>(48, 1);
+            ];
+            fi = fi + 1;
+        ];
+
+        // ── Traitement du clic sur le menu contextuel générique (dossier/fichier) ──
+        // Même pattern que WindowManGetLaunchArgGen (§2.8) : ne traiter un clic
+        // qu'UNE fois via la génération, slot 15 dédié à ce traitement (libéré
+        // par le retrait de FolderMenu.mara, qui l'utilisait pour son propre
+        // edge-detect — voir README §2.9).
+        let gmClickGen: <i32> = <DrvAPIInterCon***MenuGetGlobalClickedGen***>();
+        let gmLastGen: <i32> = <DrvAPIInterCon***ScrollGet***>(15);
+        if (gmClickGen != gmLastGen) [
+            let _: <i32> = <DrvAPIInterCon***ScrollSet***>(15, gmClickGen);
+            let clickedLabel: <ptr> = <DrvAPIInterCon***MenuGetGlobalClickedLabel***>();
+            let clickedFi: <i32> = <DrvAPIInterCon***MenuGetGlobalClickedCtxId***>();
+            let clickedEntry: <ptr> = <DrvAPIInterCon***DiskCacheDirGetName***>(clickedFi);
+            let isRed: <i32> = <DrvManSpec***StrEqual***>(clickedLabel, "Rouge");
+            let isOrange: <i32> = <DrvManSpec***StrEqual***>(clickedLabel, "Orange");
+            let isYellow: <i32> = <DrvManSpec***StrEqual***>(clickedLabel, "Jaune");
+            let isGreen: <i32> = <DrvManSpec***StrEqual***>(clickedLabel, "Vert");
+            let isBlue: <i32> = <DrvManSpec***StrEqual***>(clickedLabel, "Bleu");
+            let isPurple: <i32> = <DrvManSpec***StrEqual***>(clickedLabel, "Violet");
+            if (isRed != 0) [ let _: <i32> = <DrvAPIInterCon***FolderColorSet***>(curPath, clickedEntry, 0xFFE57373); ];
+            if (isOrange != 0) [ let _: <i32> = <DrvAPIInterCon***FolderColorSet***>(curPath, clickedEntry, 0xFFFFB74D); ];
+            if (isYellow != 0) [ let _: <i32> = <DrvAPIInterCon***FolderColorSet***>(curPath, clickedEntry, 0xFFFFF176); ];
+            if (isGreen != 0) [ let _: <i32> = <DrvAPIInterCon***FolderColorSet***>(curPath, clickedEntry, 0xFF81C784); ];
+            if (isBlue != 0) [ let _: <i32> = <DrvAPIInterCon***FolderColorSet***>(curPath, clickedEntry, 0xFF64B5F6); ];
+            if (isPurple != 0) [ let _: <i32> = <DrvAPIInterCon***FolderColorSet***>(curPath, clickedEntry, 0xFFBA68C8); ];
+            // "Renommer" : pas encore câblé côté noyau (aucune fonction de
+            // renommage réel n'existe aujourd'hui) — item affiché honnêtement,
+            // sans simuler une action absente (même principe que "Sleep screen"/
+            // "Standby" dans GlobalMenu.mara).
+        ];
+    ];
+
+    // ═══════════════════════ Bas d'écran (toujours visible) ═══════════════
+    let _: <i32> = <DrvAPIInterCon***ClockRefresh***>();
+    let timeStr: <ptr> = <DrvAPIInterCon***ClockGetTimeStr***>();
+    let dateStr: <ptr> = <DrvAPIInterCon***ClockGetDateStr***>();
+    let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((17 * sW + 500) / 1000), ((807 * sH + 500) / 1000), ((50 * sW + 500) / 1000), timeStr, 0xFF2D2D2D, 0x00000000, fnt, ((20 * sU + 500) / 1000), 0);
+    let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((96 * sW + 500) / 1000), ((807 * sH + 500) / 1000), ((201 * sW + 500) / 1000), dateStr, 0xFF2D2D2D, 0x00000000, fnt, ((20 * sU + 500) / 1000), 0);
+
+    // "Vyft Mobile" est le NOM DE L'OPÉRATEUR (comme "Orange"/"SFR" sur un vrai
+    // téléphone), pas un type de réseau — il reste affiché tel quel tant qu'une
+    // connexion réelle est détectée (SluWWANMan, scan PCI), et seulement
+    // remplacé par "Hors service" quand ce n'est pas le cas. Le TYPE de réseau
+    // (GPRS/3G/4G/5G/...) reste porté par l'icône juste à côté (stat_sys_ra_
+    // signal_*), pas par ce libellé — même répartition texte/icône qu'un vrai
+    // téléphone (nom d'opérateur en texte, technologie en pictogramme).
+    let wwanConnected: <i32> = <DrvAPIInterCon***WWANIsConnected***>();
+    let wwanLvl: <i32> = <DrvAPIInterCon***WWANGetSignalLevel***>();
+    if (wwanConnected == 0) [ let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((1010 * sW + 500) / 1000), ((807 * sH + 500) / 1000), ((112 * sW + 500) / 1000), "Hors service", 0xFF8A8A8A, 0x00000000, fnt, ((20 * sU + 500) / 1000), 0); ];
+    if (wwanConnected != 0) [ let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((1010 * sW + 500) / 1000), ((807 * sH + 500) / 1000), ((112 * sW + 500) / 1000), "Vyft Mobile", 0xFF2D2D2D, 0x00000000, fnt, ((20 * sU + 500) / 1000), 0); ];
+
+    // Signal cellulaire réel (SluWWANMan — détection PCI, honnête : "0 barre"
+    // tant qu'aucun modem/connexion n'est détecté, jamais de fausse icône).
+    // Alignée juste après le libellé réseau ci-dessus (même rangée, 1130/1159).
+    // NOTE dimensionnement : img5.png d'origine (slot gauche, 19×25, plus
+    // large) est visuellement des BARRES DE SIGNAL — img4.png (slot droit,
+    // 7×15, fin) est une silhouette de BATTERIE portrait. Confirmé par
+    // comparaison des ratios avec les PNG déjà générés cette session
+    // (signal stat_sys_*_cdma = 39×51 ≈ ratio du slot large ; batterie
+    // img_batt_charge_f0 = 20×42 ≈ ratio du slot fin) et par la capture
+    // Figma 832-4 (icône large = barres, icône fine = pile). Slots donc
+    // INVERSÉS par rapport à une première lecture naïve du code généré.
+    if (wwanConnected == 0) [
+        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLooker/ShiLooker.slasset/stat_sys_signal_0_cdma.png");
         let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ((1130 * sW + 500) / 1000), ((807 * sH + 500) / 1000), ((19 * sW + 500) / 1000), ((25 * sH + 500) / 1000));
-        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((17 * sW + 500) / 1000), ((807 * sH + 500) / 1000), ((50 * sW + 500) / 1000), "10:45", 0xFF2D2D2D, 0x00000000, font, ((20 * sU + 500) / 1000), 0);
-        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((96 * sW + 500) / 1000), ((807 * sH + 500) / 1000), ((201 * sW + 500) / 1000), "Wed, 2026, 03th May", 0xFF2D2D2D, 0x00000000, font, ((20 * sU + 500) / 1000), 0);
+    ];
+    if (wwanConnected != 0 && wwanLvl == 0) [
+        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLooker/ShiLooker.slasset/stat_sys_ra_signal_0_cdma.png");
+        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ((1130 * sW + 500) / 1000), ((807 * sH + 500) / 1000), ((19 * sW + 500) / 1000), ((25 * sH + 500) / 1000));
+    ];
+    if (wwanConnected != 0 && wwanLvl == 1) [
+        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLooker/ShiLooker.slasset/stat_sys_ra_signal_1_cdma.png");
+        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ((1130 * sW + 500) / 1000), ((807 * sH + 500) / 1000), ((19 * sW + 500) / 1000), ((25 * sH + 500) / 1000));
+    ];
+    if (wwanConnected != 0 && wwanLvl == 2) [
+        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLooker/ShiLooker.slasset/stat_sys_ra_signal_2_cdma.png");
+        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ((1130 * sW + 500) / 1000), ((807 * sH + 500) / 1000), ((19 * sW + 500) / 1000), ((25 * sH + 500) / 1000));
+    ];
+    if (wwanConnected != 0 && wwanLvl == 3) [
+        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLooker/ShiLooker.slasset/stat_sys_ra_signal_3_cdma.png");
+        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ((1130 * sW + 500) / 1000), ((807 * sH + 500) / 1000), ((19 * sW + 500) / 1000), ((25 * sH + 500) / 1000));
+    ];
+    if (wwanConnected != 0 && wwanLvl == 4) [
+        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLooker/ShiLooker.slasset/stat_sys_ra_signal_4_cdma.png");
+        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ((1130 * sW + 500) / 1000), ((807 * sH + 500) / 1000), ((19 * sW + 500) / 1000), ((25 * sH + 500) / 1000));
+    ];
+
+    // Animation batterie (cycle continu, honnête : aucune vraie API de charge
+    // n'existe dans ce noyau — pas de faux pourcentage affiché).
+    let battFrame: <i32> = (tick / 8) - (((tick / 8) / 7) * 7);
+    if (battFrame == 0) [
+        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLooker/ShiLooker.slasset/img_batt_charge_f0.png");
+        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ((1159 * sW + 500) / 1000), ((811 * sH + 500) / 1000), ((7 * sW + 500) / 1000), ((15 * sH + 500) / 1000));
+    ];
+    if (battFrame == 1) [
+        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLooker/ShiLooker.slasset/img_batt_charge_f1.png");
+        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ((1159 * sW + 500) / 1000), ((811 * sH + 500) / 1000), ((7 * sW + 500) / 1000), ((15 * sH + 500) / 1000));
+    ];
+    if (battFrame == 2) [
+        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLooker/ShiLooker.slasset/img_batt_charge_f2.png");
+        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ((1159 * sW + 500) / 1000), ((811 * sH + 500) / 1000), ((7 * sW + 500) / 1000), ((15 * sH + 500) / 1000));
+    ];
+    if (battFrame == 3) [
+        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLooker/ShiLooker.slasset/img_batt_charge_f3.png");
+        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ((1159 * sW + 500) / 1000), ((811 * sH + 500) / 1000), ((7 * sW + 500) / 1000), ((15 * sH + 500) / 1000));
+    ];
+    if (battFrame == 4) [
+        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLooker/ShiLooker.slasset/img_batt_charge_f4.png");
+        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ((1159 * sW + 500) / 1000), ((811 * sH + 500) / 1000), ((7 * sW + 500) / 1000), ((15 * sH + 500) / 1000));
+    ];
+    if (battFrame == 5) [
+        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLooker/ShiLooker.slasset/img_batt_charge_f5.png");
+        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ((1159 * sW + 500) / 1000), ((811 * sH + 500) / 1000), ((7 * sW + 500) / 1000), ((15 * sH + 500) / 1000));
+    ];
+    if (battFrame == 6) [
+        im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLooker/ShiLooker.slasset/img_batt_charge_f6.png");
+        let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ((1159 * sW + 500) / 1000), ((811 * sH + 500) / 1000), ((7 * sW + 500) / 1000), ((15 * sH + 500) / 1000));
+    ];
+
+    // ── Persistance de l'état pour la frame suivante ──
+    let _: <i32> = <DrvAPIInterCon***ScrollSet***>(1, rightView);
+    let _: <i32> = <DrvAPIInterCon***ScrollSet***>(2, openFlags);
+    let _: <i32> = <DrvAPIInterCon***ScrollSet***>(3, selDisk);
+    let _: <i32> = <DrvAPIInterCon***ScrollSet***>(4, createKind);
 
     let gpuResult: <i32> = <DrvAPIInterCon***GpuFlushRenderContext***>(ctx);
     if (gpuResult != 0) [ ret 1; ];

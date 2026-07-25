@@ -1,0 +1,46 @@
+package:
+  name: base***EncDecProcManSrv
+  version: v1 NAVERTA build 29062617
+  build: 18072619
+
+metadata:
+  bundle: marep
+  target: arm64
+  attributes:
+    SRID: SRID_slura_os_29062617
+    Marav: 0.1 build 18072619
+    icon: EncDecProcManSrv.slasset/EncDecProcManSrv.png
+    display_name: "Codecs & Media"
+    diamond_color: "0x33C97A56"
+    description: |
+      EncDecProcManSrv — panneau de statut du pilote EncDecProcMan (matrice
+      des formats réellement pris en charge par Slura : décodage complet vs
+      identification seule vs non reconnu). Honnête sur les limites : aucun
+      décodeur vidéo/audio réel (H.264/HEVC/VP8/VP9/MP3/Vorbis) ni codec
+      d'appel cellulaire (AMR/EVS) n'existe dans Slura aujourd'hui.
+    slura_min: 1
+    slura_max: 5.0
+
+  entry: OEntry
+  lifecycle: LAPrevent
+
+  permissions:
+    - gpu.framebuffer
+    - fs.read
+
+  assets:
+    - EncDecProcManSrv.slasset/
+
+dependencies:
+  basecon:
+    base***SluraOS***LAPrevent: 18072615
+    base***SluraOS***OEntry: 18072615
+
+resources:
+  - path: RAbstractallowing.xml
+    type: xml
+    description: "Règles d'autorisation abstraites pour le sandbox Slura."
+
+scripts:
+  postinstall: |
+    slura-reg add --srid ${metadata.attributes.SRID}

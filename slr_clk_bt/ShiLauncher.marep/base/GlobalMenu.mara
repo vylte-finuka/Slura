@@ -1,0 +1,320 @@
+#base <std***ComTpe***SlulFrmt***[ DrvAPIInterCon, DrvManSpec ]>;
+#base <MaratineKit>;
+
+// GlobalMenu — menu global "in-app" ShiLauncher (bouton menu haut-droit).
+// Design Figma 900:88 (ShiUI) : une carte givrée listant TOUS les apps pinned,
+// chacun avec un en-tête (losange dock + nom) suivi de ses dock_menu_items,
+// séparés par des fines lignes horizontales — une ligne plus marquée après le
+// DERNIER item de chaque groupe d'app (avant l'en-tête de l'app suivante).
+// Un item déclarant un sous-menu (ex: "System power>Reboot,Sleep screen,
+// Shutdown,Standby") affiche un chevron ">" et ouvre une SECONDE carte
+// flottante à droite au clic (voir MenuOpenSubmenuGlobal côté noyau).
+//
+// Losange = MÊME recette que le dock (ShiLauncher.marep/TemplateView.mara) :
+// rotation 46°, fond noir 4-pass (anti-effiloché, cf. README §5.3), puis
+// GpuDrawFloavaBlob(color, phase=0) par-dessus — PAS l'icône plate "settings"
+// du mockup Figma (verdict user : toute icône d'app doit être le losange
+// granulé du dock, y compris ici et pour toute future app).
+//
+// Slot SCROLL_SCRATCH : 50 = prevBtn global menu (edge-detect clic)
+// État noyau : GLOBAL_MENU_* (ouverture/position) + GLOBAL_MENU_SUBMENU_*
+// (app/item propriétaire + ancre du sous-menu flottant) — voir ovc_exec.rs.
+
+rel op OpenGlobal: [anchorX i32, anchorY i32] [
+    let _: <i32> = <DrvAPIInterCon***MenuOpenGlobal***>(anchorX, anchorY);
+    ret 0;
+];
+
+// Ouvre en mode CONTEXTE : affiche `items` ("Label1|Label2", liste plate sans
+// sous-menu) au lieu des apps épinglées — remplace FolderMenu.mara et toute
+// future carte contextuelle dédiée (fichier, dossier, disque monté, etc.).
+// `ctxId` est une donnée libre (ex: index de ligne) renvoyée telle quelle par
+// GlobalMenuGetClickedCtxId au clic — voir RenderAndHandle plus bas.
+rel op OpenGlobalWithItems: [anchorX i32, anchorY i32, items string, ctxId i32] [
+    let _: <i32> = <DrvAPIInterCon***MenuOpenGlobalWithItems***>(anchorX, anchorY, items, ctxId);
+    ret 0;
+];
+
+rel op RenderAndHandle: [ctx string, fnt ptr, mx i32, my i32, pbtn i32, sU i32] [
+    var im: <i32> = 0;
+    var font: <ptr> = fnt;
+    if (font == nullptr) [ font = <DrvAPIInterCon***FontGetDefault***>(); ];
+
+    let isOpen: <i32> = <DrvAPIInterCon***MenuIsOpenGlobal***>();
+    if (isOpen == 0) [ ret 0; ];
+
+    let baseX: <i32> = <DrvAPIInterCon***MenuGetGlobalX***>();
+    var baseY: <i32> = <DrvAPIInterCon***MenuGetGlobalY***>();
+
+    // Edge-detect du clic (partagé par la carte principale ET le sous-menu —
+    // une seule frame ne peut de toute façon traiter qu'un clic).
+    let prevBtn: <i32> = <DrvAPIInterCon***ScrollGet***>(50);
+    let btnBit: <i32> = pbtn & 1;
+    let clickEdge: <bool> = ((btnBit != 0) && (prevBtn & 1 == 0));
+    let _: <i32> = <DrvAPIInterCon***ScrollSet***>(50, pbtn);
+
+    // ── Dimensions (design Figma 900:88 : carte 263px de large) ──────────────
+    let rowH: <i32> = ((30 * sU + 500) / 1000);
+    let cardW: <i32> = ((263 * sU + 500) / 1000);
+    let cardR: <i32> = ((15 * sU + 500) / 1000);
+    let padX: <i32> = ((15 * sU + 500) / 1000);
+    let headerGap: <i32> = ((7 * sU + 500) / 1000);   // espace après l'en-tête d'app
+    let dmSize: <i32> = ((20 * sU + 500) / 1000);
+    // Rayon du losange ≈ 33% de dmSize — même ratio que les recettes qui
+    // fonctionnent visuellement (dock TemplateView.mara : 16/45 ≈ 35%,
+    // barre de titre LAPrevent.mara : 6/18 ≈ 33%). L'ancienne formule
+    // (11 * 15% ≈ 1) donnait un rayon quasi nul → losange invisible sous
+    // le fond noir 4-pass (verdict user : "toujours un bloc noir").
+    let dmR: <i32> = dmSize / 3;
+    let textSize: <i32> = ((12 * sU + 500) / 1000);
+    let lineInset: <i32> = padX;
+
+    // ── MODE CONTEXTE : composant précis (fichier/dossier/disque...) qui a
+    // déclaré sa propre liste d'items via OpenGlobalWithItems — remplace
+    // FolderMenu.mara. Liste plate, pas de losange/en-tête/sous-menu, juste
+    // des lignes de texte cliquables qui renvoient le label cliqué (voir
+    // MenuSetGlobalClicked) à l'appelant via ctxId. Court-circuite tout le
+    // reste de la fonction (mode "apps épinglées" inchangé en dessous).
+    let isCtxMode: <i32> = <DrvAPIInterCon***MenuGlobalIsCtxMode***>();
+    if (isCtxMode != 0) [
+        let ctxCount: <i32> = <DrvAPIInterCon***MenuGetGlobalCtxItemCount***>();
+        let ctxCardH: <i32> = (ctxCount * rowH);
+        let ctxScreenH: <i32> = <DrvAPIInterCon***GpuGetHeight***>();
+        if ((baseY + ctxCardH) > ctxScreenH) [ baseY = ctxScreenH - ctxCardH; ];
+        if (baseY < 0) [ baseY = 0; ];
+
+        let _: <i32> = <DrvAPIInterCon***GpuBackgroundBlur***>(baseX, baseY, cardW, ctxCardH, cardR, 8);
+        let _: <i32> = <DrvAPIInterCon***GpuSetOpacity***>(77);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(baseX, baseY, cardW, ctxCardH, cardR, 0xFFE0E0E0);
+        let _: <i32> = <DrvAPIInterCon***GpuResetOpacity***>();
+
+        var ctxY: <i32> = baseY;
+        var ctxI: <i32> = 0;
+        loop (ctxI < ctxCount) [
+            let ctxLabel: <ptr> = <DrvAPIInterCon***MenuGetGlobalCtxItemLabel***>(ctxI);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>((baseX + padX), (ctxY + ((8 * sU + 500) / 1000)), (cardW - (padX * 2)), ctxLabel, 0xFF000000, 0x00000000, font, textSize, 0);
+
+            if (ctxI < (ctxCount - 1)) [
+                let ctxSepY: <i32> = ctxY + rowH - ((1 * sU + 500) / 1000);
+                let _: <i32> = <DrvAPIInterCon***GpuDrawLine***>((baseX + lineInset), ctxSepY, (baseX + cardW - lineInset), ctxSepY, 0xFFE0E0E0);
+            ];
+
+            let overCtxX: <bool> = (mx >= baseX && mx <= (baseX + cardW));
+            let overCtxY: <bool> = (my >= ctxY && my <= (ctxY + rowH));
+            if (overCtxX && overCtxY && clickEdge) [
+                let _: <i32> = <DrvAPIInterCon***MenuSetGlobalClicked***>(ctxLabel);
+                let _: <i32> = <DrvAPIInterCon***MenuCloseGlobal***>();
+            ];
+
+            ctxY = ctxY + rowH;
+            ctxI = ctxI + 1;
+        ];
+
+        let overCtxCard: <bool> = (mx >= baseX && mx <= (baseX + cardW) && my >= baseY && my <= (baseY + ctxCardH));
+        if (clickEdge && overCtxCard == false) [ let _: <i32> = <DrvAPIInterCon***MenuCloseGlobal***>(); ];
+
+        ret 0;
+    ];
+
+    // ── Hauteur totale : dépend du nombre d'apps pinned et de leurs items —
+    // calculée AVANT le fond pour dessiner une seule carte à la bonne taille
+    // (le design n'a pas de hauteur fixe, contrairement à ContextMenu.mara qui
+    // liste une app unique à géométrie connue à l'avance).
+    let pinnedCount: <i32> = <DrvAPIInterCon***AppRegistryGetPinnedCount***>();
+    var totalRows: <i32> = 0;
+    var pcAi: <i32> = 0;
+    loop (pcAi < pinnedCount) [
+        let pcAppIdx: <i32> = <DrvAPIInterCon***AppRegistryGetPinnedIndex***>(pcAi);
+        if (pcAppIdx >= 0) [
+            let pcItemCnt: <i32> = <DrvAPIInterCon***AppRegistryGetMenuItemCount***>(pcAppIdx);
+            totalRows = totalRows + 1 + pcItemCnt; // 1 = ligne d'en-tête d'app
+        ];
+        pcAi = pcAi + 1;
+    ];
+    let cardH: <i32> = (totalRows * rowH);
+
+    // Anti-débordement bas d'écran : si la carte déborde (bouton menu proche
+    // du bas ou trop d'apps pinned), la remonter pour qu'elle reste entièrement
+    // visible (voir capture user : carte coupée par le bord de l'écran).
+    let screenH: <i32> = <DrvAPIInterCon***GpuGetHeight***>();
+    if ((baseY + cardH) > screenH) [ baseY = screenH - cardH; ];
+    if (baseY < 0) [ baseY = 0; ];
+
+    // Card background frosted glass (ordre imposé §5.2 : blur → fill).
+    let _: <i32> = <DrvAPIInterCon***GpuBackgroundBlur***>(baseX, baseY, cardW, cardH, cardR, 8);
+    let _: <i32> = <DrvAPIInterCon***GpuSetOpacity***>(77);
+    let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(baseX, baseY, cardW, cardH, cardR, 0xFFE0E0E0);
+    let _: <i32> = <DrvAPIInterCon***GpuResetOpacity***>();
+
+    let colX: <i32> = baseX + padX;
+    var currentY: <i32> = baseY;
+    var appI: <i32> = 0;
+
+    loop (appI < pinnedCount) [
+        let appIdx: <i32> = <DrvAPIInterCon***AppRegistryGetPinnedIndex***>(appI);
+        var appSkip: <bool> = (appIdx < 0);
+        if (appSkip == false) [
+            let appName: <ptr> = <DrvAPIInterCon***AppRegistryGetName***>(appIdx);
+            let appColor: <i32> = <DrvAPIInterCon***AppRegistryGetDiamondColor***>(appIdx);
+
+            // ── En-tête d'app : losange dock (rotation 46°, même recette que
+            // ShiLauncher.marep/TemplateView.mara et LAPrevent.mara) + nom. ──
+            let diy0: <i32> = currentY + ((rowH - dmSize) / 2);
+            let dvx: <i32> = colX + (dmSize / 2);
+            let dvy: <i32> = diy0 + (dmSize / 2);
+            let dix: <i32> = dvx - (dmSize / 2);
+            let diy: <i32> = dvy - (dmSize / 2);
+            let _: <i32> = <DrvAPIInterCon***GpuSetTransform2D***>(6947, 7193, -7193, 6947, dvx, dvy);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(dix, diy, dmSize, dmSize, dmR, 0xFF000000);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>((dix + 1), (diy + 1), dmSize, dmSize, dmR, 0xFF000000);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>((dix + 1), diy, dmSize, dmSize, dmR, 0xFF000000);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(dix, (diy + 1), dmSize, dmSize, dmR, 0xFF000000);
+            // GpuDrawFloavaBlob DOIT être dessiné AVANT GpuResetTransform (même
+            // ordre que TemplateView.mara/LAPrevent.mara) — sinon le blob se
+            // dessine axis-aligned et reste caché sous le fond noir tourné.
+            let _: <i32> = <DrvAPIInterCon***GpuDrawFloavaBlob***>(dix, diy, dmSize, dmSize, dmR, appColor, 0);
+            let _: <i32> = <DrvAPIInterCon***GpuResetTransform***>();
+
+            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>((colX + dmSize + headerGap), (currentY + ((8 * sU + 500) / 1000)), (cardW - dmSize - headerGap - (padX * 2)), appName, 0xFF000000, 0x00000000, font, textSize, 0);
+
+            // Ligne séparatrice sous l'en-tête (losange + nom) — Figma 900:18,
+            // couleur #CFCFCF (plus marquée que le gris des items, voir §3
+            // couleurs des séparateurs ci-dessous).
+            let headerSepY: <i32> = currentY + rowH - ((1 * sU + 500) / 1000);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawLine***>((baseX + lineInset), headerSepY, (baseX + cardW - lineInset), headerSepY, 0xFFCFCFCF);
+
+            currentY = currentY + rowH;
+
+            // ── Items de cette app (dock_menu_items) ──────────────────────
+            let menuItemCnt: <i32> = <DrvAPIInterCon***AppRegistryGetMenuItemCount***>(appIdx);
+            var itemJ: <i32> = 0;
+            loop (itemJ < menuItemCnt) [
+                let itemLabel: <ptr> = <DrvAPIInterCon***AppRegistryGetMenuItemLabel***>(appIdx, itemJ);
+                let submenuCnt: <i32> = <DrvAPIInterCon***AppRegistryGetMenuItemSubmenuCount***>(appIdx, itemJ);
+                let itemY: <i32> = currentY;
+
+                let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(colX, (itemY + ((8 * sU + 500) / 1000)), (cardW - (padX * 2)), itemLabel, 0xFF000000, 0x00000000, font, textSize, 0);
+                if (submenuCnt > 0) [
+                    // Chevron ">" du sous-menu = img16.png (asset ShiUI, pas un
+                    // glyphe de police — Figma 900:88 node 900:87 "ic_activity_
+                    // thirds_option", 10×11 design).
+                    im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img16.png");
+                    let chevW: <i32> = ((10 * sU + 500) / 1000);
+                    let chevH: <i32> = ((11 * sU + 500) / 1000);
+                    let chevX: <i32> = colX + cardW - (padX * 2) - chevW;
+                    let chevY: <i32> = itemY + ((rowH - chevH) / 2);
+                    let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, chevX, chevY, chevW, chevH);
+                ];
+
+                // Ligne séparatrice sous l'item — 3 couleurs distinctes (Figma
+                // 900:88, assets Line4/Line7/Line14/Line15) : #E0E0E0 entre deux
+                // items de la MÊME app, #888888 (plus marqué) sous le DERNIER
+                // item d'un groupe quand un autre groupe suit (frontière de
+                // catégorie, ex: dernier item ShiLooker avant header ShiLauncher).
+                // Rien sous le tout dernier item de la dernière app (pas de ligne
+                // flottant hors de la carte).
+                let isLastItemOfGroup: <bool> = (itemJ == (menuItemCnt - 1));
+                let isLastGroup: <bool> = (appI == (pinnedCount - 1));
+                if (isLastItemOfGroup == false) [
+                    let sepY: <i32> = itemY + rowH - ((1 * sU + 500) / 1000);
+                    let _: <i32> = <DrvAPIInterCon***GpuDrawLine***>((baseX + lineInset), sepY, (baseX + cardW - lineInset), sepY, 0xFFE0E0E0);
+                ];
+                if (isLastItemOfGroup && (isLastGroup == false)) [
+                    let sepY2: <i32> = itemY + rowH - ((1 * sU + 500) / 1000);
+                    let _: <i32> = <DrvAPIInterCon***GpuDrawLine***>((baseX + lineInset), sepY2, (baseX + cardW - lineInset), sepY2, 0xFF888888);
+                ];
+
+                // Hit-zone + clic
+                let overItemX: <bool> = (mx >= baseX && mx <= (baseX + cardW));
+                let overItemY: <bool> = (my >= itemY && my <= (itemY + rowH));
+                if (overItemX && overItemY && clickEdge) [
+                    if (submenuCnt > 0) [
+                        // Ancre le sous-menu flottant à droite de la carte principale,
+                        // aligné verticalement sur l'item cliqué (Figma 900:89).
+                        let subX: <i32> = baseX + cardW + ((10 * sU + 500) / 1000);
+                        let _: <i32> = <DrvAPIInterCon***MenuOpenSubmenuGlobal***>(appIdx, itemJ, subX, itemY);
+                    ];
+                    if (submenuCnt == 0) [
+                        // Item terminal sans sous-menu : ferme le menu (pas de
+                        // routage d'action générique par label — voir README
+                        // §4.11, aucune concaténation/comparaison fiable de
+                        // chaînes arbitraires côté Mara au-delà de StrEqual).
+                        let _: <i32> = <DrvAPIInterCon***MenuCloseGlobal***>();
+                    ];
+                ];
+
+                currentY = currentY + rowH;
+                itemJ = itemJ + 1;
+            ];
+        ];
+        appI = appI + 1;
+    ];
+
+    // ── Sous-menu flottant (ex: "System power") ───────────────────────────
+    let subAppIdx: <i32> = <DrvAPIInterCon***MenuGetSubmenuGlobalAppIdx***>();
+    let subItemIdx: <i32> = <DrvAPIInterCon***MenuGetSubmenuGlobalItemIdx***>();
+    if (subAppIdx >= 0) [
+        let subCnt: <i32> = <DrvAPIInterCon***AppRegistryGetMenuItemSubmenuCount***>(subAppIdx, subItemIdx);
+        let subX: <i32> = <DrvAPIInterCon***MenuGetSubmenuGlobalX***>();
+        let subY: <i32> = <DrvAPIInterCon***MenuGetSubmenuGlobalY***>();
+        let subCardH: <i32> = (subCnt * rowH);
+
+        let _: <i32> = <DrvAPIInterCon***GpuBackgroundBlur***>(subX, subY, cardW, subCardH, cardR, 8);
+        let _: <i32> = <DrvAPIInterCon***GpuSetOpacity***>(77);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(subX, subY, cardW, subCardH, cardR, 0xFFE0E0E0);
+        let _: <i32> = <DrvAPIInterCon***GpuResetOpacity***>();
+
+        var subY2: <i32> = subY;
+        var subK: <i32> = 0;
+        loop (subK < subCnt) [
+            let subLabel: <ptr> = <DrvAPIInterCon***AppRegistryGetMenuItemSubmenuLabel***>(subAppIdx, subItemIdx, subK);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>((subX + padX), (subY2 + ((8 * sU + 500) / 1000)), (cardW - (padX * 2)), subLabel, 0xFF000000, 0x00000000, font, textSize, 0);
+
+            if (subK < (subCnt - 1)) [
+                let subSepY: <i32> = subY2 + rowH - ((1 * sU + 500) / 1000);
+                let _: <i32> = <DrvAPIInterCon***GpuDrawLine***>((subX + lineInset), subSepY, (subX + cardW - lineInset), subSepY, 0xFFE0E0E0);
+            ];
+
+            let overSubX: <bool> = (mx >= subX && mx <= (subX + cardW));
+            let overSubY: <bool> = (my >= subY2 && my <= (subY2 + rowH));
+            if (overSubX && overSubY && clickEdge) [
+                // Actions d'alimentation réellement câblées via SluPwMan
+                // (voir README §4.9 / SluPwMan.slul) — "Sleep screen" et
+                // "Standby" n'ont pas d'action système dédiée aujourd'hui
+                // (pas de verrouillage écran ni d'ACPI S1 séparé de S3) :
+                // seul le clic ferme les menus, honnêtement, sans simuler.
+                let isReboot: <bool> = <DrvManSpec***StrEqual***>(subLabel, "Reboot") != 0;
+                let isShutdown: <bool> = <DrvManSpec***StrEqual***>(subLabel, "Shutdown") != 0;
+                let isStandby: <bool> = <DrvManSpec***StrEqual***>(subLabel, "Standby") != 0;
+                if (isReboot) [ let _: <i32> = <DrvAPIInterCon***PowerRestart***>(); ];
+                if (isShutdown) [ let _: <i32> = <DrvAPIInterCon***PowerShutdown***>(); ];
+                if (isStandby) [ let _: <i32> = <DrvAPIInterCon***PowerSleep***>(); ];
+                let _: <i32> = <DrvAPIInterCon***MenuCloseSubmenuGlobal***>();
+                let _: <i32> = <DrvAPIInterCon***MenuCloseGlobal***>();
+            ];
+
+            subY2 = subY2 + rowH;
+            subK = subK + 1;
+        ];
+
+        // Clic hors des deux cartes (principale + sous-menu) referme tout.
+        let overMain: <bool> = (mx >= baseX && mx <= (baseX + cardW) && my >= baseY && my <= (baseY + cardH));
+        let overSub: <bool> = (mx >= subX && mx <= (subX + cardW) && my >= subY && my <= (subY + subCardH));
+        if (clickEdge && overMain != true && overSub != true) [
+            let _: <i32> = <DrvAPIInterCon***MenuCloseSubmenuGlobal***>();
+            let _: <i32> = <DrvAPIInterCon***MenuCloseGlobal***>();
+        ];
+    ];
+
+    // Clic hors de la carte principale (aucun sous-menu ouvert) referme le menu.
+    if (subAppIdx < 0) [
+        let overCard: <bool> = (mx >= baseX && mx <= (baseX + cardW) && my >= baseY && my <= (baseY + cardH));
+        if (clickEdge && overCard != true) [
+            let _: <i32> = <DrvAPIInterCon***MenuCloseGlobal***>();
+        ];
+    ];
+
+    ret 0;
+];
+
+rel op Destroy: [] [ ret 0; ];

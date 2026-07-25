@@ -9,6 +9,18 @@
         }
     },
 
+    // "make: booter.iso" prompte ce choix à chaque run — le canal est injecté
+    // dans le nom de fichier ISO (voir README §11 — Versionning & Build).
+    "inputs": [
+        {
+            "id": "releaseChannel",
+            "type": "pickString",
+            "description": "Canal de release pour l'ISO Slura",
+            "options": ["dev", "beta", "release"],
+            "default": "dev"
+        }
+    ],
+
     "tasks": [
 
         // =================================================================
@@ -125,6 +137,28 @@
         },
 
         // =================================================================
+        // STAMP — Horodatage dynamique des Maraset.yaml (build/Marav/basecon)
+        // Même logique que "make: booter.iso" (voir README §11) : un stamp
+        // DDMMYYHH frais est calculé à CE run et propagé partout, plutôt
+        // qu'une valeur figée dans les fichiers sources.
+        // =================================================================
+
+        {
+            "label": "stamp: Maraset build (dynamic)",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": [
+                "-NoProfile", "-ExecutionPolicy", "Bypass",
+                "-File", "${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\stamp-maraset.ps1",
+                "-Channel", "${input:releaseChannel}"
+            ],
+            "options": { "cwd": "${workspaceFolder}" },
+            "group": "build",
+            "presentation": { "reveal": "always", "panel": "shared" },
+            "problemMatcher": []
+        },
+
+        // =================================================================
         // ESP — Création de TOUS les répertoires
         // esp/
         // ├── slr_clk_bt.efi / ShiLauncher.marep / sources/ / boot/ / EFI/
@@ -135,6 +169,15 @@
         //     ├── env/            ← variables d'environnement *.env + .index
         //     ├── chain/          ← pending_txs/ calls/ receipts/ state/ metadata/
         //     └── DrivRequirment/ ← tous les drivers *.slul
+        //
+        // Nettoie aussi ICI (avant TOUT le reste du pipeline) les deux fichiers
+        // qui capturent l'ESP entier comme source (efiboot.img pour l'ISO,
+        // install.slin) : "marai image: create install.slin" tourne AVANT
+        // "make: booter.iso" dans le graphe de dépendances, donc si efiboot.img
+        // d'un run précédent traînait encore dans esp/ à ce moment-là, il se
+        // retrouvait embarqué DANS install.slin (poupée russe croisée, ~550 Mo
+        // constaté) — le nettoyage de efiboot.img par "make: booter.iso"
+        // lui-même arrivait trop tard dans l'ordre d'exécution pour l'éviter.
         // =================================================================
 
         {
@@ -143,9 +186,10 @@
             "command": "powershell.exe",
             "args": [
                 "-NoProfile", "-Command",
-                "$e = '${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp'; $s = \"$e\\SDC\\slu64\"; @(\"$e\\EFI\\BOOT\",\"$e\\sources\",\"$e\\boot\\assets\\font\",\"$e\\boot\\font\",\"$s\\assets\\fonts\",\"$s\\assets\\crypto\",\"$s\\contracts\",\"$s\\DrivRequirment\",\"$s\\env\",\"$s\\chain\\pending_txs\",\"$s\\chain\\calls\",\"$s\\chain\\receipts\",\"$s\\chain\\state\\balances\",\"$s\\chain\\metadata\",\"$s\\apps\\ShiLauncher\\ShiLauncher.slasset\") | ForEach-Item { New-Item -ItemType Directory -Force $_ | Out-Null }; Write-Host 'ESP dirs OK'"
+                "$e = '${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp'; $s = \"$e\\SDC\\slu64\"; @(\"$e\\EFI\\BOOT\",\"$e\\sources\",\"$e\\boot\\assets\\font\",\"$e\\boot\\font\",\"$s\\assets\\fonts\",\"$s\\assets\\crypto\",\"$s\\contracts\",\"$s\\DrivRequirment\",\"$s\\env\",\"$s\\chain\\pending_txs\",\"$s\\chain\\calls\",\"$s\\chain\\receipts\",\"$s\\chain\\state\\balances\",\"$s\\chain\\metadata\",\"$s\\apps\\ShiLauncher\\ShiLauncher.slasset\") | ForEach-Item { New-Item -ItemType Directory -Force $_ | Out-Null }; Remove-Item -Force -ErrorAction SilentlyContinue \"$e\\efiboot.img\", \"$e\\sources\\install.slin\"; Write-Host 'ESP dirs OK (efiboot.img + install.slin nettoyes)'"
             ],
             "options": { "cwd": "${workspaceFolder}" },
+            "dependsOn": ["stamp: Maraset build (dynamic)"],
             "group": "build",
             "presentation": { "reveal": "silent", "panel": "shared" },
             "problemMatcher": []
@@ -210,7 +254,7 @@
 
         // =================================================================
         // MARATINE — Drivers (.slul) + Application (.marep)
-        // 7 drivers : SluGpu, SluHIIDMan, SluFontConf, SRFSMan,
+        // 8 drivers : SluGpu, SluHIIDMan, SluFontConf, SRFSMan, NTFSMan,
         //             SluEnvSys, CryptoAssetSupport + ShiLauncher
         // =================================================================
 
@@ -257,6 +301,118 @@
             "args": [ "-NoProfile", "-Command",
                 "marai build SRFSMan.slul -O --arch=x64 \"--out-dir=${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\sources\"" ],
             "options": { "cwd": "${workspaceFolder}/slr_clk_bt" },
+            "dependsOn": ["make: ESP dirs"],
+            "group": "build",
+            "presentation": { "reveal": "always", "panel": "shared" },
+            "problemMatcher": []
+        },
+        {
+            "label": "marai build: NTFSMan.slul",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": [ "-NoProfile", "-Command",
+                "marai build NTFSMan.slul -O --arch=x64 \"--out-dir=${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\sources\"" ],
+            "options": { "cwd": "${workspaceFolder}/slr_clk_bt" },
+            "dependsOn": ["make: ESP dirs"],
+            "group": "build",
+            "presentation": { "reveal": "always", "panel": "shared" },
+            "problemMatcher": []
+        },
+        {
+            "label": "marai build: SluDskMan.slul",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": [ "-NoProfile", "-Command",
+                "marai build SluDskMan.slul -O --arch=x64 \"--out-dir=${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\sources\"" ],
+            "options": { "cwd": "${workspaceFolder}/slr_clk_bt" },
+            "dependsOn": ["make: ESP dirs"],
+            "group": "build",
+            "presentation": { "reveal": "always", "panel": "shared" },
+            "problemMatcher": []
+        },
+        {
+            "label": "marai build: SluWWANMan.slul",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": [ "-NoProfile", "-Command",
+                "marai build SluWWANMan.slul -O --arch=x64 \"--out-dir=${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\sources\"" ],
+            "options": { "cwd": "${workspaceFolder}/slr_clk_bt" },
+            "dependsOn": ["make: ESP dirs"],
+            "group": "build",
+            "presentation": { "reveal": "always", "panel": "shared" },
+            "problemMatcher": []
+        },
+        {
+            "label": "marai build: SluWWANManSrv.marep",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": [ "-NoProfile", "-Command",
+                "marai build SluWWANManSrv.marep -O --arch=x64 \"--out-dir=${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\"" ],
+            "options": { "cwd": "${workspaceFolder}/slr_clk_bt" },
+            "dependsOn": ["make: ESP dirs"],
+            "group": "build",
+            "presentation": { "reveal": "always", "panel": "shared" },
+            "problemMatcher": []
+        },
+        {
+            "label": "marai build: EncDecProcMan.slul",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": [ "-NoProfile", "-Command",
+                "marai build EncDecProcMan.slul -O --arch=x64 \"--out-dir=${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\sources\"" ],
+            "options": { "cwd": "${workspaceFolder}/slr_clk_bt" },
+            "dependsOn": ["make: ESP dirs"],
+            "group": "build",
+            "presentation": { "reveal": "always", "panel": "shared" },
+            "problemMatcher": []
+        },
+        {
+            "label": "marai build: SluPwMan.slul",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": [ "-NoProfile", "-Command",
+                "marai build SluPwMan.slul -O --arch=x64 \"--out-dir=${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\sources\"" ],
+            "options": { "cwd": "${workspaceFolder}/slr_clk_bt" },
+            "dependsOn": ["make: ESP dirs"],
+            "group": "build",
+            "presentation": { "reveal": "always", "panel": "shared" },
+            "problemMatcher": []
+        },
+        {
+            "label": "marai build: EncDecProcManSrv.marep",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": [ "-NoProfile", "-Command",
+                "marai build EncDecProcManSrv.marep -O --arch=x64 \"--out-dir=${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\"" ],
+            "options": { "cwd": "${workspaceFolder}/slr_clk_bt" },
+            "dependsOn": ["make: ESP dirs"],
+            "group": "build",
+            "presentation": { "reveal": "always", "panel": "shared" },
+            "problemMatcher": []
+        },
+        {
+            "label": "install: EncDecProcManSrv → apps SRFS",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": [
+                "-NoProfile", "-Command",
+                "$src = '${workspaceFolder}\\slr_clk_bt\\EncDecProcManSrv.marep'; $dst = '${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\SDC\\slu64\\apps\\EncDecProcManSrv'; New-Item -ItemType Directory -Force \"$dst\\EncDecProcManSrv.slasset\" | Out-Null; Copy-Item -Force \"$src\\Maraset.yaml\" \"$dst\\Maraset.yaml\"; if (Test-Path \"$src\\EncDecProcManSrv.slasset\") { Copy-Item -Force -Recurse \"$src\\EncDecProcManSrv.slasset\\*\" \"$dst\\EncDecProcManSrv.slasset\" }; Write-Host 'EncDecProcManSrv installe -> apps/EncDecProcManSrv'"
+            ],
+            "options": { "cwd": "${workspaceFolder}" },
+            "dependsOn": ["make: ESP dirs"],
+            "group": "build",
+            "presentation": { "reveal": "always", "panel": "shared" },
+            "problemMatcher": []
+        },
+        {
+            "label": "install: SluWWANManSrv → apps SRFS",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": [
+                "-NoProfile", "-Command",
+                "$src = '${workspaceFolder}\\slr_clk_bt\\SluWWANManSrv.marep'; $dst = '${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\SDC\\slu64\\apps\\SluWWANManSrv'; New-Item -ItemType Directory -Force \"$dst\\SluWWANManSrv.slasset\" | Out-Null; Copy-Item -Force \"$src\\Maraset.yaml\" \"$dst\\Maraset.yaml\"; if (Test-Path \"$src\\SluWWANManSrv.slasset\") { Copy-Item -Force -Recurse \"$src\\SluWWANManSrv.slasset\\*\" \"$dst\\SluWWANManSrv.slasset\" }; Write-Host 'SluWWANManSrv installe -> apps/SluWWANManSrv'"
+            ],
+            "options": { "cwd": "${workspaceFolder}" },
             "dependsOn": ["make: ESP dirs"],
             "group": "build",
             "presentation": { "reveal": "always", "panel": "shared" },
@@ -317,14 +473,31 @@
             "problemMatcher": []
         },
         {
+            "label": "marai build: TestApp.marep",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": [ "-NoProfile", "-Command",
+                "marai build TestApp.marep -O --arch=x64 \"--out-dir=${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\"" ],
+            "options": { "cwd": "${workspaceFolder}/slr_clk_bt" },
+            "dependsOn": ["make: ESP dirs"],
+            "group": "build",
+            "presentation": { "reveal": "always", "panel": "shared" },
+            "problemMatcher": []
+        },
+        {
             "label": "🔨 build all drivers",
             "dependsOn": [
                 "marai build: SluGpu.slul",
                 "marai build: SluHIIDMan.slul",
                 "marai build: SluFontConf.slul",
                 "marai build: SRFSMan.slul",
+                "marai build: NTFSMan.slul",
+                "marai build: SluDskMan.slul",
+                "marai build: SluWWANMan.slul",
                 "marai build: SluEnvSys.slul",
                 "marai build: CryptoAssetSupport.slul",
+                "marai build: EncDecProcMan.slul",
+                "marai build: SluPwMan.slul",
                 "marai build: ShiLauncher.marep"
             ],
             "dependsOrder": "parallel",
@@ -393,9 +566,81 @@
                 "$src = '${workspaceFolder}\\slr_clk_bt\\ShiLooker.marep'; $dst = '${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\SDC\\slu64\\apps\\ShiLooker'; New-Item -ItemType Directory -Force \"$dst\\ShiLooker.slasset\" | Out-Null; Copy-Item -Force \"$src\\Maraset.yaml\" \"$dst\\Maraset.yaml\"; if (Test-Path \"$src\\ShiLooker.slasset\") { Copy-Item -Force -Recurse \"$src\\ShiLooker.slasset\\*\" \"$dst\\ShiLooker.slasset\" }; Write-Host 'ShiLooker installe → apps/ShiLooker'"
             ],
             "options": { "cwd": "${workspaceFolder}" },
-            "dependsOn": ["make: ESP dirs"],
+            "dependsOn": ["make: ESP dirs", "marai build: ShiLooker.marep"],
             "group": "build",
             "presentation": { "reveal": "always", "panel": "shared" },
+            "problemMatcher": []
+        },
+        {
+            "label": "install: TestApp → apps SRFS",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": [
+                "-NoProfile", "-Command",
+                "$src = '${workspaceFolder}\\slr_clk_bt\\TestApp.marep'; $dst = '${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\SDC\\slu64\\apps\\TestApp'; New-Item -ItemType Directory -Force \"$dst\\TestApp.slasset\" | Out-Null; Copy-Item -Force \"$src\\Maraset.yaml\" \"$dst\\Maraset.yaml\"; if (Test-Path \"$src\\TestApp.slasset\") { Copy-Item -Force -Recurse \"$src\\TestApp.slasset\\*\" \"$dst\\TestApp.slasset\" }; Write-Host 'TestApp installe → apps/TestApp'"
+            ],
+            "options": { "cwd": "${workspaceFolder}" },
+            "dependsOn": ["make: ESP dirs", "marai build: TestApp.marep"],
+            "group": "build",
+            "presentation": { "reveal": "always", "panel": "shared" },
+            "problemMatcher": []
+        },
+
+        // =================================================================
+        // VMWARETOOL — CD d'installation autonome (PAS embarqué dans booter.iso)
+        // Intégration VMware/QEMU (souris absolue + auto-adaptation résolution,
+        // voir ShiLauncher/VmwareIntegration.mara) : installer cette app EST
+        // l'interrupteur (ShiLauncher.marep vérifie sa présence dans le
+        // registre à chaque frame). Distribué comme un vrai CD Tools : à
+        // monter manuellement via VM > Amovibles > CD/DVD > Paramètres >
+        // "Utiliser un fichier image ISO" dans VMware Workstation — Slura
+        // (ShiLauncher/VmwareInstaller.mara) détecte le CD et installe
+        // réellement (DrvManSpec***UefiInstallFile***, persiste au reboot).
+        // =================================================================
+        {
+            "label": "marai build: Vmwaretool.marep",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": [ "-NoProfile", "-Command",
+                "Remove-Item -Recurse -Force -ErrorAction SilentlyContinue '${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\vmwaretool_cd'; New-Item -ItemType Directory -Force '${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\vmwaretool_cd\\SDC\\slu64\\apps\\Vmwaretool\\Vmwaretool.slasset' | Out-Null; marai build Vmwaretool.marep -O --arch=x64 \"--out-dir=${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\vmwaretool_cd\"" ],
+            "options": { "cwd": "${workspaceFolder}/slr_clk_bt" },
+            "group": "build",
+            "presentation": { "reveal": "always", "panel": "shared" },
+            "problemMatcher": []
+        },
+        {
+            "label": "stage: Vmwaretool → CD layout",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": [
+                "-NoProfile", "-Command",
+                "$src = '${workspaceFolder}\\slr_clk_bt\\Vmwaretool.marep'; $dst = '${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\vmwaretool_cd\\SDC\\slu64\\apps\\Vmwaretool'; Copy-Item -Force \"$src\\Maraset.yaml\" \"$dst\\Maraset.yaml\"; Copy-Item -Force -Recurse \"$src\\Vmwaretool.slasset\\*\" \"$dst\\Vmwaretool.slasset\"; Write-Host 'Vmwaretool → CD layout OK'"
+            ],
+            "options": { "cwd": "${workspaceFolder}" },
+            "dependsOn": ["marai build: Vmwaretool.marep"],
+            "group": "build",
+            "presentation": { "reveal": "always", "panel": "shared" },
+            "problemMatcher": []
+        },
+        {
+            "label": "make: vmwaretool.iso",
+            "type": "process",
+            "command": "powershell.exe",
+            // CD de données simple — pas de El Torito/boot requis (Vmwaretool.iso
+            // n'est jamais démarré, juste monté et lu par Slura déjà en cours
+            // d'exécution), contrairement à booter.iso.
+            "args": [ "-NoProfile", "-Command",
+                "& 'D:\\msys64\\usr\\bin\\xorriso.exe' -as mkisofs -V VMWARETOOL -R -J -joliet-long -iso-level 3 -o vmwaretool.iso 'slr_clk_bt/x64/amd64/vmwaretool_cd'; if ($LASTEXITCODE -ne 0) { Write-Error 'xorriso a echoue'; exit 1 }; Write-Host '[ISO] OK -> vmwaretool.iso'" ],
+            "options": { "cwd": "${workspaceFolder}" },
+            "dependsOn": ["stage: Vmwaretool → CD layout"],
+            "group": "build",
+            "presentation": { "reveal": "always", "panel": "shared" },
+            "problemMatcher": []
+        },
+        {
+            "label": "📀 build vmwaretool.iso",
+            "dependsOn": ["make: vmwaretool.iso"],
+            "group": "build",
             "problemMatcher": []
         },
 
@@ -415,14 +660,14 @@
         },
 
         // TOUS les drivers → esp/SDC/slu64/DrivRequirment/
-        // (SluGpu, SluHIIDMan, SluFontConf, SRFSMan, SluEnvSys, CryptoAssetSupport)
+        // (SluGpu, SluHIIDMan, SluFontConf, SRFSMan, NTFSMan, SluDskMan, SluEnvSys, CryptoAssetSupport)
         {
             "label": "copy: all drivers → SRFS DrivRequirment",
             "type": "process",
             "command": "powershell.exe",
             "args": [
                 "-NoProfile", "-Command",
-                "$dst = '${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\SDC\\slu64\\DrivRequirment'; $src = '${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\sources'; @('SluGpu.slul','SluHIIDMan.slul','SluFontConf.slul','SRFSMan.slul','SluEnvSys.slul','CryptoAssetSupport.slul') | ForEach-Object { Copy-Item -Force \"$src\\$_\" $dst }; Write-Host '6 drivers → DrivRequirment OK'"
+                "$dst = '${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\SDC\\slu64\\DrivRequirment'; $src = '${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\sources'; @('SluGpu.slul','SluHIIDMan.slul','SluFontConf.slul','SRFSMan.slul','NTFSMan.slul','SluDskMan.slul','SluWWANMan.slul','SluEnvSys.slul','CryptoAssetSupport.slul','EncDecProcMan.slul','SluPwMan.slul') | ForEach-Object { Copy-Item -Force \"$src\\$_\" $dst }; Write-Host '11 drivers → DrivRequirment OK'"
             ],
             "options": { "cwd": "${workspaceFolder}" },
             "dependsOn": ["🔨 build all drivers", "make: ESP dirs"],
@@ -432,23 +677,92 @@
         },
 
         // =================================================================
-        // SLIN — Image système Slura avec partition SDC
-        // Inclut : kernel, drivers, actifs crypto, env vars, contrats
+        // SLIN — Image système Slura complète, façon install.wim (Windows)
+        // Capture TOUT ce qu'il faut pour reconstruire le système bootable :
+        // noyau (slr_clk_bt.efi), sélecteur de boot (BOOTX64.EFI), bytecode
+        // compilé des apps (*.marep/base/*.ovc, à la racine ESP — PAS sous
+        // SDC/slu64/), + toute la partition SDC (drivers, polices, actifs
+        // crypto, contrats, manifestes+assets d'apps). Avant ce fix, seul
+        // SDC/slu64/ était capturé : le noyau/bootloader/bytecode compilé
+        // manquaient — une "capture" incomplète, contrairement à un vrai WIM
+        // qui capture le disque système entier. NOTE : "apply" existe côté
+        // outil marai (marai slin apply <slin> <cible>) mais rien dans le
+        // pipeline de boot ne l'appelle encore — cette image n'est donc pour
+        // l'instant PAS installée/appliquée automatiquement (pas d'installeur
+        // Slura), seulement embarquée dans l'ISO pour un futur usage.
         // =================================================================
 
         {
             "label": "marai image: create install.slin",
             "type": "process",
             "command": "powershell.exe",
+            // "slin init" ne crée qu'une coquille VIDE (0 image, manifeste seul — vérifié via
+            // "marai slin info" : Images=0). Le verbe qui embarque réellement le contenu comme
+            // image est "create" (avec --out) — vérifié. Source = ESP ENTIER (pas juste SDC/slu64)
+            // pour inclure noyau + bootloader + bytecode compilé. Sortie en dehors de l'ESP
+            // (install.slin.tmp) pour éviter que le fichier ne s'auto-inclue en re-packageant
+            // un install.slin déjà présent d'un run précédent — copié vers esp/sources/ ensuite.
+            // Suppression préalable d'esp/sources/install.slin (s'il existe d'un build antérieur) :
+            // sans ça, capturer l'ESP entier réembarquerait CE fichier À L'INTÉRIEUR de lui-même,
+            // grossissant en poupée russe à chaque rebuild (marai slin create n'a pas d'option
+            // --exclude pour filtrer un fichier précis).
             "args": [ "-NoProfile", "-Command",
-                "marai slin init \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\sources\\install.slin\" --name \"Slura OS\" --os-version \"1.0.0\" --arch x64 \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\SDC\\slu64\" " ],
+                "Remove-Item -Force -ErrorAction SilentlyContinue '${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\sources\\install.slin'; marai slin create \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\" --out \"${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\install.slin.tmp\" --name \"Slura OS\" --os-version \"1.0.0\" --arch x64" ],
             "options": { "cwd": "${workspaceFolder}/slr_clk_bt" },
+            // TOUT ce qui écrit sous esp/ doit être fait AVANT le packaging (noyau lié, apps
+            // compilées, SDC peuplé), sinon l'image .slin est incomplète.
             "dependsOn": [
                 "make: ESP dirs",
+                "5️⃣ make: esp image",
+                "copy: brsonomasemibold.ttf → assets",
                 "copy: all drivers → SRFS DrivRequirment",
-                "copy: vezcurproxy.ca + vezcurproxy.sol → SRFS"
+                "copy: vezcurproxy.ca + vezcurproxy.sol → SRFS",
+                "copy: ShiLauncher.slasset → SRFS",
+                "marai build: ShiLauncher.marep",
+                "install: ShiLooker → apps SRFS",
+                "marai build: ShiLooker.marep",
+                "install: TestApp → apps SRFS",
+                "marai build: TestApp.marep"
             ],
             "group": "none",
+            "presentation": { "reveal": "always", "panel": "shared" },
+            "problemMatcher": []
+        },
+        {
+            "label": "copy: install.slin → sources",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": [
+                "-NoProfile", "-Command",
+                "Copy-Item -Force '${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\install.slin.tmp' '${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\sources\\install.slin'; Write-Host 'install.slin → sources OK'"
+            ],
+            "options": { "cwd": "${workspaceFolder}" },
+            "dependsOn": ["marai image: create install.slin"],
+            "group": "none",
+            "presentation": { "reveal": "always", "panel": "shared" },
+            "problemMatcher": []
+        },
+
+        // Pipeline d'installation réel : "marai slin apply" extrait le contenu
+        // capturé dans install.slin vers un répertoire cible (comportement
+        // vérifié empiriquement — c'est une extraction de fichiers façon zip,
+        // PAS une écriture sur un disque/partition réel). La cible est wipée et
+        // recréée à chaque run pour simuler une installation propre. Après
+        // l'apply, on VÉRIFIE (pas juste on suppose) que les drivers critiques
+        // sont bien présents dans la copie installée — notamment NTFSMan.slul,
+        // pour éviter une régression silencieuse si son ajout à "copy: all
+        // drivers → SRFS DrivRequirment" venait à sauter d'install.slin.
+        {
+            "label": "marai slin: apply install.slin → installed",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": [
+                "-NoProfile", "-Command",
+                "$target = '${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\installed\\esp'; $slin = '${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\sources\\install.slin'; if (Test-Path $target) { Remove-Item -Recurse -Force $target }; New-Item -ItemType Directory -Force $target | Out-Null; marai slin apply $slin $target; if ($LASTEXITCODE -ne 0) { Write-Error 'marai slin apply a echoue'; exit 1 }; $ntfs = Join-Path $target 'SDC\\slu64\\DrivRequirment\\NTFSMan.slul'; $srfs = Join-Path $target 'SDC\\slu64\\DrivRequirment\\SRFSMan.slul'; $missing = @(); if (-not (Test-Path $ntfs)) { $missing += 'NTFSMan.slul' }; if (-not (Test-Path $srfs)) { $missing += 'SRFSMan.slul' }; if ($missing.Count -gt 0) { Write-Error \"Driver(s) manquant(s) dans l'image installee : $($missing -join ', ')\"; exit 1 }; Write-Host \"OK - install.slin applique vers $target (NTFSMan.slul + SRFSMan.slul confirmes presents)\""
+            ],
+            "options": { "cwd": "${workspaceFolder}" },
+            "dependsOn": ["copy: install.slin → sources"],
+            "group": "test",
             "presentation": { "reveal": "always", "panel": "shared" },
             "problemMatcher": []
         },
@@ -457,24 +771,20 @@
         // ISO bootable UEFI — booter.iso
         // Fix: xorriso (supporte EFI) au lieu de mkisofs ucrt64
         // xorriso -as mkisofs supporte -eltorito-alt-boot -e
+        //
+        // Nom de fichier généré DYNAMIQUEMENT à chaque run (voir README §11) :
+        //   Slura1_NAVERTA_<canal>_build<DDMMYYHH>.iso
+        // <canal> = choix demandé via l'input "releaseChannel" (dev/beta/release).
+        // <DDMMYYHH> = horodatage réel du build (Get-Date), pas une valeur figée.
         // =================================================================
 
              {
             "label": "make: booter.iso",
             "type": "process",
-            "command": "D:\\msys64\\usr\\bin\\xorriso.exe",
+            "command": "powershell.exe",
             "args": [
-                "-as", "mkisofs",
-                "-V", "SLURA_PARTDISK",
-                "-R", "-J", "-joliet-long",
-                "-iso-level", "3",
-                "-no-emul-boot",
-                "-eltorito-alt-boot",
-                    "-e", "EFI/BOOT/BOOTX64.EFI",
-                    "-no-emul-boot",
-                    "-isohybrid-gpt-basdat",
-                "-o", "Slura1_NAVERTA_build29062617.iso",
-                "slr_clk_bt/x64/amd64/esp"
+                "-NoProfile", "-Command",
+                "$stamp = Get-Date -Format 'ddMMyyHH'; $rawChannel = '${input:releaseChannel}'; if ($rawChannel -match '^[a-z]+$') { $channel = $rawChannel } else { $channel = 'dev' }; $isoName = \"Slura1_NAVERTA_${channel}_build${stamp}.iso\"; Write-Host \"[ISO] $isoName\"; Remove-Item -Force -ErrorAction SilentlyContinue '${workspaceFolder}\\slr_clk_bt\\x64\\amd64\\esp\\efiboot.img'; Write-Host '[ISO] building efiboot.img (FAT ESP image, via WSL mkfs.vfat) ...'; wsl -u root -e bash -lc 'set -e; rm -f /tmp/efiboot.img /mnt/d/Downloads/Vyft_product/Slura/slr_clk_bt/x64/amd64/esp/efiboot.img; dd if=/dev/zero of=/tmp/efiboot.img bs=1M count=512 status=none; mkfs.vfat -F 32 -n SLURA_ESP /tmp/efiboot.img >/dev/null 2>&1; mkdir -p /tmp/efimnt; mount -o loop /tmp/efiboot.img /tmp/efimnt; cp -r /mnt/d/Downloads/Vyft_product/Slura/slr_clk_bt/x64/amd64/esp/. /tmp/efimnt/; sync; umount /tmp/efimnt; cp /tmp/efiboot.img /mnt/d/Downloads/Vyft_product/Slura/slr_clk_bt/x64/amd64/esp/efiboot.img'; if ($LASTEXITCODE -ne 0) { Write-Error 'efiboot.img (WSL) a echoue'; exit 1 }; & 'D:\\msys64\\usr\\bin\\xorriso.exe' -as mkisofs -V SLURA_PARTDISK -R -J -joliet-long -iso-level 3 -eltorito-alt-boot -e 'efiboot.img' -no-emul-boot -isohybrid-gpt-basdat -o $isoName 'slr_clk_bt/x64/amd64/esp'; if ($LASTEXITCODE -ne 0) { Write-Error 'xorriso a echoue'; exit 1 }; Write-Host \"[ISO] OK -> $isoName\""
             ],
             "options": { "cwd": "${workspaceFolder}" },
             "dependsOn": [
@@ -484,7 +794,7 @@
                 "copy: all drivers → SRFS DrivRequirment",
                 "copy: ShiLauncher.slasset → SRFS",
                 "copy: vezcurproxy.ca + vezcurproxy.sol → SRFS",
-                "marai image: create install.slin",
+                "copy: install.slin → sources",
                 "marai build: ShiLooker.marep",
                 "install: ShiLooker → apps SRFS",
                 "marai build: TestApp.marep",
@@ -536,6 +846,42 @@
             "problemMatcher": []
         },
         {
+            "label": "marai check: NTFSMan.slul",
+            "type": "process", "command": "powershell.exe",
+            "args": [ "-NoProfile", "-Command", "marai check NTFSMan.slul -O --json" ],
+            "options": { "cwd": "${workspaceFolder}/slr_clk_bt" },
+            "group": "test",
+            "presentation": { "reveal": "always", "panel": "shared", "clear": true },
+            "problemMatcher": []
+        },
+        {
+            "label": "marai check: SluDskMan.slul",
+            "type": "process", "command": "powershell.exe",
+            "args": [ "-NoProfile", "-Command", "marai check SluDskMan.slul -O --json" ],
+            "options": { "cwd": "${workspaceFolder}/slr_clk_bt" },
+            "group": "test",
+            "presentation": { "reveal": "always", "panel": "shared", "clear": true },
+            "problemMatcher": []
+        },
+        {
+            "label": "marai check: SluWWANMan.slul",
+            "type": "process", "command": "powershell.exe",
+            "args": [ "-NoProfile", "-Command", "marai check SluWWANMan.slul -O --json" ],
+            "options": { "cwd": "${workspaceFolder}/slr_clk_bt" },
+            "group": "test",
+            "presentation": { "reveal": "always", "panel": "shared", "clear": true },
+            "problemMatcher": []
+        },
+        {
+            "label": "marai check: SluWWANManSrv.marep",
+            "type": "process", "command": "powershell.exe",
+            "args": [ "-NoProfile", "-Command", "marai check SluWWANManSrv.marep -O --json" ],
+            "options": { "cwd": "${workspaceFolder}/slr_clk_bt" },
+            "group": "test",
+            "presentation": { "reveal": "always", "panel": "shared", "clear": true },
+            "problemMatcher": []
+        },
+        {
             "label": "marai check: SluEnvSys.slul",
             "type": "process", "command": "powershell.exe",
             "args": [ "-NoProfile", "-Command", "marai check SluEnvSys.slul -O --json" ],
@@ -548,6 +894,15 @@
             "label": "marai check: CryptoAssetSupport.slul",
             "type": "process", "command": "powershell.exe",
             "args": [ "-NoProfile", "-Command", "marai check CryptoAssetSupport.slul -O --json" ],
+            "options": { "cwd": "${workspaceFolder}/slr_clk_bt" },
+            "group": "test",
+            "presentation": { "reveal": "always", "panel": "shared", "clear": true },
+            "problemMatcher": []
+        },
+        {
+            "label": "marai check: SluPwMan.slul",
+            "type": "process", "command": "powershell.exe",
+            "args": [ "-NoProfile", "-Command", "marai check SluPwMan.slul -O --json" ],
             "options": { "cwd": "${workspaceFolder}/slr_clk_bt" },
             "group": "test",
             "presentation": { "reveal": "always", "panel": "shared", "clear": true },
@@ -569,8 +924,13 @@
                 "marai check: SluHIIDMan.slul",
                 "marai check: SluFontConf.slul",
                 "marai check: SRFSMan.slul",
+                "marai check: NTFSMan.slul",
+                "marai check: SluDskMan.slul",
+                "marai check: SluWWANMan.slul",
+                "marai check: SluWWANManSrv.marep",
                 "marai check: SluEnvSys.slul",
                 "marai check: CryptoAssetSupport.slul",
+                "marai check: SluPwMan.slul",
                 "marai check: ShiLauncher.marep"
             ],
             "dependsOrder": "parallel",
@@ -593,11 +953,19 @@
             "presentation": { "reveal": "always", "panel": "shared" },
             "problemMatcher": []
         },
+        // Pointe TOUJOURS VyftUEFI.vmx vers le dernier ISO Slura1_NAVERTA_*.iso
+        // généré (par date de modification) avant de démarrer la VM — sinon le
+        // .vmx garde la référence figée du tout premier ISO créé et VMware
+        // rejoue un build potentiellement obsolète (ou "No Media" si cet ISO a
+        // été supprimé depuis).
         {
             "label": "6️⃣ vmware: run UEFI test",
             "type": "process",
-            "command": "C:\\Program Files (x86)\\VMware\\VMware Workstation\\vmrun.exe",
-            "args": [ "-T", "ws", "start", "${workspaceFolder}/VyftUEFI.vmx", "nogui" ],
+            "command": "powershell.exe",
+            "args": [
+                "-NoProfile", "-Command",
+                "$iso = Get-ChildItem -Path '${workspaceFolder}' -Filter 'Slura1_NAVERTA_*.iso' | Sort-Object LastWriteTime -Descending | Select-Object -First 1; if (-not $iso) { Write-Error 'Aucun ISO Slura1_NAVERTA_*.iso trouve — lance make: booter.iso d''abord'; exit 1 }; Write-Host \"[VMware] ISO le plus recent : $($iso.Name)\"; $vmx = '${workspaceFolder}\\VyftUEFI.vmx'; (Get-Content $vmx) -replace '^ide1:0\\.fileName\\s*=.*$', \"ide1:0.fileName = `\"$($iso.Name)`\"\" | Set-Content -Path $vmx -Encoding ASCII; Write-Host \"[VMware] VyftUEFI.vmx -> $($iso.Name)\"; & 'C:\\Program Files (x86)\\VMware\\VMware Workstation\\vmrun.exe' -T ws start $vmx nogui; if ($LASTEXITCODE -ne 0) { Write-Error 'vmrun a echoue'; exit 1 }"
+            ],
             "options": { "cwd": "${workspaceFolder}" },
             "dependsOn": ["5️⃣ make: esp image"],
             "group": { "kind": "test", "isDefault": false },

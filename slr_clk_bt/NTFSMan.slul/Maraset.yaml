@@ -1,0 +1,35 @@
+# Maraset – manifest NTFSMan.slul
+
+package:
+  name: base***NTFSMan
+  version: 1.0.0
+  build: 25072616
+
+metadata:
+  target: arm64
+  bundle: slul
+  attributes:
+    SRID: SRID_slura_os_29062617
+    Marav: 0.1 build 25072616-dev
+    description: |
+      Driver NTFS pour Slura OS (lecture seule).
+      Monte une partition NTFS sur NTC:, lit le secteur de boot,
+      resout le $MFT (fixups, attributs resident/non-resident,
+      data runs) et parcourt l'index B+ des repertoires
+      ($INDEX_ROOT + $INDEX_ALLOCATION).
+      Fournit ResolvePath, ReadFile via DrvAPIInterCon.
+      CreateFile / CreateDir / WriteFile retournent une erreur :
+      l'ecriture NTFS n'est pas implementee (DiskWrite est un
+      no-op cote noyau pendant la phase UEFI, comme pour SRFSMan).
+    slura_min: 1
+    slura_max: 5.0
+
+dependencies:
+  basecon:
+    base***SluraOS***APrevent: 25072616
+    base***SluraOS***OEntry:   25072616
+
+resources:
+  - path: RAbstractallowing.xml
+    type: xml
+    description: "Permissions driver NTFS."

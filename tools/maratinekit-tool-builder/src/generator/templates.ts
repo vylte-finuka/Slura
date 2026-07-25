@@ -35,6 +35,10 @@ export interface AppMeta {
   isDesktop: boolean;    // variante bureau/shell (boucle WindowMan dans LAPrevent)
   hasAssets: boolean;    // au moins un png/svg exporté
   iconFile: string | null; // ex. "img1.png" (relatif au .slasset), ou null
+  // Couleur ARGB du losange (dock + barre de titre « Shi Windows ») — écrite dans
+  // Maraset.yaml (diamond_color), lue par app_registry.rs au scan. ShiLauncher n'a besoin
+  // d'AUCUNE reconnaissance par nom : chaque app porte sa couleur via cette donnée.
+  diamondColor: number;
 }
 
 export function marasetYaml(meta: AppMeta): string {
@@ -49,6 +53,7 @@ export function marasetYaml(meta: AppMeta): string {
   const permLines = perms.map((p) => `    - ${p}`).join("\n");
   const iconLine = meta.iconFile ? `    icon: ${meta.appName}.slasset/${meta.iconFile}\n` : "";
   const assetsBlock = meta.hasAssets ? `\n  assets:\n    - ${meta.appName}.slasset/\n` : "\n";
+  const diamondHex = "0x" + (meta.diamondColor >>> 0).toString(16).toUpperCase().padStart(8, "0");
   return `package:
   name: base***${meta.appName}
   version: v1 NAVERTA build ${stamp}
@@ -61,6 +66,7 @@ metadata:
     SRID: ${srid}
     Marav: 0.1 build ${stamp}
 ${iconLine}    display_name: "${displayTitle}"
+    diamond_color: "${diamondHex}"
     description: |
       ${meta.appName} — application Slura OS générée par MaratineKit tool's builder.
     slura_min: 1

@@ -90,6 +90,10 @@
   <label for="iconratio">Taille de l'icône dans son cadre (0.48 = petite, verre visible · 1 = remplit)</label>
   <input id="iconratio" type="number" step="0.02" min="0.1" max="1" value="0.48" />
 
+  <label for="diamondcolor">Couleur du losange (ARGB hex, ex. 0x33B9B9B9)</label>
+  <input id="diamondcolor" type="text" placeholder="0x33B9B9B9" value="0x33B9B9B9" />
+  <p class="hint">Double usage : (1) écrite dans <code>Maraset.yaml</code> (<code>diamond_color</code>) — ShiLauncher colore automatiquement le losange de CETTE app dans le dock et sa barre de titre, aucune modification de ShiLauncher requise. (2) Si le design contient un nœud <code>[diamond]</code> (ex. « Icône [diamond] »), il est rendu en losange verre dans CETTE MÊME couleur à l'intérieur de l'app (le fill Figma du nœud est ignoré ; ses enfants, ex. une icône, sont dessinés par-dessus, non pivotés).</p>
+
   <label class="check">
     <input id="desktop" type="checkbox" />
     Ceci est le bureau/shell (boucle de fenêtres WindowMan dans LAPrevent)

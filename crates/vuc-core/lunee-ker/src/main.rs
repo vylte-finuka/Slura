@@ -8,6 +8,18 @@ pub mod hal_manager;
 mod ressources_manager;
 pub mod bundle_loader;
 pub mod platform_bridge;
+pub mod ovc_exec;
+pub mod pci;
+pub mod acpi;
+pub mod xhci;
+pub mod usb;
+pub mod app_registry;
+pub mod window_manager;
+pub mod chain_ca;
+pub mod media_encode;
+pub mod image_decode;
+pub mod format_detect;
+pub mod disk_volumes;
 
 use uefi::{entry, CStr16, Status, Handle, table::{Boot, SystemTable}};
 use crate::kernel_runtime::KernelRuntime;

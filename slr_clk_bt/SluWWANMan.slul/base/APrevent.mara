@@ -1,0 +1,37 @@
+//===================================================================
+//  APrevent.mara – Cycle de vie SluWWANMan
+//  Projet : SluWWANMan.slul
+//  Auteur : Vyft Ltd — 2026
+//  Volontairement mince : la détection matérielle RÉELLE (scan PCI
+//  classe 02:80, lecture seule) se fait déjà plus tôt au boot, côté
+//  Rust (kernel_runtime.rs::init juste après le scan xHCI, avant même
+//  le chargement des .slul) — voir pci.rs::scan_for_wwan_modem et
+//  WWAN_DETECTED dans ovc_exec.rs. Ce fichier n'a donc rien à
+//  initialiser lui-même : il annonce juste la présence du service,
+//  l'état qu'il expose via DrvAPIInterCon***WWAN...*** est déjà réel
+//  au moment où ce OnPowerOn s'exécute.
+//===================================================================
+
+#base <std***ComTpe***SlulFrmt***[ DrvAPIInterCon ]>;
+#base <MaratineKit>;
+#base <MaratineKit***CycleActivity>;
+
+rel op APrevent: <[string CycleActivity]>t [
+
+    var Architecture: <string> = "";
+
+    rel op OnPowerOn: [arch string] [
+        Architecture = arch;
+        let detected: <i32> = <DrvAPIInterCon***WWANIsDetected***()>;
+        if (detected != 0) [
+            log: "SluWWANMan: pilote signal cellulaire pret - modem PCI 02:80 detecte au boot";
+        ] else [
+            log: "SluWWANMan: pilote signal cellulaire pret - aucun modem detecte (scan PCI reel, etat honnete)";
+        ];
+        ret 0;
+    ];
+
+    rel op OnPowerOff: [] [ log: "SluWWANMan: arret"; ret 0; ];
+    rel op OnSuspend:  [] [ log: "SluWWANMan: suspension"; ret 0; ];
+    rel op OnResume:   [] [ log: "SluWWANMan: reprise"; ret 0; ];
+];

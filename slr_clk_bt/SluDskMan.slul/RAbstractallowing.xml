@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<RAbstractallowing xmlns="http://vyft.com/schema/abstractallowing" version="1.0">
+    <Metadata>
+        <PackageName>com.slura.os</PackageName>
+        <SRID>SRID_slura_os_29062617</SRID>
+        <FrameworkVersion>1.0.0</FrameworkVersion>
+        <Target>arm64</Target>
+        <Description>Service de gestion des disques (détection/montage/démontage/formatage) — sans interface propre, consommé directement par ShiLooker.marep.</Description>
+    </Metadata>
+    <Permissions>
+        <Permission name="disk.detect" description="Lecture de la table de montage réelle (MOUNT_TABLE) pour lister les disques.">
+            <Required>true</Required>
+        </Permission>
+        <Permission name="disk.mount" description="Ajout/retrait d'une entrée de la table de montage.">
+            <Required>true</Required>
+        </Permission>
+        <Permission name="disk.format" description="Marque un disque comme formaté pour la session — aucune écriture disque réelle (DiskWrite est un no-op noyau).">
+            <Required>true</Required>
+        </Permission>
+    </Permissions>
+    <Capabilities>
+        <Capability name="driver.aprevent" description="Cycle de vie APrevent."><Enabled>true</Enabled></Capability>
+        <Capability name="filesystem.readonly" description="Ne monte/démonte aucune partition réelle au boot — lit uniquement l'état déjà publié par SRFSMan/NTFSMan."><Enabled>true</Enabled></Capability>
+    </Capabilities>
+</RAbstractallowing>

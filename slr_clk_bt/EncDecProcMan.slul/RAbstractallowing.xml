@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<RAbstractallowing xmlns="http://vyft.com/schema/abstractallowing" version="1.0">
+    <Metadata>
+        <PackageName>com.slura.os</PackageName>
+        <SRID>SRID_slura_os_29062617</SRID>
+        <FrameworkVersion>1.0.0</FrameworkVersion>
+        <Target>arm64</Target>
+        <Description>Pilote d'encodage/décodage média — sans interface propre, détection de format réelle par signature binaire, décodage complet pour PNG/BMP/GIF.</Description>
+    </Metadata>
+    <Permissions>
+        <Permission name="fs.read" description="Lecture des fichiers média à identifier/décoder (SDC/NTFS/SRFS).">
+            <Required>true</Required>
+        </Permission>
+    </Permissions>
+    <Capabilities>
+        <Capability name="driver.aprevent" description="Cycle de vie APrevent."><Enabled>true</Enabled></Capability>
+        <Capability name="media.decode.image" description="Décodage réel PNG/BMP/GIF."><Enabled>true</Enabled></Capability>
+        <Capability name="media.probe" description="Identification de format par signature binaire pour tous les formats listés (vidéo/audio/image)."><Enabled>true</Enabled></Capability>
+    </Capabilities>
+</RAbstractallowing>

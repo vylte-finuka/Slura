@@ -1,0 +1,47 @@
+package:
+  name: base***Vmwaretool
+  version: v1 NAVERTA build 29062617
+  build: 18072618
+
+metadata:
+  bundle: marep
+  target: arm64
+  attributes:
+    SRID: SRID_slura_os_29062617
+    Marav: 0.1 build 18072618
+    icon: Vmwaretool.slasset/Vmwaretool.png
+    display_name: "Vmwaretool"
+    diamond_color: "0x3374B9FF"
+    description: |
+      Vmwaretool — intégration VMware/QEMU pour Slura OS (équivalent VMware
+      Tools) : souris absolue (plus de capture de la fenêtre hôte) et
+      auto-adaptation de la résolution. Installer cette app active
+      l'intégration (voir ShiLauncher/VmwareIntegration.mara) ; la
+      désinstaller la désactive — aucune modification du noyau requise pour
+      basculer l'un ou l'autre comportement.
+    slura_min: 1
+    slura_max: 5.0
+
+  entry: OEntry
+  lifecycle: LAPrevent
+
+  permissions:
+    - gpu.framebuffer
+    - fs.read
+
+  assets:
+    - Vmwaretool.slasset/
+
+dependencies:
+  basecon:
+    base***SluraOS***LAPrevent: 18072615
+    base***SluraOS***OEntry: 18072615
+
+resources:
+  - path: RAbstractallowing.xml
+    type: xml
+    description: "Règles d'autorisation abstraites pour le sandbox Slura."
+
+scripts:
+  postinstall: |
+    slura-reg add --srid ${metadata.attributes.SRID}

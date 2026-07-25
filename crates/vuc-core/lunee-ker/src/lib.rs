@@ -16,8 +16,12 @@ pub mod acpi;
 pub mod xhci;
 pub mod usb;
 pub mod app_registry;
+pub mod disk_volumes;
 pub mod window_manager;
 pub mod chain_ca;
+pub mod media_encode;
+pub mod image_decode;
+pub mod format_detect;
 
 use uefi::{entry, CStr16, Status, Handle, table::{Boot, SystemTable}};
 use crate::kernel_runtime::KernelRuntime;

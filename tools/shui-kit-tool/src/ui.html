@@ -1,0 +1,213 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  body {
+    font-family: Inter, "Segoe UI", sans-serif;
+    font-size: 12px;
+    margin: 0;
+    padding: 16px;
+    color: #1a1a1a;
+  }
+  h1 {
+    font-size: 13px;
+    margin: 0 0 8px 0;
+  }
+  h2 {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #888;
+    margin: 16px 0 6px 0;
+    border-top: 1px solid #eee;
+    padding-top: 12px;
+  }
+  h2:first-of-type {
+    border-top: none;
+    padding-top: 0;
+  }
+  p {
+    color: #666;
+    line-height: 1.4;
+    margin: 0 0 8px 0;
+  }
+  button {
+    background: #18a0fb;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    padding: 8px 14px;
+    font-size: 12px;
+    cursor: pointer;
+    margin-right: 8px;
+  }
+  button.secondary {
+    background: #e5e5e5;
+    color: #1a1a1a;
+  }
+  button:disabled {
+    background: #ccc;
+    cursor: not-allowed;
+  }
+  #selection-info {
+    background: #f5f5f5;
+    border-radius: 6px;
+    padding: 8px;
+    margin: 4px 0;
+  }
+  #selection-info.valid {
+    background: #e6f7ee;
+    color: #1a1a1a;
+  }
+  #status {
+    margin-top: 12px;
+    padding: 8px;
+    background: #f5f5f5;
+    border-radius: 6px;
+    min-height: 32px;
+    white-space: pre-wrap;
+  }
+  label {
+    display: block;
+    margin: 10px 0 4px 0;
+    color: #333;
+  }
+  label.check {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 10px 0;
+  }
+  .row {
+    display: flex;
+    gap: 8px;
+  }
+  .row > div {
+    flex: 1;
+  }
+  input[type="text"], input[type="number"], select {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 6px 8px;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    font-size: 12px;
+  }
+  input[type="range"] {
+    width: 100%;
+  }
+  .range-value {
+    font-size: 11px;
+    color: #888;
+    float: right;
+  }
+  .buttons {
+    margin-top: 14px;
+  }
+  .hint {
+    font-size: 11px;
+    color: #888;
+    margin: 4px 0 0 0;
+    line-height: 1.4;
+  }
+  .modes {
+    display: flex;
+    gap: 8px;
+    margin: 6px 0 10px 0;
+  }
+  .mode-btn {
+    flex: 1;
+    padding: 8px;
+    text-align: center;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    cursor: pointer;
+    background: white;
+    color: #333;
+  }
+  .mode-btn.selected {
+    border-color: #18a0fb;
+    background: #eaf5ff;
+    color: #0a5ca8;
+    font-weight: 600;
+  }
+</style>
+</head>
+<body>
+  <h1>ShiUI Kit tool</h1>
+  <p>Transforme une/des forme(s) DÉJÀ DESSINÉE(S) par vous en ruban de soie fluide (signature ShiUI, façon fond d'écran Windows 11 — highlights satinés inclus) OU en anneau rotatif mat façon papier plié. Votre couleur de base reste celle de votre forme, jamais remplacée par le plugin.</p>
+
+  <h2>Sélection</h2>
+  <div id="selection-info" class="hint">Aucune forme sélectionnée.</div>
+  <p class="hint">Sélectionnez 1 forme existante (vecteur, rectangle, ellipse...) pour une silhouette statique, ou 2+ formes (dans l'ordre gauche → droite) pour une animation — jamais un frame.</p>
+
+  <h2>Mode</h2>
+  <div class="modes">
+    <div class="mode-btn selected" id="mode-blob" data-mode="blob">Ruban de soie</div>
+    <div class="mode-btn" id="mode-ring" data-mode="ring">Anneau (papier mat)</div>
+  </div>
+
+  <h2>Géométrie</h2>
+  <label for="sizeratio">Taille (% de la forme) <span class="range-value" id="sizeratio-val">70%</span></label>
+  <input id="sizeratio" type="range" min="10" max="100" step="5" value="70" />
+
+  <div class="row">
+    <div>
+      <label for="points" id="points-label">Complexité (points) <span class="range-value" id="points-val">7</span></label>
+      <input id="points" type="range" min="4" max="12" step="1" value="7" />
+    </div>
+    <div>
+      <label for="jitter" id="jitter-label">Organicité <span class="range-value" id="jitter-val">55%</span></label>
+      <input id="jitter" type="range" min="0" max="100" step="5" value="55" />
+    </div>
+  </div>
+
+  <div id="ring-only">
+    <label for="thickness">Épaisseur du bandeau (% du rayon) <span class="range-value" id="thickness-val">22%</span></label>
+    <input id="thickness" type="range" min="5" max="45" step="1" value="22" />
+    <label class="check">
+      <input id="ringsegment" type="checkbox" />
+      Segment plus clair (indicateur façon spinner)
+    </label>
+    <p class="hint">Contour toujours un cercle parfait (pas de bord ondulé) — l'effet "cordon torsadé" (pâtes torsadées) se voit uniquement via l'ombrage ("Organicité" = intensité de la torsion), jamais via la silhouette.</p>
+  </div>
+
+  <label for="seed">Seed (reproductibilité — vide = aléatoire)</label>
+  <input id="seed" type="text" placeholder="ex. aurora-01" />
+
+  <h2>Ombre</h2>
+  <label class="check"><input id="shadow" type="checkbox" checked /> Ombre portée ambiante</label>
+  <label for="shadowblur">Flou de l'ombre (px) <span class="range-value" id="shadowblur-val">55</span></label>
+  <input id="shadowblur" type="range" min="0" max="120" step="5" value="55" />
+  <p class="hint">Anneau : reste strictement mat, aucun reflet clair (variations sombres uniquement). Ruban de soie : highlights satinés inclus dans le dégradé du corps (voir "Mode" ci-dessus).</p>
+
+  <h2>Animation (Smart Animate)</h2>
+  <p class="hint" id="anim-hint">Le nombre de keyframes = le nombre de formes sélectionnées (voir "Sélection" ci-dessus) — pas un réglage séparé. Câblage du prototype possible seulement si chaque forme est posée dans son propre frame de premier niveau (limite de l'API Figma). Avec 1 SEULE forme sélectionnée, le résultat est une silhouette statique (aucune rotation visible n'est possible sans keyframes) — pour un anneau qui tourne vraiment, sélectionnez 2 formes ou plus.</p>
+  <div class="row">
+    <div>
+      <label for="rotation" id="rotation-label">Tours de rotation sur la boucle <span class="range-value" id="rotation-val">0.15</span></label>
+      <input id="rotation" type="range" min="0" max="100" step="5" value="15" />
+    </div>
+    <div>
+      <label for="delay" id="delay-label">Délai entre keyframes (ms)</label>
+      <input id="delay" type="number" min="50" max="5000" step="50" value="700" />
+    </div>
+  </div>
+  <label class="check">
+    <input id="autoplay" type="checkbox" checked />
+    Câbler le prototype (boucle/rotation auto via Smart Animate)
+  </label>
+  <p class="hint" id="anim-hint2">Même topologie de points sur toutes les formes → morph liquide réel, pas un simple fondu. Le câblage du prototype est best-effort : vérifiez en mode Présentation, reliez à la main dans l'onglet Prototype si besoin.</p>
+
+  <div class="buttons">
+    <button id="generate" disabled>Générer</button>
+    <button id="cancel" class="secondary">Fermer</button>
+  </div>
+  <div id="status"></div>
+
+  <script>
+    __BUNDLE_JS__
+  </script>
+</body>
+</html>

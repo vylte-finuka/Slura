@@ -1,0 +1,40 @@
+# Maraset – manifest EncDecProcMan.slul
+
+package:
+  name: base***EncDecProcMan
+  version: 1.0.0
+  build: 18072619
+
+metadata:
+  target: arm64
+  bundle: slul
+  attributes:
+    SRID: SRID_slura_os_29062617
+    Marav: 0.1 build 18072619-dev
+    description: |
+      Pilote d'encodage/décodage média pour Slura OS. Sans interface
+      (framebuffer nul comme tout .slul). Détection de format RÉELLE par
+      signature binaire (format_detect.rs, ovc_exec.rs) pour PNG/BMP/GIF/
+      JPEG/MP4/MOV/HEIC/HEIF/MKV/WebM/AVI/MP3/MP2/OGG/AMR — pas par extension
+      de nom de fichier. Décodage COMPLET réel (pixels affichables) : PNG,
+      BMP (BI_RGB + BI_RLE8/RLE4, 1/4/8/24/32-bit), GIF (LZW, multi-frames,
+      transparence, entrelacement). Pour les autres formats listés, seule
+      l'IDENTIFICATION est réelle aujourd'hui — pas de décodeur vidéo (H.264/
+      HEVC/VP8/VP9), audio (MP2/MP3/OGG-Vorbis) ni codec d'appel cellulaire
+      (AMR/EVS) : ces derniers nécessiteraient chacun un projet d'ingénierie
+      séparé (voir EncDecCanDecode, qui renvoie honnêtement le niveau de
+      support réel par format plutôt que de prétendre décoder). Encodage
+      réel disponible séparément : PNG et AVI non compressé (media_encode.rs,
+      utilisés par le widget ShiCamera de ShiLooker).
+    slura_min: 1
+    slura_max: 5.0
+
+dependencies:
+  basecon:
+    base***SluraOS***APrevent: 18072619
+    base***SluraOS***OEntry:   18072619
+
+resources:
+  - path: RAbstractallowing.xml
+    type: xml
+    description: "Permissions pilote encodage/décodage média."

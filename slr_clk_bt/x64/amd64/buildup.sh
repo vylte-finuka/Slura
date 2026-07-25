@@ -120,7 +120,7 @@ if [ "${MODE}" = "--iso" ]; then
     BOOT_ARGS="-cdrom ${ISO_FILE} -boot d"
 else
     echo "🚀  QEMU ← ESP dir : ${ESP_DIR}"
-    BOOT_ARGS="-drive if=ide,format=raw,file=fat:rw:${ESP_DIR}"
+    BOOT_ARGS="-drive if=ide,file=fat:rw:${ESP_DIR}"
 fi
 
 # -----------------------------------------------------------------
@@ -140,16 +140,12 @@ qemu-system-x86_64 \
     -m         1024M \
     -device    virtio-vga \
     -display   sdl,gl=off \
-    -device    qemu-xhci,id=xhci \
-    -device    usb-tablet,bus=xhci.0 \
-    -device    usb-mouse,bus=xhci.0 \
-    -device    usb-kbd,bus=xhci.0 \
-    -drive     if=pflash,format=raw,readonly=on,file="${OVMF_CODE}",id=ovmf_code \
-    -drive     if=pflash,format=raw,file="${OVMF_VARS}",id=ovmf_vars \
+    -device    qemu-xhci \
+    -drive     if=pflash,readonly=on,file="${OVMF_CODE}",id=ovmf_code \
+    -drive     if=pflash,file="${OVMF_VARS}",id=ovmf_vars \
     -global    driver=efi-pflash.0,property=secure-boot,value=0 \
     ${BOOT_ARGS} \
-    -chardev   stdio,id=ser0,logfile="${PROJ_ROOT}/serial.log",signal=off \
-    -serial    chardev:ser0 \
+    -serial    stdio \
     -monitor   none \
     -d         int \
     -D         "${PROJ_ROOT}/qemu.log" \

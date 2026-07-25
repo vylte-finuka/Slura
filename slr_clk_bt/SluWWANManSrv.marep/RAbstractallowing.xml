@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RAbstractallowing>
+    <!-- Identifiant unique du bundle — doit correspondre à Maraset.yaml -->
+    <SRID>SRID_slura_os_29062617</SRID>
+
+    <!-- Éditeur déclaré -->
+    <Publisher>Vyft Ltd</Publisher>
+
+    <!-- Clé de vérification publique (hex 33 bytes, format secp256k1) -->
+    <SigningKey>PRIMARY_VALIDATOR_PUBKEY</SigningKey>
+
+    <!-- Permissions explicitement accordées (sous-ensemble de Maraset.yaml) -->
+    <Permissions>
+        <Allow>gpu.framebuffer</Allow>
+    </Permissions>
+
+    <!-- Drivers autorisés à être chargés par ce bundle -->
+    <DriverDeps/>
+</RAbstractallowing>

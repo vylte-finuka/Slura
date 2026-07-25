@@ -1,0 +1,38 @@
+# Maraset – manifest SluDskMan.slul
+
+package:
+  name: base***SluDskMan
+  version: 1.0.0
+  build: 17072617
+
+metadata:
+  target: arm64
+  bundle: slul
+  attributes:
+    SRID: SRID_slura_os_29062617
+    Marav: 0.1 build 17072617-dev
+    description: |
+      Service de gestion des disques pour Slura OS.
+      Pilote SANS interface (s'exécute avec un framebuffer nul, comme tout
+      .slul) — toute la surface visible (liste, navigation, création de
+      fichiers, boutons Formater/Monter/Démonter) vit dans ShiLooker.marep,
+      qui appelle directement les FFI DrvAPIInterCon***Disk...*** exposées
+      par ce service (même pattern que MountTableCount déjà consommée par
+      ShiLooker sans lien Mara avec SRFSMan).
+      Aujourd'hui : détection = lecture de MOUNT_TABLE (déjà réelle, remplie
+      par SRFSMan/NTFSMan au boot) ; monter/démonter mutent réellement cette
+      même table (session uniquement, non persisté au reboot) ; formater est
+      un no-op honnête et documenté (aucune écriture disque réelle n'existe
+      dans ce noyau — DiskWrite lui-même est un no-op).
+    slura_min: 1
+    slura_max: 5.0
+
+dependencies:
+  basecon:
+    base***SluraOS***APrevent: 17072617
+    base***SluraOS***OEntry:   17072617
+
+resources:
+  - path: RAbstractallowing.xml
+    type: xml
+    description: "Permissions service disques."

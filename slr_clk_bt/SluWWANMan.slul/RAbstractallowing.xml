@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<RAbstractallowing xmlns="http://vyft.com/schema/abstractallowing" version="1.0">
+    <Metadata>
+        <PackageName>com.slura.os</PackageName>
+        <SRID>SRID_slura_os_29062617</SRID>
+        <FrameworkVersion>1.0.0</FrameworkVersion>
+        <Target>arm64</Target>
+        <Description>Pilote de signal cellulaire (WWAN) — sans interface propre, détection matérielle réelle (scan PCI 02:80) consommée directement par ShiLooker.</Description>
+    </Metadata>
+    <Permissions>
+        <Permission name="wwan.detect" description="Détection réelle d'un modem WWAN via scan PCI lecture seule (classe 02:80), effectuée au boot.">
+            <Required>true</Required>
+        </Permission>
+    </Permissions>
+    <Capabilities>
+        <Capability name="driver.aprevent" description="Cycle de vie APrevent."><Enabled>true</Enabled></Capability>
+        <Capability name="hardware.wwan" description="Détection PCI réelle (classe 02:80) ; niveau de signal exact d'un modem détecté non lu (AT/QMI/MBIM hors scope)."><Enabled>true</Enabled></Capability>
+    </Capabilities>
+</RAbstractallowing>

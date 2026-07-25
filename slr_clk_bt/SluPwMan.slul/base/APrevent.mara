@@ -1,0 +1,40 @@
+//===================================================================
+//  APrevent.mara – Cycle de vie SluPwMan
+//  Projet : SluPwMan.slul
+//  Auteur : Vyft Ltd — 2026
+//  Volontairement mince : la découverte ACPI (FADT/PM1/\_S3) et la
+//  capture des Runtime Services UEFI se font UNE fois au boot côté
+//  Rust (kernel_runtime.rs → acpi::scan_power_management →
+//  ovc_exec::power_init), avant même que ce driver ne s'exécute — ce
+//  fichier ne fait qu'annoncer la présence du service et logguer l'état
+//  réel de la mise en veille (disponible ou non), sans le deviner.
+//  Toute la surface visible (menu contextuel "Redémarrer / Éteindre /
+//  Mettre en veille" sur l'icône du dock ShiLooker) vit dans
+//  ShiLauncher.marep/ShiLooker.marep, qui appellent directement les FFI
+//  DrvAPIInterCon***Power...*** exposées par le noyau.
+//===================================================================
+
+#base <std***ComTpe***SlulFrmt***[ DrvAPIInterCon ]>;
+#base <MaratineKit>;
+#base <MaratineKit***CycleActivity>;
+
+rel op APrevent: <[string CycleActivity]>t [
+
+    var Architecture: <string> = "";
+
+    rel op OnPowerOn: [arch string] [
+        Architecture = arch;
+        let sleepOk: <i32> = <DrvAPIInterCon***PowerSleepSupported***>();
+        if (sleepOk != 0) [
+            log: "SluPwMan: pret (redemarrer/eteindre reels via UEFI ResetSystem, mise en veille S3 disponible)";
+        ];
+        if (sleepOk == 0) [
+            log: "SluPwMan: pret (redemarrer/eteindre reels via UEFI ResetSystem, mise en veille S3 indisponible sur cette machine)";
+        ];
+        ret 0;
+    ];
+
+    rel op OnPowerOff: [] [ log: "SluPwMan: arret"; ret 0; ];
+    rel op OnSuspend:  [] [ log: "SluPwMan: suspension"; ret 0; ];
+    rel op OnResume:   [] [ log: "SluPwMan: reprise"; ret 0; ];
+];

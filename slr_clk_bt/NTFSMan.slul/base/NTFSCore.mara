@@ -1,0 +1,112 @@
+//===================================================================
+//  NTFSCore.mara – Operations NTFS (lecture seule)
+//  Projet : NTFSMan.slul
+//  Auteur : Vyft Ltd — 2026
+//  API publique du pilote : ResolvePath / ReadFile, a l'identique de
+//  SRFSCore.mara. CreateDir/CreateFile/WriteFile retournent -1 :
+//  l'ecriture NTFS n'est pas supportee (voir Maraset.yaml).
+//===================================================================
+
+#base <std***ComTpe***SlulFrmt***[ DrvManSpec, MathSafety ]>;
+#base <MaratineKit>;
+
+// Construit une sous-chaine allouee sur le tas depuis path[start..start+len).
+rel op ExtractComponent: [path string, start i32, len i32] [
+    let buf: <ptr> = <DrvAPIInterCon***MemAlloc***>(len + 1, 0, 4);
+    var i: <i32> = 0;
+    loop (i < len) [
+        let ch: <i32> = <DrvManSpec***StrCharAt***>(path, start + i);
+        <DrvManSpec***PtrWrite8At***>(buf, i, ch);
+        i = i + 1;
+    ];
+    <DrvManSpec***PtrWrite8At***>(buf, len, 0);
+    ret buf;
+];
+
+// Resout un chemin "A:\a\b\c" (prefixe lettre de lecteur optionnel, une
+// seule lettre — generique : detecte "<X>:" quel que soit X, donc aucun
+// changement necessaire ici si la lettre de montage change dans APrevent)
+// en MFT record id, en descendant depuis la racine (record 5) via
+// NTFSIndex.LookupInDirectory a chaque composant. Retourne -1 si un
+// composant est introuvable.
+rel op ResolvePath: [path string] [
+    if (path == "" || path == null) [ ret -1; ];
+    let total: <i32> = <DrvManSpec***StrLen***>(path);
+    var i: <i32> = 0;
+
+    if (total >= 2) [
+        let c1: <i32> = <DrvManSpec***StrCharAt***>(path, 1);
+        if (c1 == 58) [  // ':'
+            i = 2;  // saute "X:"
+            if (total > 2) [
+                let c2: <i32> = <DrvManSpec***StrCharAt***>(path, 2);
+                if (c2 == 92 || c2 == 47) [ i = 3; ];  // saute aussi le separateur
+            ];
+        ];
+    ];
+
+    var cur:       <i32> = <std***core***self***APrevent***GetRootRecordId>();
+    var compStart: <i32> = i;
+    var ok:        <i32> = 1;
+
+    loop (i <= total && ok == 1) [
+        var atEnd: <i32> = 0;
+        if (i == total) [ atEnd = 1; ];
+        var isSep: <i32> = 0;
+        if (atEnd == 0) [
+            let ch: <i32> = <DrvManSpec***StrCharAt***>(path, i);
+            if (ch == 92 || ch == 47) [ isSep = 1; ];  // '\' ou '/'
+        ];
+        if (atEnd == 1 || isSep == 1) [
+            let compLen: <i32> = i - compStart;
+            if (compLen > 0) [
+                let comp: <string> = ExtractComponent(path, compStart, compLen);
+                let child: <i32> = <std***core***self***NTFSIndex***LookupInDirectory>(cur, comp);
+                if (child < 0) [ ok = 0; ] else [ cur = child; ];
+            ];
+            compStart = i + 1;
+        ];
+        i = i + 1;
+    ];
+
+    if (ok == 0) [ ret -1; ];
+    ret cur;
+];
+
+// Lit jusqu'a maxSize octets du flux $DATA non-nomme de inodeID dans
+// outBuf. Retourne le nombre d'octets lus, ou -1 en cas d'erreur.
+rel op ReadFile: [inodeID i32, outBuf ptr, maxSize i32] [
+    if (inodeID < 0 || outBuf == nullptr || maxSize <= 0) [ ret -1; ];
+
+    let mftRecordSize: <i32> = <std***core***self***APrevent***GetMftRecordSize>();
+    let recBuf: <ptr> = <DrvAPIInterCon***MemAlloc***>(mftRecordSize, 0, 4);
+
+    let rr: <i32> = <std***core***self***NTFSMft***ReadMftRecord>(inodeID, recBuf);
+    if (rr != 0) [ ret -1; ];
+
+    let dataOff: <i32> = <std***core***self***NTFSMft***FindAttribute>(recBuf, 0x80);  // $DATA
+    if (dataOff < 0) [ ret -1; ];
+
+    let n: <i32> = <std***core***self***NTFSMft***StreamRead>(recBuf, dataOff, 0, maxSize, outBuf);
+    ret n;
+];
+
+// ── Ecriture — non supportee (pilote NTFS en lecture seule) ────────────────
+// DiskWrite est de toute facon un no-op cote noyau pendant la phase UEFI
+// (voir SRFSMan) : implementer un vrai chemin d'ecriture NTFS ici n'aurait
+// aucun effet reel tant que ce point n'est pas cable.
+
+rel op CreateDir: [path string] [
+    log: "NTFSCore: CreateDir refuse - pilote NTFS en lecture seule";
+    ret -1;
+];
+
+rel op CreateFile: [path string] [
+    log: "NTFSCore: CreateFile refuse - pilote NTFS en lecture seule";
+    ret -1;
+];
+
+rel op WriteFile: [inodeID i32, data ptr, size i32] [
+    log: "NTFSCore: WriteFile refuse - pilote NTFS en lecture seule";
+    ret -1;
+];

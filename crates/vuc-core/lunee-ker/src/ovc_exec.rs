@@ -22,7 +22,12 @@ static mut FONT_WOFF_OVC:    Option<Vec<u8>> = None;
 // ── Cache SRFS (SDC: → octets chargés à la demande depuis l'ESP) ─────────────
 // Plus aucun fichier hardcodé dans slul_loader.
 // FontLoad(path) charge le fichier depuis l'ESP UEFI au premier appel.
-static mut SRFS_CACHE: [Option<(String, Vec<u8>)>; 8] = [None, None, None, None, None, None, None, None];
+// 32 slots + LRU : 8 slots saturaient dès le boot (police + Maraset.yaml + curseur
+// + vecs du launcher) et srfs_register_file jetait silencieusement tout fichier
+// suivant → SvgLoad retournait 0 pour TOUS les assets d'une app (aucun SVG rendu).
+static mut SRFS_CACHE: [Option<(String, Vec<u8>)>; 32] = [const { None }; 32];
+static mut SRFS_AGE:  [u32; 32] = [0; 32];
+static mut SRFS_TICK: u32 = 0;
 
 // Cache d'images décodées (PNG → RGBA).  handle = index+1 (0 = erreur).
 // 8 slots avec éviction LRU — ImageLoad inline juste avant ImageDraw.
@@ -30,9 +35,82 @@ static mut IMAGE_CACHE: [Option<(u32, u32, Vec<u8>)>; 8] = [None, None, None, No
 static mut IMAGE_CACHE_AGE:  [u32; 8] = [0, 0, 0, 0, 0, 0, 0, 0];
 static mut IMAGE_CACHE_TICK: u32 = 0;
 
+// Cache d'images PRÉ-REDIMENSIONNÉES (ARGB prêt à blitter). Le fond d'écran
+// plein écran repassait par img_sample_box PAR PIXEL À CHAQUE FRAME (~2M
+// échantillonnages) : coût dominant du bureau → souris peu réactive. Clé =
+// (ptr des pixels source, dw, dh) ; 2 slots (fond d'écran + 1 grand visuel),
+// réservé aux draws ≥ 65536 px pour ne pas thrasher avec les icônes.
+static mut SCALED_CACHE: [Option<(usize, i32, i32, Vec<u32>)>; 2] = [None, None];
+static mut SCALED_NEXT: usize = 0;
+
 // Handles UEFI pour le chargement à la demande — initialisés par render_from_marep
 static mut UEFI_ST_PTR:     *mut core::ffi::c_void = core::ptr::null_mut();
 static mut UEFI_IMG_HANDLE: usize = 0;
+
+// Copie en mémoire de tout ce qu'écrit `serial_log` — sur une machine bare-metal
+// sans câble UART/port série accessible, le port 0x3F8 est écrit dans le vide et
+// invisible. Ce buffer permet de sauver le même contenu vers un fichier sur l'ESP
+// (voir `flush_boot_log_to_esp`), lisible après coup en rebootant sur un autre OS
+// ou en retirant le disque — aucun matériel supplémentaire requis pour diagnostiquer.
+static mut BOOT_LOG_BUF: Vec<u8> = Vec::new();
+
+/// Écrit `BOOT_LOG_BUF` dans `\slura_boot.log` à la racine de l'ESP (créé ou écrasé).
+/// Appelé à des points de contrôle du boot (pas à chaque `serial_log`, pour éviter
+/// le coût d'un open/write/close UEFI par ligne) — voir les appels dans
+/// marep_loader.rs et kernel_runtime.rs autour du chargement de ShiLauncher.
+pub fn flush_boot_log_to_esp(st: &mut uefi::table::SystemTable<uefi::table::Boot>, image_handle: uefi::Handle) {
+    use uefi::proto::media::{
+        file::{File, FileAttribute, FileMode, FileType},
+        fs::SimpleFileSystem,
+    };
+    use uefi::table::boot::{OpenProtocolAttributes, OpenProtocolParams};
+
+    let handles = match st.boot_services().find_handles::<SimpleFileSystem>() {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+    let path = match uefi::CStr16::from_u16_with_nul(
+        &[0x005C, 0x0073,0x006C,0x0075,0x0072,0x0061,0x005F,0x0062,0x006F,0x006F,0x0074,
+          0x002E,0x006C,0x006F,0x0067, 0x0000] // "\slura_boot.log\0"
+    ) {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let data: &[u8] = unsafe { &BOOT_LOG_BUF };
+    for &fs_handle in handles.iter() {
+        let mut fs = match unsafe {
+            st.boot_services().open_protocol::<SimpleFileSystem>(
+                OpenProtocolParams { handle: fs_handle, agent: image_handle, controller: None },
+                OpenProtocolAttributes::GetProtocol,
+            )
+        } {
+            Ok(f) => f,
+            Err(_) => continue,
+        };
+        let mut root = match fs.open_volume() {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let fh = match root.open(path, FileMode::CreateReadWrite, FileAttribute::empty()) {
+            Ok(f) => f,
+            Err(_) => continue,
+        };
+        let mut file = match fh.into_type() {
+            Ok(FileType::Regular(f)) => f,
+            _ => continue,
+        };
+        let mut off = 0usize;
+        let mut wrote_all = true;
+        while off < data.len() {
+            let end = data.len().min(off + 4096);
+            match file.write(&data[off..end]) {
+                Ok(()) => off = end,
+                Err(_) => { wrote_all = false; break; }
+            }
+        }
+        if wrote_all { return; } // premier volume accepté suffit
+    }
+}
 
 // Fenêtres applicatives ouvertes (bureau à fenêtres) — source de vérité pour les
 // builtins DrvAPIInterCon***WindowMan...***, pilotés depuis LAPrevent.mara. La
@@ -98,6 +176,21 @@ fn srfs_load_on_demand(path_ptr: i64) -> i64 {
             rel.trim_start_matches(|c: char| c == '/' || c == '\\').to_string()
         };
 
+    // Cache d'abord : sans ce test, chaque appel relisait le fichier depuis l'ESP
+    // ET ré-enregistrait un doublon — le cache se remplissait de copies du même
+    // asset en quelques frames et tous les chargements suivants échouaient.
+    unsafe {
+        SRFS_TICK = SRFS_TICK.wrapping_add(1);
+        for (i, slot) in SRFS_CACHE.iter().enumerate() {
+            if let Some((ref k, ref d)) = slot {
+                if keys_match(k.as_str(), rel) {
+                    SRFS_AGE[i] = SRFS_TICK;
+                    return d.as_ptr() as i64;
+                }
+            }
+        }
+    }
+
     let st_raw = unsafe { UEFI_ST_PTR };
     if st_raw.is_null() {
         serial_log(b"[SRFS] ST_PTR null! init_uefi_handles non appele\r\n");
@@ -125,7 +218,9 @@ fn srfs_load_on_demand(path_ptr: i64) -> i64 {
             }
         }
     }
-    // Fallback: should not happen if registration succeeded
+    // L'enregistrement a pu échouer si les 32 slots sont TOUS occupés par des
+    // fichiers protégés (police) — cas théorique, loggé pour diagnostic.
+    serial_log(b"[SRFS] cache plein, chargement perdu\r\n");
     0
 }
 
@@ -182,14 +277,371 @@ unsafe fn srfs_uefi_read(st_raw: *mut core::ffi::c_void, rel_path: &str)
     None
 }
 
+/// Écrit RÉELLEMENT un fichier sur l'ESP (UEFI SimpleFileSystem, PAS SRFS_CACHE
+/// qui est RAM-only et perdu au reboot) — crée les répertoires intermédiaires
+/// manquants. Essaie chaque filesystem découvert jusqu'à ce qu'un accepte
+/// l'écriture (un volume en lecture seule, ex. le CD Vmwaretool lui-même,
+/// échouera silencieusement et le prochain filesystem — l'ESP — est tenté ;
+/// pas besoin de désambiguïser explicitement quel handle est "le bon").
+/// Utilisé par UefiInstallFile (voir plus bas) pour une installation qui
+/// persiste réellement au reboot, contrairement à CaWriteFile (SRFS_CACHE).
+unsafe fn srfs_uefi_write(st_raw: *mut core::ffi::c_void, rel_path: &str, data: &[u8]) -> bool {
+    use uefi::table::{Boot, SystemTable};
+    use uefi::proto::media::{
+        file::{Directory, File, FileAttribute, FileMode, FileType},
+        fs::SimpleFileSystem,
+    };
+    use uefi::table::boot::{OpenProtocolAttributes, OpenProtocolParams};
+
+    let st: SystemTable<Boot> = match SystemTable::from_ptr(st_raw) { Some(s) => s, None => return false };
+    let img = match uefi::Handle::from_ptr(UEFI_IMG_HANDLE as *mut core::ffi::c_void) { Some(h) => h, None => return false };
+    let handles = match st.boot_services().find_handles::<SimpleFileSystem>() { Ok(h) => h, Err(_) => return false };
+
+    let segments: alloc::vec::Vec<&str> = rel_path.split(|c| c == '/' || c == '\\').filter(|s| !s.is_empty()).collect();
+    let last = match segments.last() { Some(&s) => s, None => return false };
+
+    'fs: for &fs_h in handles.iter() {
+        let mut fs = match st.boot_services().open_protocol::<SimpleFileSystem>(
+            OpenProtocolParams { handle: fs_h, agent: img, controller: None },
+            OpenProtocolAttributes::GetProtocol,
+        ) { Ok(f) => f, Err(_) => continue };
+        let mut dir: Directory = match fs.open_volume() { Ok(r) => r, Err(_) => continue };
+
+        for &seg in &segments[..segments.len() - 1] {
+            let mut ucs2: alloc::vec::Vec<u16> = seg.encode_utf16().collect();
+            ucs2.push(0);
+            let cname = match uefi::CStr16::from_u16_with_nul(&ucs2) { Ok(c) => c, Err(_) => continue 'fs };
+            let handle = match dir.open(cname, FileMode::CreateReadWrite, FileAttribute::DIRECTORY) {
+                Ok(h) => h, Err(_) => continue 'fs,
+            };
+            dir = match handle.into_type() {
+                Ok(FileType::Dir(d)) => d,
+                _ => continue 'fs,
+            };
+        }
+
+        let mut ucs2: alloc::vec::Vec<u16> = last.encode_utf16().collect();
+        ucs2.push(0);
+        let cname = match uefi::CStr16::from_u16_with_nul(&ucs2) { Ok(c) => c, Err(_) => continue };
+        let handle = match dir.open(cname, FileMode::CreateReadWrite, FileAttribute::empty()) {
+            Ok(h) => h, Err(_) => continue,
+        };
+        let mut file = match handle.into_type() {
+            Ok(FileType::Regular(f)) => f, _ => continue,
+        };
+        if file.write(data).is_ok() { return true; }
+    }
+    false
+}
+
+// ── Capture média (ShiCamera, ShiLooker) ──────────────────────────────────────
+// Compteur de fichiers + tampon vidéo en cours d'enregistrement. Plafonné
+// (MAX_VIDEO_FRAMES) car chaque frame BGR non compressée pèse lourd — voir
+// avi_frame_geometry (media_encode.rs) : à l'écran de design ~1440x1024, une
+// frame ≈ 4.4 Mo, donc 40 frames ≈ 175 Mo, volontairement conservateur pour
+// un environnement UEFI à mémoire limitée.
+// ── Détection de format (EncDecProcMan) ───────────────────────────────────
+static mut ENCDEC_NAME_BUF: [u8; 40] = [0u8; 40];
+
+fn encdec_format_name_ptr(fmt: i32) -> i64 {
+    let name = crate::format_detect::format_name(fmt);
+    unsafe {
+        let bytes = name.as_bytes();
+        let n = bytes.len().min(ENCDEC_NAME_BUF.len() - 1);
+        ENCDEC_NAME_BUF[..n].copy_from_slice(&bytes[..n]);
+        ENCDEC_NAME_BUF[n] = 0;
+        ENCDEC_NAME_BUF.as_ptr() as i64
+    }
+}
+
+static mut CAPTURE_COUNTER: u32 = 0;
+static mut VIDEO_FRAMES: alloc::vec::Vec<alloc::vec::Vec<u8>> = alloc::vec::Vec::new();
+static mut VIDEO_W: i32 = 0;
+static mut VIDEO_H: i32 = 0;
+const MAX_VIDEO_FRAMES: usize = 40;
+// Dossier de destination configurable pour les captures ShiCamera — nul-terminé,
+// même convention que DISK_BROWSE_PATH. Défaut "SDC/slu64/captures" (sans préfixe "SDC:").
+static mut CAPTURE_DIR: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+
+pub fn capture_dir_get() -> i64 {
+    unsafe {
+        if CAPTURE_DIR.is_empty() {
+            CAPTURE_DIR.extend_from_slice(b"SDC/slu64/captures\0");
+        }
+        CAPTURE_DIR.as_ptr() as i64
+    }
+}
+
+pub fn capture_dir_set(path: &str) {
+    let mut v = path.trim_end_matches('/').as_bytes().to_vec();
+    v.push(0);
+    unsafe { CAPTURE_DIR = v; }
+}
+
+/// Framebuffer courant → RGBA8 row-major top-down (format attendu par
+/// png_encode). Lecture volatile directe du framebuffer réel (ctx.fb) —
+/// capture la frame telle qu'affichée à l'écran à cet instant.
+fn capture_rgba(ctx: &ExecCtx) -> alloc::vec::Vec<u8> {
+    let w = ctx.width.max(0) as usize;
+    let h = ctx.height.max(0) as usize;
+    let stride = ctx.stride.max(0) as usize;
+    let mut out = alloc::vec::Vec::with_capacity(w * h * 4);
+    unsafe {
+        for y in 0..h {
+            let row_ptr = ctx.fb.add(y * stride);
+            for x in 0..w {
+                let px = row_ptr.add(x).read_volatile();
+                out.push(((px >> 16) & 0xFF) as u8); // R
+                out.push(((px >> 8) & 0xFF) as u8);  // G
+                out.push((px & 0xFF) as u8);          // B
+                out.push(((px >> 24) & 0xFF) as u8); // A
+            }
+        }
+    }
+    out
+}
+
+/// Framebuffer courant → BGR24 bottom-up, lignes paddées à 4 octets (format
+/// DIB/BI_RGB attendu par avi_encode).
+fn capture_bgr_bottomup(ctx: &ExecCtx) -> alloc::vec::Vec<u8> {
+    let w = ctx.width.max(0) as usize;
+    let h = ctx.height.max(0) as usize;
+    let stride = ctx.stride.max(0) as usize;
+    let (padded_row, frame_size) = crate::media_encode::avi_frame_geometry(w as u32, h as u32);
+    let mut out = alloc::vec![0u8; frame_size];
+    unsafe {
+        for y in 0..h {
+            let row_ptr = ctx.fb.add(y * stride);
+            let dest_start = (h - 1 - y) * padded_row;
+            for x in 0..w {
+                let px = row_ptr.add(x).read_volatile();
+                let o = dest_start + x * 3;
+                out[o]     = (px & 0xFF) as u8;          // B
+                out[o + 1] = ((px >> 8) & 0xFF) as u8;   // G
+                out[o + 2] = ((px >> 16) & 0xFF) as u8;  // R
+            }
+        }
+    }
+    out
+}
+
+/// Nombre de modes GOP disponibles (lecture seule, aucune mutation du framebuffer
+/// — sûr à appeler n'importe quand, contrairement à un changement de mode réel qui
+/// doit rester piloté par kernel_runtime.rs, seul propriétaire du backbuffer/de la
+/// synchro largeur-hauteur-stride). Reconstruit un accès GOP frais à chaque appel
+/// via UEFI_ST_PTR/UEFI_IMG_HANDLE, même mécanisme que srfs_uefi_read ci-dessus.
+unsafe fn gop_mode_count(st_raw: *mut core::ffi::c_void) -> u32 {
+    use uefi::table::{Boot, SystemTable};
+    use uefi::proto::console::gop::GraphicsOutput;
+    use uefi::table::boot::{OpenProtocolAttributes, OpenProtocolParams};
+    let st: SystemTable<Boot> = match SystemTable::from_ptr(st_raw) { Some(s) => s, None => return 0 };
+    let img = match uefi::Handle::from_ptr(UEFI_IMG_HANDLE as *mut core::ffi::c_void) { Some(h) => h, None => return 0 };
+    let handles = match st.boot_services().find_handles::<GraphicsOutput>() { Ok(h) => h, Err(_) => return 0 };
+    let h0 = match handles.first() { Some(h) => *h, None => return 0 };
+    let gop = match st.boot_services().open_protocol::<GraphicsOutput>(
+        OpenProtocolParams { handle: h0, agent: img, controller: None },
+        OpenProtocolAttributes::GetProtocol,
+    ) { Ok(g) => g, Err(_) => return 0 };
+    gop.modes(st.boot_services()).count() as u32
+}
+
+/// (largeur, hauteur) du mode GOP d'index `idx` — mêmes garanties/mécanisme que
+/// gop_mode_count. `None` si l'index est hors limites ou le GOP indisponible.
+unsafe fn gop_mode_wh(st_raw: *mut core::ffi::c_void, idx: u32) -> Option<(u32, u32)> {
+    use uefi::table::{Boot, SystemTable};
+    use uefi::proto::console::gop::GraphicsOutput;
+    use uefi::table::boot::{OpenProtocolAttributes, OpenProtocolParams};
+    let st: SystemTable<Boot> = SystemTable::from_ptr(st_raw)?;
+    let img = uefi::Handle::from_ptr(UEFI_IMG_HANDLE as *mut core::ffi::c_void)?;
+    let handles = st.boot_services().find_handles::<GraphicsOutput>().ok()?;
+    let h0 = *handles.first()?;
+    let gop = st.boot_services().open_protocol::<GraphicsOutput>(
+        OpenProtocolParams { handle: h0, agent: img, controller: None },
+        OpenProtocolAttributes::GetProtocol,
+    ).ok()?;
+    let mode = gop.modes(st.boot_services()).nth(idx as usize)?;
+    let (w, h) = mode.info().resolution();
+    Some((w as u32, h as u32))
+}
+
+/// Énumère RÉELLEMENT le contenu d'un dossier de la partition ESP hôte (SDC:)
+/// via SimpleFileSystem — contrairement à SRFS_CACHE (qui ne reflète que les
+/// fichiers déjà lus en mémoire cette session), ceci lit le VRAI système de
+/// fichiers, comme `srfs_uefi_read` mais sur un FileType::Dir plutôt qu'un
+/// FileType::Regular. `rel_path` est au format DISK_BROWSE_PATH ("SDC:/apps/"
+/// par ex., toujours préfixé "SDC:" et terminé par '/'). Retourne None si le
+/// volume/dossier est introuvable (pas fatal : l'appelant retombe sur le cache
+/// seul — voir disk_cache_dir_rebuild). Sous-dossiers marqués d'un '/' final,
+/// même convention que disk_cache_dir_rebuild pour que isFolderEntry (Mara,
+/// StrCharAt sur le dernier octet) fonctionne pareil pour les deux sources.
+unsafe fn srfs_uefi_list_dir(st_raw: *mut core::ffi::c_void, rel_path: &str)
+    -> Option<alloc::vec::Vec<alloc::string::String>>
+{
+    use uefi::table::{Boot, SystemTable};
+    use uefi::proto::media::{
+        file::{File, FileAttribute, FileMode, FileType},
+        fs::SimpleFileSystem,
+    };
+    use uefi::table::boot::{OpenProtocolAttributes, OpenProtocolParams};
+
+    let after = rel_path.trim_start_matches("SDC:").trim_matches(|c: char| c == '/' || c == '\\');
+    let uefi_rel: alloc::string::String = if after.is_empty() {
+        alloc::string::String::from("SDC/slu64")
+    } else {
+        alloc::format!("SDC/slu64/{}", after)
+    };
+
+    let mut st: SystemTable<Boot> = SystemTable::from_ptr(st_raw)?;
+    let mut ucs2: alloc::vec::Vec<u16> = alloc::vec::Vec::with_capacity(uefi_rel.len() + 2);
+    ucs2.push(b'\\' as u16);
+    let mut last_sep = true;
+    for b in uefi_rel.bytes() {
+        if b == b'\\' || b == b'/' {
+            if !last_sep { ucs2.push(b'\\' as u16); }
+            last_sep = true;
+        } else {
+            ucs2.push(b as u16);
+            last_sep = false;
+        }
+    }
+    ucs2.push(0u16);
+    let uefi_path = uefi::CStr16::from_u16_with_nul(&ucs2).ok()?;
+    let img = uefi::Handle::from_ptr(UEFI_IMG_HANDLE as *mut core::ffi::c_void)?;
+    let handles = st.boot_services().find_handles::<SimpleFileSystem>().ok()?;
+    for &fs_h in handles.iter() {
+        let mut fs = match st.boot_services().open_protocol::<SimpleFileSystem>(
+            OpenProtocolParams { handle: fs_h, agent: img, controller: None },
+            OpenProtocolAttributes::GetProtocol,
+        ) { Ok(f) => f, Err(_) => continue };
+        let mut root = match fs.open_volume() { Ok(r) => r, Err(_) => continue };
+        let fh = match root.open(uefi_path, FileMode::Read, FileAttribute::empty()) {
+            Ok(f) => f, Err(_) => continue };
+        let mut dir = match fh.into_type() {
+            Ok(FileType::Dir(d)) => d, _ => continue };
+        let mut names: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
+        loop {
+            match dir.read_entry_boxed() {
+                Ok(Some(info)) => {
+                    let name = alloc::string::String::from_utf16_lossy(info.file_name().to_u16_slice());
+                    if name == "." || name == ".." { continue; }
+                    if info.is_directory() {
+                        names.push(alloc::format!("{}/", name));
+                    } else {
+                        names.push(name);
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => break,
+            }
+        }
+        return Some(names);
+    }
+    None
+}
+
+// ── Horloge système (UEFI RuntimeServices::get_time) ──────────────────────────
+// Utilisée par ShiLooker (TemplateView.mara) pour l'heure/date réelles affichées
+// dans la barre système — contrairement à SRFS_CACHE ceci n'est PAS un cache :
+// `ClockRefresh` relit l'horloge matérielle à chaque appel (bon marché, appelé
+// au plus une fois par frame). GetTime est valide à tout moment (avant/après
+// ExitBootServices), donc aucune restriction de phase supplémentaire ici.
+static mut CLOCK_TIME_BUF: [u8; 8]  = [0u8; 8];   // "HH:MM\0"
+static mut CLOCK_DATE_BUF: [u8; 32] = [0u8; 32];  // "Ddd, DD Month YYYY\0"
+
+const WEEKDAY_NAMES: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const MONTH_NAMES: [&str; 12] = [
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+];
+
+/// Jour de la semaine (0=dimanche) via l'algorithme de Sakamoto — le `Time`
+/// UEFI ne fournit que year/month/day, pas le jour de semaine.
+fn weekday_index(year: u16, month: u8, day: u8) -> usize {
+    const T: [i32; 12] = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
+    let mut y = year as i32;
+    let m = month.clamp(1, 12) as usize;
+    if month < 3 { y -= 1; }
+    (((y + y / 4 - y / 100 + y / 400 + T[m - 1] + day as i32) % 7 + 7) % 7) as usize
+}
+
+/// Relit l'horloge UEFI et reformate CLOCK_TIME_BUF/CLOCK_DATE_BUF. Retourne
+/// false (buffers inchangés) si le SystemTable n'est pas encore initialisé ou
+/// si GetTime échoue. Appelé par `DrvAPIInterCon***ClockRefresh***`.
+pub fn clock_refresh() -> bool {
+    use uefi::table::{Boot, SystemTable};
+    let st_raw = unsafe { UEFI_ST_PTR };
+    if st_raw.is_null() { return false; }
+    let st: SystemTable<Boot> = match unsafe { SystemTable::from_ptr(st_raw) } {
+        Some(s) => s,
+        None => return false,
+    };
+    let time = match st.runtime_services().get_time() {
+        Ok(t) => t,
+        Err(_) => return false,
+    };
+
+    let time_s = alloc::format!("{:02}:{:02}", time.hour(), time.minute());
+    let wd = WEEKDAY_NAMES[weekday_index(time.year(), time.month(), time.day())];
+    let mo = MONTH_NAMES[(time.month().clamp(1, 12) - 1) as usize];
+    let date_s = alloc::format!("{}, {:02} {} {}", wd, time.day(), mo, time.year());
+
+    unsafe {
+        let tb = time_s.as_bytes();
+        let n = tb.len().min(CLOCK_TIME_BUF.len() - 1);
+        CLOCK_TIME_BUF[..n].copy_from_slice(&tb[..n]);
+        CLOCK_TIME_BUF[n] = 0;
+
+        let db = date_s.as_bytes();
+        let n2 = db.len().min(CLOCK_DATE_BUF.len() - 1);
+        CLOCK_DATE_BUF[..n2].copy_from_slice(&db[..n2]);
+        CLOCK_DATE_BUF[n2] = 0;
+    }
+    true
+}
+
+/// Pointeur nul-terminé vers "HH:MM" (dernier `ClockRefresh` réussi).
+pub fn clock_time_str_ptr() -> i64 {
+    unsafe { CLOCK_TIME_BUF.as_ptr() as i64 }
+}
+
+/// Pointeur nul-terminé vers "Ddd, DD Month YYYY" (dernier `ClockRefresh` réussi).
+pub fn clock_date_str_ptr() -> i64 {
+    unsafe { CLOCK_DATE_BUF.as_ptr() as i64 }
+}
+
 /// Enregistre un fichier SRFS (path = "SDC:\\...") depuis slul_loader.
+/// Dédoublonne par clé, puis slot libre, puis éviction LRU — en protégeant les
+/// polices .ttf : leur pointeur est détenu à travers les frames (font_ptr,
+/// TtfParser::Load), les évincer casserait tout le rendu texte.
 pub fn srfs_register_file(path: String, data: Vec<u8>) {
     unsafe {
-        for slot in SRFS_CACHE.iter_mut() {
+        SRFS_TICK = SRFS_TICK.wrapping_add(1);
+        for (i, slot) in SRFS_CACHE.iter_mut().enumerate() {
+            if let Some((ref k, _)) = slot {
+                if keys_match(k.as_str(), path.as_str()) {
+                    SRFS_AGE[i] = SRFS_TICK;
+                    *slot = Some((path, data));
+                    return;
+                }
+            }
+        }
+        for (i, slot) in SRFS_CACHE.iter_mut().enumerate() {
             if slot.is_none() {
+                SRFS_AGE[i] = SRFS_TICK;
                 *slot = Some((path, data));
                 return;
             }
+        }
+        let mut victim: Option<usize> = None;
+        for (i, slot) in SRFS_CACHE.iter().enumerate() {
+            if let Some((ref k, _)) = slot {
+                if k.ends_with(".ttf") || k.ends_with(".TTF") { continue; }
+                if victim.map_or(true, |v| SRFS_AGE[i] < SRFS_AGE[v]) { victim = Some(i); }
+            }
+        }
+        if let Some(v) = victim {
+            SRFS_AGE[v] = SRFS_TICK;
+            SRFS_CACHE[v] = Some((path, data));
         }
     }
 }
@@ -421,6 +873,10 @@ static FONT8X16: [u8; 128 * 16] = build_font8x16();
 static mut FONT_UNITS_PER_EM: u32 = 1000;
 static mut RAST_W: u32 = 0;
 static mut RAST_H: u32 = 0;
+// Offsets du dernier bitmap rastérisé, relatifs au point de plume sur la BASELINE
+// (xoff = left side bearing, yoff = distance baseline → haut du bitmap, négatif).
+static mut RAST_XOFF: i32 = 0;
+static mut RAST_YOFF: i32 = 0;
 
 // ── Primitives natives stb_truetype (stb_font.obj, wrapper de stb_truetype.h) ──
 // Exposées EXACTEMENT sous les noms que SluFontConf.slul appelle via <stb_*___> ;
@@ -435,6 +891,10 @@ extern "C" {
     fn stb_bmp_w() -> i32;
     fn stb_bmp_h() -> i32;
     fn stb_bmp_yoff() -> i32;
+    fn stb_bmp_xoff() -> i32;
+    fn stb_advance(glyph_idx: i32, scale_k: i32) -> i32;
+    fn stb_ascent(scale_k: i32) -> i32;
+    fn stb_kern(g1: i32, g2: i32, scale_k: i32) -> i32;
 }
 
 // Cache de parse_string_consts par (OVC text pointer + taille en octets).
@@ -500,6 +960,151 @@ static mut TTF_DATA_PTR: i64 = 0;
 static mut TTF_SCRATCH:  [i64; 200] = [0i64; 200];
 static mut WOFF_SCRATCH: [i64; 256] = [0i64; 256];
 
+// ── Demande de résolution en attente (DrvManSpec___SetResolution___) ─────────
+// SetResolution N'APPLIQUE PAS le changement directement : seul kernel_runtime.rs
+// (render_from_marep) possède le backbuffer/gop_ptr/w/h/stride réels et peut donc
+// resynchroniser ces valeurs APRÈS le set_mode — un changement de mode appliqué
+// depuis ici sans que la boucle de rendu ne s'en aperçoive laisserait le kernel
+// écrire dans un framebuffer redimensionné avec l'ancienne géométrie (corruption
+// d'affichage). Cette file d'attente à 1 élément est le point de rendez-vous.
+static mut GOP_RESIZE_REQUEST: (i64, i64) = (0, 0);
+static mut GOP_RESIZE_PENDING: bool = false;
+
+/// Lu par kernel_runtime.rs à chaque frame — consomme (et efface) la demande de
+/// résolution en attente posée par DrvManSpec___SetResolution___, `None` sinon.
+pub fn gop_resize_take_pending() -> Option<(i64, i64)> {
+    unsafe {
+        if GOP_RESIZE_PENDING {
+            GOP_RESIZE_PENDING = false;
+            Some(GOP_RESIZE_REQUEST)
+        } else {
+            None
+        }
+    }
+}
+
+// ── Résultat du dernier HwBackdoorCall (DrvManSpec) ───────────────────────────
+// [eax, ebx, ecx, edx] après l'instruction IN — voir hw_io_call() et l'arm
+// "DrvManSpec___HwBackdoorCall___" plus bas. Purement mécanique (aucune
+// connaissance de protocole ici), lu via HwBackdoorResultGet(0..3).
+static mut HW_BACKDOOR_RESULT: [i64; 4] = [0i64; 4];
+
+/// Échange brut de 4 registres 32 bits via une instruction x86 `IN` — port =
+/// bits bas de `edx_in`, magic/commande/paramètre = eax_in/ecx_in/ebx_in (aucune
+/// sémantique imposée ici, c'est au code Mara appelant de choisir ce que ces
+/// registres représentent pour le protocole matériel visé).
+///
+/// `rbx` est réservé en interne par LLVM (pointeur de table globale en code
+/// position-indépendant, y compris sur x86_64) — impossible de le nommer
+/// directement dans `asm!` ("rbx is used internally by LLVM"). Contournement
+/// standard : sauver/restaurer rbx manuellement via push/pop autour de
+/// l'instruction, en passant par un registre banal pour ebx_in/ebx_out.
+fn hw_io_call(eax_in: u32, ebx_in: u32, ecx_in: u32, edx_in: u32) -> (u32, u32, u32, u32) {
+    let eax_out: u32;
+    let ebx_out: u32;
+    let ecx_out: u32;
+    let edx_out: u32;
+    unsafe {
+        core::arch::asm!(
+            "push rbx",
+            "mov ebx, {ebx_in:e}",
+            "in eax, dx",
+            "mov {ebx_out:e}, ebx",
+            "pop rbx",
+            ebx_in  = in(reg) ebx_in,
+            ebx_out = out(reg) ebx_out,
+            inout("eax") eax_in => eax_out,
+            inout("ecx") ecx_in => ecx_out,
+            inout("edx") edx_in => edx_out,
+            options(preserves_flags)
+        );
+    }
+    (eax_out, ebx_out, ecx_out, edx_out)
+}
+
+// ── Registres généraux (DrvAPIInterCon***ScrollGet/Set***) ────────────────────
+// Slots persistants indexés, même idiome que TTF_SCRATCH/WOFF_SCRATCH — sert de
+// petit état inter-frames pour les vues marep (ex: TemplateView.mara), qui ne
+// peuvent pas fiablement garder de state via des vars <ptr> de classe (voir
+// LAPrevent.mara : "Seules les vars <string> persistent via class vars"). Usage
+// typique : offsets de défilement vertical + état de glisser-déposer (ancre du
+// pointeur au clic, région en cours de glissement) pour une liste donnée.
+static mut SCROLL_SCRATCH: [i64; 64] = [0i64; 64];
+
+// ── Menu contextuel (ShiLauncher, dock) ───────────────────────────────────────
+// État minimal (ouvert/fermé, propriétaire, position, sous-menu déplié) — la liste
+// d'items elle-même n'est PAS dupliquée ici : ContextMenu.mara la recalcule chaque
+// frame depuis AppRegistryGetMenuItemCount/Label, comme le dock recalcule déjà sa
+// liste d'apps depuis AppRegistryCount à chaque frame.
+static mut MENU_OPEN: bool = false;
+static mut MENU_OWNER_IDX: i32 = -1;
+static mut MENU_X: i32 = 0;
+static mut MENU_Y: i32 = 0;
+static mut MENU_SUBMENU_IDX: i32 = -1;
+
+// ── Menu contextuel (ShiLooker, couleur de dossier) — état SÉPARÉ du menu
+// ci-dessus : ShiLauncher.marep (le dock) tourne en permanence en parallèle
+// de n'importe quelle app et relit MENU_OPEN/MENU_OWNER_IDX à CHAQUE frame
+// via ContextMenu.mara pour dessiner SON PROPRE menu — partager le même état
+// entre le dock et FolderMenu.mara ferait que MENU_OWNER_IDX contiendrait
+// tantôt un index d'app, tantôt un index de ligne de dossier, et les deux
+// menus se dessineraient/interféreraient l'un avec l'autre au hasard des
+// frames. D'où ce second jeu d'entiers, complètement indépendant.
+static mut FOLDER_MENU_OPEN: bool = false;
+static mut FOLDER_MENU_ROW: i32 = -1;
+
+// ── Menu global in-app ShiLauncher — état SÉPARÉ du dock
+// Affiche TOUS les apps pinned avec leurs losanges et dock_menu_items.
+// Utilise son propre état pour ne pas interférer avec ContextMenu.mara.
+static mut GLOBAL_MENU_OPEN: bool = false;
+static mut GLOBAL_MENU_X: i32 = 0;
+static mut GLOBAL_MENU_Y: i32 = 0;
+// Sous-menu flottant (ex: "System power" > Reboot/Sleep screen/Shutdown/Standby,
+// Figma 900:88) — index de l'app pinned propriétaire (position dans la liste
+// AppRegistryGetPinnedIndex, PAS l'index registre brut) + index de l'item dans
+// les dock_menu_items de CETTE app, et ancre écran où dessiner la carte flottante.
+// -1/-1 = aucun sous-menu ouvert. État séparé de MENU_SUBMENU_IDX (ContextMenu,
+// une seule app) car GlobalMenu itère plusieurs apps simultanément.
+static mut GLOBAL_MENU_SUBMENU_APP_IDX: i32 = -1;
+static mut GLOBAL_MENU_SUBMENU_ITEM_IDX: i32 = -1;
+static mut GLOBAL_MENU_SUBMENU_X: i32 = 0;
+static mut GLOBAL_MENU_SUBMENU_Y: i32 = 0;
+
+// ── Mode "contexte" de GlobalMenu — remplace FolderMenu.mara/toute future
+// carte contextuelle dédiée : un composant (fichier, dossier, disque monté,
+// etc.) ouvre GlobalMenu avec SA PROPRE liste d'items ("Label1|Label2", même
+// syntaxe `|` que dock_menu_items — voir app_registry.rs, mais SANS support
+// de sous-menu ici : ces menus contextuels sont des listes plates) au lieu de
+// la liste des apps épinglées. `ctx_id` est une donnée libre que l'appelant
+// choisit et se réattribue lui-même au clic (ex: index de ligne dans
+// DISK_DIR_LISTING) — le noyau ne l'interprète jamais, il le renvoie tel quel.
+// Items déjà découpés et nul-terminés au moment de l'ouverture (Mara ne sait
+// pas splitter une chaîne — voir README §4.11) ; vide = mode normal (apps
+// épinglées, inchangé).
+static mut GLOBAL_MENU_CTX_ITEMS: alloc::vec::Vec<alloc::vec::Vec<u8>> = alloc::vec::Vec::new();
+static mut GLOBAL_MENU_CTX_ID: i32 = -1;
+// Retour de clic — même pattern que WindowManGetLaunchArg/LaunchArgGen : le
+// label cliqué + une génération incrémentée à chaque nouveau clic, pour que
+// l'appelant (ShiLooker...) ne traite un clic qu'UNE fois en le comparant à
+// une valeur stockée en SCROLL_SCRATCH (voir README §2.8/§2.9).
+static mut GLOBAL_MENU_CLICKED_LABEL: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+static mut GLOBAL_MENU_CLICKED_CTX_ID: i32 = -1;
+static mut GLOBAL_MENU_CLICKED_GEN: i32 = 0;
+
+// ── Sélecteur de dossier de capture (ShiCamera) — état COMPLÈTEMENT SÉPARÉ
+// de FOLDER_MENU_* (qui est pour la couleur des dossiers, pas leur navigation)
+// et de MENU_* (qui est pour le dock). Le picker a : propre bool ouvert/fermé,
+// propres ancres X/Y, ET son propre curseur de navigation (CAPTURE_PICKER_PATH)
+// — NE PAS réutiliser DISK_BROWSE_PATH, qui est le curseur persistant de
+// l'onglet Disque (rightView==3). Le partager casserait la navigation du Disque
+// dès que le picker naviguerait ailleurs pendant qu'il est ouvert.
+static mut CAPTURE_PICKER_OPEN: bool = false;
+static mut CAPTURE_PICKER_X: i32 = 0;
+static mut CAPTURE_PICKER_Y: i32 = 0;
+static mut CAPTURE_PICKER_PATH: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+static mut FOLDER_MENU_X: i32 = 0;
+static mut FOLDER_MENU_Y: i32 = 0;
+
 // ── Disque virtuel SRFS (pour SRFSMan.slul) ───────────────────────────────────
 // Superblock SRFS v2 minimal : magic 'SRF2', blockSize=32768, rootBlock=3.
 // SRFSMan.slul vérifie ce magic puis monte SDC:\.
@@ -526,23 +1131,856 @@ static SRFS_DISK_IMAGE: [u8; 512] = {
     b
 };
 
-/// Retourne un pointeur vers le superblock SRFS virtuel.
-/// Appelé par `DrvManSpec***UefiLocateDisk***`.
-pub fn srfs_disk_handle() -> i64 {
-    SRFS_DISK_IMAGE.as_ptr() as i64
+// ── Disque virtuel NTFS (pour NTFSMan.slul) ───────────────────────────────────
+// Volume NTFS minimal mais spec-conforme : secteur de boot (BPB : 512 o/secteur,
+// 8 secteurs/cluster → cluster 4096 o, $MFT au LCN 4, records de 1024 o),
+// $MFT (record 0, $DATA non-résident décrivant son propre run [LCN4..6)),
+// répertoire racine (record 5, $INDEX_ROOT avec une entrée "HELLO.TXT" → record 6)
+// et un fichier de test (record 6, $DATA résident = "Bonjour NTFS!\n").
+// usaCount=1 partout → NTFSMft.ApplyFixup n'a rien à corriger (pas besoin de
+// simuler la substitution de fin de secteur pour cette image de test).
+static NTFS_DISK_IMAGE: [u8; 24576] = {
+    let mut b = [0u8; 24576];
+
+    // ── Secteur de boot ──────────────────────────────────────────────────
+    b[3] = 0x4E; b[4] = 0x54; b[5] = 0x46; b[6] = 0x53;  // OEM "NTFS"
+    b[7] = 0x20; b[8] = 0x20; b[9] = 0x20; b[10] = 0x20; // "    "
+    b[11] = 0x00; b[12] = 0x02;                          // bytesPerSector = 512
+    b[13] = 0x08;                                        // sectorsPerCluster = 8 (cluster 4096)
+    b[48] = 0x04;                                        // $MFT LCN = 4 (offset 48, 64-bit LE)
+    b[64] = 0xF6;                                        // clustersPerMftRecord = -10 -> 1024 o
+    b[510] = 0x55; b[511] = 0xAA;
+
+    // MFT_BASE = LCN4 * 4096 = 16384. $MFT contigu sur 2 clusters (LCN4..6),
+    // donc offset physique = MFT_BASE + recordId*1024 pour les records 0..7.
+    const R0: usize = 16384;
+    const R5: usize = 16384 + 5 * 1024;
+    const R6: usize = 16384 + 6 * 1024;
+
+    // ── Record 0 : $MFT (se décrit lui-même) ────────────────────────────
+    b[R0]=0x46; b[R0+1]=0x49; b[R0+2]=0x4C; b[R0+3]=0x45;  // 'FILE'
+    b[R0+4]=0x2A;                                           // usaOffset=42
+    b[R0+6]=0x01;                                           // usaCount=1
+    b[R0+16]=0x01;                                          // seq=1
+    b[R0+18]=0x01;                                          // hardLink=1
+    b[R0+20]=0x38;                                          // firstAttrOffset=56
+    b[R0+22]=0x01;                                          // flags=1 (en cours d'utilisation)
+    b[R0+24]=0x80;                                          // usedSize=128
+    b[R0+28]=0x00; b[R0+29]=0x04;                           // allocSize=1024
+    b[R0+40]=0x02;                                          // nextAttrId=2
+    b[R0+42]=0x01;                                          // USA[0] (non utilisé, usaCount<=1)
+    // $DATA non-résident à +56 (header 64 o + runlist 4 o = 68 o)
+    b[R0+56]=0x80;                                          // type=$DATA
+    b[R0+60]=0x44;                                          // length=68
+    b[R0+64]=0x01;                                          // nonResident=1
+    b[R0+80]=0x01;                                          // endVCN=1 (2 clusters : VCN0,1)
+    b[R0+88]=0x40;                                          // runsOffset=64 (rel. attr)
+    b[R0+96]=0x00; b[R0+97]=0x20;                           // allocatedSize=8192
+    b[R0+104]=0x00; b[R0+105]=0x20;                         // realSize=8192
+    b[R0+112]=0x00; b[R0+113]=0x20;                         // initializedSize=8192
+    // runlist @ +120 : header 0x11 (1 o longueur, 1 o LCN), longueur=2, delta LCN=+4
+    b[R0+120]=0x11; b[R0+121]=0x02; b[R0+122]=0x04; b[R0+123]=0x00;
+    // marqueur de fin d'attributs @ +124
+    b[R0+124]=0xFF; b[R0+125]=0xFF; b[R0+126]=0xFF; b[R0+127]=0xFF;
+
+    // ── Record 5 : répertoire racine ─────────────────────────────────────
+    b[R5]=0x46; b[R5+1]=0x49; b[R5+2]=0x4C; b[R5+3]=0x45;  // 'FILE'
+    b[R5+4]=0x2A;                                           // usaOffset=42
+    b[R5+6]=0x01;                                           // usaCount=1
+    b[R5+16]=0x01; b[R5+18]=0x01;                           // seq=1, hardLink=1
+    b[R5+20]=0x38;                                          // firstAttrOffset=56
+    b[R5+22]=0x03;                                          // flags=3 (en cours + répertoire)
+    b[R5+24]=0xE8;                                          // usedSize=232
+    b[R5+28]=0x00; b[R5+29]=0x04;                           // allocSize=1024
+    b[R5+40]=0x02;                                          // nextAttrId=2
+    b[R5+42]=0x01;                                          // USA[0]
+    // $INDEX_ROOT résident à +56 (header 24 o + valeur 148 o = 172 o)
+    b[R5+56]=0x90;                                          // type=$INDEX_ROOT
+    b[R5+60]=0xAC;                                          // length=172
+    b[R5+72]=0x94;                                          // valueLength=148
+    b[R5+76]=0x18;                                          // valueOffset=24
+    // valeur @ +80 : type indexé $FILE_NAME (0x30), collation=1, 4096 o/index record
+    b[R5+80]=0x30;
+    b[R5+84]=0x01;
+    b[R5+88]=0x00; b[R5+89]=0x10;                           // 0x1000 = 4096
+    b[R5+92]=0x01;                                          // clustersPerIndexRecord
+    // Index Header @ +96 (= valeur+16)
+    b[R5+96]=0x10;                                          // firstEntryOffset (rel.) = 16
+    b[R5+100]=0x84;                                         // totalSize (rel.) = 132
+    b[R5+104]=0x84;                                         // allocSize (rel.) = 132
+    // Entrée 1 "HELLO.TXT" @ +112 (100 o) -> MFT record 6
+    b[R5+112]=0x06;                                         // fileRef = 6
+    b[R5+120]=0x64;                                         // entryLength=100
+    b[R5+122]=0x54;                                         // streamLength=84
+    // $FILE_NAME @ +128
+    b[R5+128]=0x05;                                         // parentRef = 5 (racine)
+    b[R5+168]=0x00; b[R5+169]=0x04;                         // allocSize=1024
+    b[R5+176]=0x0E;                                         // realSize=14 ("Bonjour NTFS!\n")
+    b[R5+192]=0x09;                                         // filenameLen=9
+    b[R5+193]=0x01;                                         // namespace=Win32
+    // "HELLO.TXT" en UTF-16LE @ +194
+    b[R5+194]=0x48; b[R5+196]=0x45; b[R5+198]=0x4C; b[R5+200]=0x4C; b[R5+202]=0x4F;
+    b[R5+204]=0x2E; b[R5+206]=0x54; b[R5+208]=0x58; b[R5+210]=0x54;
+    // Entrée 2 (terminateur, "last entry") @ +212 (16 o)
+    b[R5+220]=0x10;                                         // entryLength=16
+    b[R5+224]=0x02;                                         // flags=isLast
+    // marqueur de fin d'attributs @ +228
+    b[R5+228]=0xFF; b[R5+229]=0xFF; b[R5+230]=0xFF; b[R5+231]=0xFF;
+
+    // ── Record 6 : fichier "HELLO.TXT" ───────────────────────────────────
+    b[R6]=0x46; b[R6+1]=0x49; b[R6+2]=0x4C; b[R6+3]=0x45;  // 'FILE'
+    b[R6+4]=0x2A;                                           // usaOffset=42
+    b[R6+6]=0x01;                                           // usaCount=1
+    b[R6+16]=0x01; b[R6+18]=0x01;                           // seq=1, hardLink=1
+    b[R6+20]=0x38;                                          // firstAttrOffset=56
+    b[R6+22]=0x01;                                          // flags=1 (fichier en cours d'utilisation)
+    b[R6+24]=0x62;                                          // usedSize=98
+    b[R6+28]=0x00; b[R6+29]=0x04;                           // allocSize=1024
+    b[R6+40]=0x02;                                          // nextAttrId=2
+    b[R6+42]=0x01;                                          // USA[0]
+    // $DATA résident @ +56 (header 24 o + valeur 14 o = 38 o)
+    b[R6+56]=0x80;                                          // type=$DATA
+    b[R6+60]=0x26;                                          // length=38
+    b[R6+72]=0x0E;                                          // valueLength=14
+    b[R6+76]=0x18;                                          // valueOffset=24
+    // contenu @ +80 : "Bonjour NTFS!\n"
+    b[R6+80]=0x42; b[R6+81]=0x6F; b[R6+82]=0x6E; b[R6+83]=0x6A; b[R6+84]=0x6F;
+    b[R6+85]=0x75; b[R6+86]=0x72; b[R6+87]=0x20; b[R6+88]=0x4E; b[R6+89]=0x54;
+    b[R6+90]=0x46; b[R6+91]=0x53; b[R6+92]=0x21; b[R6+93]=0x0A;
+    // marqueur de fin d'attributs @ +94
+    b[R6+94]=0xFF; b[R6+95]=0xFF; b[R6+96]=0xFF; b[R6+97]=0xFF;
+
+    b
+};
+
+/// Sélecteur de disque actif : 0 = SRFS (SDC:), 1 = NTFS (voir NTFSMan.slul).
+/// Positionné par `DrvManSpec***UefiLocateDisk***` (argument optionnel) —
+/// chaque driver appelle UefiLocateDisk avec son propre id avant de lire,
+/// donc l'exécution séquentielle des drivers au boot (slul_loader) suffit
+/// à garantir la bonne cible sans avoir besoin de threader un handle
+/// explicite à travers chaque appel DiskRead.
+static mut ACTIVE_DISK: u8 = 0;
+
+/// Table de montage (lettre → id disque), remplie par `MountPointRegister`.
+/// Lettre stockée nul-terminée (même convention que `RegEntry::name_c` dans
+/// app_registry.rs) pour que `MountTableGetLetter` renvoie un pointeur stable
+/// consommable directement par StrLen/StrCharAt côté Mara. Exposée en lecture
+/// via `DrvAPIInterCon***MountTable{Count,GetLetter,GetDiskId}***` (ShiLooker
+/// affiche la liste réelle des disques montés). Pas encore consommée pour
+/// router FSGetSize/FSRead (mécanisme séparé, voir SRFS_CACHE).
+static mut MOUNT_TABLE: Vec<(Vec<u8>, u8)> = Vec::new();
+
+/// Volumes UEFI physiques réellement détectés au boot (disk_id >= 2 — voir
+/// disk_volumes.rs), en PLUS de SDC(0)/A(1) qui restent simulés et inchangés.
+/// `(label, handle_index)` : label pour l'affichage, handle_index pour rouvrir
+/// CE volume précis via disk_volumes::list_dir_on_volume. Lecture seule (pas
+/// de create/format sur ces volumes-là pour l'instant).
+static mut PHYSICAL_VOLUMES: Vec<(alloc::string::String, usize)> = Vec::new();
+
+/// Publie les volumes physiques détectés au boot (appelé une fois depuis
+/// kernel_runtime.rs, juste après disk_volumes::scan_physical_volumes) et les
+/// monte automatiquement dans MOUNT_TABLE avec disk_id = 2, 3, 4...
+pub fn publish_physical_volumes(vols: alloc::vec::Vec<crate::disk_volumes::PhysicalVolume>) {
+    unsafe {
+        PHYSICAL_VOLUMES.clear();
+        for (i, v) in vols.into_iter().enumerate() {
+            let disk_id = (2 + i) as u8;
+            PHYSICAL_VOLUMES.push((v.label, v.handle_index));
+            let mut letter_c = alloc::format!("PHYS{}:\\", i).into_bytes();
+            letter_c.push(0);
+            MOUNT_TABLE.push((letter_c, disk_id));
+        }
+    }
 }
 
-/// Lit `size` octets depuis le disque virtuel SRFS à l'offset `offset`.
-/// Appelé par `DrvManSpec***DiskRead***`.
+/// Nombre d'entrées dans la table de montage. Appelé par
+/// `DrvAPIInterCon***MountTableCount***`.
+pub fn mount_table_count() -> i64 {
+    unsafe { MOUNT_TABLE.len() as i64 }
+}
+
+/// Pointeur nul-terminé vers la lettre de montage `i` (ex "A:\\"), ou 0 si
+/// hors bornes. Appelé par `DrvAPIInterCon***MountTableGetLetter***`.
+pub fn mount_table_letter_ptr(i: usize) -> i64 {
+    unsafe { MOUNT_TABLE.get(i).map(|(letter, _)| letter.as_ptr() as i64).unwrap_or(0) }
+}
+
+/// Id disque (0=SRFS, 1=NTFS) de l'entrée `i`, ou -1 si hors bornes. Appelé
+/// par `DrvAPIInterCon***MountTableGetDiskId***`.
+pub fn mount_table_disk_id(i: usize) -> i64 {
+    unsafe { MOUNT_TABLE.get(i).map(|(_, id)| *id as i64).unwrap_or(-1) }
+}
+
+/// Libellé friendly UNE SEULE LIGNE "Slura Drive Core (SDC:\)" / "Slura NTFS
+/// Data (A:\)" — construit ICI en Rust (concaténation nom+lettre non fiable
+/// côté Mara, voir mémoire projet). Lettre gardée TELLE QUE stockée dans
+/// MOUNT_TABLE (avec le "\" final, ex "SDC:\\") — c'est le format explicitement
+/// demandé ("Slura Drive Core (SDC:\)"), pas le format compact "(SDC:)" utilisé
+/// avant cette révision.
+///
+/// Les deux noms sont de VRAIS libellés attribués (comme un volume label posé
+/// par `mkfs`/`format` — légitime, pas une fabrication), PAS une marque OEM
+/// matérielle : ni SDC ni le volume NTFS embarqué (`NTFS_DISK_IMAGE`, un tableau
+/// statique compilé de 2 records MFT seulement — pas de record $Volume/attribut
+/// $VOLUME_NAME réel dedans) ne sont adossés à un vrai périphérique UEFI
+/// Block I/O avec une identité fabricant/modèle interrogeable (voir commentaire
+/// de DISK_FORMATTED_SESSION) — aucune chaîne "marque OEM" ne peut donc être
+/// honnêtement lue depuis du matériel réel ici ; le nom attribué EST le repli,
+/// comme il le serait sur un disque réel jamais nommé par son fabricant.
+static mut MOUNT_LABEL_BUF: [u8; 64] = [0u8; 64];
+
+pub fn mount_table_label_ptr(i: usize) -> i64 {
+    let entry = unsafe { MOUNT_TABLE.get(i) };
+    let Some((letter, disk_id)) = entry else { return 0; };
+    let letter_trimmed = core::str::from_utf8(letter)
+        .unwrap_or("?")
+        .trim_end_matches('\0');
+    // disk_id 0/1 = SDC/NTFS simulés (noms fixes existants) ; disk_id >= 2 =
+    // volume physique réellement détecté au boot (voir PHYSICAL_VOLUMES).
+    let name: alloc::string::String = if *disk_id == 0 {
+        "Slura Drive Core".into()
+    } else if *disk_id == 1 {
+        "Slura NTFS Data".into()
+    } else {
+        let phys_idx = (*disk_id as usize).saturating_sub(2);
+        unsafe { PHYSICAL_VOLUMES.get(phys_idx).map(|(label, _)| label.clone()) }
+            .unwrap_or_else(|| "Physical Disk".into())
+    };
+    let label = alloc::format!("{} ({})", name, letter_trimmed);
+    let bytes = label.as_bytes();
+    unsafe {
+        let n = bytes.len().min(MOUNT_LABEL_BUF.len() - 1);
+        MOUNT_LABEL_BUF[..n].copy_from_slice(&bytes[..n]);
+        MOUNT_LABEL_BUF[n] = 0;
+        MOUNT_LABEL_BUF.as_ptr() as i64
+    }
+}
+
+// ── SluWWANMan : signal cellulaire — ÉTAT RÉEL, pas de placeholder ──────────
+// `scan_for_wwan_modem` (pci.rs) énumère réellement les devices PCI (lecture
+// seule, même mécanisme éprouvé que scan_for_xhci) à la recherche d'un modem
+// WWAN (classe PCI 02:80), appelé une fois au boot depuis kernel_runtime.rs
+// juste après le scan xHCI. `WWAN_DETECTED` reflète ce résultat RÉEL — sur une
+// VM QEMU/VMware sans passthrough WWAN, il sera honnêtement `false` (pas de
+// barres, pas de type réseau simulé), exactement comme un vrai OS le
+// rapporterait sur cette machine. `WWAN_CONNECTED` ne peut être vrai que si
+// `WWAN_DETECTED` l'est — le signal/type ne sont affichés QUE si du matériel a
+// réellement été trouvé.
+//
+// ⚠️ Limite assumée : un modem détecté (classe PCI 02:80 présente) ne donne
+// PAS accès à son niveau de signal réel — ça nécessiterait de parler le
+// protocole du modem (AT/QMI/MBIM), hors scope ici. Si détecté, le niveau de
+// signal reste à 0 ("détecté mais niveau inconnu") plutôt que d'inventer une
+// valeur — seul `WWAN_DETECTED`/`WWAN_CONNECTED` sont garantis réels.
+// Type réseau encodé i32 0..9 : 0=GPRS 1=EDGE 2=3G 3=HSPA 4=HSPA+ 5=4G 6=4G+ 7=5G 8=5G+ 9=5Ge.
+static mut WWAN_DETECTED: bool = false;
+static mut WWAN_SIGNAL_LEVEL: i32 = 0;
+static mut WWAN_NETWORK_TYPE: i32 = 0;
+static mut WWAN_CONNECTED: bool = false;
+
+pub fn wwan_get_signal_level() -> i64 { unsafe { WWAN_SIGNAL_LEVEL as i64 } }
+pub fn wwan_get_network_type() -> i64 { unsafe { WWAN_NETWORK_TYPE as i64 } }
+pub fn wwan_is_connected() -> i64 { unsafe { WWAN_CONNECTED as i64 } }
+pub fn wwan_is_detected() -> i64 { unsafe { WWAN_DETECTED as i64 } }
+pub fn wwan_set_network_type(t: i32) -> i64 {
+    if t < 0 || t > 9 { return -1; }
+    unsafe { WWAN_NETWORK_TYPE = t; }
+    0
+}
+
+/// Appelé UNE fois au boot par kernel_runtime.rs juste après
+/// `pci::scan_for_wwan_modem` — traduit le résultat RÉEL de la détection
+/// matérielle en l'état exposé à Mara. Ne devine jamais de niveau de signal :
+/// `found=true` ne fait passer `WWAN_CONNECTED` à vrai que parce qu'un device
+/// PCI classe 02:80 existe réellement, pas parce qu'une valeur est simulée.
+pub fn wwan_set_detected(found: bool) {
+    unsafe {
+        WWAN_DETECTED = found;
+        WWAN_CONNECTED = found;
+    }
+    serial_log(alloc::format!(
+        "[WWAN] detection materielle au boot : {}\r\n",
+        if found { "modem PCI 02:80 trouve" } else { "aucun modem — etat honnetement non connecte" }
+    ).as_bytes());
+}
+
+// ── SluVMTools : pointeur absolu + auto-adaptation résolution — ÉTAT RÉEL ──
+// Même philosophie que WWAN_DETECTED ci-dessus : reflète ce que
+// vmware_backdoor.rs (backdoor VMware/QEMU, port 0x5658) a réellement négocié
+// au boot dans kernel_runtime.rs, jamais un placeholder. Sur bare-metal ou un
+// hyperviseur sans ce backdoor, `VMTOOLS_PRESENT` reste honnêtement `false` —
+// SluVMTools.marep l'affiche tel quel plutôt que de prétendre être actif.
+static mut VMTOOLS_PRESENT:            bool = false;
+static mut VMTOOLS_ABSPOINTER_ENABLED: bool = false;
+static mut VMTOOLS_RESIZE_COUNT:       i32  = 0;
+
+pub fn vmtools_is_present() -> i64 { unsafe { VMTOOLS_PRESENT as i64 } }
+pub fn vmtools_abspointer_enabled() -> i64 { unsafe { VMTOOLS_ABSPOINTER_ENABLED as i64 } }
+pub fn vmtools_get_resize_count() -> i64 { unsafe { VMTOOLS_RESIZE_COUNT as i64 } }
+
+/// Appelé UNE fois au boot par kernel_runtime.rs juste après la négociation
+/// du backdoor (vmware_backdoor::backdoor_available/abspointer_enable).
+pub fn vmtools_set_detected(present: bool, abspointer_enabled: bool) {
+    unsafe {
+        VMTOOLS_PRESENT = present;
+        VMTOOLS_ABSPOINTER_ENABLED = abspointer_enabled;
+    }
+}
+
+/// Appelé par kernel_runtime.rs à chaque fois que la résolution GOP est
+/// effectivement rebasculée en cours de session (fenêtre hôte redimensionnée).
+pub fn vmtools_note_resize() {
+    unsafe { VMTOOLS_RESIZE_COUNT = VMTOOLS_RESIZE_COUNT.saturating_add(1); }
+}
+
+// ── SluPwMan : actions d'alimentation RÉELLES (ACPI Spec 6.4 §7, UEFI Runtime
+// Services ResetSystem) ──────────────────────────────────────────────────────
+// Redémarrer/Éteindre : `RuntimeServices::reset()` — mécanisme UEFI standard,
+// géré par le firmware (transition ACPI \_S5 réelle pour l'extinction). Le
+// pointeur vers les Runtime Services est capturé UNE fois au boot
+// (kernel_runtime.rs, via `power_init`) et reste valide toute la session car
+// ce noyau n'appelle jamais ExitBootServices (voir commentaire plus haut) —
+// la table système n'est donc jamais réadressée en mémoire virtuelle.
+//
+// Mettre en veille (S3) : PAS géré par ResetSystem (qui ne connaît que
+// Cold/Warm/Shutdown/PlatformSpecific, jamais "sleep" — S3 est une transition
+// d'état ACPI différente, pas un reset). Implémenté via écriture directe du
+// registre PM1_CNT (bits SLP_TYP + SLP_EN), avec les valeurs SLP_TYPa/b
+// trouvées réellement dans le DSDT via `acpi::scan_power_management` (voir ce
+// fichier pour le détail — recherche bornée de l'objet `\_S3`, PAS un
+// interpréteur AML complet). Si l'un des éléments nécessaires manque (FADT
+// sans PM1a exploitable, `\_S3` introuvable, GAS en System Memory non géré),
+// la mise en veille est honnêtement indisponible (`PowerSleepSupported` rend
+// 0) plutôt que de deviner des valeurs et risquer un blocage matériel.
+static mut RUNTIME_SERVICES_PTR: *const uefi::table::runtime::RuntimeServices = core::ptr::null();
+static mut POWER_MGMT: Option<crate::acpi::PowerMgmt> = None;
+
+/// Appelé UNE fois au boot par kernel_runtime.rs, juste après
+/// `acpi::scan_acpi_tables` — capture le pointeur Runtime Services (toujours
+/// disponible, indépendant de l'ACPI) et le résultat (potentiellement `None`,
+/// honnêtement) de la découverte des registres de mise en veille.
+pub fn power_init(rt: *const uefi::table::runtime::RuntimeServices, pm: Option<crate::acpi::PowerMgmt>) {
+    unsafe {
+        RUNTIME_SERVICES_PTR = rt;
+        let supported = pm.is_some();
+        POWER_MGMT = pm;
+        serial_log(alloc::format!(
+            "[POWER] Runtime Services captures — mise en veille S3 {}\r\n",
+            if supported { "disponible (\\_S3 trouve dans le DSDT)" } else { "indisponible (voir logs [ACPI] ci-dessus)" }
+        ).as_bytes());
+    }
+}
+
+/// Écrit un octet sur un port I/O x86_64 (`out`). Utilisé uniquement pour
+/// SMI_CMD (activation du mode ACPI, rarement nécessaire sous UEFI natif où
+/// SCI_EN est déjà à 1).
+unsafe fn outb(port: u16, val: u8) {
+    core::arch::asm!("out dx, al", in("dx") port, in("al") val, options(nomem, nostack, preserves_flags));
+}
+
+/// Lit un mot 16 bits sur un port I/O x86_64 (`in`) — PM1_CNT fait
+/// PM1_CNT_LEN octets (2 le plus souvent) ; on lit/écrit toujours 16 bits,
+/// suffisant pour couvrir SLP_TYP (bits 10-12) + SLP_EN (bit 13).
+unsafe fn inw(port: u16) -> u16 {
+    let val: u16;
+    core::arch::asm!("in ax, dx", in("dx") port, out("ax") val, options(nomem, nostack, preserves_flags));
+    val
+}
+
+unsafe fn outw(port: u16, val: u16) {
+    core::arch::asm!("out dx, ax", in("dx") port, in("ax") val, options(nomem, nostack, preserves_flags));
+}
+
+pub fn power_restart() -> i64 {
+    let ptr = unsafe { RUNTIME_SERVICES_PTR };
+    if ptr.is_null() {
+        serial_log(b"[POWER] Redemarrage demande mais Runtime Services non captures\r\n");
+        return -1;
+    }
+    serial_log(b"[POWER] Redemarrage (UEFI ResetSystem, EfiResetWarm)\r\n");
+    unsafe { (*ptr).reset(uefi::table::runtime::ResetType::WARM, uefi::Status::SUCCESS, None) }
+}
+
+pub fn power_shutdown() -> i64 {
+    let ptr = unsafe { RUNTIME_SERVICES_PTR };
+    if ptr.is_null() {
+        serial_log(b"[POWER] Extinction demandee mais Runtime Services non captures\r\n");
+        return -1;
+    }
+    serial_log(b"[POWER] Extinction (UEFI ResetSystem, EfiResetShutdown - vraie transition ACPI S5)\r\n");
+    unsafe { (*ptr).reset(uefi::table::runtime::ResetType::SHUTDOWN, uefi::Status::SUCCESS, None) }
+}
+
+pub fn power_sleep_supported() -> i64 {
+    unsafe { POWER_MGMT.is_some() as i64 }
+}
+
+/// Déclenche une vraie transition ACPI S3 (RAM auto-rafraîchie, CPU arrêté) —
+/// écrit SLP_TYPa<<10 | SLP_EN(bit13) dans PM1a_CNT ; si PM1b existe, même
+/// séquence dessus AVANT PM1a (ordre recommandé par la spec pour que SLP_EN
+/// déclenche l'entrée en veille une fois les deux blocs préparés). Ne modifie
+/// jamais les autres bits déjà présents dans PM1_CNT (lecture puis
+/// modification ciblée, pas d'écrasement).
+pub fn power_sleep() -> i64 {
+    let pm = unsafe { POWER_MGMT.clone() };
+    let Some(pm) = pm else {
+        serial_log(b"[POWER] Mise en veille demandee mais indisponible (voir logs [ACPI])\r\n");
+        return -1;
+    };
+    serial_log(b"[POWER] Mise en veille S3 (ecriture PM1_CNT reelle)\r\n");
+    unsafe {
+        if pm.smi_cmd_port != 0 {
+            let cur = inw(pm.pm1a_cnt_port);
+            if cur & 1 == 0 { outb(pm.smi_cmd_port, pm.acpi_enable_val); }
+        }
+        const SLP_TYP_SHIFT: u16 = 10;
+        const SLP_EN: u16 = 1 << 13;
+        if pm.pm1b_cnt_port != 0 {
+            let curb = inw(pm.pm1b_cnt_port);
+            let clearedb = curb & !(0b111 << SLP_TYP_SHIFT);
+            outw(pm.pm1b_cnt_port, clearedb | (pm.slp_typ_b << SLP_TYP_SHIFT));
+        }
+        let cura = inw(pm.pm1a_cnt_port);
+        let clareda = cura & !(0b111 << SLP_TYP_SHIFT);
+        outw(pm.pm1a_cnt_port, clareda | (pm.slp_typ_a << SLP_TYP_SHIFT));
+        if pm.pm1b_cnt_port != 0 {
+            let curb2 = inw(pm.pm1b_cnt_port);
+            outw(pm.pm1b_cnt_port, curb2 | SLP_EN);
+        }
+        let cura2 = inw(pm.pm1a_cnt_port);
+        outw(pm.pm1a_cnt_port, cura2 | SLP_EN);
+    }
+    // Si l'écriture a réellement fonctionné, le CPU s'arrête ici (S3) et cette
+    // fonction ne "retourne" qu'au réveil (le firmware relance l'exécution
+    // depuis le vecteur de reset — cette valeur de retour n'est donc en
+    // pratique observable QUE si la transition a échoué silencieusement).
+    0
+}
+
+// ── SluDskMan : format/mount/unmount honnêtes (voir plan) ───────────────────
+// Aucune écriture disque réelle n'existe dans ce noyau (DiskWrite est un no-op,
+// SRFS_DISK_IMAGE/NTFS_DISK_IMAGE sont des tableaux statiques compilés, pas des
+// fichiers) — formater resterait donc un no-op honnête (documenté) plutôt que de
+// simuler un vrai formatage. Mount/unmount sont réels : ils mutent la même
+// MOUNT_TABLE que ShiLooker affiche déjà, mais restent SESSION-ONLY (reset au
+// reboot, comme tout le reste de cet état noyau) et n'affectent aucun routage de
+// fichier réel (rien ne gate ImageLoad/FontLoad/SRFS_CACHE sur MOUNT_TABLE).
+static mut DISK_FORMATTED_SESSION: [bool; 2] = [false, false];
+
+/// Marque le disque `disk_id` (0=SRFS, 1=NTFS) comme formaté pour cette session
+/// uniquement — ne touche jamais SRFS_DISK_IMAGE/NTFS_DISK_IMAGE (état partagé,
+/// le muter serait un effet de bord dangereux). Retourne -1 si id invalide.
+pub fn disk_format(disk_id: i32) -> i64 {
+    if disk_id < 0 || disk_id > 1 { return -1; }
+    unsafe { DISK_FORMATTED_SESSION[disk_id as usize] = true; }
+    serial_log(alloc::format!(
+        "[DISK] Format disque {} — marque formate (session uniquement, non persiste au reboot)\r\n", disk_id
+    ).as_bytes());
+    0
+}
+
+pub fn disk_is_formatted_session(disk_id: i32) -> i64 {
+    if disk_id < 0 || disk_id > 1 { return 0; }
+    unsafe { DISK_FORMATTED_SESSION[disk_id as usize] as i64 }
+}
+
+fn disk_id_to_default_letter(disk_id: i32) -> &'static str {
+    match disk_id { 1 => "A:\\", _ => "SDC:\\" }
+}
+
+/// Monte le disque `disk_id` s'il ne l'est pas déjà (pousse dans MOUNT_TABLE, même
+/// mécanisme que MountPointRegister). Idempotent : renvoie 1 si déjà monté, 0 si
+/// nouvellement monté, -1 si id invalide.
+pub fn disk_mount(disk_id: i32) -> i64 {
+    if disk_id < 0 || disk_id > 1 { return -1; }
+    unsafe {
+        if MOUNT_TABLE.iter().any(|(_, id)| *id == disk_id as u8) { return 1; }
+        let mut letter_c = disk_id_to_default_letter(disk_id).as_bytes().to_vec();
+        letter_c.push(0);
+        MOUNT_TABLE.push((letter_c, disk_id as u8));
+    }
+    serial_log(alloc::format!("[DISK] DiskMount({}) OK\r\n", disk_id).as_bytes());
+    0
+}
+
+/// Démonte le disque `disk_id` (retire son entrée de MOUNT_TABLE) — AFFICHAGE
+/// SEULEMENT : rien ne route réellement les lectures fichier via MOUNT_TABLE
+/// aujourd'hui, donc ça n'empêche aucune autre app de continuer à lire SDC:/A:.
+/// Retourne -1 si aucune entrée ne correspondait.
+pub fn disk_unmount(disk_id: i32) -> i64 {
+    if disk_id < 0 || disk_id > 1 { return -1; }
+    let before = unsafe { MOUNT_TABLE.len() };
+    unsafe { MOUNT_TABLE.retain(|(_, id)| *id != disk_id as u8); }
+    if unsafe { MOUNT_TABLE.len() } == before { return -1; }
+    serial_log(alloc::format!("[DISK] DiskUnmount({}) OK (affichage seulement)\r\n", disk_id).as_bytes());
+    0
+}
+
+// ── Navigation dossiers (ShiLooker, onglet Disks) ────────────────────────────
+// Chemin courant de navigation, nul-terminé (même convention que RegEntry.name_c).
+// Les "dossiers" sont une convention UI par-dessus SRFS_CACHE (entrées à 0 octet
+// dont la clé finit par '/'), pas une vraie notion noyau — voir DiskCacheListDir.
+static mut DISK_BROWSE_PATH: Vec<u8> = Vec::new();
+
+pub fn disk_browse_get_path() -> i64 {
+    unsafe {
+        if DISK_BROWSE_PATH.is_empty() { DISK_BROWSE_PATH.push(0); }
+        DISK_BROWSE_PATH.as_ptr() as i64
+    }
+}
+
+pub fn disk_browse_reset(root: &str) {
+    let mut s = alloc::string::String::from(root);
+    if !s.ends_with('/') { s.push('/'); }
+    let mut v = s.into_bytes();
+    v.push(0);
+    unsafe { DISK_BROWSE_PATH = v; }
+}
+
+/// Reset la navigation vers la racine du disque `disk_id`, quel qu'il soit —
+/// construit le bon préfixe ("SDC:", "A:", ou "PHYSn:") côté Rust puisque Mara
+/// n'a aucune concaténation de chaîne fiable (voir README §4.11). disk_id >= 2
+/// = volume physique réel (voir disk_volumes.rs) : le préfixe "PHYSn:" est
+/// reconnu par disk_cache_dir_rebuild pour router vers list_dir_on_volume.
+pub fn disk_browse_reset_for_disk_id(disk_id: i32) {
+    let root: alloc::string::String = match disk_id {
+        0 => "SDC:".into(),
+        1 => "A:".into(),
+        n if n >= 2 => alloc::format!("PHYS{}:", n - 2),
+        _ => "SDC:".into(),
+    };
+    disk_browse_reset(&root);
+}
+
+pub fn disk_browse_navigate_into(name: &str) {
+    unsafe {
+        if DISK_BROWSE_PATH.is_empty() { DISK_BROWSE_PATH.push(0); }
+        DISK_BROWSE_PATH.pop(); // retire le \0 final
+        DISK_BROWSE_PATH.extend_from_slice(name.as_bytes());
+        if !name.ends_with('/') { DISK_BROWSE_PATH.push(b'/'); }
+        DISK_BROWSE_PATH.push(0);
+    }
+}
+
+pub fn disk_browse_navigate_up() {
+    unsafe {
+        if DISK_BROWSE_PATH.len() <= 1 { return; }
+        DISK_BROWSE_PATH.pop(); // \0
+        if DISK_BROWSE_PATH.last() == Some(&b'/') { DISK_BROWSE_PATH.pop(); } // slash de fin courant
+        while let Some(&b) = DISK_BROWSE_PATH.last() {
+            if b == b'/' { break; }
+            DISK_BROWSE_PATH.pop();
+        }
+        DISK_BROWSE_PATH.push(0);
+    }
+}
+
+// ── Sélecteur de dossier de capture (ShiCamera) — curseur de navigation isolé
+// Des fonctions identiques à disk_browse_*, mais opérant sur CAPTURE_PICKER_PATH
+// plutôt que DISK_BROWSE_PATH (règle §9.7 : jamais partager d'état entre UI).
+pub fn capture_picker_browse_get_path() -> i64 {
+    unsafe {
+        if CAPTURE_PICKER_PATH.is_empty() { CAPTURE_PICKER_PATH.push(0); }
+        CAPTURE_PICKER_PATH.as_ptr() as i64
+    }
+}
+
+pub fn capture_picker_browse_reset(root: &str) {
+    let mut s = alloc::string::String::from(root);
+    if !s.ends_with('/') { s.push('/'); }
+    let mut v = s.into_bytes();
+    v.push(0);
+    unsafe { CAPTURE_PICKER_PATH = v; }
+}
+
+pub fn capture_picker_browse_navigate_into(name: &str) {
+    unsafe {
+        if CAPTURE_PICKER_PATH.is_empty() { CAPTURE_PICKER_PATH.push(0); }
+        CAPTURE_PICKER_PATH.pop(); // retire le \0 final
+        CAPTURE_PICKER_PATH.extend_from_slice(name.as_bytes());
+        if !name.ends_with('/') { CAPTURE_PICKER_PATH.push(b'/'); }
+        CAPTURE_PICKER_PATH.push(0);
+    }
+}
+
+pub fn capture_picker_browse_navigate_up() {
+    unsafe {
+        if CAPTURE_PICKER_PATH.len() <= 1 { return; }
+        CAPTURE_PICKER_PATH.pop(); // \0
+        if CAPTURE_PICKER_PATH.last() == Some(&b'/') { CAPTURE_PICKER_PATH.pop(); } // slash de fin courant
+        while let Some(&b) = CAPTURE_PICKER_PATH.last() {
+            if b == b'/' { break; }
+            CAPTURE_PICKER_PATH.pop();
+        }
+        CAPTURE_PICKER_PATH.push(0);
+    }
+}
+
+// ── Champ de texte générique (nom de fichier/dossier — aucune primitive de saisie
+// texte n'existait avant : KeyGetCode ne donne qu'UNE touche par frame, et la
+// concaténation <string>+<i32> Mara compile sans garantie d'exécution réelle côté
+// interpréteur OVC, voir mémoire projet) ────────────────────────────────────────
+static mut TEXT_FIELD_BUF: Vec<u8> = Vec::new();
+
+pub fn text_field_append_char(code: i32) -> i64 {
+    // Imprimable ASCII uniquement (32..=126) — ignore le reste (touches de contrôle
+    // hors backspace, qui a son propre FFI).
+    if code < 32 || code > 126 { return -1; }
+    unsafe {
+        if TEXT_FIELD_BUF.is_empty() { TEXT_FIELD_BUF.push(0); }
+        if TEXT_FIELD_BUF.len() >= 64 { return -1; } // 63 car + \0
+        TEXT_FIELD_BUF.pop();
+        TEXT_FIELD_BUF.push(code as u8);
+        TEXT_FIELD_BUF.push(0);
+    }
+    0
+}
+
+pub fn text_field_backspace() -> i64 {
+    unsafe {
+        if TEXT_FIELD_BUF.len() <= 1 { return 0; }
+        TEXT_FIELD_BUF.pop(); // \0
+        TEXT_FIELD_BUF.pop(); // dernier caractère
+        TEXT_FIELD_BUF.push(0);
+    }
+    0
+}
+
+pub fn text_field_clear() -> i64 {
+    unsafe { TEXT_FIELD_BUF.clear(); TEXT_FIELD_BUF.push(0); }
+    0
+}
+
+pub fn text_field_get_ptr() -> i64 {
+    unsafe {
+        if TEXT_FIELD_BUF.is_empty() { TEXT_FIELD_BUF.push(0); }
+        TEXT_FIELD_BUF.as_ptr() as i64
+    }
+}
+
+/// Construit un buffer BMP 24bpp minimal (w×h, couleur unie argb) en RAM et
+/// retourne un pointeur vers ses octets — évite de manipuler les octets d'en-tête
+/// à la main en Mara via PtrWrite8At en boucle. Le pointeur reste valide tant que
+/// le Vec sous-jacent n'est pas libéré : consommé immédiatement par l'appelant
+/// (CaWriteFile) donc pas de problème de durée de vie.
+pub fn bmp_blank_buffer(w: i32, h: i32, argb: i32) -> alloc::vec::Vec<u8> {
+    let w = w.clamp(1, 256) as u32;
+    let h = h.clamp(1, 256) as u32;
+    let row_bytes = ((w * 3 + 3) / 4) * 4; // aligné 4 octets
+    let pixel_data_size = row_bytes * h;
+    let file_size = 54 + pixel_data_size;
+    let r = ((argb >> 16) & 0xFF) as u8;
+    let g = ((argb >> 8) & 0xFF) as u8;
+    let b = (argb & 0xFF) as u8;
+
+    let mut buf = alloc::vec::Vec::with_capacity(file_size as usize);
+    // BITMAPFILEHEADER (14 octets)
+    buf.extend_from_slice(b"BM");
+    buf.extend_from_slice(&file_size.to_le_bytes());
+    buf.extend_from_slice(&0u32.to_le_bytes()); // réservé
+    buf.extend_from_slice(&54u32.to_le_bytes()); // offset pixels
+    // BITMAPINFOHEADER (40 octets)
+    buf.extend_from_slice(&40u32.to_le_bytes());
+    buf.extend_from_slice(&(w as i32).to_le_bytes());
+    buf.extend_from_slice(&(h as i32).to_le_bytes());
+    buf.extend_from_slice(&1u16.to_le_bytes());  // plans
+    buf.extend_from_slice(&24u16.to_le_bytes()); // bpp
+    buf.extend_from_slice(&0u32.to_le_bytes());  // compression (BI_RGB)
+    buf.extend_from_slice(&pixel_data_size.to_le_bytes());
+    buf.extend_from_slice(&2835i32.to_le_bytes()); // ppm X (~72dpi)
+    buf.extend_from_slice(&2835i32.to_le_bytes()); // ppm Y
+    buf.extend_from_slice(&0u32.to_le_bytes());    // couleurs palette
+    buf.extend_from_slice(&0u32.to_le_bytes());    // couleurs importantes
+    // Pixels (bas→haut, BGR, padding par ligne)
+    let pad = (row_bytes - w * 3) as usize;
+    for _ in 0..h {
+        for _ in 0..w {
+            buf.push(b);
+            buf.push(g);
+            buf.push(r);
+        }
+        for _ in 0..pad { buf.push(0); }
+    }
+    buf
+}
+
+// Listing du "dossier" courant (préfixe de chemin) — reconstruit à chaque appel
+// de DiskCacheDirCount (même idiome que AppRegistryCount/GetName : un Count()
+// qui prépare l'état, puis des GetName(i) indexés, pas de string \n-joined à
+// parser côté Mara qui n'a aucune primitive de découpage de chaîne). Deux
+// sources fusionnées pour SDC: (1) le VRAI contenu de la partition ESP hôte
+// (srfs_uefi_list_dir, lecture réelle) et (2) SRFS_CACHE pour les
+// fichiers/dossiers créés cette session (DiskBrowseCreateEntry n'écrit que sur
+// le cache RAM, jamais sur le disque réel — sans ce merge, un dossier tout
+// juste créé n'apparaîtrait pas dans la liste malgré la lecture réelle).
+static mut DISK_DIR_LISTING: Vec<Vec<u8>> = Vec::new();
+
+pub fn disk_cache_dir_rebuild(prefix: &str) -> i64 {
+    use uefi::table::{Boot, SystemTable};
+    let mut names: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
+
+    if prefix.to_ascii_uppercase().starts_with("SDC:") {
+        let st_raw = unsafe { UEFI_ST_PTR };
+        if !st_raw.is_null() {
+            if let Some(real_names) = unsafe { srfs_uefi_list_dir(st_raw, prefix) } {
+                names.extend(real_names);
+            }
+        }
+    } else if let Some(phys_rest) = prefix.strip_prefix("PHYS").filter(|_| prefix.to_ascii_uppercase().starts_with("PHYS")) {
+        // Volume physique réel (disk_id >= 2, voir disk_volumes.rs) : lecture
+        // seule, aucun merge SRFS_CACHE (pas de création de fichier dessus).
+        if let Some((idx_str, sub_path)) = phys_rest.split_once(':') {
+            if let Ok(phys_idx) = idx_str.parse::<usize>() {
+                let handle_index = unsafe { PHYSICAL_VOLUMES.get(phys_idx).map(|(_, h)| *h) };
+                if let Some(handle_index) = handle_index {
+                    let st_raw = unsafe { UEFI_ST_PTR };
+                    if !st_raw.is_null() {
+                        if let Some(mut st) = unsafe { SystemTable::<Boot>::from_ptr(st_raw) } {
+                            if let Some(img) = unsafe { uefi::Handle::from_ptr(UEFI_IMG_HANDLE as *mut core::ffi::c_void) } {
+                                let rel = sub_path.trim_start_matches('/');
+                                if let Some(real_names) = crate::disk_volumes::list_dir_on_volume(&mut st, img, handle_index, rel) {
+                                    names.extend(real_names);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    unsafe {
+        for slot in SRFS_CACHE.iter() {
+            if let Some((k, _)) = slot {
+                if let Some(rest) = k.strip_prefix(prefix) {
+                    if rest.is_empty() { continue; }
+                    let seg = match rest.find('/') {
+                        Some(pos) => &rest[..=pos], // garde le '/' final = sous-dossier
+                        None => rest,
+                    };
+                    if !names.iter().any(|n| n == seg) { names.push(seg.to_string()); }
+                }
+            }
+        }
+    }
+    let listing: alloc::vec::Vec<alloc::vec::Vec<u8>> = names.into_iter().map(|n| {
+        let mut v = n.into_bytes();
+        v.push(0);
+        v
+    }).collect();
+    let count = listing.len() as i64;
+    unsafe { DISK_DIR_LISTING = listing; }
+    count
+}
+
+pub fn disk_cache_dir_get_name(i: usize) -> i64 {
+    unsafe { DISK_DIR_LISTING.get(i).map(|v| v.as_ptr() as i64).unwrap_or(0) }
+}
+
+/// Crée une entrée (dossier ou fichier) dans le "dossier" courant de navigation
+/// (DISK_BROWSE_PATH) avec le nom actuellement dans TEXT_FIELD_BUF — toute la
+/// construction du chemin (concaténation dossier+nom+extension) se fait ICI en
+/// Rust plutôt qu'en Mara, où la concaténation <string>+<string> n'a AUCUNE
+/// garantie d'exécution réelle côté interpréteur OVC (voir commentaire sur
+/// TEXT_FIELD_BUF/DISK_BROWSE_PATH). kind: 0=dossier, 1=.txt, 2=.md, 3=.bmp.
+/// Retourne 0 si succès, -1 si le nom ou le dossier courant est vide/invalide.
+pub fn disk_browse_create_entry(kind: i32) -> i64 {
+    let name = unsafe {
+        if TEXT_FIELD_BUF.len() <= 1 { return -1; }
+        match core::str::from_utf8(&TEXT_FIELD_BUF[..TEXT_FIELD_BUF.len() - 1]) {
+            Ok(s) => s,
+            Err(_) => return -1,
+        }
+    };
+    if name.is_empty() { return -1; }
+    let base = unsafe {
+        if DISK_BROWSE_PATH.len() <= 1 { return -1; }
+        match core::str::from_utf8(&DISK_BROWSE_PATH[..DISK_BROWSE_PATH.len() - 1]) {
+            Ok(s) => s,
+            Err(_) => return -1,
+        }
+    };
+    match kind {
+        0 => { let path = alloc::format!("{}{}/", base, name); srfs_write_chain_file(&path, &[]); }
+        1 => { let path = alloc::format!("{}{}.txt", base, name); srfs_write_chain_file(&path, &[]); }
+        2 => { let path = alloc::format!("{}{}.md", base, name); srfs_write_chain_file(&path, &[]); }
+        3 => {
+            let path = alloc::format!("{}{}.bmp", base, name);
+            let bytes = bmp_blank_buffer(16, 16, 0xFFB9B9B9u32 as i32);
+            srfs_write_chain_file(&path, &bytes);
+        }
+        _ => return -1,
+    }
+    unsafe { TEXT_FIELD_BUF.clear(); TEXT_FIELD_BUF.push(0); }
+    0
+}
+
+/// Couleur ARGB personnalisée d'un dossier — clé = chemin complet (dossier
+/// parent + nom, mêmes deux pointeurs que DiskBrowseNavigateInto/CreateEntry
+/// reçoit séparément : la concaténation se fait ICI en Rust, jamais côté Mara,
+/// voir le commentaire sur disk_browse_create_entry). Table plate, pas de
+/// limite de taille arbitraire (le nombre de dossiers réellement parcourus
+/// dans une session reste petit). Couleur par défaut si jamais définie :
+/// 0xFFE0E0E0 (gris clair, même teinte que les tuiles disque d'origine).
+pub const DEFAULT_FOLDER_COLOR: u32 = 0xFFE0E0E0;
+static mut FOLDER_COLORS: Vec<(alloc::string::String, u32)> = Vec::new();
+
+fn folder_color_key(base_ptr: i64, name_ptr: i64) -> Option<alloc::string::String> {
+    if base_ptr == 0 || name_ptr == 0 { return None; }
+    let base = unsafe { read_cstr(base_ptr as *const u8) };
+    let name = unsafe { read_cstr(name_ptr as *const u8) };
+    if base.is_empty() || name.is_empty() { return None; }
+    Some(alloc::format!("{}{}", base, name))
+}
+
+pub fn folder_color_get(base_ptr: i64, name_ptr: i64) -> i64 {
+    let key = match folder_color_key(base_ptr, name_ptr) { Some(k) => k, None => return DEFAULT_FOLDER_COLOR as i64 };
+    unsafe {
+        match FOLDER_COLORS.iter().find(|(k, _)| *k == key) {
+            Some((_, c)) => *c as i64,
+            None => DEFAULT_FOLDER_COLOR as i64,
+        }
+    }
+}
+
+pub fn folder_color_set(base_ptr: i64, name_ptr: i64, argb: i32) -> i64 {
+    let key = match folder_color_key(base_ptr, name_ptr) { Some(k) => k, None => return -1 };
+    unsafe {
+        match FOLDER_COLORS.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, c)) => { *c = argb as u32; }
+            None => { FOLDER_COLORS.push((key, argb as u32)); }
+        }
+    }
+    0
+}
+
+/// Retourne un pointeur vers l'image disque actuellement sélectionnée
+/// (ACTIVE_DISK). Appelé par `DrvManSpec***UefiLocateDisk***`.
+pub fn srfs_disk_handle() -> i64 {
+    unsafe {
+        match ACTIVE_DISK {
+            1 => NTFS_DISK_IMAGE.as_ptr() as i64,
+            _ => SRFS_DISK_IMAGE.as_ptr() as i64,
+        }
+    }
+}
+
+/// Lit `size` octets depuis le disque virtuel actuellement sélectionné
+/// (ACTIVE_DISK) à l'offset `offset`. Appelé par `DrvManSpec***DiskRead***`.
 pub fn srfs_disk_read(offset: usize, dst: *mut u8, size: usize) -> i64 {
     if dst.is_null() { return 0; }
-    let src = SRFS_DISK_IMAGE.as_ptr();
-    let avail = SRFS_DISK_IMAGE.len().saturating_sub(offset);
+    let (src, len) = unsafe {
+        match ACTIVE_DISK {
+            1 => (NTFS_DISK_IMAGE.as_ptr(), NTFS_DISK_IMAGE.len()),
+            _ => (SRFS_DISK_IMAGE.as_ptr(), SRFS_DISK_IMAGE.len()),
+        }
+    };
+    let avail = len.saturating_sub(offset);
     let n = size.min(avail);
     if n > 0 {
         unsafe { core::ptr::copy_nonoverlapping(src.add(offset), dst, n); }
     }
-    // Si on dépasse le superblock, remplir de zéros (blocs vides)
+    // Au-delà de l'image (fin de disque), on remplit de zéros (blocs vides)
     if size > n {
         unsafe { core::ptr::write_bytes(dst.add(n), 0, size - n); }
     }
@@ -819,6 +2257,36 @@ unsafe fn gpu_write_pixel(fb: *mut u32, idx: usize, sr: u32, sg: u32, sb: u32, s
 
 /// Applique la transformation 2D courante à un point (x, y) → (x', y').
 #[inline]
+/// Échantillonne (r,g,b,a) dans une image RGBA avec moyenne de bloc quand on
+/// RÉDUIT — l'échantillonnage nearest décime les glyphes (icônes en pointillés)
+/// dès que l'image source est plus grande que la zone de destination.
+/// Moyenne PRÉMULTIPLIÉE par l'alpha : sans ça les pixels transparents (RGB=0)
+/// assombrissent les bords des glyphes.
+#[inline]
+unsafe fn img_sample_box(pp: *const u8, iw: u32, ih: u32, lx: i32, ly: i32, dw: i32, dh: i32) -> (u32, u32, u32, u32) {
+    let dw = dw.max(1); let dh = dh.max(1);
+    let kx = (iw as i32 / dw).clamp(1, 12);
+    let ky = (ih as i32 / dh).clamp(1, 12);
+    let sx0 = (lx as i64 * iw as i64 / dw as i64) as i32;
+    let sy0 = (ly as i64 * ih as i64 / dh as i64) as i32;
+    let (mut r, mut g, mut b, mut a, mut n) = (0u32, 0u32, 0u32, 0u32, 0u32);
+    for oy in 0..ky {
+        let sy = (sy0 + oy).clamp(0, ih as i32 - 1) as usize;
+        for ox in 0..kx {
+            let sx = (sx0 + ox).clamp(0, iw as i32 - 1) as usize;
+            let o = (sy * iw as usize + sx) * 4;
+            let pa = *pp.add(o + 3) as u32;
+            r += *pp.add(o) as u32 * pa;
+            g += *pp.add(o + 1) as u32 * pa;
+            b += *pp.add(o + 2) as u32 * pa;
+            a += pa;
+            n += 1;
+        }
+    }
+    if n == 0 || a == 0 { return (0, 0, 0, 0); }
+    (r / a, g / a, b / a, a / n)
+}
+
 unsafe fn gpu_transform_point(x: i32, y: i32) -> (i32, i32) {
     if !GPU_TRANSFORM_ACTIVE { return (x, y); }
     let t = &GPU_TRANSFORM;
@@ -1037,6 +2505,11 @@ fn svg_num(s: &str) -> i32 {
     let s = s.trim();
     if s.is_empty() { return 0; }
     let (sign, s) = if s.starts_with('-') { (-1i32, &s[1..]) } else { (1, s) };
+    // Notation scientifique (exports Figma : "2.00272e-05") — mantisse + exposant.
+    let (s, exp) = match s.find(|c| c == 'e' || c == 'E') {
+        Some(p) => (&s[..p], s[p+1..].parse::<i32>().unwrap_or(0)),
+        None => (s, 0),
+    };
     let dot = s.find('.').unwrap_or(s.len());
     let int_part: i32 = s[..dot].parse().unwrap_or(0);
     let frac_str = if dot < s.len() { &s[dot+1..] } else { "" };
@@ -1046,37 +2519,61 @@ fn svg_num(s: &str) -> i32 {
         2 => frac_str.parse::<i32>().unwrap_or(0) * 10,
         _ => frac_str[..3].parse().unwrap_or(0),
     };
-    sign * (int_part * 1000 + frac)
+    let mut val = sign * (int_part * 1000 + frac);
+    let mut e = exp;
+    while e > 0 && val.abs() < i32::MAX / 10 { val *= 10; e -= 1; }
+    while e < 0 && val != 0 { val /= 10; e += 1; }
+    val
 }
 
-/// Dessine un segment de ligne (Bresenham) avec couleur et épaisseur.
+/// Dessine un segment en CAPSULE (bouts ronds + anti-aliasing au bord).
+/// Les exports Figma utilisent stroke-linecap="round" : l'ancien tampon carré
+/// de Bresenham donnait des bouts carrés sur toutes les barres/pilules
+/// (soulignés de titres, accents de tuiles) et des joints crénelés sur les
+/// contours de paths. Rendu par distance au segment, fixed-point 1/8 px.
 fn svg_draw_line(fb: *mut u32, stride: i32, width: i32, height: i32,
                  x0: i32, y0: i32, x1: i32, y1: i32, color: u32, wt: i32) {
     if color == 0 || wt <= 0 { return; }
-    let alpha = (color >> 24) & 0xFF;
-    if alpha == 0 { return; }
-    let ia = 255 - alpha;
+    let base_alpha = (color >> 24) & 0xFF;
+    if base_alpha == 0 { return; }
     let sr = (color >> 16) & 0xFF; let sg = (color >> 8) & 0xFF; let sb = color & 0xFF;
-    let dx = (x1 - x0).abs(); let dy = (y1 - y0).abs();
-    let sx = if x0 < x1 { 1i32 } else { -1 };
-    let sy = if y0 < y1 { 1i32 } else { -1 };
-    let mut err = dx - dy;
-    let mut cx = x0; let mut cy = y0;
-    loop {
-        for ty in -(wt/2)..=(wt/2) { for tx in -(wt/2)..=(wt/2) {
-            let fx = cx + tx; let fy = cy + ty;
-            if fx >= 0 && fx < width && fy >= 0 && fy < height {
-                let di = (fy * stride + fx) as usize;
-                let dst = unsafe { fb.add(di).read_volatile() };
-                let db = (dst & 0xFF) as u32; let dg = ((dst >> 8) & 0xFF) as u32; let dr = ((dst >> 16) & 0xFF) as u32;
-                let nr = (sr * alpha + dr * ia) / 255; let ng = (sg * alpha + dg * ia) / 255; let nb = (sb * alpha + db * ia) / 255;
-                unsafe { fb.add(di).write_volatile(0xFF000000 | (nr << 16) | (ng << 8) | nb); }
-            }
-        }}
-        if cx == x1 && cy == y1 { break; }
-        let e2 = 2 * err;
-        if e2 > -dy { err -= dy; cx += sx; }
-        if e2 <  dx { err += dx; cy += sy; }
+    const F: i64 = 8;                       // 1/8 px
+    let hw8 = (wt as i64 * F) / 2;          // demi-largeur
+    let (ax8, ay8) = (x0 as i64 * F, y0 as i64 * F);
+    let (dx8, dy8) = ((x1 - x0) as i64 * F, (y1 - y0) as i64 * F);
+    let len2 = dx8 * dx8 + dy8 * dy8;
+    let pad = wt / 2 + 2;
+    let bx0 = (x0.min(x1) - pad).max(0);
+    let bx1 = (x0.max(x1) + pad).min(width - 1);
+    let by0 = (y0.min(y1) - pad).max(0);
+    let by1 = (y0.max(y1) + pad).min(height - 1);
+    let r_in  = (hw8 - F / 2).max(0);       // plein en deçà
+    let r_out = hw8 + F / 2;                // transparent au-delà
+    for py in by0..=by1 {
+        for px in bx0..=bx1 {
+            let vx = px as i64 * F + F / 2 - ax8;
+            let vy = py as i64 * F + F / 2 - ay8;
+            // Point le plus proche sur le segment (t borné à [0,1])
+            let (nx, ny) = if len2 == 0 { (0i64, 0i64) } else {
+                let t = (vx * dx8 + vy * dy8).clamp(0, len2);
+                (dx8 * t / len2, dy8 * t / len2)
+            };
+            let ddx = vx - nx; let ddy = vy - ny;
+            let d2 = (ddx * ddx + ddy * ddy) as u64;
+            if d2 > (r_out * r_out) as u64 { continue; }
+            // AA linéaire sur la couronne [r_in, r_out]
+            let alpha = if d2 <= (r_in * r_in) as u64 { base_alpha } else {
+                let d = isqrt(d2 as u32) as i64;
+                (base_alpha as i64 * (r_out - d).max(0) / (r_out - r_in).max(1)) as u32
+            };
+            if alpha == 0 { continue; }
+            let ia = 255 - alpha;
+            let di = (py * stride + px) as usize;
+            let dst = unsafe { fb.add(di).read_volatile() };
+            let db = (dst & 0xFF) as u32; let dg = ((dst >> 8) & 0xFF) as u32; let dr = ((dst >> 16) & 0xFF) as u32;
+            let nr = (sr * alpha + dr * ia) / 255; let ng = (sg * alpha + dg * ia) / 255; let nb = (sb * alpha + db * ia) / 255;
+            unsafe { fb.add(di).write_volatile(0xFF000000 | (nr << 16) | (ng << 8) | nb); }
+        }
     }
 }
 
@@ -1111,8 +2608,143 @@ fn svg_draw_circle(fb: *mut u32, stride: i32, width: i32, height: i32,
 
 /// Rend un tag SVG unique vers le framebuffer, coordonnées déjà en pixels écran.
 /// ox/oy = offset, sx/sy = facteur d'échelle en millièmes (1000 = 1:1).
+// ── Defs SVG (exports Figma) : dégradés, patterns image, images base64 ───────
+// Figma exporte les barres en stroke url(#linearGradient), et les icônes/formes
+// texturées en fill url(#pattern) → <use href="#image"> → <image base64 PNG>.
+// Sans résolution de ces refs, svg_color retombait sur du noir opaque (barres
+// noires) ou rien du tout (formes invisibles).
+struct SvgDefs {
+    gradients: Vec<(String, u32)>,       // id → couleur moyenne ARGB des stops
+    patterns:  Vec<(String, usize)>,     // id → index dans images
+    images:    Vec<(u32, u32, Vec<u8>)>, // (w, h, RGBA décodé)
+}
+
+enum SvgPaint { None, Color(u32), Pattern(usize) }
+
+/// Multiplie le canal alpha d'une couleur ARGB par milli/1000.
+fn svg_scale_alpha(c: u32, milli: i32) -> u32 {
+    if c == 0 { return 0; }
+    let a = ((c >> 24) & 0xFF) as i32 * milli.clamp(0, 1000) / 1000;
+    ((a as u32) << 24) | (c & 0x00FF_FFFF)
+}
+
+/// Attribut d'opacité en millièmes (absent → 1000).
+fn svg_opacity(tag: &str, attr: &str) -> i32 {
+    let o = svg_attr(tag, attr);
+    if o.is_empty() { 1000 } else { svg_num(o).clamp(0, 1000) }
+}
+
+fn svg_paint(s: &str, defs: &SvgDefs) -> SvgPaint {
+    let s = s.trim();
+    if let Some(rest) = s.strip_prefix("url(#") {
+        let id = rest.trim_end_matches(')').trim();
+        for (gid, c) in defs.gradients.iter() {
+            if gid == id { return SvgPaint::Color(*c); }
+        }
+        for (pid, img) in defs.patterns.iter() {
+            if pid == id { return SvgPaint::Pattern(*img); }
+        }
+        return SvgPaint::None;
+    }
+    let c = svg_color(s);
+    if c == 0 { SvgPaint::None } else { SvgPaint::Color(c) }
+}
+
+fn b64_decode(s: &str) -> Vec<u8> {
+    fn val(c: u8) -> i32 {
+        match c {
+            b'A'..=b'Z' => (c - b'A') as i32,
+            b'a'..=b'z' => (c - b'a') as i32 + 26,
+            b'0'..=b'9' => (c - b'0') as i32 + 52,
+            b'+' => 62, b'/' => 63, b'=' => -1, _ => -2,
+        }
+    }
+    let mut out: Vec<u8> = Vec::with_capacity(s.len() * 3 / 4);
+    let mut acc = 0u32;
+    let mut nbits = 0u32;
+    for &c in s.as_bytes() {
+        let v = val(c);
+        if v == -2 { continue; }  // espaces/retours ligne
+        if v == -1 { break; }     // padding '='
+        acc = (acc << 6) | v as u32;
+        nbits += 6;
+        if nbits >= 8 { nbits -= 8; out.push((acc >> nbits) as u8); }
+    }
+    out
+}
+
+/// Scanne les <defs> d'un SVG : dégradés (→ couleur moyenne), patterns et images.
+fn svg_scan_defs(text: &str) -> SvgDefs {
+    let mut gradients: Vec<(String, u32)> = Vec::new();
+    let mut patterns_raw: Vec<(String, String)> = Vec::new(); // pid → image id
+    let mut images_raw: Vec<(String, u32, u32, Vec<u8>)> = Vec::new();
+    let mut cur_grad: Option<(String, Vec<u32>)> = None;
+    let mut cur_pattern: Option<String> = None;
+    let mut pos = 0usize;
+    while let Some(lt) = text[pos..].find('<') {
+        let abs = pos + lt;
+        let gt = text[abs..].find('>').map(|g| abs + g + 1).unwrap_or(text.len());
+        let tag = &text[abs..gt];
+        pos = gt;
+        let inner = tag.trim_start_matches('<');
+        if inner.starts_with("linearGradient") || inner.starts_with("radialGradient") {
+            cur_grad = Some((svg_attr(tag, "id").to_string(), Vec::new()));
+        } else if inner.starts_with("/linearGradient") || inner.starts_with("/radialGradient") {
+            if let Some((id, stops)) = cur_grad.take() {
+                if !stops.is_empty() {
+                    let n = stops.len() as u32;
+                    let (mut a, mut r, mut g, mut b) = (0u32, 0u32, 0u32, 0u32);
+                    for c in stops.iter() {
+                        a += (c >> 24) & 0xFF; r += (c >> 16) & 0xFF;
+                        g += (c >> 8) & 0xFF;  b += c & 0xFF;
+                    }
+                    gradients.push((id, ((a / n) << 24) | ((r / n) << 16) | ((g / n) << 8) | (b / n)));
+                }
+            }
+        } else if inner.starts_with("stop") {
+            if let Some((_, ref mut stops)) = cur_grad {
+                let mut c = svg_color(svg_attr(tag, "stop-color"));
+                if c == 0 { c = 0xFF000000; }
+                let so = svg_attr(tag, "stop-opacity");
+                if !so.is_empty() { c = svg_scale_alpha(c, svg_num(so)); }
+                stops.push(c);
+            }
+        } else if inner.starts_with("pattern") {
+            cur_pattern = Some(svg_attr(tag, "id").to_string());
+        } else if inner.starts_with("/pattern") {
+            cur_pattern = None;
+        } else if inner.starts_with("use") {
+            if let Some(ref pid) = cur_pattern {
+                let h = svg_attr(tag, "xlink:href");
+                let href = if h.is_empty() { svg_attr(tag, "href") } else { h };
+                patterns_raw.push((pid.clone(), href.trim_start_matches('#').to_string()));
+            }
+        } else if inner.starts_with("image") {
+            let id = svg_attr(tag, "id").to_string();
+            let h = svg_attr(tag, "xlink:href");
+            let href = if h.is_empty() { svg_attr(tag, "href") } else { h };
+            if let Some(b64) = href.strip_prefix("data:image/png;base64,") {
+                let bytes = b64_decode(b64);
+                if let Some((iw, ih, rgba)) = png_decode_rgba(&bytes) {
+                    images_raw.push((id, iw, ih, rgba));
+                }
+            }
+        }
+    }
+    let mut defs = SvgDefs { gradients, patterns: Vec::new(), images: Vec::new() };
+    for (pid, img_id) in patterns_raw {
+        if let Some(pos_img) = images_raw.iter().position(|(id, _, _, _)| *id == img_id) {
+            // L'image est déplacée à la demande dans defs.images (une seule référence)
+            let (_, iw, ih, rgba) = images_raw[pos_img].clone();
+            defs.patterns.push((pid, defs.images.len()));
+            defs.images.push((iw, ih, rgba));
+        }
+    }
+    defs
+}
+
 fn svg_render_element(fb: *mut u32, stride: i32, width: i32, height: i32,
-                      tag: &str, ox: i32, oy: i32, sx: i32, sy: i32) {
+                      tag: &str, ox: i32, oy: i32, sx: i32, sy: i32, defs: &SvgDefs) {
     let name_end = tag.find(|c: char| c.is_ascii_whitespace() || c == '/').unwrap_or(tag.len());
     let tag_name = tag[..name_end].trim_start_matches('<').trim();
 
@@ -1125,9 +2757,16 @@ fn svg_render_element(fb: *mut u32, stride: i32, width: i32, height: i32,
             let w  = sc(svg_num(svg_attr(tag, "width")) / 1000, sx);
             let h  = sc(svg_num(svg_attr(tag, "height"))/ 1000, sy);
             let rx = svg_num(svg_attr(tag, "rx")) / 1000;
-            let fill   = svg_color(svg_attr(tag, "fill"));
-            let stroke = svg_color(svg_attr(tag, "stroke"));
-            let swt    = (svg_num(svg_attr(tag, "stroke-width")) / 1000).max(if stroke != 0 { 1 } else { 0 });
+            let op = svg_opacity(tag, "opacity");
+            let fill = match svg_paint(svg_attr(tag, "fill"), defs) {
+                SvgPaint::Color(c) => svg_scale_alpha(c, op * svg_opacity(tag, "fill-opacity") / 1000),
+                _ => 0,
+            };
+            let stroke = match svg_paint(svg_attr(tag, "stroke"), defs) {
+                SvgPaint::Color(c) => svg_scale_alpha(c, op * svg_opacity(tag, "stroke-opacity") / 1000),
+                _ => 0,
+            };
+            let swt    = ((svg_num(svg_attr(tag, "stroke-width")) * ((sx + sy) / 2) + 500000) / 1000000).max(if stroke != 0 { 1 } else { 0 });
             let r2 = rx * rx;
             if fill != 0 {
                 let fa = (fill >> 24) & 0xFF; let ia = 255 - fa;
@@ -1177,9 +2816,16 @@ fn svg_render_element(fb: *mut u32, stride: i32, width: i32, height: i32,
             let cx = sc(svg_num(svg_attr(tag, "cx")) / 1000, sx) + ox;
             let cy = sc(svg_num(svg_attr(tag, "cy")) / 1000, sy) + oy;
             let r  = sc(svg_num(svg_attr(tag, "r"))  / 1000, sx);
-            let fill   = svg_color(svg_attr(tag, "fill"));
-            let stroke = svg_color(svg_attr(tag, "stroke"));
-            let swt    = (svg_num(svg_attr(tag, "stroke-width")) / 1000).max(if stroke != 0 { 1 } else { 0 });
+            let op = svg_opacity(tag, "opacity");
+            let fill = match svg_paint(svg_attr(tag, "fill"), defs) {
+                SvgPaint::Color(c) => svg_scale_alpha(c, op * svg_opacity(tag, "fill-opacity") / 1000),
+                _ => 0,
+            };
+            let stroke = match svg_paint(svg_attr(tag, "stroke"), defs) {
+                SvgPaint::Color(c) => svg_scale_alpha(c, op * svg_opacity(tag, "stroke-opacity") / 1000),
+                _ => 0,
+            };
+            let swt    = ((svg_num(svg_attr(tag, "stroke-width")) * ((sx + sy) / 2) + 500000) / 1000000).max(if stroke != 0 { 1 } else { 0 });
             svg_draw_circle(fb, stride, width, height, cx, cy, r, fill, stroke, swt);
         },
         "ellipse" => {
@@ -1187,9 +2833,16 @@ fn svg_render_element(fb: *mut u32, stride: i32, width: i32, height: i32,
             let ecy = sc(svg_num(svg_attr(tag, "cy")) / 1000, sy) + oy;
             let erx = sc(svg_num(svg_attr(tag, "rx")) / 1000, sx);
             let ery = sc(svg_num(svg_attr(tag, "ry")) / 1000, sy);
-            let fill   = svg_color(svg_attr(tag, "fill"));
-            let stroke = svg_color(svg_attr(tag, "stroke"));
-            let swt    = (svg_num(svg_attr(tag, "stroke-width")) / 1000).max(if stroke != 0 { 1 } else { 0 });
+            let op = svg_opacity(tag, "opacity");
+            let fill = match svg_paint(svg_attr(tag, "fill"), defs) {
+                SvgPaint::Color(c) => svg_scale_alpha(c, op * svg_opacity(tag, "fill-opacity") / 1000),
+                _ => 0,
+            };
+            let stroke = match svg_paint(svg_attr(tag, "stroke"), defs) {
+                SvgPaint::Color(c) => svg_scale_alpha(c, op * svg_opacity(tag, "stroke-opacity") / 1000),
+                _ => 0,
+            };
+            let swt    = ((svg_num(svg_attr(tag, "stroke-width")) * ((sx + sy) / 2) + 500000) / 1000000).max(if stroke != 0 { 1 } else { 0 });
             // Rasterize ellipse via scan-line
             let out_rx = erx + swt; let out_ry = ery + swt;
             for py in (ecy - out_ry)..=(ecy + out_ry) {
@@ -1216,15 +2869,28 @@ fn svg_render_element(fb: *mut u32, stride: i32, width: i32, height: i32,
             let y0 = sc(svg_num(svg_attr(tag, "y1")) / 1000, sy) + oy;
             let x1 = sc(svg_num(svg_attr(tag, "x2")) / 1000, sx) + ox;
             let y1 = sc(svg_num(svg_attr(tag, "y2")) / 1000, sy) + oy;
-            let stroke = svg_color(svg_attr(tag, "stroke"));
-            let swt    = (svg_num(svg_attr(tag, "stroke-width")) / 1000).max(1);
+            let op = svg_opacity(tag, "opacity");
+            let stroke = match svg_paint(svg_attr(tag, "stroke"), defs) {
+                SvgPaint::Color(c) => svg_scale_alpha(c, op * svg_opacity(tag, "stroke-opacity") / 1000),
+                _ => 0,
+            };
+            let swt    = ((svg_num(svg_attr(tag, "stroke-width")) * ((sx + sy) / 2) + 500000) / 1000000).max(1);
             svg_draw_line(fb, stride, width, height, x0, y0, x1, y1, stroke, swt);
         },
         "polygon" | "polyline" => {
             let pts_str = svg_attr(tag, "points");
-            let stroke = svg_color(svg_attr(tag, "stroke"));
-            let fill   = if tag_name == "polygon" { svg_color(svg_attr(tag, "fill")) } else { 0 };
-            let swt    = (svg_num(svg_attr(tag, "stroke-width")) / 1000).max(if stroke != 0 { 1 } else { 0 });
+            let op = svg_opacity(tag, "opacity");
+            let stroke = match svg_paint(svg_attr(tag, "stroke"), defs) {
+                SvgPaint::Color(c) => svg_scale_alpha(c, op * svg_opacity(tag, "stroke-opacity") / 1000),
+                _ => 0,
+            };
+            let fill = if tag_name == "polygon" {
+                match svg_paint(svg_attr(tag, "fill"), defs) {
+                    SvgPaint::Color(c) => svg_scale_alpha(c, op * svg_opacity(tag, "fill-opacity") / 1000),
+                    _ => 0,
+                }
+            } else { 0 };
+            let swt    = ((svg_num(svg_attr(tag, "stroke-width")) * ((sx + sy) / 2) + 500000) / 1000000).max(if stroke != 0 { 1 } else { 0 });
             // Parse "x1,y1 x2,y2 x3,y3 ..."
             let mut pts: Vec<(i32, i32)> = Vec::new();
             for pair in pts_str.split(|c: char| c == ' ' || c == '\n' || c == '\r') {
@@ -1279,37 +2945,292 @@ fn svg_render_element(fb: *mut u32, stride: i32, width: i32, height: i32,
             }
         },
         "path" => {
+            // Parser complet : M/L/H/V/C/S/Q/T/A/Z (absolu + relatif), Béziers
+            // aplatis en polylignes, FILL scanline even-odd multi-sous-chemins.
+            // L'ancien parser ne faisait que du stroke M/L/H/V/Z : or Figma
+            // exporte quasi tout en <path fill="..."> à courbes C — les cartes,
+            // fonds arrondis et icônes pleines ne s'affichaient pas du tout.
             let d = svg_attr(tag, "d");
-            let stroke = svg_color(svg_attr(tag, "stroke"));
-            let swt    = (svg_num(svg_attr(tag, "stroke-width")) / 1000).max(if stroke != 0 { 1 } else { 0 });
-            // Mini path parser : M, L, H, V, Z (majuscule = absolu, minuscule = relatif)
-            let mut cur_x = 0i32; let mut cur_y = 0i32;
-            let mut move_x = 0i32; let mut move_y = 0i32;
-            let mut cmd = b'M';
-            let mut i = 0usize;
+            let op = svg_opacity(tag, "opacity");
+            let fill_paint = svg_paint(svg_attr(tag, "fill"), defs);
+            let fill = match fill_paint {
+                SvgPaint::Color(c) => svg_scale_alpha(c, op * svg_opacity(tag, "fill-opacity") / 1000),
+                _ => 0,
+            };
+            let pattern_img = match fill_paint { SvgPaint::Pattern(i) => Some(i), _ => None };
+            let stroke = match svg_paint(svg_attr(tag, "stroke"), defs) {
+                SvgPaint::Color(c) => svg_scale_alpha(c, op * svg_opacity(tag, "stroke-opacity") / 1000),
+                _ => 0,
+            };
+            let swt    = ((svg_num(svg_attr(tag, "stroke-width")) * ((sx + sy) / 2) + 500000) / 1000000).max(if stroke != 0 { 1 } else { 0 });
+            if fill == 0 && stroke == 0 && pattern_img.is_none() { return; }
             let db = d.as_bytes();
-            while i < db.len() {
-                let c = db[i];
-                if c.is_ascii_alphabetic() { cmd = c; i += 1; continue; }
-                if c == b',' || c == b' ' || c == b'\n' { i += 1; continue; }
-                // Lire un ou deux nombres
-                let num1_end = db[i..].iter().position(|&b| b == b',' || b == b' ' || b.is_ascii_alphabetic()).map(|p| i + p).unwrap_or(db.len());
-                let n1 = sc(svg_num(core::str::from_utf8(&db[i..num1_end]).unwrap_or("0")) / 1000, sx);
-                i = num1_end; if i < db.len() && (db[i] == b',' || db[i] == b' ') { i += 1; }
-                let num2_end = db[i..].iter().position(|&b| b == b',' || b == b' ' || b.is_ascii_alphabetic()).map(|p| i + p).unwrap_or(db.len());
-                let n2 = sc(svg_num(core::str::from_utf8(&db[i..num2_end]).unwrap_or("0")) / 1000, sy);
-                i = num2_end;
-                match cmd {
-                    b'M' => { cur_x = ox + n1; cur_y = oy + n2; move_x = cur_x; move_y = cur_y; }
-                    b'm' => { cur_x += n1; cur_y += n2; move_x = cur_x; move_y = cur_y; }
-                    b'L' => { svg_draw_line(fb, stride, width, height, cur_x, cur_y, ox+n1, oy+n2, stroke, swt); cur_x=ox+n1; cur_y=oy+n2; }
-                    b'l' => { svg_draw_line(fb, stride, width, height, cur_x, cur_y, cur_x+n1, cur_y+n2, stroke, swt); cur_x+=n1; cur_y+=n2; }
-                    b'H' => { svg_draw_line(fb, stride, width, height, cur_x, cur_y, ox+n1, cur_y, stroke, swt); cur_x=ox+n1; }
-                    b'h' => { svg_draw_line(fb, stride, width, height, cur_x, cur_y, cur_x+n1, cur_y, stroke, swt); cur_x+=n1; }
-                    b'V' => { svg_draw_line(fb, stride, width, height, cur_x, cur_y, cur_x, oy+n1, stroke, swt); cur_y=oy+n1; }
-                    b'v' => { svg_draw_line(fb, stride, width, height, cur_x, cur_y, cur_x, cur_y+n1, stroke, swt); cur_y+=n1; }
-                    b'Z' | b'z' => { svg_draw_line(fb, stride, width, height, cur_x, cur_y, move_x, move_y, stroke, swt); cur_x=move_x; cur_y=move_y; }
-                    _ => {}
+            // Lit le prochain nombre (millièmes d'unité utilisateur) ou None si commande/fin.
+            let next_num = |idx: &mut usize| -> Option<i32> {
+                while *idx < db.len() && (db[*idx] == b',' || db[*idx].is_ascii_whitespace()) { *idx += 1; }
+                if *idx >= db.len() || db[*idx].is_ascii_alphabetic() { return None; }
+                let start = *idx;
+                if db[*idx] == b'-' || db[*idx] == b'+' { *idx += 1; }
+                while *idx < db.len() && (db[*idx].is_ascii_digit() || db[*idx] == b'.') { *idx += 1; }
+                // Exposant scientifique ("2e-05") : à consommer ici sinon le 'e'
+                // serait pris pour une commande de path et corromprait le parse.
+                if *idx < db.len() && (db[*idx] == b'e' || db[*idx] == b'E') {
+                    *idx += 1;
+                    if *idx < db.len() && (db[*idx] == b'-' || db[*idx] == b'+') { *idx += 1; }
+                    while *idx < db.len() && db[*idx].is_ascii_digit() { *idx += 1; }
+                }
+                if *idx == start { *idx += 1; return None; }
+                Some(svg_num(core::str::from_utf8(&db[start..*idx]).unwrap_or("0")))
+            };
+            // Sous-chemins en espace utilisateur (millièmes) — convertis en px à la fin.
+            let mut subpaths: Vec<Vec<(i32, i32)>> = Vec::new();
+            let mut cur: Vec<(i32, i32)> = Vec::new();
+            let (mut px_u, mut py_u) = (0i32, 0i32);   // point courant
+            let (mut mx_u, mut my_u) = (0i32, 0i32);   // début du sous-chemin
+            let (mut rcx, mut rcy)   = (0i32, 0i32);   // dernier contrôle (réflexion S/T)
+            let mut prev_cmd = b' ';
+            let mut cmd = b' ';
+            let mut idx = 0usize;
+            // Aplatis une cubique en 16 segments (Bernstein entier, i64 anti-overflow).
+            let bez3 = |p0: (i32,i32), c1: (i32,i32), c2: (i32,i32), p3: (i32,i32), out: &mut Vec<(i32,i32)>| {
+                const N: i64 = 16;
+                for k in 1..=N {
+                    let t = k; let u = N - k;
+                    let x = (u*u*u*(p0.0 as i64) + 3*u*u*t*(c1.0 as i64) + 3*u*t*t*(c2.0 as i64) + t*t*t*(p3.0 as i64)) / (N*N*N);
+                    let y = (u*u*u*(p0.1 as i64) + 3*u*u*t*(c1.1 as i64) + 3*u*t*t*(c2.1 as i64) + t*t*t*(p3.1 as i64)) / (N*N*N);
+                    out.push((x as i32, y as i32));
+                }
+            };
+            let bez2 = |p0: (i32,i32), c1: (i32,i32), p2: (i32,i32), out: &mut Vec<(i32,i32)>| {
+                const N: i64 = 16;
+                for k in 1..=N {
+                    let t = k; let u = N - k;
+                    let x = (u*u*(p0.0 as i64) + 2*u*t*(c1.0 as i64) + t*t*(p2.0 as i64)) / (N*N);
+                    let y = (u*u*(p0.1 as i64) + 2*u*t*(c1.1 as i64) + t*t*(p2.1 as i64)) / (N*N);
+                    out.push((x as i32, y as i32));
+                }
+            };
+            while idx < db.len() {
+                let c = db[idx];
+                if c == b',' || c.is_ascii_whitespace() { idx += 1; continue; }
+                if c.is_ascii_alphabetic() {
+                    cmd = c; idx += 1;
+                    if cmd == b'Z' || cmd == b'z' {
+                        if cur.len() >= 2 {
+                            cur.push((mx_u, my_u));
+                            subpaths.push(core::mem::take(&mut cur));
+                        } else { cur.clear(); }
+                        px_u = mx_u; py_u = my_u;
+                        prev_cmd = cmd;
+                    }
+                    continue;
+                }
+                let rel = cmd.is_ascii_lowercase();
+                match cmd.to_ascii_uppercase() {
+                    b'M' => {
+                        let x = match next_num(&mut idx) { Some(v) => v, None => break };
+                        let y = match next_num(&mut idx) { Some(v) => v, None => break };
+                        if cur.len() >= 2 { subpaths.push(core::mem::take(&mut cur)); } else { cur.clear(); }
+                        if rel { px_u += x; py_u += y; } else { px_u = x; py_u = y; }
+                        mx_u = px_u; my_u = py_u;
+                        cur.push((px_u, py_u));
+                        // Paires suivantes d'un même M = lineto implicites
+                        cmd = if rel { b'l' } else { b'L' };
+                    }
+                    b'L' => {
+                        let x = match next_num(&mut idx) { Some(v) => v, None => break };
+                        let y = match next_num(&mut idx) { Some(v) => v, None => break };
+                        if rel { px_u += x; py_u += y; } else { px_u = x; py_u = y; }
+                        cur.push((px_u, py_u));
+                    }
+                    b'H' => {
+                        let x = match next_num(&mut idx) { Some(v) => v, None => break };
+                        if rel { px_u += x; } else { px_u = x; }
+                        cur.push((px_u, py_u));
+                    }
+                    b'V' => {
+                        let y = match next_num(&mut idx) { Some(v) => v, None => break };
+                        if rel { py_u += y; } else { py_u = y; }
+                        cur.push((px_u, py_u));
+                    }
+                    b'C' => {
+                        let n: [i32; 6] = {
+                            let mut a = [0i32; 6];
+                            let mut ok = true;
+                            for v in a.iter_mut() { match next_num(&mut idx) { Some(x) => *v = x, None => { ok = false; break; } } }
+                            if !ok { break; }
+                            a
+                        };
+                        let base = if rel { (px_u, py_u) } else { (0, 0) };
+                        let c1 = (base.0 + n[0], base.1 + n[1]);
+                        let c2 = (base.0 + n[2], base.1 + n[3]);
+                        let p3 = (base.0 + n[4], base.1 + n[5]);
+                        bez3((px_u, py_u), c1, c2, p3, &mut cur);
+                        rcx = c2.0; rcy = c2.1;
+                        px_u = p3.0; py_u = p3.1;
+                    }
+                    b'S' => {
+                        let n: [i32; 4] = {
+                            let mut a = [0i32; 4];
+                            let mut ok = true;
+                            for v in a.iter_mut() { match next_num(&mut idx) { Some(x) => *v = x, None => { ok = false; break; } } }
+                            if !ok { break; }
+                            a
+                        };
+                        let pc = prev_cmd.to_ascii_uppercase();
+                        let c1 = if pc == b'C' || pc == b'S' { (2*px_u - rcx, 2*py_u - rcy) } else { (px_u, py_u) };
+                        let base = if rel { (px_u, py_u) } else { (0, 0) };
+                        let c2 = (base.0 + n[0], base.1 + n[1]);
+                        let p3 = (base.0 + n[2], base.1 + n[3]);
+                        bez3((px_u, py_u), c1, c2, p3, &mut cur);
+                        rcx = c2.0; rcy = c2.1;
+                        px_u = p3.0; py_u = p3.1;
+                    }
+                    b'Q' => {
+                        let n: [i32; 4] = {
+                            let mut a = [0i32; 4];
+                            let mut ok = true;
+                            for v in a.iter_mut() { match next_num(&mut idx) { Some(x) => *v = x, None => { ok = false; break; } } }
+                            if !ok { break; }
+                            a
+                        };
+                        let base = if rel { (px_u, py_u) } else { (0, 0) };
+                        let c1 = (base.0 + n[0], base.1 + n[1]);
+                        let p2 = (base.0 + n[2], base.1 + n[3]);
+                        bez2((px_u, py_u), c1, p2, &mut cur);
+                        rcx = c1.0; rcy = c1.1;
+                        px_u = p2.0; py_u = p2.1;
+                    }
+                    b'T' => {
+                        let x = match next_num(&mut idx) { Some(v) => v, None => break };
+                        let y = match next_num(&mut idx) { Some(v) => v, None => break };
+                        let pc = prev_cmd.to_ascii_uppercase();
+                        let c1 = if pc == b'Q' || pc == b'T' { (2*px_u - rcx, 2*py_u - rcy) } else { (px_u, py_u) };
+                        let p2 = if rel { (px_u + x, py_u + y) } else { (x, y) };
+                        bez2((px_u, py_u), c1, p2, &mut cur);
+                        rcx = c1.0; rcy = c1.1;
+                        px_u = p2.0; py_u = p2.1;
+                    }
+                    b'A' => {
+                        // Arc elliptique approximé par un segment (suffisant pour les
+                        // exports Figma qui n'en émettent presque jamais).
+                        let n: [i32; 7] = {
+                            let mut a = [0i32; 7];
+                            let mut ok = true;
+                            for v in a.iter_mut() { match next_num(&mut idx) { Some(x) => *v = x, None => { ok = false; break; } } }
+                            if !ok { break; }
+                            a
+                        };
+                        if rel { px_u += n[5]; py_u += n[6]; } else { px_u = n[5]; py_u = n[6]; }
+                        cur.push((px_u, py_u));
+                    }
+                    _ => { idx += 1; }
+                }
+                prev_cmd = cmd;
+            }
+            if cur.len() >= 2 { subpaths.push(cur); }
+            // Conversion espace utilisateur (millièmes) → pixels écran
+            let to_px = |p: (i32, i32)| -> (i32, i32) {
+                ((((p.0 as i64) * (sx as i64)) / 1_000_000) as i32 + ox,
+                 (((p.1 as i64) * (sy as i64)) / 1_000_000) as i32 + oy)
+            };
+            let rings_flat: Vec<Vec<(i32, i32)>> = subpaths.iter()
+                .map(|sp| sp.iter().map(|&p| to_px(p)).collect())
+                .collect();
+            // Bbox AVANT transformation — sert de repère objet pour les patterns
+            // image (objectBoundingBox), même quand les anneaux sont ensuite tournés.
+            let ub_x0 = rings_flat.iter().flat_map(|r| r.iter().map(|p| p.0)).min().unwrap_or(0);
+            let ub_x1 = rings_flat.iter().flat_map(|r| r.iter().map(|p| p.0)).max().unwrap_or(0);
+            let ub_y0 = rings_flat.iter().flat_map(|r| r.iter().map(|p| p.1)).min().unwrap_or(0);
+            let ub_y1 = rings_flat.iter().flat_map(|r| r.iter().map(|p| p.1)).max().unwrap_or(0);
+            let (ubw, ubh) = ((ub_x1 - ub_x0).max(1), (ub_y1 - ub_y0).max(1));
+            // GpuSetTransform2D actif pendant SvgDraw : transformer les SOMMETS —
+            // le scanline d'un polygone transformé reste couvrant (aucun trou),
+            // contrairement à un mapping avant par pixel.
+            let xf_active = unsafe { GPU_TRANSFORM_ACTIVE };
+            let rings: Vec<Vec<(i32, i32)>> = if xf_active {
+                rings_flat.iter()
+                    .map(|r| r.iter().map(|&(px, py)| unsafe { gpu_transform_point(px, py) }).collect())
+                    .collect()
+            } else {
+                rings_flat
+            };
+            // Fill scanline even-odd sur TOUS les sous-chemins à la fois (les trous
+            // — anneaux intérieurs — comptent double et restent transparents).
+            // Pattern image (fill="url(#pattern)") : le pattern Figma est en
+            // objectBoundingBox → l'image couvre la bbox du path, échantillonnée
+            // par pixel (c'est comme ça que Figma exporte les formes texturées).
+            if (fill != 0 || pattern_img.is_some()) && !rings.is_empty() {
+                let min_y = rings.iter().flat_map(|r| r.iter().map(|p| p.1)).min().unwrap_or(0).max(0);
+                let max_y = rings.iter().flat_map(|r| r.iter().map(|p| p.1)).max().unwrap_or(0).min(height - 1);
+                let fa = (fill>>24)&0xFF;
+                let fr = (fill>>16)&0xFF; let fg2 = (fill>>8)&0xFF; let fb2 = fill&0xFF;
+                for py in min_y..=max_y {
+                    let mut xs: Vec<i32> = Vec::new();
+                    for ring in rings.iter() {
+                        let rn = ring.len();
+                        if rn < 3 { continue; }
+                        let mut j = rn - 1;
+                        for i2 in 0..rn {
+                            let (xi, yi) = ring[i2]; let (xj, yj) = ring[j];
+                            if (yi <= py && yj > py) || (yj <= py && yi > py) {
+                                let denom = yj - yi;
+                                if denom != 0 { xs.push(xi + (py - yi) * (xj - xi) / denom); }
+                            }
+                            j = i2;
+                        }
+                    }
+                    xs.sort_unstable();
+                    let mut k = 0;
+                    while k + 1 < xs.len() {
+                        let x0c = xs[k].max(0); let x1c = xs[k+1].min(width-1);
+                        for px in x0c..=x1c {
+                            let (pa, pr, pg, pb) = if let Some(ii) = pattern_img {
+                                let (iw, ih, ref rgba) = defs.images[ii];
+                                // Repère objet : inverse de la transformation GPU si
+                                // active, pattern mappé sur la bbox NON transformée,
+                                // échantillonné en moyenne de bloc (anti-décimation).
+                                let (ox2, oy2) = if xf_active {
+                                    let t = unsafe { GPU_TRANSFORM };
+                                    let (ta64, tb64, tc64, td64) =
+                                        (t[0] as i64, t[1] as i64, t[2] as i64, t[3] as i64);
+                                    let det = ta64 * td64 - tc64 * tb64;
+                                    if det == 0 { (px, py) } else {
+                                        let dx = (px - t[4]) as i64;
+                                        let dy = (py - t[5]) as i64;
+                                        (((td64 * dx - tc64 * dy) * 10000 / det) as i32,
+                                         ((-tb64 * dx + ta64 * dy) * 10000 / det) as i32)
+                                    }
+                                } else { (px, py) };
+                                let (r, g, b, a0) = unsafe {
+                                    img_sample_box(rgba.as_ptr(), iw, ih,
+                                        (ox2 - ub_x0).clamp(0, ubw - 1),
+                                        (oy2 - ub_y0).clamp(0, ubh - 1),
+                                        ubw, ubh)
+                                };
+                                let a = a0 * op.clamp(0, 1000) as u32 / 1000;
+                                (a, r, g, b)
+                            } else {
+                                (fa, fr, fg2, fb2)
+                            };
+                            if pa == 0 { continue; }
+                            let pia = 255 - pa;
+                            let di = (py*stride+px) as usize;
+                            let dst = unsafe { fb.add(di).read_volatile() };
+                            let dbc=(dst&0xFF) as u32; let dg=((dst>>8)&0xFF) as u32; let dr=((dst>>16)&0xFF) as u32;
+                            unsafe { fb.add(di).write_volatile(0xFF000000|((pr*pa+dr*pia)/255<<16)|((pg*pa+dg*pia)/255<<8)|(pb*pa+dbc*pia)/255); }
+                        }
+                        k += 2;
+                    }
+                }
+            }
+            // Stroke le long de chaque sous-chemin (Z a déjà refermé les anneaux clos)
+            if stroke != 0 && swt > 0 {
+                for ring in rings.iter() {
+                    for i2 in 0..ring.len().saturating_sub(1) {
+                        let (x0, y0) = ring[i2]; let (x1, y1) = ring[i2 + 1];
+                        svg_draw_line(fb, stride, width, height, x0, y0, x1, y1, stroke, swt);
+                    }
                 }
             }
         },
@@ -1350,15 +3271,21 @@ fn svg_render(svg: &[u8], fb: *mut u32, stride: i32, width: i32, height: i32,
     let sy = if vb_h > 0 { dst_h * 1000 / vb_h } else { 1000 };
     let ox = dst_x - vb_x * sx / 1000;
     let oy = dst_y - vb_y * sy / 1000;
+    // Résoudre les <defs> (dégradés, patterns image) avant le rendu des éléments
+    let defs = svg_scan_defs(text);
+    let mut in_defs = false;
     // Itérer sur les tags
     let mut pos = 0usize;
     while let Some(lt) = text[pos..].find('<') {
         let abs = pos + lt;
         let gt = text[abs..].find('>').map(|g| abs + g + 1).unwrap_or(text.len());
         let tag = &text[abs..gt];
+        // Le contenu de <defs> (stops, patterns, rects de gradient…) ne se rend pas.
+        if tag.starts_with("<defs") { in_defs = true; }
+        if tag.starts_with("</defs") { in_defs = false; }
         // Sauter les commentaires, déclarations, balises fermantes
-        if !tag.starts_with("</") && !tag.starts_with("<!--") && !tag.starts_with("<?") && !tag.starts_with("<svg") {
-            svg_render_element(fb, stride, width, height, tag.trim_start_matches('<'), ox, oy, sx, sy);
+        if !in_defs && !tag.starts_with("</") && !tag.starts_with("<!--") && !tag.starts_with("<?") && !tag.starts_with("<svg") {
+            svg_render_element(fb, stride, width, height, tag.trim_start_matches('<'), ox, oy, sx, sy, &defs);
         }
         pos = gt;
         if pos >= text.len() { break; }
@@ -1719,6 +3646,36 @@ pub fn serial_log(msg: &[u8]) {
                 options(nomem, nostack)
             );
         }
+    }
+    // Accumulé pour `flush_boot_log_to_esp` — voir BOOT_LOG_BUF. Plafonné pour
+    // éviter une croissance non bornée si le boot tourne longtemps (ex. boucle
+    // de rendu) ; largement suffisant pour couvrir toute la séquence de boot
+    // jusqu'au chargement de ShiLauncher, la zone qui nous intéresse ici.
+    unsafe {
+        if BOOT_LOG_BUF.len() < 512 * 1024 {
+            BOOT_LOG_BUF.extend_from_slice(msg);
+        }
+    }
+}
+
+/// Affiche `msg` DIRECTEMENT à l'écran (st.stdout(), la console UEFI déjà
+/// visible avant même que le kernel ne touche au GOP) et marque une pause
+/// courte pour laisser le temps de lire — utilisé UNIQUEMENT sur le chemin de
+/// boot bare-metal entre "Loading ShiLauncher..." et le premier dessin GOP, où
+/// l'écran devient noir sans qu'on sache pourquoi. Contrairement à serial_log
+/// (port série, invisible sans câble UART) ou flush_boot_log_to_esp (fichier,
+/// invisible sans reboot sur un autre OS), ce message apparaît là, sur l'écran
+/// qui affiche déjà le firmware — donc observable sans aucun matériel/étape
+/// supplémentaire. `stall_us` : microsecondes de pause après affichage (0 pour
+/// ne pas attendre, ex. juste avant une étape qu'on soupçonne de planter).
+pub fn screen_log(st: &mut uefi::table::SystemTable<uefi::table::Boot>, msg: &str, stall_us: usize) {
+    use core::fmt::Write;
+    let _ = st.stdout().write_str(msg);
+    let _ = st.stdout().write_str("\r\n");
+    serial_log(msg.as_bytes());
+    serial_log(b"\r\n");
+    if stall_us > 0 {
+        st.boot_services().stall(stall_us);
     }
 }
 
@@ -2403,6 +4360,145 @@ fn exec_fn_raw(ovc: &[u8], fn_name: &str, args: &[i64], ctx: &ExecCtx) -> i64 {
     exec_fn_raw_with_mods(ovc, fn_name, fn_name, args, ctx, &[])
 }
 
+// Police effectivement chargée dans TtfParser (ptr + len du dernier Load réussi).
+static mut TTF_LOADED_PTR: i64 = 0;
+static mut TTF_LOADED_LEN: usize = 0;
+
+/// (Re)joue TtfParser::Load si la police effective a changé. Le gate historique
+/// `TTF_SCRATCH[104] == 0` ne rejouait JAMAIS le Load : au 1er frame la police
+/// SRFS n'est pas encore montée (ctx.font_len retombe sur un fichier quelconque,
+/// ex. 158 octets de Maraset.yaml) — le Load parsait n'importe quoi puis tous les
+/// GetGlyphId rendaient 0 glyphe pour toujours (texte invisible sur le bureau).
+fn ttf_ensure_loaded(ttf_bytes: &[u8], rast_text: &str, woff_text: &str, font_ptr: i64, ctx: &ExecCtx) {
+    unsafe {
+        if TTF_LOADED_PTR == font_ptr && TTF_LOADED_LEN == ctx.font_len && TTF_SCRATCH[104] != 0 {
+            return;
+        }
+    }
+    let load_mods: Vec<(&str, &str)> = if woff_text.starts_with("# Vyft OVC") {
+        alloc::vec![("GlyphRasterizer", rast_text),
+                    ("WoffReader", woff_text),
+                    ("std___core___self___WoffReader", woff_text)]
+    } else {
+        alloc::vec![("GlyphRasterizer", rast_text)]
+    };
+    // Purge l'état d'un parse foireux (cmap offset bidon) avant de recharger.
+    unsafe { TTF_SCRATCH[104] = 0; }
+    exec_fn_raw_with_mods(ttf_bytes, "TtfParser", "Load", &[font_ptr, ctx.font_len as i64], ctx, &load_mods);
+    unsafe {
+        if TTF_SCRATCH[104] != 0 {
+            TTF_LOADED_PTR = font_ptr;
+            TTF_LOADED_LEN = ctx.font_len;
+        }
+    }
+}
+
+// ── Pipeline texte TTF partagé (GpuDrawTextFont / Align / Full) ──────────────
+// Pose chaque glyphe sur la baseline COMMUNE de la ligne (y_top + ascent) avec
+// ses offsets stb (xoff = side bearing, yoff = baseline → haut du bitmap) et
+// avance de la vraie largeur hmtx + kerning. Sans ça, les glyphes étaient
+// blittés haut-alignés à y et avancés de bmp_w+1 : texte qui « sautille »
+// verticalement et espacement dépendant de la forme de chaque lettre.
+struct TtfLine<'a> {
+    ttf_bytes:  &'a [u8],
+    rast_bytes: &'a [u8],
+    ttf_mods:   &'a [(&'a str, &'a str)],
+    rast_mods:  &'a [(&'a str, &'a str)],
+    font_ptr:   i64,
+    size:       i32,
+    lsp:        i32,
+}
+
+/// Décode le prochain codepoint UTF-8 de tp[*i..end] et avance *i.
+/// Sans ce décodage, « • » (U+2022) ou « ' » (U+2019) sortaient octet par
+/// octet en glyphes Latin-1 (« â ¢ ») — texte non product-grade.
+fn utf8_next(tp: *const u8, i: &mut usize, end: usize) -> u32 {
+    let b0 = unsafe { *tp.add(*i) } as u32;
+    *i += 1;
+    if b0 < 0x80 { return b0; }
+    let (need, mask) = if b0 >= 0xF0 { (3u32, 0x07u32) }
+        else if b0 >= 0xE0 { (2, 0x0F) }
+        else if b0 >= 0xC0 { (1, 0x1F) }
+        else { return b0; };  // octet de continuation isolé → tel quel
+    let mut cp = b0 & mask;
+    for _ in 0..need {
+        if *i >= end { break; }
+        let b = unsafe { *tp.add(*i) } as u32;
+        if b & 0xC0 != 0x80 { break; }
+        cp = (cp << 6) | (b & 0x3F);
+        *i += 1;
+    }
+    cp
+}
+
+/// Largeur en px de tp[start..end] (avances hmtx + kerning, sans rastériser).
+/// Sert aux alignements centre/droite — remplace l'estimation n*size*0.6.
+fn ttf_line_width(p: &TtfLine, ctx: &ExecCtx, tp: *const u8, start: usize, end: usize) -> i32 {
+    let scale_k = unsafe { stb_scale_k(p.size) };
+    let mut w = 0i32;
+    let mut prev = 0i32;
+    let mut i = start;
+    while i < end {
+        let cp = utf8_next(tp, &mut i, end);
+        let gid = exec_fn_raw_with_mods(p.ttf_bytes, "TtfParser", "GetGlyphId",
+            &[cp as i64], ctx, p.ttf_mods) as i32;
+        if gid <= 0 { w += p.size / 2 + p.lsp; prev = 0; continue; }
+        if prev > 0 { w += unsafe { stb_kern(prev, gid, scale_k) }; }
+        let adv = unsafe { stb_advance(gid, scale_k) };
+        w += if adv > 0 { adv } else { p.size / 2 } + p.lsp;
+        prev = gid;
+    }
+    w
+}
+
+/// Rend tp[start..end] à partir de (x, y_top) — y_top = haut de ligne, la
+/// baseline est déduite de l'ascent de la police. Retourne le cx final.
+fn ttf_draw_line(
+    p: &TtfLine, ctx: &ExecCtx, tp: *const u8, start: usize, end: usize,
+    x: i32, y_top: i32, fg: i64, bg: i64,
+) -> i32 {
+    let scale_k  = unsafe { stb_scale_k(p.size) };
+    let ascent   = unsafe { stb_ascent(scale_k) };
+    let baseline = y_top + ascent;
+    let fb_i64 = ctx.fb as i64;
+    let stride_i64 = ctx.stride as i64;
+    let mut cx = x;
+    let mut prev = 0i32;
+    let mut i = start;
+    while i < end {
+        let cp = utf8_next(tp, &mut i, end);
+        let gid = exec_fn_raw_with_mods(p.ttf_bytes, "TtfParser", "GetGlyphId",
+            &[cp as i64], ctx, p.ttf_mods) as i32;
+        if gid <= 0 { cx += p.size / 2 + p.lsp; prev = 0; continue; }
+        if prev > 0 { cx += unsafe { stb_kern(prev, gid, scale_k) }; }
+        let adv = unsafe { stb_advance(gid, scale_k) };
+        let glyf_off = exec_fn_raw_with_mods(p.ttf_bytes, "TtfParser", "GetGlyfOffset",
+            &[gid as i64], ctx, p.ttf_mods);
+        let mut bmp_w = 0i32;
+        // glyf_off <= 0 (ex. espace : contour vide) → pas de bitmap, mais on
+        // avance quand même de la vraie largeur hmtx.
+        if glyf_off > 0 {
+            let glyf_data = p.font_ptr.wrapping_add(glyf_off);
+            ovc_arena_reset();
+            let bitmap = exec_fn_raw_with_mods(p.rast_bytes, "GlyphRasterizer", "RasterizeGlyph",
+                &[glyf_data, p.size as i64], ctx, p.rast_mods);
+            if bitmap != 0 {
+                let (bw, bh, xo, yo) = unsafe { (RAST_W as i32, RAST_H as i32, RAST_XOFF, RAST_YOFF) };
+                bmp_w = bw;
+                // ascent == 0 → métriques indisponibles : ancien rendu top-aligné.
+                let (gx, gy) = if ascent > 0 { (cx + xo, baseline + yo) } else { (cx, y_top) };
+                exec_fn_raw_with_mods(p.rast_bytes, "GlyphRasterizer", "DrawGlyphAt",
+                    &[fb_i64, stride_i64, gx as i64, gy as i64, bitmap,
+                      bw as i64, bh as i64, fg, bg], ctx, p.rast_mods);
+            }
+        }
+        cx += if adv > 0 { adv } else if bmp_w > 0 { bmp_w + 1 } else { p.size / 2 };
+        cx += p.lsp;
+        prev = gid;
+    }
+    cx
+}
+
 // ── Bureau à fenêtres — accesseurs génériques RUNNING_APPS[i] ────────────────
 // `args[0]` = index de fenêtre pour les deux ; `window_man_set` attend en plus
 // `args[1]` = nouvelle valeur. Index hors bornes → no-op (0/valeur par défaut),
@@ -2436,6 +4532,67 @@ fn dispatch(
         "DrvManSpec___GopGetWidth___"           => ctx.width  as i64,
         "DrvManSpec___GopGetHeight___"          => ctx.height as i64,
 
+        // ── DrvAPIInterCon Capture média (ShiCamera, ShiLooker) ───────────────
+        // Photo = un vrai PNG (voir media_encode.rs), écrit sur l'ESP réel
+        // (srfs_uefi_write — persiste, contrairement à SRFS_CACHE). Vidéo =
+        // Start/CaptureFrame (appelé périodiquement par Mara pendant
+        // l'enregistrement)/Stop, assemblées en un vrai AVI (BI_RGB, non
+        // compressé — voir media_encode.rs pour l'honnêteté de ce choix).
+        "DrvAPIInterCon___CaptureDirGet___" => capture_dir_get(),
+        "DrvAPIInterCon___CaptureDirSet___" => {
+            if !args.is_empty() && args[0] != 0 {
+                let s = unsafe { read_cstr(args[0] as *const u8) };
+                capture_dir_set(&s);
+            }
+            0
+        },
+        "DrvAPIInterCon___MediaCapturePhoto___" => {
+            let w = ctx.width.max(0) as u32;
+            let h = ctx.height.max(0) as u32;
+            if w == 0 || h == 0 { return -1; }
+            let rgba = capture_rgba(ctx);
+            let png = crate::media_encode::png_encode(w, h, &rgba);
+            let idx = unsafe { CAPTURE_COUNTER += 1; CAPTURE_COUNTER };
+            let dir = unsafe { read_cstr(capture_dir_get() as *const u8) };
+            let path = alloc::format!("{}/photo_{:04}.png", dir, idx);
+            let ok = unsafe { srfs_uefi_write(UEFI_ST_PTR, &path, &png) };
+            serial_log(alloc::format!(
+                "[MEDIA] Photo '{}' ({} octets) -> {}\r\n", path, png.len(), ok
+            ).as_bytes());
+            if ok { 0 } else { -1 }
+        },
+        "DrvAPIInterCon___MediaVideoStart___" => {
+            unsafe {
+                VIDEO_FRAMES.clear();
+                VIDEO_W = ctx.width;
+                VIDEO_H = ctx.height;
+            }
+            0
+        },
+        "DrvAPIInterCon___MediaVideoCaptureFrame___" => unsafe {
+            if VIDEO_FRAMES.len() >= MAX_VIDEO_FRAMES { return VIDEO_FRAMES.len() as i64; }
+            if ctx.width != VIDEO_W || ctx.height != VIDEO_H { return VIDEO_FRAMES.len() as i64; }
+            VIDEO_FRAMES.push(capture_bgr_bottomup(ctx));
+            VIDEO_FRAMES.len() as i64
+        },
+        "DrvAPIInterCon___MediaVideoFrameCount___" => unsafe { VIDEO_FRAMES.len() as i64 },
+        "DrvAPIInterCon___MediaVideoStop___" => {
+            let (frames, w, h) = unsafe {
+                (core::mem::take(&mut VIDEO_FRAMES), VIDEO_W, VIDEO_H)
+            };
+            if frames.is_empty() || w <= 0 || h <= 0 { return -1; }
+            let frame_n = frames.len();
+            let avi = crate::media_encode::avi_encode(w as u32, h as u32, 4, &frames);
+            let idx = unsafe { CAPTURE_COUNTER += 1; CAPTURE_COUNTER };
+            let dir = unsafe { read_cstr(capture_dir_get() as *const u8) };
+            let path = alloc::format!("{}/video_{:04}.avi", dir, idx);
+            let ok = unsafe { srfs_uefi_write(UEFI_ST_PTR, &path, &avi) };
+            serial_log(alloc::format!(
+                "[MEDIA] Video '{}' ({} frames, {} octets) -> {}\r\n", path, frame_n, avi.len(), ok
+            ).as_bytes());
+            if ok { 0 } else { -1 }
+        },
+
         // ── DrvManSpec HID (SluHIIDMan.slul) — EFI_SIMPLE_POINTER_PROTOCOL +
         // EFI_SIMPLE_TEXT_INPUT_PROTOCOL, ouverts et pollés par le kernel dans
         // render_from_marep (mêmes protocoles standards que le firmware expose
@@ -2454,8 +4611,16 @@ fn dispatch(
         // réception uniquement (pas de fonctionnalité matérielle à fabriquer).
         "DrvManSpec___UefiSetKeyMode___" => 0,
 
-        // ── DrvManSpec Block Device (SRFSMan.slul) ────────────────────────────
-        "DrvManSpec___UefiLocateDisk___" => srfs_disk_handle(),
+        // ── DrvManSpec Block Device (SRFSMan.slul, NTFSMan.slul) ──────────────
+        // Argument optionnel : id disque à activer (0=SRFS/SDC:, 1=NTFS).
+        // Absence d'argument = ne change pas la sélection courante (compat.
+        // avec les appels historiques à zéro argument).
+        "DrvManSpec___UefiLocateDisk___" => {
+            if args.len() >= 1 {
+                unsafe { ACTIVE_DISK = args[0] as u8; }
+            }
+            srfs_disk_handle()
+        },
 
         "DrvManSpec___DiskRead___" => {
             if args.len() >= 3 {
@@ -2471,8 +4636,101 @@ fn dispatch(
         },
         "DrvManSpec___MountPointRegister___" |
         "DrvAPIInterCon___MountPointRegister___" => {
-            serial_log(b"[SRFS] SDC: monte\r\n");
+            // args[0] = pointeur vers la lettre ("SDC:\\", "A:\\", ...),
+            // args[1] = handle disque (non utilisé au-delà de la trace).
+            let letter = if args.len() >= 1 && args[0] != 0 {
+                let p = args[0] as *const u8;
+                let mut len = 0usize;
+                unsafe { while *p.add(len) != 0 && len < 64 { len += 1; } }
+                unsafe { core::str::from_utf8(core::slice::from_raw_parts(p, len)).unwrap_or("?") }
+            } else { "?" };
+            let disk = unsafe { ACTIVE_DISK };
+            let mut letter_c = letter.as_bytes().to_vec();
+            letter_c.push(0);
+            unsafe { MOUNT_TABLE.push((letter_c, disk)); }
+            serial_log(alloc::format!("[MOUNT] {} -> disque {}\r\n", letter, disk).as_bytes());
             0
+        },
+
+        // ── SluWWANMan : signal cellulaire (voir commentaire de WWAN_DETECTED) ──
+        "DrvAPIInterCon___WWANGetSignalLevel___" => wwan_get_signal_level(),
+        "DrvAPIInterCon___WWANGetNetworkType___" => wwan_get_network_type(),
+        "DrvAPIInterCon___WWANIsConnected___" => wwan_is_connected(),
+        "DrvAPIInterCon___WWANIsDetected___" => wwan_is_detected(),
+        "DrvAPIInterCon___WWANSetNetworkType___" => wwan_set_network_type(args.first().copied().unwrap_or(-1) as i32),
+
+        // ── SluVMTools : backdoor VMware/QEMU (voir commentaire de VMTOOLS_PRESENT) ──
+        "DrvAPIInterCon___VMToolsIsPresent___" => vmtools_is_present(),
+        "DrvAPIInterCon___VMToolsAbsPointerEnabled___" => vmtools_abspointer_enabled(),
+        "DrvAPIInterCon___VMToolsGetResizeCount___" => vmtools_get_resize_count(),
+
+        // ── SluPwMan : actions d'alimentation réelles (voir commentaire de RUNTIME_SERVICES_PTR) ──
+        "DrvAPIInterCon___PowerRestart___" => power_restart(),
+        "DrvAPIInterCon___PowerShutdown___" => power_shutdown(),
+        "DrvAPIInterCon___PowerSleep___" => power_sleep(),
+        "DrvAPIInterCon___PowerSleepSupported___" => power_sleep_supported(),
+
+        // ── SluDskMan : format/mount/unmount (voir commentaire de DISK_FORMATTED_SESSION) ──
+        "DrvAPIInterCon___DiskFormat___" => disk_format(args.first().copied().unwrap_or(-1) as i32),
+        "DrvAPIInterCon___DiskIsFormattedSession___" => disk_is_formatted_session(args.first().copied().unwrap_or(-1) as i32),
+        "DrvAPIInterCon___DiskMount___" => disk_mount(args.first().copied().unwrap_or(-1) as i32),
+        "DrvAPIInterCon___DiskUnmount___" => disk_unmount(args.first().copied().unwrap_or(-1) as i32),
+
+        // ── Navigation dossiers (ShiLooker, onglet Disks) ──
+        "DrvAPIInterCon___DiskBrowseGetPath___" => disk_browse_get_path(),
+        "DrvAPIInterCon___DiskBrowseReset___" => {
+            let root = if !args.is_empty() && args[0] != 0 { unsafe { read_cstr(args[0] as *const u8) } } else { "SDC:".into() };
+            disk_browse_reset(&root);
+            0
+        },
+        // Reset générique par disk_id (0=SDC, 1=A, 2+=volume physique réel) —
+        // construit le bon préfixe côté Rust, voir disk_browse_reset_for_disk_id.
+        "DrvAPIInterCon___DiskBrowseResetForDiskId___" => {
+            disk_browse_reset_for_disk_id(args.first().copied().unwrap_or(0) as i32);
+            0
+        },
+        "DrvAPIInterCon___DiskBrowseNavigateInto___" => {
+            if args.is_empty() || args[0] == 0 { return -1; }
+            let name = unsafe { read_cstr(args[0] as *const u8) };
+            disk_browse_navigate_into(&name);
+            0
+        },
+        "DrvAPIInterCon___DiskBrowseNavigateUp___" => { disk_browse_navigate_up(); 0 },
+        // Crée un dossier/fichier dans le dossier courant, nom pris dans le champ de
+        // texte (TextField*) — voir disk_browse_create_entry pour pourquoi la
+        // concaténation de chemin se fait ici plutôt qu'en Mara.
+        "DrvAPIInterCon___DiskBrowseCreateEntry___" => disk_browse_create_entry(args.first().copied().unwrap_or(-1) as i32),
+
+        // ── Couleur personnalisable des dossiers (ShiLooker, menu contextuel) ──
+        "DrvAPIInterCon___FolderColorGet___" => {
+            let base = args.first().copied().unwrap_or(0);
+            let name = args.get(1).copied().unwrap_or(0);
+            folder_color_get(base, name)
+        },
+        "DrvAPIInterCon___FolderColorSet___" => {
+            let base = args.first().copied().unwrap_or(0);
+            let name = args.get(1).copied().unwrap_or(0);
+            let argb = args.get(2).copied().unwrap_or(DEFAULT_FOLDER_COLOR as i64) as i32;
+            folder_color_set(base, name, argb)
+        },
+
+        // ── Champ de texte générique (nom fichier/dossier) ──
+        "DrvAPIInterCon___TextFieldAppendChar___" => text_field_append_char(args.first().copied().unwrap_or(0) as i32),
+        "DrvAPIInterCon___TextFieldBackspace___" => text_field_backspace(),
+        "DrvAPIInterCon___TextFieldClear___" => text_field_clear(),
+        "DrvAPIInterCon___TextFieldGetPtr___" => text_field_get_ptr(),
+
+        // ── Création de fichier .bmp minimal (header 24bpp + pixels unis) ──
+        // args[0]=path_ptr args[1]=w args[2]=h args[3]=argb — construit le buffer
+        // en RAM puis l'écrit directement via le même mécanisme que CaWriteFile
+        // (SRFS_CACHE, seul chemin d'écriture réellement fonctionnel du noyau).
+        "DrvAPIInterCon___DiskCreateBmpFile___" => {
+            if args.len() >= 4 && args[0] != 0 {
+                let path = unsafe { read_cstr(args[0] as *const u8) };
+                let bytes = bmp_blank_buffer(args[1] as i32, args[2] as i32, args[3] as i32);
+                srfs_write_chain_file(&path, &bytes);
+                0
+            } else { -1 }
         },
         "DrvManSpec___PtrWrite8At___" => {
             if args.len() >= 3 {
@@ -2514,6 +4772,253 @@ fn dispatch(
             }
             0
         },
+
+        // ── DrvAPIInterCon Registres généraux (scroll/drag persistants) ──────
+        "DrvAPIInterCon___ScrollGet___" => {
+            if args.len() >= 1 {
+                let idx = args[0] as usize;
+                if idx < 64 { unsafe { SCROLL_SCRATCH[idx] } } else { 0 }
+            } else { 0 }
+        },
+        "DrvAPIInterCon___ScrollSet___" => {
+            if args.len() >= 2 {
+                let idx = args[0] as usize;
+                let val = args[1];
+                if idx < 64 { unsafe { SCROLL_SCRATCH[idx] = val; } }
+            }
+            0
+        },
+
+        // ── DrvAPIInterCon Menu contextuel (ShiLauncher, dock) ────────────────
+        "DrvAPIInterCon___MenuOpen___" => {
+            if args.len() >= 3 {
+                unsafe {
+                    MENU_OPEN = true;
+                    MENU_OWNER_IDX = args[0] as i32;
+                    MENU_X = args[1] as i32;
+                    MENU_Y = args[2] as i32;
+                    MENU_SUBMENU_IDX = -1;
+                }
+                serial_log(alloc::format!(
+                    "[MENU] MenuOpen ownerIdx={} x={} y={}\r\n", args[0], args[1], args[2]
+                ).as_bytes());
+            }
+            0
+        },
+        "DrvAPIInterCon___MenuClose___" => {
+            unsafe { MENU_OPEN = false; MENU_OWNER_IDX = -1; MENU_SUBMENU_IDX = -1; }
+            0
+        },
+        "DrvAPIInterCon___MenuIsOpen___" => unsafe { MENU_OPEN as i64 },
+        "DrvAPIInterCon___MenuGetOwnerIdx___" => unsafe { MENU_OWNER_IDX as i64 },
+        "DrvAPIInterCon___MenuGetX___" => unsafe { MENU_X as i64 },
+        "DrvAPIInterCon___MenuGetY___" => unsafe { MENU_Y as i64 },
+        "DrvAPIInterCon___MenuOpenSubmenu___" => {
+            if let Some(&idx) = args.first() { unsafe { MENU_SUBMENU_IDX = idx as i32; } }
+            0
+        },
+        "DrvAPIInterCon___MenuCloseSubmenu___" => { unsafe { MENU_SUBMENU_IDX = -1; } 0 },
+        "DrvAPIInterCon___MenuGetOpenSubmenuIdx___" => unsafe { MENU_SUBMENU_IDX as i64 },
+
+        // ── DrvAPIInterCon Menu contextuel (ShiLooker, couleur dossier) — état
+        // dédié, voir commentaire sur FOLDER_MENU_OPEN. ──────────────────────
+        "DrvAPIInterCon___FolderMenuOpen___" => {
+            if args.len() >= 3 {
+                unsafe {
+                    FOLDER_MENU_OPEN = true;
+                    FOLDER_MENU_ROW = args[0] as i32;
+                    FOLDER_MENU_X = args[1] as i32;
+                    FOLDER_MENU_Y = args[2] as i32;
+                }
+            }
+            0
+        },
+        "DrvAPIInterCon___FolderMenuClose___" => {
+            unsafe { FOLDER_MENU_OPEN = false; FOLDER_MENU_ROW = -1; }
+            0
+        },
+        "DrvAPIInterCon___FolderMenuIsOpen___" => unsafe { FOLDER_MENU_OPEN as i64 },
+        "DrvAPIInterCon___FolderMenuGetRow___" => unsafe { FOLDER_MENU_ROW as i64 },
+        "DrvAPIInterCon___FolderMenuGetX___" => unsafe { FOLDER_MENU_X as i64 },
+        "DrvAPIInterCon___FolderMenuGetY___" => unsafe { FOLDER_MENU_Y as i64 },
+
+        // ── DrvAPIInterCon Menu global in-app ShiLauncher ─────────────────────
+        "DrvAPIInterCon___MenuOpenGlobal___" => {
+            if args.len() >= 2 {
+                unsafe {
+                    GLOBAL_MENU_OPEN = true;
+                    GLOBAL_MENU_X = args[0] as i32;
+                    GLOBAL_MENU_Y = args[1] as i32;
+                    GLOBAL_MENU_CTX_ITEMS.clear(); // mode normal : liste des apps épinglées
+                    GLOBAL_MENU_CTX_ID = -1;
+                }
+            }
+            0
+        },
+        // Ouvre GlobalMenu en mode CONTEXTE : affiche `items` ("Label1|Label2",
+        // liste plate SANS sous-menu) au lieu des apps épinglées — utilisé par
+        // tout composant avec son propre menu contextuel (fichier, dossier,
+        // disque monté...). `ctx_id` est une donnée libre renvoyée telle quelle
+        // au clic (voir MenuGetGlobalClickedLabel/Gen/CtxId) — remplace
+        // FolderMenu.mara et toute future carte contextuelle dédiée.
+        "DrvAPIInterCon___MenuOpenGlobalWithItems___" => {
+            if args.len() >= 4 && args[2] != 0 {
+                let raw = unsafe { read_cstr(args[2] as *const u8) };
+                let items: alloc::vec::Vec<alloc::vec::Vec<u8>> = raw
+                    .split('|')
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| { let mut v = s.as_bytes().to_vec(); v.push(0); v })
+                    .collect();
+                unsafe {
+                    GLOBAL_MENU_OPEN = true;
+                    GLOBAL_MENU_X = args[0] as i32;
+                    GLOBAL_MENU_Y = args[1] as i32;
+                    GLOBAL_MENU_CTX_ITEMS = items;
+                    GLOBAL_MENU_CTX_ID = args[3] as i32;
+                }
+            }
+            0
+        },
+        "DrvAPIInterCon___MenuCloseGlobal___" => {
+            // Ferme aussi le sous-menu flottant (System power, etc.) — sinon
+            // il resterait ouvert « fantôme » lors de la prochaine ouverture
+            // du menu global, sans que son ancre/app propriétaire soit valide.
+            unsafe {
+                GLOBAL_MENU_OPEN = false;
+                GLOBAL_MENU_SUBMENU_APP_IDX = -1;
+                GLOBAL_MENU_SUBMENU_ITEM_IDX = -1;
+                GLOBAL_MENU_CTX_ITEMS.clear();
+                GLOBAL_MENU_CTX_ID = -1;
+            }
+            0
+        },
+        "DrvAPIInterCon___MenuIsOpenGlobal___" => unsafe { GLOBAL_MENU_OPEN as i64 },
+        "DrvAPIInterCon___MenuGetGlobalX___" => unsafe { GLOBAL_MENU_X as i64 },
+        "DrvAPIInterCon___MenuGetGlobalY___" => unsafe { GLOBAL_MENU_Y as i64 },
+        // Mode contexte : actif si des items ont été fournis via
+        // MenuOpenGlobalWithItems — GlobalMenu.mara lit ceci pour savoir s'il
+        // doit lister les apps épinglées (0 item ctx) ou ces items précis.
+        "DrvAPIInterCon___MenuGlobalIsCtxMode___" => unsafe { (!GLOBAL_MENU_CTX_ITEMS.is_empty()) as i64 },
+        "DrvAPIInterCon___MenuGetGlobalCtxItemCount___" => unsafe { GLOBAL_MENU_CTX_ITEMS.len() as i64 },
+        "DrvAPIInterCon___MenuGetGlobalCtxItemLabel___" => {
+            let i = args.first().copied().unwrap_or(-1);
+            if i < 0 { return 0; }
+            unsafe { GLOBAL_MENU_CTX_ITEMS.get(i as usize).map(|v| v.as_ptr() as i64).unwrap_or(0) }
+        },
+        "DrvAPIInterCon___MenuGetGlobalCtxId___" => unsafe { GLOBAL_MENU_CTX_ID as i64 },
+        // Enregistre le clic sur un item en mode contexte — GlobalMenu.mara
+        // appelle ceci au lieu de MenuCloseGlobal seul, pour transmettre QUEL
+        // label a été cliqué (même pattern que WindowManSetLaunchArg) : incrémente
+        // la génération pour que l'appelant (ShiLooker...) ne le traite qu'une fois.
+        "DrvAPIInterCon___MenuSetGlobalClicked___" => {
+            if args.len() >= 1 && args[0] != 0 {
+                let label = unsafe { read_cstr(args[0] as *const u8) };
+                let mut label_c = label.into_bytes();
+                label_c.push(0);
+                unsafe {
+                    GLOBAL_MENU_CLICKED_LABEL = label_c;
+                    GLOBAL_MENU_CLICKED_CTX_ID = GLOBAL_MENU_CTX_ID;
+                    GLOBAL_MENU_CLICKED_GEN += 1;
+                }
+            }
+            0
+        },
+        "DrvAPIInterCon___MenuGetGlobalClickedLabel___" => unsafe {
+            if GLOBAL_MENU_CLICKED_LABEL.is_empty() { 0 } else { GLOBAL_MENU_CLICKED_LABEL.as_ptr() as i64 }
+        },
+        "DrvAPIInterCon___MenuGetGlobalClickedCtxId___" => unsafe { GLOBAL_MENU_CLICKED_CTX_ID as i64 },
+        "DrvAPIInterCon___MenuGetGlobalClickedGen___" => unsafe { GLOBAL_MENU_CLICKED_GEN as i64 },
+        // Sous-menu flottant du menu global (ex: "System power" > Reboot/Sleep
+        // screen/Shutdown/Standby) — voir commentaire de GLOBAL_MENU_SUBMENU_*.
+        "DrvAPIInterCon___MenuOpenSubmenuGlobal___" => {
+            if args.len() >= 4 {
+                unsafe {
+                    GLOBAL_MENU_SUBMENU_APP_IDX = args[0] as i32;
+                    GLOBAL_MENU_SUBMENU_ITEM_IDX = args[1] as i32;
+                    GLOBAL_MENU_SUBMENU_X = args[2] as i32;
+                    GLOBAL_MENU_SUBMENU_Y = args[3] as i32;
+                }
+            }
+            0
+        },
+        "DrvAPIInterCon___MenuCloseSubmenuGlobal___" => {
+            unsafe { GLOBAL_MENU_SUBMENU_APP_IDX = -1; GLOBAL_MENU_SUBMENU_ITEM_IDX = -1; }
+            0
+        },
+        "DrvAPIInterCon___MenuGetSubmenuGlobalAppIdx___" => unsafe { GLOBAL_MENU_SUBMENU_APP_IDX as i64 },
+        "DrvAPIInterCon___MenuGetSubmenuGlobalItemIdx___" => unsafe { GLOBAL_MENU_SUBMENU_ITEM_IDX as i64 },
+        "DrvAPIInterCon___MenuGetSubmenuGlobalX___" => unsafe { GLOBAL_MENU_SUBMENU_X as i64 },
+        "DrvAPIInterCon___MenuGetSubmenuGlobalY___" => unsafe { GLOBAL_MENU_SUBMENU_Y as i64 },
+
+        // ── DrvAPIInterCon AppRegistry (étendu pour menus) ─────────────────────
+        // Menu global : itérer les apps pinned
+        "DrvAPIInterCon___AppRegistryGetPinnedCount___" => crate::app_registry::registry_pinned_count(),
+        "DrvAPIInterCon___AppRegistryGetPinnedIndex___" => {
+            if let Some(&idx) = args.first() { return crate::app_registry::registry_pinned_index(idx as usize) }
+            -1
+        },
+
+        // ── DrvAPIInterCon Sélecteur de dossier de capture (ShiCamera) ─────────
+        // État isolé : propre curseur de navigation (CAPTURE_PICKER_PATH), jamais
+        // partager DISK_BROWSE_PATH qui appartient à l'onglet Disque.
+        "DrvAPIInterCon___CapturePickerOpen___" => {
+            if args.len() >= 2 {
+                unsafe {
+                    CAPTURE_PICKER_OPEN = true;
+                    CAPTURE_PICKER_X = args[0] as i32;
+                    CAPTURE_PICKER_Y = args[1] as i32;
+                }
+            }
+            0
+        },
+        "DrvAPIInterCon___CapturePickerClose___" => {
+            unsafe { CAPTURE_PICKER_OPEN = false; }
+            0
+        },
+        "DrvAPIInterCon___CapturePickerIsOpen___" => unsafe { CAPTURE_PICKER_OPEN as i64 },
+        "DrvAPIInterCon___CapturePickerGetX___" => unsafe { CAPTURE_PICKER_X as i64 },
+        "DrvAPIInterCon___CapturePickerGetY___" => unsafe { CAPTURE_PICKER_Y as i64 },
+        "DrvAPIInterCon___CapturePickerBrowseGetPath___" => capture_picker_browse_get_path(),
+        "DrvAPIInterCon___CapturePickerBrowseReset___" => {
+            let root = if !args.is_empty() && args[0] != 0 {
+                unsafe { read_cstr(args[0] as *const u8) }
+            } else {
+                "SDC:".into()
+            };
+            capture_picker_browse_reset(&root);
+            0
+        },
+        "DrvAPIInterCon___CapturePickerBrowseNavigateInto___" => {
+            if args.is_empty() || args[0] == 0 { return -1; }
+            let name = unsafe { read_cstr(args[0] as *const u8) };
+            capture_picker_browse_navigate_into(&name);
+            0
+        },
+        "DrvAPIInterCon___CapturePickerBrowseNavigateUp___" => {
+            capture_picker_browse_navigate_up();
+            0
+        },
+
+        // ── DrvAPIInterCon Table de montage (disques réellement montés) ──────
+        "DrvAPIInterCon___MountTableCount___" => mount_table_count(),
+        "DrvAPIInterCon___MountTableGetLetter___" => {
+            let i = args.first().copied().unwrap_or(-1);
+            if i < 0 { 0 } else { mount_table_letter_ptr(i as usize) }
+        },
+        "DrvAPIInterCon___MountTableGetDiskId___" => {
+            let i = args.first().copied().unwrap_or(-1);
+            if i < 0 { -1 } else { mount_table_disk_id(i as usize) }
+        },
+        "DrvAPIInterCon___MountTableGetLabel___" => {
+            let i = args.first().copied().unwrap_or(-1);
+            if i < 0 { 0 } else { mount_table_label_ptr(i as usize) }
+        },
+
+        // ── DrvAPIInterCon Horloge système (UEFI GetTime réel) ───────────────
+        "DrvAPIInterCon___ClockRefresh___" => clock_refresh() as i64,
+        "DrvAPIInterCon___ClockGetTimeStr___" => clock_time_str_ptr(),
+        "DrvAPIInterCon___ClockGetDateStr___" => clock_date_str_ptr(),
 
         // ── DrvManSpec TtfParser state ────────────────────────────────────────
         // TtfGetData/SetData : pointeur vers les bytes TTF en mémoire
@@ -2616,6 +5121,141 @@ fn dispatch(
             if args.len() >= 2 { args[0].wrapping_add(args[1]) } else { 0 }
         },
 
+        // ── DrvManSpec Primitive matérielle générique : échange de 4 registres via
+        // une instruction x86 IN sur un port I/O donné (mécanisme CPU brut, PAS lié
+        // à un protocole précis). Args = [eax_in, ebx_in, ecx_in, edx_in] — le port
+        // effectif lu est la valeur basse 16 bits d'edx_in (convention x86 standard :
+        // seul DX adresse le port, EAX/EBX/ECX portent des données/paramètres selon
+        // ce que le récepteur matériel en fait). Résultat (4 registres après
+        // l'instruction) stocké dans HW_BACKDOOR_RESULT, lu ensuite via
+        // HwBackdoorResultGet(0..3). Toute la logique protocole (constantes, séquence
+        // d'activation, décodage paquet) vit côté Mara (SluHIIDMan.slul/HidImpl.mara)
+        // — ce builtin ne connaît qu'un mécanisme CPU générique, jamais un vendor.
+        "DrvManSpec___HwBackdoorCall___" => {
+            if args.len() >= 4 {
+                let (eax, ebx, ecx, edx) = hw_io_call(
+                    args[0] as u32, args[1] as u32, args[2] as u32, args[3] as u32,
+                );
+                unsafe { HW_BACKDOOR_RESULT = [eax as i64, ebx as i64, ecx as i64, edx as i64]; }
+            }
+            0
+        },
+        // ── DrvManSpec Installation depuis un volume quelconque (Vmwaretool) ──
+        // UefiProbeExists : lecture seule, essaie `path` (chemin ABSOLU depuis la
+        // racine du volume, ex. "\Vmwaretool.marep") sur TOUS les filesystems
+        // découverts (même mécanisme que srfs_uefi_read, qui ne présuppose déjà
+        // aucun volume précis) — répond "oui" dès qu'UN volume (CD monté ou ESP)
+        // contient ce chemin. UefiInstallFile lit `srcPath` (n'importe quel
+        // volume, même mécanisme) et l'écrit RÉELLEMENT sur l'ESP à `dstPath`
+        // (voir srfs_uefi_write) — persiste au reboot, contrairement à
+        // CaWriteFile (SRFS_CACHE, RAM-only).
+        "DrvManSpec___UefiProbeExists___" => {
+            if args.len() >= 1 {
+                let p = args[0] as *const u8;
+                if !p.is_null() {
+                    let path = unsafe { read_cstr(p) };
+                    let found = unsafe { srfs_uefi_read(UEFI_ST_PTR, &path).is_some() };
+                    serial_log(alloc::format!("[VMINSTALL] Probe '{}' -> {}\r\n", path, found).as_bytes());
+                    return if found { 1 } else { 0 };
+                }
+            }
+            0
+        },
+        "DrvManSpec___UefiInstallFile___" => {
+            if args.len() >= 2 {
+                let sp = args[0] as *const u8;
+                let dp = args[1] as *const u8;
+                if !sp.is_null() && !dp.is_null() {
+                    let src_path = unsafe { read_cstr(sp) };
+                    let dst_path = unsafe { read_cstr(dp) };
+                    let read_result = unsafe { srfs_uefi_read(UEFI_ST_PTR, &src_path) };
+                    serial_log(alloc::format!(
+                        "[VMINSTALL] Read '{}' -> {:?} octets\r\n", src_path, read_result.as_ref().map(|d| d.len())
+                    ).as_bytes());
+                    if let Some(data) = read_result {
+                        let write_ok = unsafe { srfs_uefi_write(UEFI_ST_PTR, &dst_path, &data) };
+                        serial_log(alloc::format!(
+                            "[VMINSTALL] Write '{}' ({} octets) -> {}\r\n", dst_path, data.len(), write_ok
+                        ).as_bytes());
+                        if write_ok {
+                            return 0;
+                        }
+                    }
+                }
+            }
+            -1
+        },
+        // ── DrvManSpec Détection de format (EncDecProcMan) ────────────────────
+        // EncDecProbeFormat lit le fichier réel (SDC/NTFS via srfs_uefi_read,
+        // même mécanisme que ImageLoad) et détecte son format par signature
+        // binaire (format_detect.rs) — pas par extension de nom de fichier.
+        // EncDecCanDecode renvoie honnêtement 2=décodage complet (image
+        // affichable), 1=identification seule (conteneur reconnu, pas
+        // d'échantillons extraits), 0=inconnu — voir media_encode.rs pour
+        // pourquoi vidéo/audio réels ne sont pas dans la colonne "2" ici.
+        "DrvManSpec___EncDecProbeFormat___" => {
+            if args.len() >= 1 {
+                let p = args[0] as *const u8;
+                if !p.is_null() {
+                    let path = unsafe { read_cstr(p) };
+                    // "SDC:/path" → "SDC/slu64/path" (emplacement réel sur l'ESP) —
+                    // même conversion que ImageLoad ; srfs_uefi_read attend un
+                    // chemin déjà résolu, pas le préfixe Mara "SDC:".
+                    let uefi_rel = if path.to_ascii_uppercase().starts_with("SDC:") {
+                        let after = path[4..].trim_matches(|c: char| c == '/' || c == '\\');
+                        alloc::format!("SDC/slu64/{}", after)
+                    } else {
+                        path.trim_start_matches(|c: char| c == '/' || c == '\\').to_string()
+                    };
+                    if let Some(data) = unsafe { srfs_uefi_read(UEFI_ST_PTR, &uefi_rel) } {
+                        return crate::format_detect::detect_format(&data) as i64;
+                    }
+                }
+            }
+            crate::format_detect::FMT_UNKNOWN as i64
+        },
+        "DrvManSpec___EncDecCanDecode___" => {
+            if args.len() >= 1 {
+                crate::format_detect::decode_support(args[0] as i32) as i64
+            } else { 0 }
+        },
+        "DrvManSpec___EncDecGetFormatName___" => {
+            if args.len() >= 1 { encdec_format_name_ptr(args[0] as i32) } else { 0 }
+        },
+        "DrvManSpec___HwBackdoorResultGet___" => {
+            if args.len() >= 1 {
+                let idx = args[0] as usize;
+                if idx < 4 { unsafe { HW_BACKDOOR_RESULT[idx] } } else { 0 }
+            } else { 0 }
+        },
+
+        // ── DrvManSpec Résolution GOP dynamique ───────────────────────────────
+        // WindowsResolution (GpuImpl.mara, SluGpu.slul) appelle SetResolution — voir
+        // GOP_RESIZE_REQUEST ci-dessus pour pourquoi ça ne fait que poser une
+        // demande. GopModeCount/GetW/GetH sont en lecture seule (sûrs immédiatement).
+        "DrvManSpec___SetResolution___" => {
+            if args.len() >= 2 {
+                unsafe {
+                    GOP_RESIZE_REQUEST = (args[0], args[1]);
+                    GOP_RESIZE_PENDING = true;
+                }
+            }
+            0
+        },
+        "DrvManSpec___GopModeCount___" => {
+            unsafe { gop_mode_count(UEFI_ST_PTR) as i64 }
+        },
+        "DrvManSpec___GopModeGetW___" => {
+            if args.len() >= 1 {
+                unsafe { gop_mode_wh(UEFI_ST_PTR, args[0] as u32).map(|(w, _)| w as i64).unwrap_or(0) }
+            } else { 0 }
+        },
+        "DrvManSpec___GopModeGetH___" => {
+            if args.len() >= 1 {
+                unsafe { gop_mode_wh(UEFI_ST_PTR, args[0] as u32).map(|(_, h)| h as i64).unwrap_or(0) }
+            } else { 0 }
+        },
+
         // ── DrvManSpec Police (TtfParser utilise ces primitives) ─────────────
         // UnitsPerEm est stocké dans un global partagé au moment du parse TTF.
         "DrvManSpec___FontGetUnitsPerEm___" => {
@@ -2679,13 +5319,33 @@ fn dispatch(
             let gid = args.first().copied().unwrap_or(0) as i32;
             let sk  = args.get(1).copied().unwrap_or(0) as i32;
             let bmp = unsafe { stb_rasterize(gid, sk) };
-            // Publie les dimensions pour que le noyau (GpuDrawTextFont*) puisse blitter.
-            unsafe { RAST_W = stb_bmp_w() as u32; RAST_H = stb_bmp_h() as u32; }
+            // Publie dimensions ET offsets baseline pour que le noyau (GpuDrawTextFont*)
+            // puisse blitter chaque glyphe à sa vraie position typographique.
+            unsafe {
+                RAST_W = stb_bmp_w() as u32; RAST_H = stb_bmp_h() as u32;
+                RAST_XOFF = stb_bmp_xoff(); RAST_YOFF = stb_bmp_yoff();
+            }
             bmp as i64
         },
         "stb_bmp_w___"    => unsafe { stb_bmp_w() as i64 },
         "stb_bmp_h___"    => unsafe { stb_bmp_h() as i64 },
         "stb_bmp_yoff___" => unsafe { stb_bmp_yoff() as i64 },
+        "stb_bmp_xoff___" => unsafe { stb_bmp_xoff() as i64 },
+        "stb_advance___"  => {
+            let gi = args.first().copied().unwrap_or(0) as i32;
+            let sk = args.get(1).copied().unwrap_or(0) as i32;
+            unsafe { stb_advance(gi, sk) as i64 }
+        },
+        "stb_ascent___"   => {
+            let sk = args.first().copied().unwrap_or(0) as i32;
+            unsafe { stb_ascent(sk) as i64 }
+        },
+        "stb_kern___"     => {
+            let g1 = args.first().copied().unwrap_or(0) as i32;
+            let g2 = args.get(1).copied().unwrap_or(0) as i32;
+            let sk = args.get(2).copied().unwrap_or(0) as i32;
+            unsafe { stb_kern(g1, g2, sk) as i64 }
+        },
 
         // ── DrvManSpec Chaîne ─────────────────────────────────────────────────
         "DrvManSpec___StrLen___" => {
@@ -2700,10 +5360,69 @@ fn dispatch(
         "DrvManSpec___StrCharAt___" => {
             if args.len() >= 2 {
                 let p = args[0] as *const u8;
+                // Bornes explicites : `args[1] < 0` (ex. StrCharAt(p, StrLen(p)-1) sur
+                // une chaîne vide → -1) caste en usize géant sans ce garde, produisant
+                // un pointeur totalement hors-bornes — lecture mémoire non garantie qui
+                // peut faire planter/redémarrer un système bare-metal (pas de MMU de
+                // protection en UEFI). On scanne aussi jusqu'à l'index demandé pour
+                // vérifier qu'aucun octet nul (fin de chaîne réelle) n'est rencontré
+                // avant — un index au-delà de la vraie longueur est traité comme
+                // hors-bornes plutôt que de lire au-delà du terminateur.
+                if p.is_null() || args[1] < 0 { return 0; }
                 let i = args[1] as usize;
-                if p.is_null() { return 0; }
-                unsafe { *p.add(i) as i64 }
+                unsafe {
+                    let mut n = 0usize;
+                    while n <= i {
+                        if *p.add(n) == 0 { return 0; }
+                        n += 1;
+                    }
+                    *p.add(i) as i64
+                }
             } else { 0 }
+        },
+
+        // Compare deux chaînes nul-terminées (bornées, aucune lecture hors
+        // limites même sur une chaîne vide ou un pointeur null) — 1 si
+        // identiques, 0 sinon. Utile pour router les actions du menu
+        // contextuel (WindowManGetLaunchArg) sans dupliquer un parseur ad hoc.
+        "DrvManSpec___StrEqual___" => {
+            if args.len() < 2 { return 0; }
+            let pa = args[0] as *const u8;
+            let pb = args[1] as *const u8;
+            if pa.is_null() || pb.is_null() { return 0; }
+            unsafe {
+                let mut i = 0usize;
+                loop {
+                    if i > 256 { return 0; } // borne dure — jamais de chaîne aussi longue ici
+                    let ca = *pa.add(i);
+                    let cb = *pb.add(i);
+                    if ca != cb { return 0; }
+                    if ca == 0 { return 1; } // les deux se terminent en même temps
+                    i += 1;
+                }
+            }
+        },
+
+        // Compare deux chaînes nul-terminées (bornées, aucune lecture hors
+        // limites même sur une chaîne vide ou un pointeur null) — 1 si
+        // identiques, 0 sinon. Utile pour router les actions du menu
+        // contextuel (WindowManGetLaunchArg) sans dupliquer un parseur ad hoc.
+        "DrvManSpec___StrEqual___" => {
+            if args.len() < 2 { return 0; }
+            let pa = args[0] as *const u8;
+            let pb = args[1] as *const u8;
+            if pa.is_null() || pb.is_null() { return 0; }
+            unsafe {
+                let mut i = 0usize;
+                loop {
+                    if i > 256 { return 0; } // borne dure — jamais de chaîne aussi longue ici
+                    let ca = *pa.add(i);
+                    let cb = *pb.add(i);
+                    if ca != cb { return 0; }
+                    if ca == 0 { return 1; } // les deux se terminent en même temps
+                    i += 1;
+                }
+            }
         },
 
         // ── MathSafety (GlyphRasterizer utilise ClampI32) ────────────────────
@@ -2806,11 +5525,20 @@ fn dispatch(
 
         // StrCharAt(ptr, idx)
         "DrvManSpec___StrCharAt___" => {
+            // Dupliqué de l'arm plus haut (inatteignable — le premier match gagne
+            // dans un `match` Rust) — bornes appliquées ici aussi par cohérence,
+            // voir le commentaire de la première occurrence.
             if args.len() >= 2 {
-                let p   = args[0] as *const u8;
+                let p = args[0] as *const u8;
+                if p.is_null() || args[1] < 0 { return 0; }
                 let idx = args[1] as usize;
-                if !p.is_null() {
-                    return unsafe { *p.add(idx) } as i64;
+                unsafe {
+                    let mut n = 0usize;
+                    while n <= idx {
+                        if *p.add(n) == 0 { return 0; }
+                        n += 1;
+                    }
+                    return *p.add(idx) as i64;
                 }
             }
             0
@@ -2866,6 +5594,53 @@ fn dispatch(
                             if fx < 0 || fx >= sw || fy < 0 || fy >= sh { continue; }
                             let idx = (fy * s + fx) as usize;
                             unsafe { gpu_write_pixel(fb, idx, sr, sg, sb, sa); }
+                        }
+                    }
+                }
+            }
+            0
+        },
+
+        // GpuDrawLine(x1, y1, x2, y2, color) — ligne droite simple (Bresenham)
+        "DrvAPIInterCon___GpuDrawLine___" => {
+            if args.len() >= 5 {
+                let x1 = args[0] as i32;
+                let y1 = args[1] as i32;
+                let x2 = args[2] as i32;
+                let y2 = args[3] as i32;
+                let c  = args[4] as u32;
+                let sr = (c >> 16) & 0xFF;
+                let sg = (c >>  8) & 0xFF;
+                let sb =  c        & 0xFF;
+                let sa = (c >> 24) & 0xFF;
+                let fb = ctx.fb;
+                let s  = ctx.stride;
+                let sw = ctx.width; let sh = ctx.height;
+                if !fb.is_null() {
+                    let dx = (x2 - x1).abs();
+                    let dy = -(y2 - y1).abs();
+                    let sx = if x1 < x2 { 1 } else { -1 };
+                    let sy = if y1 < y2 { 1 } else { -1 };
+                    let mut err = dx + dy;
+                    let mut x = x1;
+                    let mut y = y1;
+                    loop {
+                        let (fx, fy) = unsafe { gpu_transform_point(x, y) };
+                        if fx >= 0 && fx < sw && fy >= 0 && fy < sh {
+                            let idx = (fy * s + fx) as usize;
+                            unsafe { gpu_write_pixel(fb, idx, sr, sg, sb, sa); }
+                        }
+                        if x == x2 && y == y2 { break; }
+                        let e2 = 2 * err;
+                        if e2 >= dy {
+                            if x == x2 { break; }
+                            err += dy;
+                            x += sx;
+                        }
+                        if e2 <= dx {
+                            if y == y2 { break; }
+                            err += dx;
+                            y += sy;
                         }
                     }
                 }
@@ -3120,100 +5895,22 @@ fn dispatch(
             let rast_text = core::str::from_utf8(rast_bytes).unwrap_or("");
             let woff_text = core::str::from_utf8(woff_bytes).unwrap_or("");
 
-            // ── Étape 1 : Load ─────────────────────────────────────────────
-            if unsafe { TTF_SCRATCH[104] == 0 } {
-                // WoffReader est appelé depuis TtfParser.ovc sous le nom
-                // "std___core___self___WoffReader___Decode" — on expose les deux alias.
-                let load_mods: alloc::vec::Vec<(&str, &str)> = if woff_text.starts_with("# Vyft OVC") {
-                    alloc::vec![
-                        ("GlyphRasterizer",                rast_text),
-                        ("WoffReader",                     woff_text),
-                        ("std___core___self___WoffReader",  woff_text),
-                    ]
-                } else {
-                    alloc::vec![("GlyphRasterizer", rast_text)]
-                };
-                let load_r = exec_fn_raw_with_mods(
-                    ttf_bytes, "TtfParser", "Load",
-                    &[font_ptr, ctx.font_len as i64], ctx, &load_mods,
-                );
-                if load_r != 0 {
-                                    serial_log(b"\r\n");
-                } else {
-                            let cmap = unsafe { TTF_SCRATCH[104] as u32 }.to_be_bytes();
-                    serial_log(&cmap[2..]);
-                    serial_log(b" upm=");
-                    serial_log(&[(unsafe { FONT_UNITS_PER_EM } / 100) as u8 + b'0',
-                                  (unsafe { FONT_UNITS_PER_EM } / 10 % 10) as u8 + b'0',
-                                  (unsafe { FONT_UNITS_PER_EM } % 10) as u8 + b'0']);
-                    serial_log(b"\r\n");
-                }
-            } else {
-                }
+            // ── Étape 1 : Load (rejoué si la police effective change) ────────
+            ttf_ensure_loaded(ttf_bytes, rast_text, woff_text, font_ptr, ctx);
 
-            let fb_i64     = ctx.fb as i64;
-            let stride_i64 = ctx.stride as i64;
             let ttf_mods   = [("GlyphRasterizer", rast_text)];
             let rast_mods  = [("TtfParser", ttf_text)];
-            let mut rendered = 0u32;
 
-            // ── Étape 2 : Boucle sur les caractères ──────────────────────────
-            let mut cx = x;
-            let mut ci = 0usize;
-            loop {
-                let ch = unsafe { *tp.add(ci) };
-                if ch == 0 { break; }
-                ci += 1;
-
-                let glyph_id = exec_fn_raw_with_mods(
-                    ttf_bytes, "TtfParser", "GetGlyphId",
-                    &[ch as i64], ctx, &ttf_mods,
-                );
-                if glyph_id <= 0 {
-                    if ci <= 2 { serial_log(b"[D] G=0\r\n"); }
-                    cx += size / 2; continue;
-                }
-                if ci <= 2 { serial_log(b"[D] G+\r\n"); }
-
-                let glyf_off = exec_fn_raw_with_mods(
-                    ttf_bytes, "TtfParser", "GetGlyfOffset",
-                    &[glyph_id], ctx, &ttf_mods,
-                );
-                if glyf_off <= 0 {
-                    if ci <= 2 { serial_log(b"[D] off=0\r\n"); }
-                    cx += size / 2; continue;
-                }
-
-                let glyf_data = font_ptr.wrapping_add(glyf_off);
-                ovc_arena_reset();  // reset arène avant chaque glyphe
-
-                let bitmap = exec_fn_raw_with_mods(
-                    rast_bytes, "GlyphRasterizer", "RasterizeGlyph",
-                    &[glyf_data, size as i64], ctx, &rast_mods,
-                );
-                if bitmap == 0 {
-                    if ci <= 2 { serial_log(b"[D] bmp=0\r\n"); }
-                    cx += size / 2; continue;
-                }
-
-                let bmp_w = unsafe { RAST_W as i32 };
-                let bmp_h = unsafe { RAST_H as i32 };
-                if ci <= 2 {
-                                    serial_log(b" H=");
-                            serial_log(b"\r\n");
-                }
-
-                exec_fn_raw_with_mods(
-                    rast_bytes, "GlyphRasterizer", "DrawGlyphAt",
-                    &[fb_i64, stride_i64, cx as i64, y as i64, bitmap,
-                      bmp_w as i64, bmp_h as i64, fg, bg],
-                    ctx, &rast_mods,
-                );
-                rendered += 1;
-                cx += bmp_w + 1;
-            }
-            serial_log(b"[FONT] rendered=");
-            serial_log(b"\r\n");
+            // ── Étape 2 : rendu baseline + avance hmtx (pipeline partagé) ────
+            let mut n = 0usize;
+            unsafe { while *tp.add(n) != 0 { n += 1; } }
+            let pipe = TtfLine {
+                ttf_bytes, rast_bytes,
+                ttf_mods: &ttf_mods, rast_mods: &rast_mods,
+                font_ptr, size, lsp: 0,
+            };
+            ttf_draw_line(&pipe, ctx, tp, 0, n, x, y, fg, bg);
+            serial_log(b"[FONT] rendered\r\n");
             0
         },
 
@@ -3257,8 +5954,11 @@ fn dispatch(
                     }
                 }
             };
-            serial_log(b"[IMG] decode PNG\r\n");
-            match png_decode_rgba(&raw_owned) {
+            serial_log(b"[IMG] decode\r\n");
+            let decoded = png_decode_rgba(&raw_owned)
+                .or_else(|| crate::image_decode::bmp_decode_rgba(&raw_owned))
+                .or_else(|| crate::image_decode::gif_decode_rgba(&raw_owned));
+            match decoded {
                 Some((w, h, pixels)) => {
                     // Slot libre ou LRU eviction (8 slots max)
                     let idx = unsafe {
@@ -3307,19 +6007,127 @@ fn dispatch(
             let draw_w = if dst_w > 0 { dst_w } else { img_w };
             let draw_h = if dst_h > 0 { dst_h } else { img_h };
             serial_log(b"[IMG] ImageDraw\r\n");
+            if unsafe { GPU_TRANSFORM_ACTIVE } {
+                // Mapping arrière (même approche que GpuDrawRoundedRectAlpha) : le blit
+                // direct ci-dessous ignorait GPU_TRANSFORM — toutes les icônes « pivotées »
+                // (étincelles du losange verre, contrôles fenêtre, curseur décoratif)
+                // se dessinaient droites, à côté du design Figma.
+                let t = unsafe { GPU_TRANSFORM };
+                let (ta, tb, tc, td, ttx, tty) = (t[0], t[1], t[2], t[3], t[4], t[5]);
+                let (w, h) = (draw_w as i32, draw_h as i32);
+                let corners = [(dst_x, dst_y), (dst_x + w, dst_y), (dst_x, dst_y + h), (dst_x + w, dst_y + h)];
+                let mut min_fx = i32::MAX; let mut max_fx = i32::MIN;
+                let mut min_fy = i32::MAX; let mut max_fy = i32::MIN;
+                for &(cx, cy) in corners.iter() {
+                    let fx = ta * cx / 10000 + tc * cy / 10000 + ttx;
+                    let fy = tb * cx / 10000 + td * cy / 10000 + tty;
+                    if fx < min_fx { min_fx = fx; } if fx > max_fx { max_fx = fx; }
+                    if fy < min_fy { min_fy = fy; } if fy > max_fy { max_fy = fy; }
+                }
+                min_fx = min_fx.max(0); max_fx = max_fx.min(sw - 1);
+                min_fy = min_fy.max(0); max_fy = max_fy.min(sh - 1);
+                let (ta64, tb64, tc64, td64) = (ta as i64, tb as i64, tc as i64, td as i64);
+                let det = ta64 * td64 - tc64 * tb64;
+                if det != 0 {
+                    let opa = unsafe { GPU_OPACITY };
+                    for fy in min_fy..=max_fy {
+                        for fx in min_fx..=max_fx {
+                            let dx = (fx - ttx) as i64;
+                            let dy = (fy - tty) as i64;
+                            let lx = ((td64 * dx - tc64 * dy) * 10000 / det) as i32 - dst_x;
+                            let ly = ((-tb64 * dx + ta64 * dy) * 10000 / det) as i32 - dst_y;
+                            if lx < 0 || lx >= w || ly < 0 || ly >= h { continue; }
+                            let (r, g, bv, raw_a) = unsafe {
+                                img_sample_box(pix_ptr, img_w, img_h, lx, ly, w, h)
+                            };
+                            let a = raw_a * opa / 255;
+                            if a == 0 { continue; }
+                            let di = (fy * s + fx) as usize;
+                            if a == 255 {
+                                unsafe { fb.add(di).write_volatile(0xFF000000 | (r << 16) | (g << 8) | bv); }
+                            } else {
+                                let dst = unsafe { fb.add(di).read_volatile() };
+                                let db = (dst & 0xFF) as u32;
+                                let dg = ((dst >> 8) & 0xFF) as u32;
+                                let dr = ((dst >> 16) & 0xFF) as u32;
+                                let ia = 255 - a;
+                                let nr = (r * a + dr * ia) / 255;
+                                let ng = (g * a + dg * ia) / 255;
+                                let nb = (bv * a + db * ia) / 255;
+                                unsafe { fb.add(di).write_volatile(0xFF000000 | (nr << 16) | (ng << 8) | nb); }
+                            }
+                        }
+                    }
+                }
+                serial_log(b"[IMG] draw done\r\n");
+                return 0;
+            }
+            // ── Fast-path grandes images (fond d'écran) : version pré-échantillonnée
+            // en cache ARGB, blit direct — le box-sampling par pixel ne se paie
+            // qu'UNE fois par (image, taille), plus jamais par frame.
+            if (draw_w as i64) * (draw_h as i64) >= 65536 {
+                let dw = draw_w as i32; let dh = draw_h as i32;
+                let key = pix_ptr as usize;
+                let mut src_ptr: *const u32 = core::ptr::null();
+                unsafe {
+                    for slot in SCALED_CACHE.iter() {
+                        if let Some((k, w2, h2, ref v)) = slot {
+                            if *k == key && *w2 == dw && *h2 == dh { src_ptr = v.as_ptr(); break; }
+                        }
+                    }
+                    if src_ptr.is_null() {
+                        let mut v: Vec<u32> = Vec::with_capacity((dw * dh) as usize);
+                        for py in 0..dh {
+                            for px in 0..dw {
+                                let (r, g, b, a) = img_sample_box(pix_ptr, img_w, img_h, px, py, dw, dh);
+                                v.push((a << 24) | (r << 16) | (g << 8) | b);
+                            }
+                        }
+                        let slot = SCALED_NEXT % 2;
+                        SCALED_NEXT = SCALED_NEXT.wrapping_add(1);
+                        SCALED_CACHE[slot] = Some((key, dw, dh, v));
+                        if let Some((_, _, _, ref v)) = SCALED_CACHE[slot] { src_ptr = v.as_ptr(); }
+                    }
+                }
+                if !src_ptr.is_null() {
+                    let opa = unsafe { GPU_OPACITY };
+                    for py in 0..dh {
+                        let fy = dst_y + py;
+                        if fy < 0 || fy >= sh { continue; }
+                        for px in 0..dw {
+                            let fx = dst_x + px;
+                            if fx < 0 || fx >= sw { continue; }
+                            let cpx = unsafe { *src_ptr.add((py * dw + px) as usize) };
+                            let a = (cpx >> 24) * opa / 255;
+                            if a == 0 { continue; }
+                            let di = (fy * s + fx) as usize;
+                            if a == 255 {
+                                unsafe { fb.add(di).write_volatile(0xFF000000 | (cpx & 0x00FF_FFFF)); }
+                            } else {
+                                let r = (cpx >> 16) & 0xFF; let g = (cpx >> 8) & 0xFF; let bv = cpx & 0xFF;
+                                let dst = unsafe { fb.add(di).read_volatile() };
+                                let db = dst & 0xFF; let dg = (dst >> 8) & 0xFF; let dr = (dst >> 16) & 0xFF;
+                                let ia = 255 - a;
+                                let nr = (r * a + dr * ia) / 255;
+                                let ng = (g * a + dg * ia) / 255;
+                                let nb = (bv * a + db * ia) / 255;
+                                unsafe { fb.add(di).write_volatile(0xFF000000 | (nr << 16) | (ng << 8) | nb); }
+                            }
+                        }
+                    }
+                    serial_log(b"[IMG] draw done (scaled cache)\r\n");
+                    return 0;
+                }
+            }
             for py in 0..draw_h as i32 {
                 let fy = dst_y + py;
                 if fy < 0 || fy >= sh { continue; }
-                let sy = (py as u64 * img_h as u64 / draw_h as u64) as usize;
                 for px in 0..draw_w as i32 {
                     let fx = dst_x + px;
                     if fx < 0 || fx >= sw { continue; }
-                    let sx = (px as u64 * img_w as u64 / draw_w as u64) as usize;
-                    let so = (sy * img_w as usize + sx) * 4;
-                    let r  = unsafe { *pix_ptr.add(so)     } as u32;
-                    let g  = unsafe { *pix_ptr.add(so + 1) } as u32;
-                    let bv = unsafe { *pix_ptr.add(so + 2) } as u32;
-                    let raw_a = unsafe { *pix_ptr.add(so + 3) } as u32;
+                    let (r, g, bv, raw_a) = unsafe {
+                        img_sample_box(pix_ptr, img_w, img_h, px, py, draw_w as i32, draw_h as i32)
+                    };
                     let opa = unsafe { GPU_OPACITY };
                     let a = raw_a * opa / 255;
                     let di = (fy * s + fx) as usize;
@@ -3362,6 +6170,7 @@ fn dispatch(
         //   tx = (px*(10000-cos) + py*sin) / 10000
         //   ty = (py*(10000-cos) - px*sin) / 10000
         "DrvAPIInterCon___GpuSetTransform2D___" => {
+            serial_log(b"[MENU] GpuSetTransform2D\r\n");
             if args.len() >= 6 {
                 let cos_ = args[0] as i32;
                 let sin_ = args[1] as i32;
@@ -3431,6 +6240,9 @@ fn dispatch(
             } 0
         },
         "DrvAPIInterCon___GpuBackgroundBlur___" => {
+            serial_log(alloc::format!(
+                "[MENU] GpuBackgroundBlur args={:?} fb_null={}\r\n", args, ctx.fb.is_null()
+            ).as_bytes());
             if args.len() >= 6 {
                 let fb = ctx.fb; let s = ctx.stride;
                 let blur_r = (args[5] as i32).clamp(1, 16);
@@ -3506,6 +6318,106 @@ fn dispatch(
             0
         },
 
+        // ── GpuDrawCorrugated(x,y,w,h,r,color,folds,angleDeg) ────────────────
+        // Surface PLISSÉE réaliste (carton ondulé, signature ShUI) : `folds` plis
+        // parallèles calculés PAR PIXEL via une onde sinusoïdale (sin_i, même trig
+        // entière ×1000 que GpuDrawLinearGradient) — pic (sin≥0) = zone la plus
+        // claire du zigzag, creux (sin<0) = couleur normale légèrement assombrie
+        // (ligne de pli). UNE SEULE teinte (`color`) : seule sa luminosité varie
+        // selon la position dans le pli — pas un dégradé plat ni des bandes dures.
+        "DrvAPIInterCon___GpuDrawCorrugated___" => {
+            if args.len() < 8 { return 0; }
+            let x=args[0] as i32; let y=args[1] as i32; let w=args[2] as i32; let h=args[3] as i32;
+            let gcr=(args[4] as i32).max(0);
+            let c=args[5] as u32;
+            let folds=(args[6] as i32).max(1);
+            let ang=args[7] as i32;
+            // Alpha BRUT — pas de pré-multiplication par GPU_OPACITY : gpu_write_pixel() (appelé
+            // plus bas) l'applique déjà (évite le bug de double-application découvert sur le dock).
+            let alpha=(c>>24)&0xFF;
+            let cr_=(c>>16)&0xFF; let cg_=(c>>8)&0xFF; let cb_=c&0xFF;
+            let fb=ctx.fb; let s=ctx.stride; let sw=ctx.width; let sh=ctx.height;
+            if fb.is_null()||alpha==0||w<=0||h<=0 { return 0; }
+            let cs=cos_i(ang); let sn=sin_i(ang);
+            let hw=w/2; let hh=h/2;
+            let mr=((w*cs.abs()+h*sn.abs())/1000).max(1);
+            let (ccx,ccy)=unsafe{gpu_transform_point(x+hw,y+hh)};
+            let active=unsafe{GPU_TRANSFORM_ACTIVE};
+            let t=unsafe{GPU_TRANSFORM};
+            let det:i64=(t[0] as i64)*(t[3] as i64)-(t[1] as i64)*(t[2] as i64);
+            // Contour du losange NON gauchi (pas de bulge) : le bord reste net et géométrique
+            // (pointes nettes du losange) — un bulge sur le bord arrondissait la silhouette en
+            // blob/cercle (rejeté : "reste losange comme avant, pas un rond"). L'effet 3D vient
+            // uniquement du contraste clair/sombre du remplissage ci-dessous.
+            let (bx0,bx1,by0,by1) = if active {
+                let corners=[(x,y),(x+w,y),(x,y+h),(x+w,y+h)];
+                let mut bx0=i32::MAX; let mut bx1=i32::MIN; let mut by0=i32::MAX; let mut by1=i32::MIN;
+                for &(cxp,cyp) in corners.iter() {
+                    let (fx,fy)=unsafe{gpu_transform_point(cxp,cyp)};
+                    if fx<bx0{bx0=fx} if fx>bx1{bx1=fx}
+                    if fy<by0{by0=fy} if fy>by1{by1=fy}
+                }
+                (bx0.max(0),bx1.min(sw-1),by0.max(0),by1.min(sh-1))
+            } else {
+                (x.max(0),(x+w-1).min(sw-1),y.max(0),(y+h-1).min(sh-1))
+            };
+            if bx1<bx0||by1<by0||det==0 { return 0; }
+            for fy in by0..=by1 {
+                for fx in bx0..=bx1 {
+                    // MAPPAGE INVERSE (écran → local) : itérer la grille locale et projeter vers
+                    // l'écran (mappage direct) laisse des trous en damier sous rotation non
+                    // alignée sur la grille (vérifié : le fond d'écran, sans cet appel, est net —
+                    // pas un artefact de capture). On itère ici la boîte englobante ÉCRAN et on
+                    // retrouve le point local par transformation inverse : tout pixel écran est
+                    // visité exactement une fois.
+                    let (px,py) = if active {
+                        let xprime=(fx-t[4]) as i64; let yprime=(fy-t[5]) as i64;
+                        let lx=((t[3] as i64*xprime - t[2] as i64*yprime)*10000/det) as i32;
+                        let ly=((-(t[1] as i64)*xprime + t[0] as i64*yprime)*10000/det) as i32;
+                        (lx-x, ly-y)
+                    } else {
+                        (fx-x, fy-y)
+                    };
+                    if px<0||px>=w||py<0||py>=h { continue; }
+                    if gcr>0 {
+                        let cdx=if px<gcr{gcr-px}else if px>=w-gcr{px-(w-gcr-1)}else{0};
+                        let cdy=if py<gcr{gcr-py}else if py>=h-gcr{py-(h-gcr-1)}else{0};
+                        if cdx>0&&cdy>0&&cdx*cdx+cdy*cdy>gcr*gcr { continue; }
+                    }
+                    // Onde calculée en ESPACE ÉCRAN — la phase est échantillonnée directement sur
+                    // (fx,fy), même technique de projection que GpuDrawLinearGradient.
+                    let rlx=fx-ccx; let rly=fy-ccy;
+                    let proj=(rlx*cs+rly*sn)/1000 + mr/2;
+                    let phase_deg=(proj*360*folds)/mr;
+                    let sv=sin_i(phase_deg); // -1000..1000 (sin_i normalise déjà les négatifs)
+                    // Zébrure blanc/noir marquée sur la teinte unique (façon Floava, gardant la
+                    // couleur du maraset) : courbes en PUISSANCE (cube/carré de sv, dérivée nulle
+                    // en sv=0 des deux côtés — raccord lisse, sans coude visible), catch-light qui
+                    // monte presque au blanc au sommet du pli, ombre qui descend presque au noir
+                    // au creux.
+                    let (mut nr,mut ng,mut nb) = if sv >= 0 {
+                        let tt=((sv as i64).pow(3) * 150 / 1_000_000_000) as i32; // 0..150, cubique, vers le blanc
+                        (((cr_ as i32)+tt).min(255) as u32, ((cg_ as i32)+tt).min(255) as u32, ((cb_ as i32)+tt).min(255) as u32)
+                    } else {
+                        let tt=(((-sv) as i64).pow(2) * 180 / 1_000_000) as i32; // 0..180, quadratique, vers le noir
+                        (((cr_ as i32)-tt).max(0) as u32, ((cg_ as i32)-tt).max(0) as u32, ((cb_ as i32)-tt).max(0) as u32)
+                    };
+                    // Grain microscopique gris (hash déterministe par pixel écran, pas d'état à
+                    // faire circuler) — GpuDrawNoisePatch n'est pas conscient de la rotation et
+                    // déborderait du losange pivoté, donc intégré directement ici.
+                    let mut gs=(fx as u32).wrapping_mul(374761393)^(fy as u32).wrapping_mul(668265263);
+                    gs^=gs>>13; gs=gs.wrapping_mul(1274126177); gs^=gs>>16;
+                    let gj=((gs&0xFF) as i32 - 128)*10/128; // -10..10
+                    nr=((nr as i32)+gj).clamp(0,255) as u32;
+                    ng=((ng as i32)+gj).clamp(0,255) as u32;
+                    nb=((nb as i32)+gj).clamp(0,255) as u32;
+                    let di=(fy*s+fx) as usize;
+                    unsafe { gpu_write_pixel(fb, di, nr, ng, nb, alpha); }
+                }
+            }
+            0
+        },
+
         // ── GpuDrawRadialGradient(x,y,w,h,radius,c1,p1,c2,p2,num_stops) ──────
         "DrvAPIInterCon___GpuDrawRadialGradient___" => {
             if args.len() < 10 { return 0; }
@@ -3549,28 +6461,44 @@ fn dispatch(
             let cr=args[4] as i32; let ox=args[5] as i32; let oy=args[6] as i32;
             let br=(args[7] as i32).clamp(0,16); let c=args[8] as u32;
             let fb=ctx.fb; let s=ctx.stride; let sw=ctx.width; let sh=ctx.height;
-            if fb.is_null() { return 0; }
-            let sx=x+ox; let sy_=y+oy; let sw2=w; let sh2=h;
+            if fb.is_null() || w<=0 || h<=0 { return 0; }
+            // Ombre portée EXTÉRIEURE uniquement (SDF du rounded rect décalé, falloff
+            // linéaire). L'ancien code remplissait tout le rect puis floutait : quand
+            // l'élément au-dessus n'est pas opaque (ombre de fenêtre/barre frosted),
+            // ça voilait l'écran entier — une drop shadow ne se voit qu'au bord.
+            let sx=x+ox; let sy_=y+oy;
             let opa=unsafe{GPU_OPACITY};
-            let alpha=((c>>24)&0xFF)*opa/255; let sr_=(c>>16)&0xFF; let sg_=(c>>8)&0xFF; let sb_=c&0xFF;
-            let r2=cr*cr; let ia=255-alpha;
-            for py in 0..sh2 {
-                let fy=sy_+py; if fy<0||fy>=sh { continue; }
-                for px in 0..sw2 {
-                    let fx=sx+px; if fx<0||fx>=sw { continue; }
-                    if cr>0 {
-                        let cdx=if px<cr{cr-px}else if px>=sw2-cr{px-(sw2-cr-1)}else{0};
-                        let cdy=if py<cr{cr-py}else if py>=sh2-cr{py-(sh2-cr-1)}else{0};
-                        if cdx>0&&cdy>0&&cdx*cdx+cdy*cdy>r2 { continue; }
-                    }
-                    let di=(fy*s+fx) as usize;
+            let base_alpha=((c>>24)&0xFF)*opa/255;
+            let sr_=(c>>16)&0xFF; let sg_=(c>>8)&0xFF; let sb_=c&0xFF;
+            if base_alpha==0 { return 0; }
+            // Spread 2×blur et falloff QUADRATIQUE : le falloff linéaire sur 3×blur
+            // laissait une bande sombre bien visible AU-DESSUS des tuiles (entre la
+            // ligne accent et la tuile) — une vraie ombre gaussienne décalée vers le
+            // bas est quasi invisible à 4px au-dessus du bord.
+            let spread=(br*2).max(2);
+            let hx=w/2; let hy=h/2;
+            let cr=cr.max(0);
+            for py in (sy_-spread)..(sy_+h+spread) {
+                if py<0||py>=sh { continue; }
+                for px in (sx-spread)..(sx+w+spread) {
+                    if px<0||px>=sw { continue; }
+                    // SDF du rounded rect : dist > 0 = extérieur de la forme
+                    let qx=(px-sx-hx).abs()-hx+cr;
+                    let qy=(py-sy_-hy).abs()-hy+cr;
+                    let ext=isqrt((qx.max(0)*qx.max(0)+qy.max(0)*qy.max(0)) as u32) as i32;
+                    let dist=ext+qx.max(qy).min(0)-cr;
+                    if dist<=0 || dist>=spread { continue; }
+                    let f=(spread-dist) as u32;
+                    let alpha=base_alpha*f*f/(spread*spread) as u32;
+                    if alpha==0 { continue; }
+                    let ia=255-alpha;
+                    let di=(py*s+px) as usize;
                     let dst=unsafe{fb.add(di).read_volatile()};
                     let db=(dst&0xFF) as u32; let dg=((dst>>8)&0xFF) as u32; let dr=((dst>>16)&0xFF) as u32;
                     let nr=(sr_*alpha+dr*ia)/255; let ng=(sg_*alpha+dg*ia)/255; let nb=(sb_*alpha+db*ia)/255;
                     unsafe{fb.add(di).write_volatile(0xFF000000|(nr<<16)|(ng<<8)|nb);}
                 }
             }
-            if br>0 { box_blur_region(fb,s,sx-br,sy_-br,sw2+2*br,sh2+2*br,br); }
             0
         },
 
@@ -3659,6 +6587,12 @@ fn dispatch(
                     let (fx,fy)=unsafe{gpu_transform_point(x+px,y+py)};
                     if fx<0||fx>=sw||fy<0||fy>=sh { continue; }
                     let di=(fy*s+fx) as usize;
+                    // Opaque : écriture directe — la lecture-mélange coûtait ~2M
+                    // d'accès mémoire par frame sur le fond plein écran du bureau.
+                    if alpha==255 {
+                        unsafe{fb.add(di).write_volatile(0xFF000000|(sr_<<16)|(sg_<<8)|sb_);}
+                        continue;
+                    }
                     let dst=unsafe{fb.add(di).read_volatile()};
                     let db=(dst&0xFF) as u32; let dg=((dst>>8)&0xFF) as u32; let dr=((dst>>16)&0xFF) as u32;
                     let nr=(sr_*alpha+dr*ia)/255; let ng=(sg_*alpha+dg*ia)/255; let nb=(sb_*alpha+db*ia)/255;
@@ -3996,6 +6930,144 @@ fn dispatch(
             0
         },
 
+        // ── GpuDrawFloavaBlob(x,y,w,h,r,color,phaseDeg) ──────────────────────
+        // Losange « Floava » (état app fermée du dock) : squircle dont les
+        // coordonnées sont GAUCHIES par deux sinusoïdes orthogonales (domain
+        // warping) → silhouette ondulée organique « tortillée », ombrage DOUX
+        // (produit de deux sinus — pas de rayures dures type corrugated), AA au
+        // bord par SDF. `phaseDeg` anime lentement l'ondulation (tick*4).
+        // Respecte GPU_TRANSFORM (mapping arrière) et GPU_OPACITY.
+        "DrvAPIInterCon___GpuDrawFloavaBlob___" => {
+            serial_log(alloc::format!("[MENU] GpuDrawFloavaBlob args_len={}\r\n", args.len()).as_bytes());
+            if args.len() < 7 { return 0; }
+            let x = args[0] as i32; let y = args[1] as i32;
+            let w = (args[2] as i32).max(4); let h = (args[3] as i32).max(4);
+            let r = (args[4] as i32).max(0);
+            let c = args[5] as u32;
+            let phase = args[6] as i32;
+            let fb = ctx.fb; let s = ctx.stride;
+            let sw2 = ctx.width; let sh2 = ctx.height;
+            if fb.is_null() { return 0; }
+            let opa = unsafe { GPU_OPACITY };
+            let base_a = ((c >> 24) & 0xFF) * opa / 255;
+            if base_a == 0 { return 0; }
+            let (cr_, cg_, cb_) = ((c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF);
+            // SILHOUETTE = carré-arrondi SANS segment plat : les côtés rectilignes
+            // entre les coins « sentaient le carré » — bombé SUBTIL (w/24 ≈ 2px au
+            // milieu du côté, profil quadratique, zéro aux coins), rayon PLEIN
+            // conservé. phase < 0 = intérieur UNI + bruit (état déplié/ouvert),
+            // phase >= 0 = légèrement replié (état fermé) — bruit dans les deux.
+            let textured = phase >= 0;
+            let bulge = (w / 24).max(1);
+            let m = bulge + 2;                  // marge bbox (bombé + AA)
+            // Évalue le blob en coordonnées locales : (alpha 0..255, luminosité ‰, gris bruit)
+            let eval = |lx: i32, ly: i32| -> (u32, i32, u32) {
+                let lyc = (2 * ly - h).abs().min(h);
+                let lxc = (2 * lx - w).abs().min(w);
+                let py_ = h - lyc; let px_ = w - lxc;
+                let ex = (w / 2 - r) + (bulge * py_ * py_) / (h * h);
+                let ey = (h / 2 - r) + (bulge * px_ * px_) / (w * w);
+                let qx = (lx - w / 2).abs() - ex;
+                let qy = (ly - h / 2).abs() - ey;
+                let ext = isqrt((qx.max(0) * qx.max(0) + qy.max(0) * qy.max(0)) as u32) as i32;
+                let dist = ext + qx.max(qy).min(0) - r;
+                if dist > 1 { return (0, 1000, 0); }
+                let a = if dist >= -1 { (base_a * ((1 - dist) as u32)) / 2 } else { base_a };
+                // Ombrage MAT « coussin BOMBÉ » : dôme diffus (centre lumineux
+                // décalé vers le haut +9 %, assombrissement progressif vers les
+                // bords -8 %) qui donne du volume SANS toucher la silhouette,
+                // + macro-plis discrets (±7 %, fermé seulement) et grain
+                // pointillé granita. Pas de spéculaire : le dôme est un
+                // dégradé large, ça reste mat.
+                let dxc = lx - w / 2;
+                let dyc = ly - (h * 3) / 8;     // centre du dôme à 37,5 % de haut
+                let rr = ((w * w + h * h) / 8).max(1);
+                let t = (((dxc * dxc + dyc * dyc) * 1000) / rr).min(1000);
+                let dome = 90 - (t * 170) / 1000;                       // +90 → -80 ‰
+                let mut bright = 1000 + dome;
+                // BRUIT navbar gesture, MÊME RECETTE que GpuDrawNoisePatch :
+                // mélange de chaque pixel vers un GRIS aléatoire 0..255 avec
+                // alpha 64 (appliqué aux sites d'appel) — mais hash déterministe
+                // en coordonnées LOCALES : il suit GPU_TRANSFORM et ne déborde
+                // jamais du losange pivoté. FINALISEUR type Murmur obligatoire :
+                // le simple xor de multiplications donnait des motifs corrélés
+                // (mailles de tricot) au lieu d'un bruit blanc.
+                let mut hsh = ((lx + 64) as u32).wrapping_mul(73856093)
+                    ^ ((ly + 64) as u32).wrapping_mul(19349663);
+                hsh ^= hsh >> 13; hsh = hsh.wrapping_mul(0x5bd1e995); hsh ^= hsh >> 15;
+                let gray = hsh & 0xFF;
+                if textured {
+                    // App FERMÉE : LÉGÈREMENT replié sur lui-même — UNIQUEMENT
+                    // les macro-plis doux (±7 %, produit de 2 sinus 2D : pas de
+                    // bandes). AUCUNE rayure/cannelure (verdict user : « pas de
+                    // rayure, des grains que je veux »). phase anime le repli.
+                    let a1 = (ly * 360) / h + phase;
+                    let a2 = (lx * 360) / w + phase * 2 + 120;
+                    let macro_ = (sin_i(a1) * sin_i(a2 + 60)) / 1000;  // ±1000
+                    bright += (macro_ * 70) / 1000;
+                }
+                (a.min(255), bright.min(1110), gray)
+            };
+            if unsafe { GPU_TRANSFORM_ACTIVE } {
+                let t = unsafe { GPU_TRANSFORM };
+                let (ta, tb, tc, td, ttx, tty) = (t[0], t[1], t[2], t[3], t[4], t[5]);
+                let corners = [(x - m, y - m), (x + w + m, y - m), (x - m, y + h + m), (x + w + m, y + h + m)];
+                let mut min_fx = i32::MAX; let mut max_fx = i32::MIN;
+                let mut min_fy = i32::MAX; let mut max_fy = i32::MIN;
+                for &(cx0, cy0) in corners.iter() {
+                    let fx = ta * cx0 / 10000 + tc * cy0 / 10000 + ttx;
+                    let fy = tb * cx0 / 10000 + td * cy0 / 10000 + tty;
+                    if fx < min_fx { min_fx = fx; } if fx > max_fx { max_fx = fx; }
+                    if fy < min_fy { min_fy = fy; } if fy > max_fy { max_fy = fy; }
+                }
+                min_fx = min_fx.max(0); max_fx = max_fx.min(sw2 - 1);
+                min_fy = min_fy.max(0); max_fy = max_fy.min(sh2 - 1);
+                let (ta64, tb64, tc64, td64) = (ta as i64, tb as i64, tc as i64, td as i64);
+                let det = ta64 * td64 - tc64 * tb64;
+                if det != 0 {
+                    for fy in min_fy..=max_fy {
+                        for fx in min_fx..=max_fx {
+                            let dx = (fx - ttx) as i64;
+                            let dy = (fy - tty) as i64;
+                            let lx = ((td64 * dx - tc64 * dy) * 10000 / det) as i32 - x;
+                            let ly = ((-tb64 * dx + ta64 * dy) * 10000 / det) as i32 - y;
+                            if lx < -m || lx >= w + m || ly < -m || ly >= h + m { continue; }
+                            let (a, bright, gray) = eval(lx, ly);
+                            if a == 0 { continue; }
+                            // Bruit navbar : mix vers le gris aléatoire, alpha 64/255.
+                            let nr2 = ((cr_ as i32 * bright / 1000).clamp(0, 255) as u32 * 191 + gray * 64) / 255;
+                            let ng2 = ((cg_ as i32 * bright / 1000).clamp(0, 255) as u32 * 191 + gray * 64) / 255;
+                            let nb2 = ((cb_ as i32 * bright / 1000).clamp(0, 255) as u32 * 191 + gray * 64) / 255;
+                            let ia = 255 - a;
+                            let di = (fy * s + fx) as usize;
+                            let dst = unsafe { fb.add(di).read_volatile() };
+                            let db = (dst & 0xFF) as u32; let dg = ((dst >> 8) & 0xFF) as u32; let dr = ((dst >> 16) & 0xFF) as u32;
+                            unsafe { fb.add(di).write_volatile(0xFF000000 | (((nr2*a+dr*ia)/255) << 16) | (((ng2*a+dg*ia)/255) << 8) | ((nb2*a+db*ia)/255)); }
+                        }
+                    }
+                }
+            } else {
+                for ly in -m..(h + m) {
+                    let fy = y + ly; if fy < 0 || fy >= sh2 { continue; }
+                    for lx in -m..(w + m) {
+                        let fx = x + lx; if fx < 0 || fx >= sw2 { continue; }
+                        let (a, bright, gray) = eval(lx, ly);
+                        if a == 0 { continue; }
+                        // Bruit navbar : mix vers le gris aléatoire, alpha 64/255.
+                        let nr2 = ((cr_ as i32 * bright / 1000).clamp(0, 255) as u32 * 191 + gray * 64) / 255;
+                        let ng2 = ((cg_ as i32 * bright / 1000).clamp(0, 255) as u32 * 191 + gray * 64) / 255;
+                        let nb2 = ((cb_ as i32 * bright / 1000).clamp(0, 255) as u32 * 191 + gray * 64) / 255;
+                        let ia = 255 - a;
+                        let di = (fy * s + fx) as usize;
+                        let dst = unsafe { fb.add(di).read_volatile() };
+                        let db = (dst & 0xFF) as u32; let dg = ((dst >> 8) & 0xFF) as u32; let dr = ((dst >> 16) & 0xFF) as u32;
+                        unsafe { fb.add(di).write_volatile(0xFF000000 | (((nr2*a+dr*ia)/255) << 16) | (((ng2*a+dg*ia)/255) << 8) | ((nb2*a+db*ia)/255)); }
+                    }
+                }
+            }
+            0
+        },
+
         // ── GpuDrawTextFontAlign(x,y,maxW,text,fg,bg,font,size,align) ────────
         // align: 0=left, 1=center, 2=right
         "DrvAPIInterCon___GpuDrawTextFontAlign___" => {
@@ -4009,17 +7081,11 @@ fn dispatch(
             let font_ptr= args[6];
             let size    = args[7] as i32;
             let align   = args[8] as i32;
+            serial_log(alloc::format!(
+                "[MENU] GpuDrawTextFontAlign x={} y={} maxW={} font_ptr={:#x} size={}\r\n",
+                base_x, y, max_w, font_ptr, size
+            ).as_bytes());
             if tp.is_null() || font_ptr == 0 { return 0; }
-            // Mesurer la largeur approximative (size * 0.6 par caractère)
-            let mut n = 0i32;
-            unsafe { while *tp.add(n as usize) != 0 { n += 1; } }
-            let approx_w = n * size * 6 / 10;
-            let x = match align {
-                1 => base_x + (max_w - approx_w) / 2,  // centre
-                2 => base_x + max_w - approx_w,          // droite
-                _ => base_x,                             // gauche
-            };
-            // Déléguer au pipeline GpuDrawTextFont avec x ajusté
             let ttf_bytes  = unsafe { FONT_TTF_OVC.as_deref() }.unwrap_or(&[]);
             let rast_bytes = unsafe { FONT_RAST_OVC.as_deref() }.unwrap_or(&[]);
             let woff_bytes = unsafe { FONT_WOFF_OVC.as_deref() }.unwrap_or(&[]);
@@ -4027,31 +7093,25 @@ fn dispatch(
             let ttf_text  = core::str::from_utf8(ttf_bytes).unwrap_or("");
             let rast_text = core::str::from_utf8(rast_bytes).unwrap_or("");
             let woff_text = core::str::from_utf8(woff_bytes).unwrap_or("");
-            if unsafe { TTF_SCRATCH[104] == 0 } {
-                let load_mods: Vec<(&str, &str)> = if woff_text.starts_with("# Vyft OVC") {
-                    alloc::vec![("GlyphRasterizer", rast_text), ("WoffReader", woff_text), ("std___core___self___WoffReader", woff_text)]
-                } else { alloc::vec![("GlyphRasterizer", rast_text)] };
-                exec_fn_raw_with_mods(ttf_bytes, "TtfParser", "Load", &[font_ptr, ctx.font_len as i64], ctx, &load_mods);
-            }
-            let fb_i64=ctx.fb as i64; let stride_i64=ctx.stride as i64;
+            ttf_ensure_loaded(ttf_bytes, rast_text, woff_text, font_ptr, ctx);
             let ttf_mods=[("GlyphRasterizer", rast_text)];
             let rast_mods=[("TtfParser", ttf_text)];
-            let mut cx = x; let mut ci = 0usize;
-            loop {
-                let ch = unsafe { *tp.add(ci) }; if ch == 0 { break; } ci += 1;
-                let glyph_id = exec_fn_raw_with_mods(ttf_bytes, "TtfParser", "GetGlyphId", &[ch as i64], ctx, &ttf_mods);
-                if glyph_id <= 0 { cx += size / 2; continue; }
-                let glyf_off = exec_fn_raw_with_mods(ttf_bytes, "TtfParser", "GetGlyfOffset", &[glyph_id], ctx, &ttf_mods);
-                if glyf_off <= 0 { cx += size / 2; continue; }
-                let glyf_data = font_ptr.wrapping_add(glyf_off);
-                ovc_arena_reset();
-                let bitmap = exec_fn_raw_with_mods(rast_bytes, "GlyphRasterizer", "RasterizeGlyph", &[glyf_data, size as i64], ctx, &rast_mods);
-                if bitmap == 0 { cx += size / 2; continue; }
-                let bmp_w = unsafe { RAST_W as i32 }; let bmp_h = unsafe { RAST_H as i32 };
-                exec_fn_raw_with_mods(rast_bytes, "GlyphRasterizer", "DrawGlyphAt",
-                    &[fb_i64, stride_i64, cx as i64, y as i64, bitmap, bmp_w as i64, bmp_h as i64, fg, bg], ctx, &rast_mods);
-                cx += bmp_w + 1;
-            }
+            let mut n = 0usize;
+            unsafe { while *tp.add(n) != 0 { n += 1; } }
+            let pipe = TtfLine {
+                ttf_bytes, rast_bytes,
+                ttf_mods: &ttf_mods, rast_mods: &rast_mods,
+                font_ptr, size, lsp: 0,
+            };
+            // Mesure RÉELLE (avances hmtx + kerning) pour l'alignement — l'estimation
+            // n*size*0.6 décalait tous les textes centrés/alignés à droite.
+            let text_w = ttf_line_width(&pipe, ctx, tp, 0, n);
+            let x = match align {
+                1 => base_x + (max_w - text_w) / 2,  // centre
+                2 => base_x + max_w - text_w,        // droite
+                _ => base_x,                         // gauche
+            };
+            ttf_draw_line(&pipe, ctx, tp, 0, n, x, y, fg, bg);
             0
         },
 
@@ -4078,17 +7138,16 @@ fn dispatch(
             let ttf_text  = core::str::from_utf8(ttf_bytes).unwrap_or("");
             let rast_text = core::str::from_utf8(rast_bytes).unwrap_or("");
             let woff_text = core::str::from_utf8(woff_bytes).unwrap_or("");
-            if unsafe { TTF_SCRATCH[104] == 0 } {
-                let load_mods: Vec<(&str, &str)> = if woff_text.starts_with("# Vyft OVC") {
-                    alloc::vec![("GlyphRasterizer", rast_text), ("WoffReader", woff_text), ("std___core___self___WoffReader", woff_text)]
-                } else { alloc::vec![("GlyphRasterizer", rast_text)] };
-                exec_fn_raw_with_mods(ttf_bytes, "TtfParser", "Load", &[font_ptr, ctx.font_len as i64], ctx, &load_mods);
-            }
+            ttf_ensure_loaded(ttf_bytes, rast_text, woff_text, font_ptr, ctx);
             let fb_raw  = ctx.fb; let stride = ctx.stride;
             let scr_w   = ctx.width; let scr_h = ctx.height;
-            let fb_i64  = fb_raw as i64; let stride_i64 = stride as i64;
             let ttf_mods  = [("GlyphRasterizer", rast_text)];
             let rast_mods = [("TtfParser", ttf_text)];
+            let pipe = TtfLine {
+                ttf_bytes, rast_bytes,
+                ttf_mods: &ttf_mods, rast_mods: &rast_mods,
+                font_ptr, size, lsp,
+            };
             // Découper en lignes sur \n
             let mut line_start = 0usize;
             let mut line_y = base_y;
@@ -4101,31 +7160,14 @@ fn dispatch(
                     ci += 1;
                 }
                 let line_end = ci;
-                // Mesure pour l'alignement
-                let line_len = (line_end - line_start) as i32;
-                let approx_w = line_len * size * 6 / 10;
+                // Mesure réelle (avances hmtx + kerning) pour l'alignement
+                let line_w = ttf_line_width(&pipe, ctx, tp, line_start, line_end);
                 let line_x = match align {
-                    1 => base_x - approx_w / 2,
-                    2 => base_x - approx_w,
+                    1 => base_x - line_w / 2,
+                    2 => base_x - line_w,
                     _ => base_x,
                 };
-                // Rendre les glyphes de cette ligne
-                let mut cx = line_x; let mut li = line_start;
-                while li < line_end {
-                    let ch = unsafe { *tp.add(li) }; li += 1;
-                    let glyph_id = exec_fn_raw_with_mods(ttf_bytes, "TtfParser", "GetGlyphId", &[ch as i64], ctx, &ttf_mods);
-                    if glyph_id <= 0 { cx += size / 2 + lsp; continue; }
-                    let glyf_off = exec_fn_raw_with_mods(ttf_bytes, "TtfParser", "GetGlyfOffset", &[glyph_id], ctx, &ttf_mods);
-                    if glyf_off <= 0 { cx += size / 2 + lsp; continue; }
-                    let glyf_data = font_ptr.wrapping_add(glyf_off);
-                    ovc_arena_reset();
-                    let bitmap = exec_fn_raw_with_mods(rast_bytes, "GlyphRasterizer", "RasterizeGlyph", &[glyf_data, size as i64], ctx, &rast_mods);
-                    if bitmap == 0 { cx += size / 2 + lsp; continue; }
-                    let bmp_w = unsafe { RAST_W as i32 }; let bmp_h = unsafe { RAST_H as i32 };
-                    exec_fn_raw_with_mods(rast_bytes, "GlyphRasterizer", "DrawGlyphAt",
-                        &[fb_i64, stride_i64, cx as i64, line_y as i64, bitmap, bmp_w as i64, bmp_h as i64, fg, bg], ctx, &rast_mods);
-                    cx += bmp_w + 1 + lsp;
-                }
+                let cx = ttf_draw_line(&pipe, ctx, tp, line_start, line_end, line_x, line_y, fg, bg);
                 // Décorations
                 if deco & 1 != 0 && !fb_raw.is_null() {
                     // Soulignement : ligne horizontale à line_y + size
@@ -4370,6 +7412,59 @@ fn dispatch(
         "DrvAPIInterCon___WindowManGetY___" => window_man_get(args, |a| a.y),
         "DrvAPIInterCon___WindowManGetW___" => window_man_get(args, |a| a.content_w),
         "DrvAPIInterCon___WindowManGetH___" => window_man_get(args, |a| a.content_h),
+        // Tick d'ouverture de la fenêtre (CURSOR_TICK au lancement) — âge de la
+        // fenêtre = GpuGetTick - GetOpenTick, pour les animations du dock.
+        "DrvAPIInterCon___WindowManGetOpenTick___" => window_man_get(args, |a| a.opened_tick as i32),
+        // Argument de lancement (WindowManLaunch(name, arg)) de la fenêtre i — pointeur
+        // nul-terminé, "" (juste "\0") si aucun arg n'a été passé au lancement. Lu par
+        // l'app cible une fois à son premier rendu (ex: item de menu "New Folder").
+        "DrvAPIInterCon___WindowManGetLaunchArg___" => {
+            let Some(&i) = args.first() else { return 0; };
+            unsafe { RUNNING_APPS.get(i as usize).map(|a| a.launch_arg_c.as_ptr() as i64).unwrap_or(0) }
+        },
+        // Génération du launch_arg de la fenêtre i — incrémentée à chaque écriture
+        // (lancement initial OU WindowManSetLaunchArg ci-dessous). L'app cible
+        // compare cette valeur à la dernière génération traitée (stockée dans son
+        // propre SCROLL_SCRATCH) pour savoir si un NOUVEL arg est arrivé, sans le
+        // retraiter en boucle chaque frame (voir commentaire sur launch_arg_gen).
+        "DrvAPIInterCon___WindowManGetLaunchArgGen___" => {
+            let Some(&i) = args.first() else { return 0; };
+            unsafe { RUNNING_APPS.get(i as usize).map(|a| a.launch_arg_gen as i64).unwrap_or(0) }
+        },
+        // Met à jour le launch_arg d'une fenêtre DÉJÀ OUVERTE (i = index existant,
+        // typiquement WindowManFindByName(name) >= 0) SANS relancer l'app — sert
+        // au menu contextuel du dock quand l'app ciblée tourne déjà : appeler
+        // WindowManLaunch dans ce cas dupliquerait une seconde instance (aucune
+        // déduplication par nom n'existe dans WindowManLaunch), au lieu de router
+        // l'action vers la fenêtre existante.
+        "DrvAPIInterCon___WindowManSetLaunchArg___" => {
+            let Some(&i) = args.first() else { return -1; };
+            let arg_ptr = args.get(1).copied().unwrap_or(0);
+            let mut arg_c = if arg_ptr != 0 {
+                unsafe { read_cstr(arg_ptr as *const u8) }.into_bytes()
+            } else {
+                alloc::vec::Vec::new()
+            };
+            arg_c.push(0);
+            unsafe {
+                let Some(app) = RUNNING_APPS.get_mut(i as usize) else { return -1; };
+                app.launch_arg_c = arg_c;
+                app.launch_arg_gen = app.launch_arg_gen.wrapping_add(1);
+                if app.launch_arg_gen == 0 { app.launch_arg_gen = 1; } // jamais 0 (sentinelle "aucun arg encore vu")
+            }
+            0
+        },
+        // Tick de frame global (1 par frame rendue) + trig entière ×10000 —
+        // de quoi animer GpuSetTransform2D depuis Maratine (rotations du dock).
+        "DrvAPIInterCon___GpuGetTick___"  => unsafe { CURSOR_TICK as i64 },
+        "DrvAPIInterCon___MathCos10k___" => {
+            let deg = args.first().copied().unwrap_or(0) as i32;
+            (cos_i(deg) * 10) as i64
+        },
+        "DrvAPIInterCon___MathSin10k___" => {
+            let deg = args.first().copied().unwrap_or(0) as i32;
+            (sin_i(deg) * 10) as i64
+        },
 
         // Chrome de fenêtre (barre « Shi Windows ») : nom + icône d'app PAR fenêtre, résolus
         // depuis le registre via le nom de la fenêtre (RunningApp.name). Pointeurs null-terminés
@@ -4389,6 +7484,16 @@ fn dispatch(
             let Some(&i) = args.first() else { return 0; };
             let name = match unsafe { RUNNING_APPS.get(i as usize) } { Some(a) => a.name.clone(), None => return 0 };
             crate::app_registry::registry_display_ptr_for(&name)
+        },
+        // Couleur ARGB du losange (barre de titre) de la fenêtre i — donnée du Maraset.yaml
+        // de l'app (diamond_color) via le registre, résolue par nom (comme GetTitle/GetIconPath).
+        "DrvAPIInterCon___WindowManGetDiamondColor___" => {
+            let Some(&i) = args.first() else { return crate::app_registry::DEFAULT_DIAMOND_COLOR as i64; };
+            let name = match unsafe { RUNNING_APPS.get(i as usize) } {
+                Some(a) => a.name.clone(),
+                None => return crate::app_registry::DEFAULT_DIAMOND_COLOR as i64,
+            };
+            crate::app_registry::registry_diamond_color_for(&name)
         },
 
         "DrvAPIInterCon___WindowManSetX___" => window_man_set(args, |a, v| a.x = v),
@@ -4441,6 +7546,45 @@ fn dispatch(
             if i < 0 { return 0; }
             crate::app_registry::registry_icon_ptr(i as usize)
         },
+        // Couleur ARGB du losange (dock) — donnée du Maraset.yaml de l'app (diamond_color),
+        // PAS codée en dur : ShiLauncher n'a plus besoin de reconnaître une app par son nom.
+        "DrvAPIInterCon___AppRegistryGetDiamondColor___" => {
+            let i = args.first().copied().unwrap_or(-1);
+            if i < 0 { return crate::app_registry::DEFAULT_DIAMOND_COLOR as i64; }
+            crate::app_registry::registry_diamond_color(i as usize)
+        },
+
+        // ── Épinglage dock (session-only, voir commentaire de publish_registry) ──
+        "DrvAPIInterCon___AppRegistryGetPinned___" => {
+            let i = args.first().copied().unwrap_or(-1);
+            if i < 0 { return 0; }
+            crate::app_registry::registry_get_pinned(i as usize)
+        },
+        "DrvAPIInterCon___AppRegistrySetPinned___" => {
+            if args.len() < 2 || args[0] < 0 { return -1; }
+            crate::app_registry::registry_set_pinned(args[0] as usize, args[1] != 0)
+        },
+        // ── Menu contextuel par app (dock_menu_items du Maraset.yaml) ──
+        "DrvAPIInterCon___AppRegistryGetMenuItemCount___" => {
+            let i = args.first().copied().unwrap_or(-1);
+            if i < 0 { return 0; }
+            let cnt = crate::app_registry::registry_menu_item_count(i as usize);
+            serial_log(alloc::format!("[MENU] MenuItemCount ownerIdx={} -> {}\r\n", i, cnt).as_bytes());
+            cnt
+        },
+        "DrvAPIInterCon___AppRegistryGetMenuItemLabel___" => {
+            if args.len() < 2 || args[0] < 0 || args[1] < 0 { return 0; }
+            serial_log(alloc::format!("[MENU] MenuItemLabel i={} j={}\r\n", args[0], args[1]).as_bytes());
+            crate::app_registry::registry_menu_item_label_ptr(args[0] as usize, args[1] as usize)
+        },
+        "DrvAPIInterCon___AppRegistryGetMenuItemSubmenuCount___" => {
+            if args.len() < 2 || args[0] < 0 || args[1] < 0 { return 0; }
+            crate::app_registry::registry_menu_item_submenu_count(args[0] as usize, args[1] as usize)
+        },
+        "DrvAPIInterCon___AppRegistryGetMenuItemSubmenuLabel___" => {
+            if args.len() < 3 || args[0] < 0 || args[1] < 0 || args[2] < 0 { return 0; }
+            crate::app_registry::registry_menu_item_submenu_label_ptr(args[0] as usize, args[1] as usize, args[2] as usize)
+        },
 
         // WindowManLaunch(nameStr) — charge \<nameStr>.marep à la racine ESP
         // (convention provisoire, cf. plan) via le même mécanisme UEFI_ST_PTR/
@@ -4450,6 +7594,15 @@ fn dispatch(
         "DrvAPIInterCon___WindowManLaunch___" => {
             if args.is_empty() || args[0] == 0 { return -1; }
             let name = unsafe { read_cstr(args[0] as *const u8) };
+            // Second argument optionnel (pointeur string) — contexte de lancement lu par
+            // l'app cible via WindowManGetLaunchArg (ex: item de menu contextuel "New
+            // Folder" qui doit ouvrir directement le bon dialogue).
+            let mut launch_arg_c = if args.len() >= 2 && args[1] != 0 {
+                unsafe { read_cstr(args[1] as *const u8) }.into_bytes()
+            } else {
+                alloc::vec::Vec::new()
+            };
+            launch_arg_c.push(0);
             let st_raw = unsafe { UEFI_ST_PTR };
             if st_raw.is_null() {
                 serial_log(b"[WINMAN] ST_PTR null, lancement impossible\r\n");
@@ -4478,7 +7631,10 @@ fn dispatch(
                         // Fenêtre nommée par le nom DEMANDÉ (name), pas par find_app_name
                         // (app_name) : garantit que WindowManFindByName(name) matche même
                         // pour une app sans .slasset (find_app_name renverrait "App").
-                        RUNNING_APPS.push(crate::window_manager::RunningApp::new(name.clone(), modules, 400, 300, 640, 480));
+                        let mut app = crate::window_manager::RunningApp::new(name.clone(), modules, 400, 300, 640, 480);
+                        app.opened_tick = CURSOR_TICK;
+                        app.launch_arg_c = launch_arg_c;
+                        RUNNING_APPS.push(app);
                         let _ = app_name;
                         (RUNNING_APPS.len() - 1) as i64
                     }
@@ -4514,9 +7670,25 @@ fn dispatch(
                     pointer_btn: ctx.pointer_btn,
                     key_code:    ctx.key_code,
                 };
-                reset_gpu_state();
-                let mod_refs = app.mod_refs();
-                let _ = exec_marep(&mod_refs, &inner_ctx);
+                // ── Throttle de rendu (réactivité souris) : l'exec_marep imbriqué
+                // est LE coût dominant quand une fenêtre est ouverte (tout le
+                // marep de l'app ré-interprété). On ne le rejoue que toutes les
+                // 6 frames, ou immédiatement sur input (clic/touche — l'app doit
+                // réagir) ou buffer sale (resize/ouverture) ; sinon on blitte le
+                // dernier contenu tel quel — le bureau, le chrome et le curseur
+                // restent fluides entre deux rendus du contenu.
+                let now = CURSOR_TICK;
+                let must_render = app.dirty
+                    || now.saturating_sub(app.last_rendered_tick) >= 6
+                    || ctx.key_code != 0
+                    || ctx.pointer_btn != 0;
+                if must_render {
+                    reset_gpu_state();
+                    let mod_refs = app.mod_refs();
+                    let _ = exec_marep(&mod_refs, &inner_ctx);
+                    app.last_rendered_tick = now;
+                    app.dirty = false;
+                }
                 if !ctx.fb.is_null() {
                     let corner_r = args.get(1).copied().unwrap_or(0) as i32; // coins bas arrondis
                     let dst = core::slice::from_raw_parts_mut(ctx.fb, (ctx.stride * ctx.height).max(0) as usize);
@@ -4531,9 +7703,12 @@ fn dispatch(
         "MaratineKit___UI___TextLabel___New"        => 0,
         "MaratineKit___UI___TextLabel___SetAlign"   => 0,
         "MaratineKit___UI___TextLabel___SetFontSize"=> 0,
+        "MaratineKit___RenderContext___New"         => 0,
         "MaratineKit___RenderContext___Attach"      => 0,
         "MaratineKit___RenderContext___Detach"      => 0,
         "MaratineKit___PIDActivity___ObtInfo"       => 0,
+        // Compter les apps actives en cours d'exécution (dock ShiLauncher)
+        "MaratineKit___PIDActivity___Count"        => unsafe { RUNNING_APPS.len() as i64 },
         "MaratineKit___AuthARoot"                   => 0,
         "MaratineKit___RenRootUI"                   => 0,
         "ObtProcess"                                => 0,
@@ -4619,6 +7794,18 @@ fn dispatch(
                 }
             }
             -1
+        },
+
+        // ── Listing "dossier" pour ShiLooker (onglet Disks) — filtre SRFS_CACHE par
+        // préfixe de chemin plutôt que par suffixe .ca (voir DiskCacheDirCount/GetName).
+        "DrvAPIInterCon___DiskCacheDirCount___" => {
+            let prefix = if !args.is_empty() && args[0] != 0 { unsafe { read_cstr(args[0] as *const u8) } } else { alloc::string::String::new() };
+            disk_cache_dir_rebuild(&prefix)
+        },
+        "DrvAPIInterCon___DiskCacheDirGetName___" => {
+            let i = args.first().copied().unwrap_or(-1);
+            if i < 0 { return 0; }
+            disk_cache_dir_get_name(i as usize)
         },
 
         // Vérifier si un buffer contient une substring (pour IsBundle)

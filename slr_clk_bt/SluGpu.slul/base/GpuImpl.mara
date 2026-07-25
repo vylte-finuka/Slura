@@ -27,6 +27,73 @@ rel op WindowsResolution: [width i32, height i32] [
     ret <DrvManSpec***SetResolution***>(width, height);
 ];
 
+// ── Auto-adaptation résolution (Vmwaretool) ───────────────────────────────────
+// Nombre de modes GOP disponibles / (largeur, hauteur) du mode d'index idx —
+// lecture seule, aucun effet de bord (voir DrvManSpec___GopModeCount/GetW/GetH,
+// ovc_exec.rs). Le firmware GOP peut regénérer sa liste de modes si la fenêtre
+// hôte VMware/QEMU change de taille — GpuAutoAdaptResolution s'en sert pour
+// suivre ce changement sans jamais toucher le framebuffer directement d'ici
+// (WindowsResolution ne fait que poser une demande, voir son commentaire côté
+// Rust — seul kernel_runtime.rs applique réellement un set_mode).
+rel op GopModeCount: [] [ ret <DrvManSpec***GopModeCount***>(); ];
+rel op GopModeGetW:  [idx i32] [ ret <DrvManSpec***GopModeGetW***>(idx); ];
+rel op GopModeGetH:  [idx i32] [ ret <DrvManSpec***GopModeGetH***>(idx); ];
+
+// GpuAutoAdaptResolution — choisit le plus grand mode dont le ratio reste
+// proche (±15%) du ratio de design (1440:1024), ou à défaut le plus grand mode
+// tout court (même heuristique que le choix initial côté kernel_runtime.rs,
+// portée ici en Mara pour être rappelable en cours de session). Appelle
+// WindowsResolution seulement si la cible diffère de la résolution actuelle —
+// à appeler périodiquement (pas chaque frame), depuis ShiLauncher/LAPrevent.mara,
+// uniquement quand Vmwaretool est installé.
+rel op GpuAutoAdaptResolution: [] [
+    let modeCount: <i32> = <DrvManSpec***GopModeCount***>();
+    if (modeCount <= 0) [ ret 0; ];
+    var bestW: <i32> = 0;
+    var bestH: <i32> = 0;
+    var bestArea: <i32> = 0;
+    var fallbackW: <i32> = 0;
+    var fallbackH: <i32> = 0;
+    var fallbackArea: <i32> = 0;
+    var mi: <i32> = 0;
+    loop (mi < modeCount) [
+        let mw: <i32> = <DrvManSpec***GopModeGetW***>(mi);
+        let mh: <i32> = <DrvManSpec***GopModeGetH***>(mi);
+        let area: <i32> = mw * mh;
+        if (area > fallbackArea) [
+            fallbackW = mw;
+            fallbackH = mh;
+            fallbackArea = area;
+        ];
+        if (mh > 0) [
+            let ratioPermille: <i32> = (mw * 1024 * 1000) / (mh * 1440);
+            if (ratioPermille >= 850) [
+                if (ratioPermille <= 1150) [
+                    if (area > bestArea) [
+                        bestW = mw;
+                        bestH = mh;
+                        bestArea = area;
+                    ];
+                ];
+            ];
+        ];
+        mi = mi + 1;
+    ];
+    var targetW: <i32> = bestW;
+    var targetH: <i32> = bestH;
+    if (bestArea == 0) [
+        targetW = fallbackW;
+        targetH = fallbackH;
+    ];
+    if (targetW == 0) [ ret 0; ];
+    let curW: <i32> = <MaratineKit***MGC***MGC***GetWidth***>();
+    let curH: <i32> = <MaratineKit***MGC***MGC***GetHeight***>();
+    if (targetW == curW) [
+        if (targetH == curH) [ ret 0; ];
+    ];
+    ret <DrvManSpec***SetResolution***>(targetW, targetH);
+];
+
 // Permet de récupérer la largeur actuelle de l'affichage.
 rel op GetWidth: [] [ ret <MaratineKit***MGC***MGC***GetWidth***>(); ];
 

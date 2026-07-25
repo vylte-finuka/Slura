@@ -1,0 +1,32 @@
+//===================================================================
+//  OEntry.mara – Point d'entree du bundle SLUL (driver)
+//  Projet : NTFSMan.slul
+//  Auteur : Vyft Ltd
+//  Licence : Proprietary – 2026
+//  Description :
+//      Initialise le driver NTFS (lecture seule).
+//      Monte la partition NTFS au demarrage et expose ResolvePath /
+//      ReadFile via DrvAPIInterCon, a l'identique du pattern SRFSMan.
+//===================================================================
+
+#base <std***core***self***[ RegistrationRoot, CaseComponentActivity ]>;
+#base <MaratineKit>;
+#include <std***gcc***arch***[ ArchitectureInfo ]>;
+
+rel cl OEntry: <[string RegistrationRoot]>t [
+
+    let ObtProcess: <[string PIDActivity]> = <MaratineKit***PIDActivity***ObtInfo>;
+    let PAccess: <[string AuthARoot]>       = <MaratineKit***AuthARoot>;
+
+    let SyncActivity: <[string CaseComponentActivity]> = ObtProcess(<MaratineKit***RenRoot>);
+
+    let RenderRoot: <[string RegistrationRoot***[ SRIDAtt, KeyReg, PAccessAuth ]]> =
+        PAccess(SyncActivity);
+
+    let ArchInfo: <[string ArchitectureInfo]> = <gcc***archInfo***()>;
+    log: ArchInfo;
+
+    let Architecture: <string> = ArchInfo;
+    let DrvMain: <i32> = <std***core***self***APrevent***OnPowerOn>(Architecture);
+    ret DrvMain;
+];

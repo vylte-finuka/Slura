@@ -1,0 +1,167 @@
+#base <std***ComTpe***SlulFrmt***[ DrvAPIInterCon ]>;
+#base <MaratineKit>;
+
+// SluWWANManSrv — panneau "Cellular" : état de connexion (placeholder honnête,
+// aucun modem réel dans ce noyau — voir SluWWANMan.slul) + sélection du type
+// réseau affiché dans la barre de statut de ShiLooker.
+//
+// Slot SCROLL_SCRATCH dédié à l'edge-detect clic de CETTE app : 12 (0-6/7 =
+// ShiLooker, 8 = ContextMenu de ShiLauncher, 9-11 = onglet Disks de ShiLooker,
+// 40+ = hold-ticks du dock ShiLauncher — 12 est libre).
+
+rel op Render: [ctx string, fnt ptr] [
+    var im: <i32> = 0;
+    let sw: <i32> = <DrvAPIInterCon***GpuGetWidth***>();
+    let sh: <i32> = <DrvAPIInterCon***GpuGetHeight***>();
+    let sW: <i32> = (sw * 1000) / 640;
+    let sH: <i32> = (sh * 1000) / 480;
+    let sU: <i32> = (sW + sH) / 2;
+
+    let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectFull***>(0, 0, sw, sh, 0, 0, 0, 0, 0xFFF5F5F5);
+
+    let mx: <i32> = <DrvAPIInterCon***PointerGetX***>();
+    let my: <i32> = <DrvAPIInterCon***PointerGetY***>();
+    let pbtn: <i32> = <DrvAPIInterCon***PointerGetBtn***>();
+    let prevBtn: <i32> = <DrvAPIInterCon***ScrollGet***>(12);
+    let clickEdge: <bool> = ((pbtn & 1) == 1 && (prevBtn & 1) == 0);
+
+    let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((24 * sW + 500) / 1000), ((20 * sH + 500) / 1000), ((300 * sU + 500) / 1000), "Cellular", 0xFF000000, 0x00000000, fnt, ((32 * sU + 500) / 1000), 0);
+
+    // Détection RÉELLE au boot (scan PCI classe 02:80, voir kernel_runtime.rs /
+    // pci.rs::scan_for_wwan_modem) — plus un placeholder fixe. Sur cette machine
+    // (VM sans carte WWAN passthrough), affichera honnêtement "Aucun modem
+    // detecte" ; sur du matériel avec un vrai modem PCI, "Modem detecte".
+    let detected: <i32> = <DrvAPIInterCon***WWANIsDetected***()>;
+    if (detected != 0) [
+        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((24 * sW + 500) / 1000), ((66 * sH + 500) / 1000), ((300 * sU + 500) / 1000), "Modem detecte (PCI 02:80)", 0xFF2D8A2D, 0x00000000, fnt, ((18 * sU + 500) / 1000), 0);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((24 * sW + 500) / 1000), ((92 * sH + 500) / 1000), ((550 * sU + 500) / 1000), "Detection materielle reelle (scan PCI au boot). Niveau de signal exact non lu (necessiterait le protocole AT/QMI/MBIM du modem, hors scope) : choisissez ci-dessous le type reseau affiche.", 0xFF888888, 0x00000000, fnt, ((13 * sU + 500) / 1000), 0);
+    ] else [
+        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((24 * sW + 500) / 1000), ((66 * sH + 500) / 1000), ((300 * sU + 500) / 1000), "Aucun modem detecte", 0xFFB00000, 0x00000000, fnt, ((18 * sU + 500) / 1000), 0);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((24 * sW + 500) / 1000), ((92 * sH + 500) / 1000), ((550 * sU + 500) / 1000), "Detection materielle reelle (scan PCI au boot, classe 02:80) : aucun modem WWAN trouve sur cette machine. Etat honnete, pas simule.", 0xFF888888, 0x00000000, fnt, ((13 * sU + 500) / 1000), 0);
+    ];
+
+    // ── Aperçu de l'icône complète (type réseau + état "envoyé", flèche en
+    // pixel-art exacte extraite du pack source + barres) — canvas large (71×51)
+    // disponible ici (fenêtre 640×480), contrairement à la barre de statut
+    // compacte de ShiLooker (19×25) qui n'affiche que barres+flèche sans texte.
+    // Chemins en littéraux directs par branche (pas de var <ptr> réassignée —
+    // évite tout doute sur le marshalling, même leçon que ContextMenu.mara).
+    let sigLevel: <i32> = <DrvAPIInterCon***WWANGetSignalLevel***>();
+    let previewType: <i32> = <DrvAPIInterCon***WWANGetNetworkType***>();
+    let previewIdx: <i32> = (previewType * 5) + sigLevel;
+    if (previewIdx == 0) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_gprs_0_sent.png"); ];
+    if (previewIdx == 1) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_gprs_1_sent.png"); ];
+    if (previewIdx == 2) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_gprs_2_sent.png"); ];
+    if (previewIdx == 3) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_gprs_3_sent.png"); ];
+    if (previewIdx == 4) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_gprs_4_sent.png"); ];
+    if (previewIdx == 5) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_edge_0_sent.png"); ];
+    if (previewIdx == 6) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_edge_1_sent.png"); ];
+    if (previewIdx == 7) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_edge_2_sent.png"); ];
+    if (previewIdx == 8) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_edge_3_sent.png"); ];
+    if (previewIdx == 9) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_edge_4_sent.png"); ];
+    if (previewIdx == 10) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_3g_0_sent.png"); ];
+    if (previewIdx == 11) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_3g_1_sent.png"); ];
+    if (previewIdx == 12) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_3g_2_sent.png"); ];
+    if (previewIdx == 13) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_3g_3_sent.png"); ];
+    if (previewIdx == 14) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_3g_4_sent.png"); ];
+    if (previewIdx == 15) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_hspa_0_sent.png"); ];
+    if (previewIdx == 16) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_hspa_1_sent.png"); ];
+    if (previewIdx == 17) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_hspa_2_sent.png"); ];
+    if (previewIdx == 18) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_hspa_3_sent.png"); ];
+    if (previewIdx == 19) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_hspa_4_sent.png"); ];
+    if (previewIdx == 20) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_hspaplus_0_sent.png"); ];
+    if (previewIdx == 21) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_hspaplus_1_sent.png"); ];
+    if (previewIdx == 22) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_hspaplus_2_sent.png"); ];
+    if (previewIdx == 23) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_hspaplus_3_sent.png"); ];
+    if (previewIdx == 24) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_hspaplus_4_sent.png"); ];
+    if (previewIdx == 25) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_4g_0_sent.png"); ];
+    if (previewIdx == 26) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_4g_1_sent.png"); ];
+    if (previewIdx == 27) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_4g_2_sent.png"); ];
+    if (previewIdx == 28) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_4g_3_sent.png"); ];
+    if (previewIdx == 29) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_4g_4_sent.png"); ];
+    if (previewIdx == 30) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_4gplus_0_sent.png"); ];
+    if (previewIdx == 31) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_4gplus_1_sent.png"); ];
+    if (previewIdx == 32) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_4gplus_2_sent.png"); ];
+    if (previewIdx == 33) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_4gplus_3_sent.png"); ];
+    if (previewIdx == 34) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_4gplus_4_sent.png"); ];
+    if (previewIdx == 35) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_5g_0_sent.png"); ];
+    if (previewIdx == 36) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_5g_1_sent.png"); ];
+    if (previewIdx == 37) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_5g_2_sent.png"); ];
+    if (previewIdx == 38) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_5g_3_sent.png"); ];
+    if (previewIdx == 39) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_5g_4_sent.png"); ];
+    if (previewIdx == 40) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_5gplus_0_sent.png"); ];
+    if (previewIdx == 41) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_5gplus_1_sent.png"); ];
+    if (previewIdx == 42) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_5gplus_2_sent.png"); ];
+    if (previewIdx == 43) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_5gplus_3_sent.png"); ];
+    if (previewIdx == 44) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_5gplus_4_sent.png"); ];
+    if (previewIdx == 45) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_5ge_0_sent.png"); ];
+    if (previewIdx == 46) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_5ge_1_sent.png"); ];
+    if (previewIdx == 47) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_5ge_2_sent.png"); ];
+    if (previewIdx == 48) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_5ge_3_sent.png"); ];
+    if (previewIdx == 49) [ im = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/SluWWANManSrv/SluWWANManSrv.slasset/stat_sys_signal_5ge_4_sent.png"); ];
+    // Icône native 49×51 (le bracket "C" parasite des barres d'origine a été
+    // effacé et remplacé par flèche+texte à sa place, largeur juste assez
+    // élargie pour les loger côte à côte) — dessinée ×2 ici pour rester
+    // lisible dans cet aperçu (nearest-neighbor, pas de flou, pixels plus gros).
+    let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ((24 * sW + 500) / 1000), ((150 * sH + 500) / 1000), ((98 * sU + 500) / 1000), ((102 * sU + 500) / 1000));
+
+    let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(((24 * sW + 500) / 1000), ((215 * sH + 500) / 1000), ((300 * sU + 500) / 1000), "Type reseau affiche :", 0xFF000000, 0x00000000, fnt, ((18 * sU + 500) / 1000), 0);
+
+    let curType: <i32> = <DrvAPIInterCon***WWANGetNetworkType***>();
+
+    // ── Sélecteur de type réseau : 10 boutons, 5 par ligne, conditions
+    // mutuellement exclusives (chaque bouton a un index fixe) — pas de
+    // pyramide if/else imbriquée (piège vécu cette session).
+    let btnW: <i32> = ((108 * sU + 500) / 1000);
+    let btnH: <i32> = ((36 * sU + 500) / 1000);
+    let btnGap: <i32> = ((8 * sU + 500) / 1000);
+    let btnR: <i32> = ((6 * sU + 500) / 1000);
+    let gridX: <i32> = ((24 * sW + 500) / 1000);
+    let gridY: <i32> = ((250 * sH + 500) / 1000);
+
+    var ti: <i32> = 0;
+    loop (ti < 10) [
+        let col: <i32> = ti - ((ti / 5) * 5);
+        let row: <i32> = ti / 5;
+        let bx: <i32> = gridX + (col * (btnW + btnGap));
+        let by: <i32> = gridY + (row * (btnH + btnGap));
+
+        var isSel: <bool> = false;
+        if (ti == curType) [ isSel = true; ];
+        if (isSel) [
+            let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(bx, by, btnW, btnH, btnR, 0xFF5960DA);
+        ] else [
+            let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(bx, by, btnW, btnH, btnR, 0xFFE0E0E0);
+        ];
+
+        var fg: <i32> = 0xFF000000;
+        if (isSel) [ fg = 0xFFFFFFFF; ];
+
+        if (ti == 0) [ let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(bx, (by + ((9 * sU + 500) / 1000)), btnW, "GPRS", fg, 0x00000000, fnt, ((14 * sU + 500) / 1000), 1); ];
+        if (ti == 1) [ let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(bx, (by + ((9 * sU + 500) / 1000)), btnW, "EDGE", fg, 0x00000000, fnt, ((14 * sU + 500) / 1000), 1); ];
+        if (ti == 2) [ let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(bx, (by + ((9 * sU + 500) / 1000)), btnW, "3G", fg, 0x00000000, fnt, ((14 * sU + 500) / 1000), 1); ];
+        if (ti == 3) [ let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(bx, (by + ((9 * sU + 500) / 1000)), btnW, "HSPA", fg, 0x00000000, fnt, ((14 * sU + 500) / 1000), 1); ];
+        if (ti == 4) [ let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(bx, (by + ((9 * sU + 500) / 1000)), btnW, "HSPA+", fg, 0x00000000, fnt, ((14 * sU + 500) / 1000), 1); ];
+        if (ti == 5) [ let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(bx, (by + ((9 * sU + 500) / 1000)), btnW, "4G", fg, 0x00000000, fnt, ((14 * sU + 500) / 1000), 1); ];
+        if (ti == 6) [ let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(bx, (by + ((9 * sU + 500) / 1000)), btnW, "4G+", fg, 0x00000000, fnt, ((14 * sU + 500) / 1000), 1); ];
+        if (ti == 7) [ let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(bx, (by + ((9 * sU + 500) / 1000)), btnW, "5G", fg, 0x00000000, fnt, ((14 * sU + 500) / 1000), 1); ];
+        if (ti == 8) [ let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(bx, (by + ((9 * sU + 500) / 1000)), btnW, "5G+", fg, 0x00000000, fnt, ((14 * sU + 500) / 1000), 1); ];
+        if (ti == 9) [ let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(bx, (by + ((9 * sU + 500) / 1000)), btnW, "5Ge", fg, 0x00000000, fnt, ((14 * sU + 500) / 1000), 1); ];
+
+        let overBtn: <bool> = (mx >= bx && mx <= (bx + btnW) && my >= by && my <= (by + btnH));
+        if (overBtn && clickEdge) [
+            let _: <i32> = <DrvAPIInterCon***WWANSetNetworkType***>(ti);
+        ];
+
+        ti = ti + 1;
+    ];
+
+    let _: <i32> = <DrvAPIInterCon***ScrollSet***>(12, pbtn);
+
+    let gpuResult: <i32> = <DrvAPIInterCon***GpuFlushRenderContext***>(ctx);
+    if (gpuResult != 0) [ ret 1; ];
+    ret 0;
+];
+
+// Destroy sans params — attendu par le framework OVC après chaque Render
+rel op Destroy: [] [ ret 0; ];

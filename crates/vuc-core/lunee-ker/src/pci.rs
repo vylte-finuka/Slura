@@ -20,7 +20,7 @@
 
 use crate::ovc_exec::serial_log;
 use uefi::proto::unsafe_protocol;
-use uefi::table::boot::{OpenProtocolAttributes, OpenProtocolParams};
+use uefi::table::boot::{OpenProtocolAttributes, OpenProtocolParams, SearchType};
 use uefi::table::{Boot, SystemTable};
 use uefi::Handle;
 use uefi_raw::{guid, Guid, Status};
@@ -226,10 +226,55 @@ pub struct XhciCapabilities {
     pub page_size_bytes: u32,
 }
 
+/// Force le firmware à connecter (binder) tous les drivers de bus standards
+/// disponibles sur tous les handles présents, de façon récursive — PCI Root
+/// Bridge → PCI Bus → PciIo, mais aussi GOP (GraphicsOutput) et HID
+/// (Pointer/AbsPointer/ConIn) selon la topologie ACPI/PCI de la machine.
+/// QEMU/VMware préconnectent tout par défaut au boot, donc `find_handles::<T>()`
+/// y voit déjà tous les devices (écran, souris, clavier, xHCI...) — mais un
+/// firmware OEM réel ne "bind" souvent que ce qui est nécessaire au chemin de
+/// boot minimal, et peut laisser d'autres devices/protocoles non connectés
+/// tant que rien ne le demande explicitement (symptôme observé en bare-metal :
+/// écran noir, clavier/souris inertes, xHCI introuvable — tous résolus par le
+/// même appel). `ConnectController` est l'appel standard EFI_BOOT_SERVICES
+/// pour déclencher ce binding (spec UEFI §7.3) — ce n'est ni une écriture
+/// MMIO ni une prise de possession matérielle, juste une invocation des
+/// drivers déjà fournis par le firmware. Erreurs ignorées par design :
+/// beaucoup de handles n'ont simplement aucun driver à connecter (NOT_FOUND).
+///
+/// Appelée une seule fois, le plus tôt possible après l'entrée dans Boot
+/// Services et avant tout `find_handles`/`open_protocol` (GOP, HID, PciIo).
+///
+/// Une seule passe : `connect_controller(recursive=true)` sur chaque handle
+/// racine se propage déjà à ses enfants côté firmware (c'est le sens de
+/// `recursive`) — répéter le scan complet sur du matériel réel avec beaucoup
+/// de devices (SATA/NVMe/réseau/USB...) coûtait plusieurs secondes par passe,
+/// fait pour un gain marginal (couvrir un xHCI derrière un bridge découvert
+/// tardivement, cas rare). Un xHCI non détecté n'empêche de toute façon aucun
+/// affichage (voir kernel_runtime.rs : le bloc d'init xHCI est simplement
+/// sauté si absent) — mieux vaut une détection légèrement moins exhaustive
+/// mais un boot rapide, cohérent avec QEMU/VMware.
+pub fn connect_all_controllers(st: &mut SystemTable<Boot>) {
+    let handles = match st.boot_services().locate_handle_buffer(SearchType::AllHandles) {
+        Ok(h) => h,
+        Err(_) => {
+            serial_log(b"[PCI] locate_handle_buffer(AllHandles) echoue\r\n");
+            return;
+        }
+    };
+    for &h in handles.iter() {
+        let _ = st.boot_services().connect_controller(h, None, None, true);
+    }
+    serial_log(alloc::format!(
+        "[PCI] ConnectController tente sur {} handle(s)\r\n", handles.len()
+    ).as_bytes());
+}
+
 /// Parcourt tous les devices PCI (lecture seule) et logue vendor/device/classe
 /// pour chacun ; retourne les infos du premier contrôleur xHCI trouvé
 /// (classe 0x0C, sous-classe 0x03, prog-if 0x30), s'il y en a un.
 pub fn scan_for_xhci(st: &mut SystemTable<Boot>, image_handle: Handle) -> Option<XhciInfo> {
+    connect_all_controllers(st);
     let handles = match st.boot_services().find_handles::<PciIo>() {
         Ok(h) => h,
         Err(_) => {
@@ -278,6 +323,17 @@ pub fn scan_for_xhci(st: &mut SystemTable<Boot>, image_handle: Handle) -> Option
 
         // Classe 0x0C (Serial Bus Controller), sous-classe 0x03 (USB),
         // prog-if 0x30 (XHCI, USB3). 0x20 = EHCI/USB2, 0x00 = UHCI, 0x10 = OHCI.
+        // Un contrôleur USB non-xHCI (EHCI/OHCI/UHCI, matériel plus ancien ou
+        // config firmware différente) est logué explicitement même si ce module
+        // ne sait piloter que du xHCI — sans ce log, son absence de la liste
+        // finale se confondait avec "aucun contrôleur USB du tout" alors qu'il
+        // peut très bien être présent sous une autre forme.
+        if class == 0x0C && subclass == 0x03 && prog_if != 0x30 {
+            serial_log(alloc::format!(
+                "[PCI] controleur USB non-xHCI trouve en {:02x}:{:02x}.{} prog-if={:#04x} (EHCI=0x20/OHCI=0x10/UHCI=0x00) - non pilotable par ce module\r\n",
+                bus, dev, func, prog_if
+            ).as_bytes());
+        }
         if class == 0x0C && subclass == 0x03 && prog_if == 0x30 && result.is_none() {
             // BAR0 : offset 0x10 dans l'espace de config. Un contrôleur xHCI
             // déclare toujours un BAR mémoire (bit 0 = 0) ; bits [2:1] indiquent
@@ -302,6 +358,81 @@ pub fn scan_for_xhci(st: &mut SystemTable<Boot>, image_handle: Handle) -> Option
 
     if result.is_none() {
         serial_log(b"[PCI] Aucun controleur xHCI (classe 0C:03:30) trouve\r\n");
+    }
+    result
+}
+
+/// Résultat de la localisation d'un modem WWAN/cellulaire PCI (M.2 ou carte
+/// intégrée — les dongles USB ne sont PAS couverts ici, voir commentaire de
+/// `scan_for_wwan_modem`).
+pub struct WwanModemInfo {
+    pub handle: Handle,
+    pub bus: usize,
+    pub device: usize,
+    pub function: usize,
+    pub vendor_id: u16,
+    pub device_id: u16,
+}
+
+/// Parcourt tous les devices PCI (lecture seule, même mécanisme que
+/// `scan_for_xhci`) à la recherche d'un modem WWAN/cellulaire réel — classe
+/// 0x02 (Network Controller), sous-classe 0x80 ("Other network controller",
+/// la convention PCI standard pour les cartes WWAN/cellulaires M.2, utilisée
+/// par ex. par les modules Intel XMM7360/Fibocom/Quectel/Sierra Wireless).
+/// Retourne le PREMIER trouvé, ou None si aucun (cas normal sur une VM QEMU/
+/// VMware sans carte WWAN passthrough — état honnête, pas de simulation).
+///
+/// ⚠️ Couverture PARTIELLE assumée : un modem WWAN USB (dongle) ne serait PAS
+/// détecté ici — `usb.rs` n'expose aucune énumération générique indépendante
+/// du flux HID clavier/souris (voir investigation de cette session). Étendre
+/// cette détection au bus USB est un travail distinct, non fait ici.
+pub fn scan_for_wwan_modem(st: &mut SystemTable<Boot>, image_handle: Handle) -> Option<WwanModemInfo> {
+    let handles = match st.boot_services().find_handles::<PciIo>() {
+        Ok(h) => h,
+        Err(_) => {
+            serial_log(b"[WWAN-PCI] find_handles::<PciIo> echoue (protocole absent ?)\r\n");
+            return None;
+        }
+    };
+
+    let mut result: Option<WwanModemInfo> = None;
+
+    for h in handles {
+        let mut pci_io = match unsafe {
+            st.boot_services().open_protocol::<PciIo>(
+                OpenProtocolParams { handle: h, agent: image_handle, controller: None },
+                OpenProtocolAttributes::GetProtocol,
+            )
+        } {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+
+        let mut id_dw = [0u32; 1];
+        let mut class_dw = [0u32; 1];
+        if !pci_io.read_config32(0x00, &mut id_dw) { continue; }
+        if !pci_io.read_config32(0x08, &mut class_dw) { continue; }
+
+        let vendor_id = (id_dw[0] & 0xFFFF) as u16;
+        let device_id = (id_dw[0] >> 16) as u16;
+        let subclass = ((class_dw[0] >> 16) & 0xFF) as u8;
+        let class    = ((class_dw[0] >> 24) & 0xFF) as u8;
+
+        if class == 0x02 {
+            let (seg, bus, dev, func) = pci_io.location().unwrap_or((0, 0, 0, 0));
+            let _ = seg;
+            serial_log(alloc::format!(
+                "[WWAN-PCI] controleur reseau {:02x}:{:02x}.{} vendor={:04x} device={:04x} classe=02:{:02x}\r\n",
+                bus, dev, func, vendor_id, device_id, subclass
+            ).as_bytes());
+            if subclass == 0x80 && result.is_none() {
+                result = Some(WwanModemInfo { handle: h, bus, device: dev, function: func, vendor_id, device_id });
+            }
+        }
+    }
+
+    if result.is_none() {
+        serial_log(b"[WWAN-PCI] Aucun modem WWAN PCI (classe 02:80) trouve - etat honnetement non connecte\r\n");
     }
     result
 }

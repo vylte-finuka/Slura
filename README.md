@@ -18,6 +18,8 @@ Langage applicatif : **Maratine** (`.mara` → OVC bytecode → interprété par
 8. [Patterns UI — Recettes prêtes à l'emploi](#8-patterns-ui--recettes-prêtes-à-lemploi)
 9. [Limitations connues et contournements](#9-limitations-connues-et-contournements)
 10. [Sécurité](#10-sécurité)
+11. [Versionning & Build](#11-versionning--build)
+12. [Pipeline de build & test ISO/VM](#12-pipeline-de-build--test-isovm)
 
 ---
 
@@ -156,6 +158,60 @@ rel op Render: [ctx string, fnt ptr] [
 
 rel op Destroy: [] [ ret 0; ];
 ```
+
+### 2.8 Cycle de vie réel d'une app — `LAPrevent::Launch` se réexécute À CHAQUE FRAME
+
+**Fait contre-intuitif mais vérifié empiriquement** (journal série QEMU/VMware) : `rel op Launch` d'une `.marep` n'est **pas** exécuté une seule fois pour la durée de vie de l'app. Chaque frame noyau relance la chaîne complète depuis `OEntry` :
+
+```
+[CM] TemplateView::Destroy
+[FN] TemplateView::Destroy
+[OVC] exec_marep done
+[OVC] exec_marep start        ← nouvelle frame, tout redémarre ICI
+[OVC] constructors start
+[FN] LAPrevent::LAPrevent
+[OVC] OEntry start
+[FN] OEntry::OEntry
+[CM] LAPrevent::Launch        ← Launch() s'exécute À NOUVEAU
+[FN] LAPrevent::Launch
+```
+
+Le `loop (running) [ ... TemplateView***Render ... ]` à l'intérieur de `Launch` ne fait en réalité tourner **qu'un seul** `Render` avant que `ret 1` (retourné par `GpuFlushRenderContext != 0`) ne mette fin à la boucle — le noyau lui-même rappelle alors `exec_marep` depuis zéro pour la frame suivante.
+
+**Conséquence critique** : tout code placé dans `Launch`, AVANT la boucle, en pensant qu'il ne s'exécute "qu'une fois au lancement" s'exécute en fait **à chaque frame**. Lire `WindowManGetLaunchArg` de cette façon (pattern historique de ce projet, maintenant corrigé — voir §4.9) redéclenchait la même action à l'infini, rendant impossible toute navigation ultérieure.
+
+**Règle** : toute logique qui ne doit s'exécuter qu'une fois par événement (pas par frame) doit vivre **dans `TemplateView***Render`** (qui tourne aussi chaque frame, mais où l'état persistant via `SCROLL_SCRATCH` — voir §2.9 — permet un vrai edge-detect), jamais comme un "one-shot avant la boucle" dans `LAPrevent.mara`.
+
+### 2.9 Persistance d'état entre frames — `SCROLL_SCRATCH`
+
+Les variables locales `let`/`var` ne survivent PAS d'une frame à l'autre (voir §2.8 — tout redémarre). Le seul mécanisme de persistance inter-frames pour les valeurs numériques est un tableau **global au noyau**, 64 emplacements `i64`, partagé par TOUTES les apps/drivers en cours d'exécution :
+
+```mara
+let v: <i32> = <DrvAPIInterCon***ScrollGet***>(slot);
+let _: <i32> = <DrvAPIInterCon***ScrollSet***>(slot, newValue);
+```
+
+(Les variables `<string>` de classe dans `LAPrevent.mara` persistent aussi, par un mécanisme séparé — mais pas les `<ptr>`, non propagés depuis `self***`.)
+
+**⚠️ RÈGLE CRITIQUE — allocation des slots** : `SCROLL_SCRATCH` est un tableau **unique pour tout le système**, pas par-app. Deux apps qui tournent en même temps (le dock `ShiLauncher` tourne TOUJOURS en parallèle de n'importe quelle autre app ouverte) et qui utilisent le même slot pour des sémantiques différentes se marchent dessus silencieusement. Avant d'utiliser un nouveau slot dans un fichier `.mara`, **documenter en commentaire l'allocation complète connue** (voir l'en-tête de `ShiLooker.marep/base/TemplateView.mara` pour un exemple) et vérifier qu'aucun autre fichier actif en parallèle ne l'utilise déjà.
+
+Allocation connue à ce jour (non exhaustive — toujours vérifier le fichier lui-même) :
+
+| Slot(s) | Propriétaire | Usage |
+|---|---|---|
+| 1–6, 16 | `ShiLooker.marep/TemplateView.mara` | Navigation colonne droite, edge-detect, génération launch_arg |
+| 8 | `ShiLauncher.marep/ContextMenu.mara` | Edge-detect clic du menu contextuel du dock |
+| 9–10 | `ShiLauncher.marep/ContextMenu.mara` | Ancre (x, y) du sous-menu flottant (ex: "System power") |
+| 12 | `SluWWANManSrv.marep/TemplateView.mara` | Edge-detect clic |
+| 15 | `ShiLooker.marep/TemplateView.mara` | Génération du dernier clic traité sur le menu contextuel générique (GlobalMenu mode contexte — remplace FolderMenu.mara, supprimé) |
+| 20–25 | `ShiLooker.marep/TemplateView.mara` | Intégration VMware (TBD) |
+| 26–29 | `ShiLooker.marep/TemplateView.mara` | Menu Photo/Video (26), enregistrement vidéo (27), throttle capture (28), tick "photo saved" (29) |
+| 30 | `ShiLooker.marep/TemplateView.mara` | Edge-detect clic du badge dossier (widget ShiCamera) |
+| 31 | `ShiLooker.marep/CaptureFolderPicker.mara` | Edge-detect clic du sélecteur de dossier de capture |
+| 40+n | `ShiLauncher.marep/TemplateView.mara` | Compteur d'appui long par icône du dock (n = index registre) |
+| 48 | Partagé (toute app avec menu contextuel interne, ex: `ShiLooker.marep/TemplateView.mara`) | Flag "ce clic droit a déjà ouvert un menu contextuel plus spécifique" — lu par `ShiLauncher.marep/LAPrevent.mara` avant d'ouvrir GlobalMenu, remis à 0 chaque tick |
+| 49+wi | `ShiLauncher.marep/LAPrevent.mara` | Edge-detect clic droit du menu global "in-app" (par fenêtre `wi`) — clic droit n'importe où dans une app, plus de bouton dédié |
+| 50 | `ShiLauncher.marep/GlobalMenu.mara` | Edge-detect clic gauche du menu global |
 
 ---
 
@@ -452,6 +508,118 @@ Empile une zone de clip arrondie. Tous les draws suivants sont clippés à cette
 7. GpuDrawTextFontAlign (textes)
 8. GpuFlushRenderContext(ctx)                           ← commit framebuffer
 ```
+
+### 4.9 Fenêtrage, registre d'apps, dock & menu contextuel
+
+Ces `DrvAPIInterCon***...***` ne dessinent rien elles-mêmes — elles pilotent l'état noyau (fenêtres ouvertes, registre d'apps, menu contextuel) que le code applicatif (`ShiLauncher.marep`, dock) interroge pour se dessiner.
+
+#### Registre d'apps installées (`AppRegistry...`)
+
+Le dock n'affiche que les apps réellement installées sous `SDC:/slu64/apps/<App>/` (présence de `Maraset.yaml`), pas une liste codée en dur.
+
+| Fonction | Retour | Description |
+|---|---|---|
+| `AppRegistryCount()` | `i32` | Nombre d'apps installées |
+| `AppRegistryGetName(i)` | `ptr` | Nom du dossier (utilisé comme identifiant de fenêtre) |
+| `AppRegistryGetIconPath(i)` | `ptr` | Chemin SRFS de l'icône, ou `nullptr` |
+| `AppRegistryGetDiamondColor(i)` | `i32` | Couleur ARGB du losange dock (`diamond_color` du `Maraset.yaml`) |
+| `AppRegistryGetPinned(i)` / `AppRegistrySetPinned(i, 0/1)` | `i32` | Épinglage au dock (survit à la session, pas au reboot) |
+| `AppRegistryGetMenuItemCount(i)` / `GetMenuItemLabel(i, j)` | `i32`/`ptr` | Items du menu contextuel déclarés par l'app (voir ci-dessous) |
+| `AppRegistryGetMenuItemSubmenuCount(i, j)` / `GetMenuItemSubmenuLabel(i, j, k)` | `i32`/`ptr` | Sous-menu d'un item |
+
+**`dock_menu_items` (`Maraset.yaml`)** — scalaire une ligne (le parseur `Maraset.yaml` ne supporte AUCUNE liste YAML, seulement `clé: valeur`) :
+
+```yaml
+dock_menu_items: "New Folder|New File>txt,md,bmp|Mount SDC|Mount A"
+```
+
+`|` sépare les items du menu principal. `>sub1,sub2,...` (optionnel) déclare un sous-menu pour l'item qui précède.
+
+#### Fenêtrage (`WindowMan...`)
+
+| Fonction | Retour | Description |
+|---|---|---|
+| `WindowManCount()` | `i32` | Fenêtres ouvertes |
+| `WindowManFindByName(name)` | `i32` | Index de la fenêtre nommée `name`, ou `-1` |
+| `WindowManLaunch(name [, arg])` | `i32` | Lance une NOUVELLE instance — **ne déduplique jamais par nom** (voir §9.7), toujours vérifier `WindowManFindByName` avant d'appeler |
+| `WindowManGetX/Y/W/H(i)` | `i32` | Géométrie de la fenêtre |
+| `WindowManGetOpenTick(i)` | `i32` | Tick d'ouverture (animations dock) |
+| `WindowManGetLaunchArg(i)` | `ptr` | Argument passé par `WindowManLaunch`/`WindowManSetLaunchArg` — pointeur nul-terminé, jamais vide (`"\0"` si aucun) |
+| `WindowManGetLaunchArgGen(i)` | `i32` | Génération de `launch_arg` — incrémentée à chaque écriture. À comparer à une valeur stockée en `SCROLL_SCRATCH` pour ne traiter un argument qu'UNE fois (voir §2.8/§2.9) |
+| `WindowManSetLaunchArg(i, arg)` | `i32` | Met à jour l'argument d'une fenêtre **déjà ouverte**, sans la relancer (bump la génération) |
+
+#### Menu contextuel du dock (`Menu...`, `ShiLauncher.marep/base/ContextMenu.mara`)
+
+État noyau minimal (ouvert/fermé, propriétaire, position) — la LISTE d'items n'est jamais dupliquée côté noyau, recalculée chaque frame depuis `AppRegistryGetMenuItemCount/Label`.
+
+```mara
+let _: <i32> = <DrvAPIInterCon***MenuOpen***>(ownerIdx, anchorX, anchorY);
+let isOpen: <i32> = <DrvAPIInterCon***MenuIsOpen***>();
+let ownerIdx: <i32> = <DrvAPIInterCon***MenuGetOwnerIdx***>();
+let _: <i32> = <DrvAPIInterCon***MenuClose***>();
+let _: <i32> = <DrvAPIInterCon***MenuOpenSubmenu***>(itemIdx);
+let openSub: <i32> = <DrvAPIInterCon***MenuGetOpenSubmenuIdx***>();
+```
+
+Rendu = carte givrée, **toujours** dans cet ordre (voir §5.2) : `GpuSetTransform2D` → `GpuBackgroundBlur` → `GpuResetTransform` → `GpuDrawDropShadow` → `GpuDrawRoundedRectAlpha`.
+
+**⚠️ Ce state est GLOBAL au noyau (voir §9.7)** — n'importe quel autre menu contextuel dans le système DOIT utiliser son propre jeu d'entiers dédié (voir `FolderMenu***` de `ShiLooker.marep` comme modèle : `FolderMenuOpen/Close/IsOpen/GetRow/GetX/GetY`), jamais réutiliser `Menu***`.
+
+#### Menu global in-app (`GlobalMenu***`, `ShiLauncher.marep/base/GlobalMenu.mara`)
+
+Menu global affiché depuis le **bouton menu** en haut à droite (Figma 900:88). Affiche TOUS les apps **épinglés** au dock avec leurs losanges et `dock_menu_items`, séparés par des lignes noires.
+
+**Slot SCROLL_SCRATCH : 50** = edge-detect clic gauche pour le bouton global menu.
+
+```mara
+// Ouvrir le menu global (bouton menu haut-droit)
+let _: <i32> = <DrvAPIInterCon***MenuOpenGlobal***>(anchorX, anchorY);
+
+// Vérifier si ouvert
+let isOpen: <i32> = <DrvAPIInterCon***MenuIsOpenGlobal***>();
+
+// Position du menu
+let x: <i32> = <DrvAPIInterCon***MenuGetGlobalX***>();
+let y: <i32> = <DrvAPIInterCon***MenuGetGlobalY***>();
+
+// Fermer
+let _: <i32> = <DrvAPIInterCon***MenuCloseGlobal***>();
+```
+
+**Itération des apps épinglés :**
+```mara
+let pinnedCount: <i32> = <DrvAPIInterCon***AppRegistryGetPinnedCount***>();
+let appIdx: <i32> = <DrvAPIInterCon***AppRegistryGetPinnedIndex***>(i);
+```
+
+### 4.10 Disques, navigation fichiers, texte
+
+| Fonction | Retour | Description |
+|---|---|---|
+| `MountTableCount()` | `i32` | Disques réellement montés |
+| `MountTableGetLetter(i)` | `ptr` | Lettre réelle (ex `"SDC:\"`) |
+| `MountTableGetDiskId(i)` | `i32` | `0`=SRFS(SDC:) `1`=NTFS(A:) |
+| `MountTableGetLabel(i)` | `ptr` | Libellé compact une-ligne construit côté Rust, ex `"Disque systeme (SDC:)"` — jamais concaténer nom+lettre côté Mara |
+| `DiskMount(id)` / `DiskUnmount(id)` | `i32` | Idempotent ; **affichage seulement** — rien ne route réellement les I/O via `MOUNT_TABLE` aujourd'hui |
+| `DiskFormat(id)` / `DiskIsFormattedSession(id)` | `i32` | Marque un flag **session uniquement**, ne touche jamais l'image disque réelle |
+| `DiskBrowseReset(letterPtr)` / `DiskBrowseGetPath()` | — / `ptr` | Réinitialise/lit le chemin de navigation courant (`"SDC:/..."`) |
+| `DiskBrowseNavigateInto(name)` / `DiskBrowseNavigateUp()` | `i32` | Navigation dossier |
+| `DiskBrowseCreateEntry(kind)` | `i32` | Crée fichier/dossier depuis `TextField*` — `kind` : `0`=dossier `1`=.txt `2`=.md `3`=.bmp — **session uniquement, non persistant** |
+| `DiskCacheDirCount(pathPtr)` / `DiskCacheDirGetName(i)` | `i32` / `ptr` | Liste le "dossier" courant — pour `SDC:`, fusionne le VRAI contenu de la partition ESP hôte (lecture UEFI `SimpleFileSystem` réelle) ET les entrées créées cette session (`SRFS_CACHE`) ; pour `A:`, cache seulement |
+| `FolderColorGet(basePtr, namePtr)` / `FolderColorSet(basePtr, namePtr, argb)` | `i32` | Couleur personnalisée d'un dossier (clé = chemin complet, construit côté Rust) |
+| `TextFieldAppendChar(code)` / `Backspace()` / `Clear()` / `GetPtr()` | — / `ptr` | Champ de saisie générique (nom de fichier) — `KeyGetCode()` ne donne qu'UNE touche par frame, ce buffer accumule |
+
+Les noms de dossier renvoyés par `DiskCacheDirGetName` se terminent par `/` — tester via `StrCharAt(name, StrLen(name)-1) == 47` (code ASCII de `/`).
+
+### 4.11 Utilitaires chaînes (`DrvManSpec`)
+
+**Mara n'a aucune concaténation de chaîne fiable** (`<string> + <string>`/`+<i32>` compile mais n'a aucune garantie d'exécution réelle côté interpréteur OVC — aucun opcode Concat/Sprintf). Toute construction de chemin/libellé doit se faire côté Rust (voir `disk_browse_create_entry`, `mount_table_label_ptr` pour des exemples) et être exposée comme un pointeur déjà prêt.
+
+| Fonction | Retour | Description |
+|---|---|---|
+| `StrLen(ptr)` | `i32` | Longueur (hors terminateur nul) |
+| `StrCharAt(ptr, idx)` | `i32` | Code ASCII du caractère à `idx` — bornes vérifiées, renvoie `0` hors limites (jamais de lecture hors-tampon) |
+| `StrEqual(ptrA, ptrB)` | `i32` | `1` si chaînes identiques, `0` sinon — utile pour comparer `WindowManGetLaunchArg()` à des littéraux connus |
 
 ---
 
@@ -1190,6 +1358,26 @@ Si `GpuDrawTextFontAlign` ne dessine rien (`DrawText=0` dans le debug kernel), `
 
 Si plus de 8 `ImageLoad` sont actifs simultanément dans le même `rel op Render`, les handles les plus anciens sont invalides. Toujours utiliser **une seule `var im: <i32>`** réutilisée séquentiellement.
 
+### 9.7 État noyau partagé entre apps — jamais réutiliser un jeu d'entiers d'état pour deux menus différents
+
+`ShiLauncher.marep` (le dock) tourne **en permanence** en parallèle de n'importe quelle autre app ouverte, et relit son propre état de menu contextuel (`Menu***`, voir §4.9) à chaque frame pour se dessiner. Un second menu contextuel ailleurs dans le système (ex: menu couleur de dossier de `ShiLooker.marep`) qui réutiliserait le MÊME état `Menu***` casserait les deux : dès que le second menu écrit son propre "propriétaire" (un index de ligne, pas un index d'app), le dock l'interprète comme un index d'app invalide et dessine n'importe quoi par-dessus (ou en dessous) de ce que montre l'autre app.
+
+**Règle** : tout nouveau menu contextuel / overlay UI mono-instance doit avoir son **propre** jeu de statics Rust + FFI dédiées (voir `FolderMenuOpen/Close/IsOpen/GetRow/GetX/GetY` de `ShiLooker.marep/base/FolderMenu.mara` comme modèle), même si la logique de rendu est copiée du menu existant. Ne jamais supposer qu'un seul menu peut être ouvert à la fois dans TOUT le système — seulement qu'un seul peut être ouvert par mécanisme d'état.
+
+### 9.8 `WindowManLaunch` ne déduplique jamais par nom
+
+`WindowManLaunch(name, arg)` charge et instancie **toujours** une nouvelle fenêtre — il n'existe aucune vérification interne pour un nom déjà en cours d'exécution. Un appel sur une app déjà ouverte crée une **seconde instance indépendante** au lieu d'agir sur celle existante.
+
+**Règle** : avant tout `WindowManLaunch(name, ...)` déclenché par un menu/bouton (pas le lancement initial normal d'une app), vérifier `WindowManFindByName(name)` :
+
+```mara
+let existingIdx: <i32> = <DrvAPIInterCon***WindowManFindByName***>(name);
+if (existingIdx < 0) [ let _: <i32> = <DrvAPIInterCon***WindowManLaunch***>(name, arg); ];
+if (existingIdx >= 0) [ let _: <i32> = <DrvAPIInterCon***WindowManSetLaunchArg***>(existingIdx, arg); ];
+```
+
+Voir §2.8 pour pourquoi l'app cible doit lire cet argument avec un edge-detect par génération (`WindowManGetLaunchArgGen`), pas un simple "lu une fois avant la boucle".
+
 ---
 
 ## 10. Sécurité
@@ -1201,6 +1389,137 @@ Pipeline de chargement `.marep` :
 2. Vérification AuthARoot (`Maraset.yaml` SRID ↔ `RAbstractallowing.xml`)
 3. Auto-install assets → `SDC:/apps/<AppName>/`
 4. Exécution OVC via `exec_marep` (entry point `OEntry` → `Render`)
+
+---
+
+## 11. Versionning & Build
+
+### 11.1 Deux axes indépendants
+
+Slura distingue deux identifiants qui ne se substituent jamais l'un à l'autre :
+
+- **Version sémantique** (`package.version` dans `Maraset.yaml`, et `version` dans chaque `Cargo.toml`) — `MAJOR.MINOR.PATCH`, changée à la main, uniquement quand une compatibilité ou une fonctionnalité change réellement. Chaque crate Rust (`lunee-ker`, `vuc-platform`, `vuc-core`...) et chaque bundle Maratine (`.slul`/`.marep`) porte SA PROPRE semver, indépendante des autres — un `lunee-ker 0.1.0` n'a aucun rapport avec le `1.0.0` d'un driver `.slul`.
+- **Horodatage de build** (`package.build` dans `Maraset.yaml`, champ `Marav`, nom de fichier `.iso`) — format **`DDMMYYHH`** (jour, mois, année sur 2 chiffres, heure), généré à chaque build. Identifie QUAND un artefact précis a été produit — pas ce qu'il contient ni sa compatibilité.
+
+### 11.2 Format `DDMMYYHH`
+
+```text
+DD MM YY HH
+29 06 26 17   →  29 juin 2026, 17h
+```
+
+| Champ | Sens                        | Chiffres  |
+| ----- | --------------------------- | --------- |
+| `DD`  | Jour du mois                | 01–31     |
+| `MM`  | Mois                        | 01–12     |
+| `YY`  | Année (2 derniers chiffres) | 26 = 2026 |
+| `HH`  | Heure du build, 24h         | 00–23     |
+
+Généré **dynamiquement** par la tâche `make: booter.iso` (`.vscode/tasks.json`) à chaque run — `$stamp = Get-Date -Format 'ddMMyyHH'`, pas une valeur figée dans le fichier :
+
+```text
+Slura1_NAVERTA_dev_build17072617.iso
+ │     │        │   └─ DDMMYYHH : horodatage réel du build (Get-Date)
+ │     │        └─ canal de release (§11.3b)
+ │     └─ codename de la ligne de release (§11.3)
+ └─ numéro de distribution Slura
+```
+
+Le **même** stamp est propagé aux `Maraset.yaml` sources (`build:`, `Marav:`, et les versions `dependencies.basecon`) par la tâche `stamp: Maraset build (dynamic)` (`slr_clk_bt/x64/amd64/stamp-maraset.ps1`), qui s'exécute automatiquement avant tout `marai build` (dépendance de `make: ESP dirs`). Les deux tâches partagent le même input `releaseChannel` — un seul choix de canal par run, réutilisé partout.
+
+### 11.3 Nom de release / codename
+
+`NAVERTA` est le codename de la ligne de release courante — apparaît dans `package.version` des `.marep` (ex: `v1 NAVERTA build 20260714-01` dans `ShiLauncher.marep/Maraset.yaml`) et dans le nom de l'ISO. Il change avec la ligne de release (pas à chaque build individuel).
+
+### 11.3b Canal de release
+
+La tâche `make: booter.iso` demande le canal via l'input VS Code `releaseChannel` (`pickString`, menu déroulant à chaque run) :
+
+| Canal     | Usage                       |
+| --------- | --------------------------- |
+| `dev`     | Build dev en cours (defaut) |
+| `beta`    | Candidat pre-release        |
+| `release` | Distribution stable         |
+
+Le canal choisi est injecté tel quel dans le nom de fichier ISO — voir §11.2.
+
+### 11.4 SRID — un identifiant partagé, PAS une version
+
+Le `SRID` (`SRID_slura_os_29062617` — identique dans TOUS les `Maraset.yaml`/`RAbstractallowing.xml` du dépôt) sert à la vérification AuthARoot au chargement — ce n'est ni une version ni un build. Contrairement à une convention SRID-par-composant, Slura utilise un SRID unique pour l'ensemble de l'OS (décision produit — voir historique de conversation), donc il ne distingue plus les composants entre eux, seulement l'appartenance à Slura OS.
+
+### 11.5 État actuel du dépôt — écart connu
+
+Le générateur d'apps (`tools/maratinekit-tool-builder/src/generator/templates.ts`, fonction `buildStamp()`) produit aujourd'hui `YYYYMMDD-01` pour `package.build`/`Marav` (ex: `20260714-01`), et la plupart des `Maraset.yaml` existants suivent encore ce format hérité — pas `DDMMYYHH`. Seuls le nom du fichier ISO (`build29062617.iso`, littéral dans `tasks.json`) et `package.version` de `TestApp.marep` (`v1 NAVERTA build 29062617`) utilisent réellement `DDMMYYHH` aujourd'hui.
+
+**`DDMMYYHH` est la structure cible** pour tout nouveau build — les fichiers encore en `YYYYMMDD-01` ne sont pas alignés et devront être migrés (générateur inclus) séparément ; cette section documente la convention à suivre, elle ne corrige pas encore le générateur.
+
+---
+
+## 12. Pipeline de build & test ISO/VM
+
+### 12.1 `efiboot.img` — pourquoi l'ISO a besoin d'une vraie image FAT
+
+`make: booter.iso` (`.vscode/tasks.json`) construit l'ISO via `xorriso -as mkisofs ... -eltorito-alt-boot -e efiboot.img -no-emul-boot -isohybrid-gpt-basdat`. Le fichier référencé par `-e` doit être une **vraie partition FAT32** contenant tout `esp/` (BOOTX64.EFI, slr_clk_bt.efi, drivers, apps) — pas le `.EFI` brut. QEMU/OVMF tolère un exécutable PE nu comme image El Torito "no emulation", mais **le firmware EFI de VMware Workstation ne le supporte pas** et échoue silencieusement en "No Media" sur le lecteur CD-ROM.
+
+`efiboot.img` est construit via WSL (`mkfs.vfat` + montage loop — aucun outil équivalent fiable côté Windows natif) :
+
+```bash
+dd if=/dev/zero of=efiboot.img bs=1M count=512
+mkfs.vfat -F 32 -n SLURA_ESP efiboot.img
+mount -o loop efiboot.img /mnt/efimnt
+cp -r esp/. /mnt/efimnt/
+umount /mnt/efimnt
+```
+
+**⚠️ Piège poupée russe** : `efiboot.img` est copié DANS `esp/` (`esp/efiboot.img`) pour être référençable par `xorriso` comme un fichier normal de l'arborescence source. Si `esp/efiboot.img` d'un run précédent n'est PAS supprimé avant de reconstruire une nouvelle image, le nouveau `efiboot.img` s'embarque lui-même récursivement — 26 Mo → 96 Mo → 218 Mo → ... à chaque run. **Toujours supprimer `esp/efiboot.img` (et `esp/sources/install.slin`, même piège — voir §11.5 commentaire du générateur `install.slin`) au tout début du pipeline** (`make: ESP dirs`, le premier point de passage commun), pas seulement dans la tâche qui les régénère — sinon une tâche EN AMONT dans le graphe de dépendances (ex: `marai image: create install.slin`, qui capture tout `esp/` comme source) embarque la version encore présente de l'autre fichier avant que sa propre tâche de nettoyage ait pu s'exécuter.
+
+### 12.2 `boot_selector.cpp` — timeout de démarrage automatique
+
+Le sélecteur de boot (`BOOTX64.EFI`) attend une touche avant de charger `slr_clk_bt.efi`. Sans limite de temps, ce blocage est invisible avec un clavier réel mais bloque **tout test automatisé** — VMware Workstation n'autorise l'injection de touches/souris par script qu'avec des identifiants invité (non disponibles pour une VM sans OS installé). `boot_selector.cpp` implémente donc un timeout de 5 secondes (`for (int waited = 0; waited < 100; ++waited) { ...ReadKeyStroke...; bs->Stall(50000); }`) qui démarre automatiquement si aucune touche n'arrive, sans supprimer la possibilité d'appuyer plus tôt.
+
+### 12.3 Test QEMU headless (le plus simple, mais limité)
+
+```bash
+qemu-system-x86_64 \
+    -nodefaults -machine q35,accel=tcg -m 1024M \
+    -device virtio-vga -display none \
+    -device qemu-xhci,id=xhci \
+    -device usb-tablet,bus=xhci.0 -device usb-kbd,bus=xhci.0 \
+    -drive if=pflash,format=raw,readonly=on,file=OVMF_CODE_4M.fd,id=ovmf_code \
+    -drive if=pflash,format=raw,file=OVMF_VARS_4M.fd,id=ovmf_vars \
+    -drive if=ide,format=raw,file=fat:rw:esp/ \
+    -chardev file,id=ser0,path=serial.log -serial chardev:ser0 \
+    -monitor none -no-reboot -no-shutdown
+```
+
+**⚠️ `-drive file=fat:rw:esp/` mappe le dossier `esp/` directement comme un disque FAT synthétique** — si `esp/` dépasse ~512 Mo (typiquement à cause de `efiboot.img` qui y réside en permanence après un `make: booter.iso`), QEMU refuse de démarrer (`Directory does not fit in FAT16`). Ceci n'affecte QUE ce chemin de test rapide, pas l'ISO réelle (xorriso ne souffre pas de cette limite) — dans ce cas, tester directement via l'ISO + VMware (§12.4), ou temporairement déplacer `efiboot.img` hors de `esp/` avant le test QEMU.
+
+Pilotage programmatique (pas d'accès souris/clavier interactif requis) via le moniteur QMP :
+
+```python
+import socket, json, time
+s = socket.create_connection(("127.0.0.1", 4450))
+s.recv(4096)
+s.sendall(json.dumps({"execute": "qmp_capabilities"}).encode() + b"\n"); s.recv(4096)
+# Touche : {"execute":"input-send-event","arguments":{"events":[{"type":"key","data":{"down":True,"key":{"type":"qcode","data":"ret"}}}]}}
+# Capture écran (fonctionne même avec -display none) : {"execute":"screendump","arguments":{"filename":"/tmp/shot.ppm"}}
+```
+
+`screendump` produit un PPM brut — convertible en PNG sans dépendance externe (zlib de la stdlib suffit pour encoder un PNG minimal).
+
+### 12.4 Test VMware Workstation
+
+`6️⃣ vmware: run UEFI test` repère automatiquement le dernier ISO `Slura1_NAVERTA_*.iso` (par date de modification) et corrige `ide1:0.fileName` dans `VyftUEFI.vmx` avant `vmrun -T ws start ... nogui` — sans ça, VMware rejoue une référence figée, potentiellement un ISO supprimé (→ "No Media").
+
+**Diagnostic sans accès souris/clavier** (aucun identifiant invité disponible pour `vmrun`) : ajouter un port série redirigé vers un fichier dans le `.vmx` — le noyau écrit déjà tous ses logs sur COM1 (`0x3F8`) :
+
+```ini
+serial0.present  = "TRUE"
+serial0.fileType = "file"
+serial0.fileName = "VyftUEFI-serial.log"
+```
+
+Puis surveiller `vmware.log` (`Guest: Status upon boot failure: No Media` — vérifier QUEL périphérique : `ide0:0`/disque dur vide = normal et attendu tant qu'aucun OS n'y est installé, `ide1:0`/CD-ROM = problème réel, voir §12.1) et `VyftUEFI-serial.log` (doit continuer à grossir frame après frame si le noyau tourne).
 
 ---
 
@@ -1221,6 +1540,11 @@ Pipeline de chargement `.marep` :
 | ☐ | PNGs exportés RGBA (fond transparent dans Figma) |
 | ☐ | SVGs sans commandes `C/S/Q/A` (Flatten dans Figma avant export) |
 | ☐ | Pivot `GpuSetTransform2D` = centre de l'élément en pixels écran (post-scale) |
+| ☐ | Nouveau slot `SCROLL_SCRATCH` documenté en en-tête de fichier, vérifié non utilisé par une autre app active en parallèle (§2.9) |
+| ☐ | Toute logique "ne doit s'exécuter qu'une fois" vit dans `Render` avec edge-detect, jamais comme code "avant la boucle" dans `LAPrevent***Launch` (§2.8) |
+| ☐ | Tout nouveau menu contextuel a son propre état noyau dédié, jamais partagé avec `Menu***` (§9.7) |
+| ☐ | `WindowManLaunch` déclenché par un menu/bouton précédé d'un `WindowManFindByName` (§9.8) |
+| ☐ | `esp/efiboot.img` et `esp/sources/install.slin` supprimés avant tout run complet du pipeline ISO (§12.1) |
 
 ---
 

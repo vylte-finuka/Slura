@@ -50,7 +50,17 @@ pub fn load_and_run(
     st:           &mut SystemTable<Boot>,
     image_handle: Handle,
 ) -> Result<i32, BundleError> {
+    crate::ovc_exec::screen_log(st, "[MARATINE] load_marep_modules start", 0);
+    // Flush AVANT l'étape risquée, pas seulement après : si load_marep_modules
+    // plante (fault matériel, pas juste un Err propre), rien après ce point ne
+    // s'exécuterait — sans ce flush préalable, le fichier ESP resterait vide
+    // et on perdrait justement les logs des étapes qui viennent de se lancer.
+    crate::ovc_exec::flush_boot_log_to_esp(st, image_handle);
     let (_, modules) = load_marep_modules(st, image_handle, HOME_MAREP)?;
+    crate::ovc_exec::screen_log(st, &alloc::format!(
+        "[MARATINE] load_marep_modules OK, {} module(s), appel render_from_marep", modules.len()
+    ), 0);
+    crate::ovc_exec::flush_boot_log_to_esp(st, image_handle);
     crate::kernel_runtime::render_from_marep(st, image_handle, &modules);
     Ok(0)
 }
@@ -91,8 +101,16 @@ pub fn load_marep_modules(
     image_handle: Handle,
     path:         &uefi::CStr16,
 ) -> Result<(alloc::string::String, alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<u8>)>), BundleError> {
+    crate::ovc_exec::screen_log(st, "[MARATINE] find_and_read start", 0);
+    crate::ovc_exec::flush_boot_log_to_esp(st, image_handle);
     let bundle = find_and_read(st, image_handle, path)?;
+    crate::ovc_exec::screen_log(st, &alloc::format!(
+        "[MARATINE] find_and_read OK, {} octets", bundle.len()
+    ), 0);
+    crate::ovc_exec::flush_boot_log_to_esp(st, image_handle);
     let zip = ZipReader::new(&bundle)?;
+    crate::ovc_exec::screen_log(st, "[MARATINE] ZipReader::new OK", 0);
+    crate::ovc_exec::flush_boot_log_to_esp(st, image_handle);
 
     // ── AuthARoot : vérification SRID ────────────────────────────────────────
     let maraset  = zip.extract_file("Maraset.yaml").unwrap_or_default();
@@ -106,15 +124,15 @@ pub fn load_marep_modules(
     let icon         = extract_yaml_scalar(&maraset, "icon").unwrap_or("");
     let display_name = extract_yaml_scalar(&maraset, "display_name").unwrap_or("");
 
-    {
-        use core::fmt::Write;
-        if auth_ok {
-            let _ = st.stdout().write_str("[AuthARoot] SRID verifie OK\r\n");
-        } else {
-            let _ = st.stdout().write_str("[AuthARoot] WARN: SRID non verifie\r\n");
-        }
-        let _ = write!(st.stdout(), "[MARASET] srid={} icon={} name={}\r\n", srid, icon, display_name);
-    }
+    crate::ovc_exec::screen_log(st, if auth_ok {
+        "[AuthARoot] SRID verifie OK"
+    } else {
+        "[AuthARoot] WARN: SRID non verifie"
+    }, 0);
+    crate::ovc_exec::screen_log(st, &alloc::format!(
+        "[MARASET] srid={} icon={} name={}", srid, icon, display_name
+    ), 0);
+    crate::ovc_exec::flush_boot_log_to_esp(st, image_handle);
 
     // ── OVC ──────────────────────────────────────────────────────────────────
     const MAGIC: &[u8] = b"# Vyft OVC v1.0";
@@ -124,6 +142,8 @@ pub fn load_marep_modules(
     if oentry.len() < MAGIC.len() || &oentry[..MAGIC.len()] != MAGIC {
         return Err(BundleError::EmptyBinary);
     }
+    crate::ovc_exec::screen_log(st, "[MARATINE] OEntry.ovc extrait et magic verifie OK", 0);
+    crate::ovc_exec::flush_boot_log_to_esp(st, image_handle);
 
     // Découverte dynamique des OVC depuis le répertoire central du ZIP.
     // Le kernel ne hardcode aucun nom de module — tous les base/*.ovc sont chargés.
@@ -146,18 +166,23 @@ pub fn load_marep_modules(
         }
     }
 
-    {
-        use core::fmt::Write;
-        let _ = write!(st.stdout(),
-            "[MARATINE] {} modules OVC charges\r\n", modules.len());
-    }
+    crate::ovc_exec::screen_log(st, &alloc::format!(
+        "[MARATINE] {} modules OVC charges", modules.len()
+    ), 0);
+    crate::ovc_exec::flush_boot_log_to_esp(st, image_handle);
 
     // ── Installation automatique des assets → SDC:/apps/<AppName>/ ──────────
     // Chaque .marep est installé sur l'ESP au premier chargement.
     // Les fichiers assets (*.slasset/) sont copiés dans SDC/slu64/apps/<AppName>/
     // avant que l'OVC tourne, de sorte que les ImageLoad("SDC:/apps/...") réussissent.
     let app_name = zip.find_app_name().unwrap_or_else(|| alloc::string::String::from("App"));
+    crate::ovc_exec::screen_log(st, &alloc::format!(
+        "[MARATINE] app_name={} - install_assets_to_esp start", app_name
+    ), 0);
+    crate::ovc_exec::flush_boot_log_to_esp(st, image_handle);
     install_assets_to_esp(st, image_handle, &zip, &app_name, &maraset);
+    crate::ovc_exec::screen_log(st, "[MARATINE] install_assets_to_esp done", 0);
+    crate::ovc_exec::flush_boot_log_to_esp(st, image_handle);
 
     Ok((app_name, modules))
 }
@@ -171,13 +196,23 @@ fn find_and_read(st: &mut SystemTable<Boot>, image_handle: Handle, path: &uefi::
         .boot_services()
         .find_handles::<SimpleFileSystem>()
         .map_err(|_| BundleError::UefiError)?;
+    crate::ovc_exec::serial_log(alloc::format!(
+        "[MARATINE] find_and_read: {} volume(s) SimpleFileSystem\r\n", handles.len()
+    ).as_bytes());
 
-    for &fs_handle in handles.iter() {
+    for (i, &fs_handle) in handles.iter().enumerate() {
+        crate::ovc_exec::serial_log(alloc::format!(
+            "[MARATINE] find_and_read: essai volume {}\r\n", i
+        ).as_bytes());
         if let Ok(bytes) = read_from_volume(st, image_handle, fs_handle, path) {
+            crate::ovc_exec::serial_log(alloc::format!(
+                "[MARATINE] find_and_read: trouve sur volume {} ({} octets)\r\n", i, bytes.len()
+            ).as_bytes());
             return Ok(bytes);
         }
     }
 
+    crate::ovc_exec::serial_log(b"[MARATINE] find_and_read: introuvable sur tous les volumes\r\n");
     Err(BundleError::FileNotFound)
 }
 
@@ -250,16 +285,32 @@ fn install_assets_to_esp(
     };
 
     let assets = zip.list_all_assets();
+    crate::ovc_exec::screen_log(st, &alloc::format!(
+        "[INSTALL] {} asset(s) a installer", assets.len()
+    ), 0);
     if assets.is_empty() && maraset.is_empty() { return; }
 
     let handles = match st.boot_services().find_handles::<SimpleFileSystem>() {
         Ok(h) => h,
-        Err(_) => return,
+        Err(_) => {
+            crate::ovc_exec::screen_log(st, "[INSTALL] find_handles::<SimpleFileSystem> echoue", 0);
+            return;
+        }
     };
+    crate::ovc_exec::screen_log(st, &alloc::format!(
+        "[INSTALL] {} volume(s) SimpleFileSystem trouve(s)", handles.len()
+    ), 0);
 
     // installed > 0 une fois que les assets sont écrits — log après que fs est droppé.
     let mut installed = 0usize;
-    'volumes: for &fs_handle in handles.iter() {
+    'volumes: for (vol_i, &fs_handle) in handles.iter().enumerate() {
+        // screen_log emprunte `st` en mutable (stdout()) — impossible à
+        // l'intérieur du scope fs/root ci-dessous, qui emprunte aussi `st`.
+        // serial_log seul (pas de dépendance à `st`) reste utilisable dedans ;
+        // l'écran est mis à jour juste après, une fois le scope fermé.
+        crate::ovc_exec::serial_log(alloc::format!(
+            "[INSTALL] volume {} : ouverture...\r\n", vol_i
+        ).as_bytes());
         let wrote = {
             let mut fs = match unsafe {
                 st.boot_services().open_protocol::<SimpleFileSystem>(
@@ -274,6 +325,9 @@ fn install_assets_to_esp(
                 Ok(r) => r,
                 Err(_) => continue,
             };
+            crate::ovc_exec::serial_log(alloc::format!(
+                "[INSTALL] volume {} ouvert, ecriture de {} asset(s)\r\n", vol_i, assets.len()
+            ).as_bytes());
             let mut w = 0usize;
             for (rel_path, data) in &assets {
                 let dest = alloc::format!("SDC\\slu64\\apps\\{}\\{}",
@@ -281,6 +335,9 @@ fn install_assets_to_esp(
                 esp_ensure_parent_dirs(&mut root, &dest);
                 if esp_write_file(&mut root, &dest, data) { w += 1; }
             }
+            crate::ovc_exec::serial_log(alloc::format!(
+                "[INSTALL] volume {}: {}/{} asset(s) ecrits\r\n", vol_i, w, assets.len()
+            ).as_bytes());
             // Copie Maraset.yaml à côté du .slasset installé — permet à
             // app_registry.rs de découvrir icône/nom sans rouvrir le .marep zip
             // (dont le fichier source n'est de toute façon plus accessible une
@@ -293,6 +350,14 @@ fn install_assets_to_esp(
             w
             // fs et root droppés ici → borrow sur st libéré
         };
+        // Flush + affichage écran hors du scope fs/root (borrow sur st libéré)
+        // — après chaque volume, pas seulement à la fin : si l'écriture d'un
+        // asset bloque (I/O disque bare-metal), l'écran garde quand même la
+        // trace du dernier volume/compte atteint avant le blocage.
+        crate::ovc_exec::screen_log(st, &alloc::format!(
+            "[INSTALL] volume {}: {} asset(s) ecrits", vol_i, wrote
+        ), 0);
+        crate::ovc_exec::flush_boot_log_to_esp(st, image_handle);
         if wrote > 0 { installed = wrote; break 'volumes; }
     }
 

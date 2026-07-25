@@ -1,0 +1,31 @@
+//===================================================================
+//  OEntry.mara – Point d'entrée du bundle SLUL (driver)
+//  Projet : SluPwMan.slul
+//  Auteur : Vyft Ltd
+//  Licence : Proprietary – 2026
+//  Description :
+//      Point d'entrée du service de gestion de l'alimentation. Sans
+//      interface (framebuffer nul comme tout .slul) — voir APrevent.mara.
+//===================================================================
+
+#base <std***core***self***[ RegistrationRoot, CaseComponentActivity ]>;
+#base <MaratineKit>;
+#include <std***gcc***arch***[ ArchitectureInfo ]>;
+
+rel cl OEntry: <[string RegistrationRoot]>t [
+
+    let ObtProcess: <[string PIDActivity]> = <MaratineKit***PIDActivity***ObtInfo>;
+    let PAccess: <[string AuthARoot]>       = <MaratineKit***AuthARoot>;
+
+    let SyncActivity: <[string CaseComponentActivity]> = ObtProcess(<MaratineKit***RenRoot>);
+
+    let RenderRoot: <[string RegistrationRoot***[ SRIDAtt, KeyReg, PAccessAuth ]]> =
+        PAccess(SyncActivity);
+
+    let ArchInfo: <[string ArchitectureInfo]> = <gcc***archInfo***()>;
+    log: ArchInfo;
+
+    let Architecture: <string> = ArchInfo;
+    let DrvMain: <i32> = <std***core***self***APrevent***OnPowerOn>(Architecture);
+    ret DrvMain;
+];

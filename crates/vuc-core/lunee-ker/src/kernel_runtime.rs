@@ -72,32 +72,49 @@ impl KernelRuntime {
         self.resources.init_hardware(st, image)?;
         self.boot_init = true;
         let _ = st.stdout().write_str("[RUNTIME] Boot phase completed.\r\n");
+        // Dupliqué sur le port série : sur bare-metal, si l'écran/GOP est
+        // cassé, `stdout()` n'affiche rien nulle part — `serial_log` reste le
+        // seul canal qui trace les jalons du boot indépendamment de l'écran.
+        crate::ovc_exec::serial_log(b"[RUNTIME] Boot phase completed.\r\n");
         Ok(())
     }
 
     fn verify_integrity(&mut self, st: &mut SystemTable<Boot>) -> Result<(), Status> {
         let _ = st.stdout().write_str("[SECURITY] Integrity check passed.\r\n");
+        crate::ovc_exec::serial_log(b"[SECURITY] Integrity check passed.\r\n");
         self.secure_verified = true;
         Ok(())
     }
 
     pub fn maratine_phase(&mut self, st: &mut SystemTable<Boot>, image_handle: Handle) {
         let _ = st.stdout().write_str("[MARATINE] Loading ShiLauncher...\r\n");
+        crate::ovc_exec::serial_log(b"[MARATINE] Loading ShiLauncher...\r\n");
         match marep_loader::load_and_run(st, image_handle) {
             Ok(code) => {
                 let _ = write!(st.stdout(), "[MARATINE] OEntry returned {}\r\n", code);
+                crate::ovc_exec::serial_log(
+                    alloc::format!("[MARATINE] OEntry returned {}\r\n", code).as_bytes()
+                );
             }
             Err(BundleError::FileNotFound) => {
                 let _ = st.stdout().write_str("[MARATINE] ShiLauncher.marep not found.\r\n");
+                crate::ovc_exec::serial_log(b"[MARATINE] ShiLauncher.marep not found.\r\n");
             }
             Err(BundleError::NotInitialized) => {
                 let _ = st.stdout().write_str("[MARATINE] OVC trouve.\r\n");
+                crate::ovc_exec::serial_log(b"[MARATINE] OVC trouve.\r\n");
             }
             Err(BundleError::ExecutionFailed(code)) => {
                 let _ = write!(st.stdout(), "[MARATINE] Execution echouee: {}\r\n", code);
+                crate::ovc_exec::serial_log(
+                    alloc::format!("[MARATINE] Execution echouee: {}\r\n", code).as_bytes()
+                );
             }
             Err(e) => {
                 let _ = write!(st.stdout(), "[MARATINE] Load error: {:?}\r\n", e);
+                crate::ovc_exec::serial_log(
+                    alloc::format!("[MARATINE] Load error: {:?}\r\n", e).as_bytes()
+                );
             }
         }
     }
@@ -121,6 +138,9 @@ impl KernelRuntime {
 
         let _ = write!(st.stdout(),
             "[PLATFORM] Chargement vuc_platform_engine ({})\r\n", network);
+        crate::ovc_exec::serial_log(
+            alloc::format!("[PLATFORM] Chargement vuc_platform_engine ({})\r\n", network).as_bytes()
+        );
 
         const EFI_PATH: &uefi::CStr16 = cstr16!("\\vuc_platform_engine.efi");
 
@@ -129,6 +149,7 @@ impl KernelRuntime {
             Ok(h) => h,
             Err(_) => {
                 let _ = st.stdout().write_str("[PLATFORM] SimpleFileSystem introuvable\r\n");
+                crate::ovc_exec::serial_log(b"[PLATFORM] SimpleFileSystem introuvable\r\n");
                 return;
             }
         };
@@ -175,6 +196,7 @@ impl KernelRuntime {
             Some(b) => b,
             None => {
                 let _ = st.stdout().write_str("[PLATFORM] vuc_platform_engine.efi introuvable\r\n");
+                crate::ovc_exec::serial_log(b"[PLATFORM] vuc_platform_engine.efi introuvable\r\n");
                 return;
             }
         };
@@ -187,19 +209,27 @@ impl KernelRuntime {
             Ok(h) => h,
             Err(e) => {
                 let _ = write!(st.stdout(), "[PLATFORM] load_image echoue: {:?}\r\n", e);
+                crate::ovc_exec::serial_log(
+                    alloc::format!("[PLATFORM] load_image echoue: {:?}\r\n", e).as_bytes()
+                );
                 return;
             }
         };
 
         let _ = st.stdout().write_str("[PLATFORM] vuc_platform_engine.efi charge — demarrage...\r\n");
+        crate::ovc_exec::serial_log(b"[PLATFORM] vuc_platform_engine.efi charge - demarrage...\r\n");
 
         // StartImage — transfère le contrôle au platform engine.
         match st.boot_services().start_image(loaded) {
             Ok(_) => {
                 let _ = st.stdout().write_str("[PLATFORM] vuc_platform_engine termine\r\n");
+                crate::ovc_exec::serial_log(b"[PLATFORM] vuc_platform_engine termine\r\n");
             }
             Err(e) => {
                 let _ = write!(st.stdout(), "[PLATFORM] start_image echoue: {:?}\r\n", e);
+                crate::ovc_exec::serial_log(
+                    alloc::format!("[PLATFORM] start_image echoue: {:?}\r\n", e).as_bytes()
+                );
             }
         }
     }
@@ -262,11 +292,6 @@ pub fn render_from_marep(
             img_h,
         );
 
-        // Auto-test du chemin d'exécution .ca — ICI car UEFI_ST_PTR vient d'être initialisé
-        // (srfs_uefi_read en a besoin). Le chemin PROD réel est ovc_exec::BlockchainQueueTx,
-        // qui tourne pendant cette même phase quand un marep met une tx en file.
-        crate::ovc_exec::chain_selftest();
-
         // Créer un loader qui capture les handles par valeur (pas par référence)
         let handles: alloc::vec::Vec<uefi::Handle> =
             st.boot_services().find_handles::<SimpleFileSystem>().unwrap_or_default();
@@ -277,11 +302,22 @@ pub fn render_from_marep(
         // Le loader réel est dans srfs_load_on_demand() via les handles UEFI stockés
     }
 
+    crate::ovc_exec::screen_log(st, "[RENDER] find_handles::<GraphicsOutput> start", 0);
     let handle0 = {
         let h = match st.boot_services().find_handles::<GraphicsOutput>() {
             Ok(h) if !h.is_empty() => h,
-            _ => return,
+            Ok(_) => {
+                crate::ovc_exec::screen_log(st, "[RENDER] find_handles::<GraphicsOutput> -> 0 handle, abandon", 0);
+                return;
+            }
+            Err(_) => {
+                crate::ovc_exec::screen_log(st, "[RENDER] find_handles::<GraphicsOutput> echoue, abandon", 0);
+                return;
+            }
         };
+        crate::ovc_exec::screen_log(st, &alloc::format!(
+            "[RENDER] find_handles::<GraphicsOutput> -> {} handle(s)", h.len()
+        ), 0);
         h[0]
     };
 
@@ -292,8 +328,12 @@ pub fn render_from_marep(
         )
     } {
         Ok(g)  => g,
-        Err(_) => return,
+        Err(_) => {
+            crate::ovc_exec::serial_log(b"[RENDER] open_protocol::<GraphicsOutput> echoue, abandon\r\n");
+            return;
+        }
     };
+    crate::ovc_exec::serial_log(b"[RENDER] GOP ouvert avec succes\r\n");
 
     // Sélectionne le mode GOP de plus grande résolution disponible. Sans ça, le kernel garde le mode
     // laissé actif par le firmware au boot (souvent un mode par défaut conservateur, pas la résolution
@@ -317,14 +357,37 @@ pub fn render_from_marep(
         .max_by_key(|m| { let (mw, mh) = m.info().resolution(); mw * mh })
         .or_else(|| gop.modes(st.boot_services())
             .max_by_key(|m| { let (mw, mh) = m.info().resolution(); mw * mh }));
+    // `gop` emprunte déjà `st` immutablement (ScopedProtocol) — screen_log (qui a
+    // besoin de &mut st) est donc IMPOSSIBLE ici tant que `gop` est vivant. Seul
+    // serial_log (indépendant de `st`) est utilisable ; ce message ne sera visible
+    // qu'au prochain flush_boot_log_to_esp ou via port série, jamais à l'écran.
+    // C'EST le point suspect n°1 : si l'écran devient noir juste après le dernier
+    // message visible, c'est très probablement `set_mode` qui bascule vers un mode
+    // vidéo que ce firmware/écran ne sait pas afficher correctement.
+    if let Some(mode) = &best_mode {
+        let (mw, mh) = mode.info().resolution();
+        crate::ovc_exec::serial_log(alloc::format!(
+            "[RENDER] set_mode vers {}x{} — point suspect ecran noir si rien apres ceci\r\n", mw, mh
+        ).as_bytes());
+    } else {
+        crate::ovc_exec::serial_log(b"[RENDER] aucun mode GOP candidat, mode courant conserve\r\n");
+    }
     if let Some(mode) = best_mode {
-        let _ = gop.set_mode(&mode);
+        match gop.set_mode(&mode) {
+            Ok(()) => crate::ovc_exec::serial_log(b"[RENDER] set_mode OK\r\n"),
+            Err(e) => crate::ovc_exec::serial_log(
+                alloc::format!("[RENDER] set_mode ECHOUE: {:?} (mode precedent conserve)\r\n", e).as_bytes()
+            ),
+        }
     }
 
     let info   = gop.current_mode_info();
     let (w, h) = info.resolution();
     let stride = info.stride() as i32;
     let fb     = gop.frame_buffer().as_mut_ptr() as *mut u32;
+    crate::ovc_exec::serial_log(alloc::format!(
+        "[RENDER] mode GOP actif: {}x{} stride={} fb={:#x}\r\n", w, h, stride, fb as usize
+    ).as_bytes());
 
     // ── Double buffering ───────────────────────────────────────────────────────
     // Sans ça, chaque frame écrit directement dans le framebuffer GOP réel (celui
@@ -353,12 +416,40 @@ pub fn render_from_marep(
         alloc::format!("[HID] find_handles::<Pointer> -> {} handle(s)\r\n", pointer_handles.len()).as_bytes()
     );
     let pointer_handle = pointer_handles.first().copied();
+    // Facteur de normalisation du pointeur relatif : EFI_SIMPLE_POINTER_PROTOCOL
+    // rapporte relative_movement en unités "counts per mm" propres au device
+    // (spec UEFI §12.4, PointerMode.resolution), PAS en pixels. Sous VMware/OVMF,
+    // cette résolution peut être un grand facteur fixe (constaté : mouvements
+    // de l'ordre de plusieurs centaines de milliers) — appliqué tel quel, le
+    // premier delta sature immédiatement cursor_x/y sur un bord de l'écran et
+    // le curseur y reste figé (visuellement disparu, coincé au bord). On divise
+    // donc chaque composante par sa résolution pour obtenir un delta en pixels.
+    //
+    // IMPORTANT : `mode()` doit être lu PENDANT que le `ScopedProtocol` est
+    // encore vivant (via Deref normal), PAS après `core::mem::forget` sur un
+    // pointeur brut — `Pointer::mode()` déréférence `self.0.mode`, un pointeur
+    // FFI vers une struct allouée par le firmware ; le lire sur l'alias brut
+    // post-forget a corrompu silencieusement l'état firmware et gelait le
+    // noyau plus tard (au premier point d'exécution atteignant le nouveau
+    // code du bouton menu global) sans jamais logguer d'erreur explicite.
+    let mut pointer_res_x: u64 = 1;
+    let mut pointer_res_y: u64 = 1;
     let pointer_ptr: *mut Pointer = pointer_handle.and_then(|h| unsafe {
         st.boot_services().open_protocol::<Pointer>(
             OpenProtocolParams { handle: h, agent: image_handle, controller: None },
             OpenProtocolAttributes::GetProtocol,
         ).ok()
     }).map(|mut p| {
+        let reset_ok = p.reset(false);
+        crate::ovc_exec::serial_log(
+            alloc::format!("[HID] reset() -> {:?}\r\n", reset_ok.is_ok()).as_bytes()
+        );
+        let mode = p.mode();
+        pointer_res_x = mode.resolution[0].max(1);
+        pointer_res_y = mode.resolution[1].max(1);
+        crate::ovc_exec::serial_log(alloc::format!(
+            "[HID] Pointer resolution=({}, {}) counts/mm\r\n", pointer_res_x, pointer_res_y
+        ).as_bytes());
         let ptr: *mut Pointer = &mut *p;
         core::mem::forget(p);
         ptr
@@ -368,12 +459,6 @@ pub fn render_from_marep(
     } else {
         b"[HID] pointer_ptr OK\r\n" as &[u8]
     });
-    if !pointer_ptr.is_null() {
-        let reset_ok = unsafe { (*pointer_ptr).reset(false) };
-        crate::ovc_exec::serial_log(
-            alloc::format!("[HID] reset() -> {:?}\r\n", reset_ok.is_ok()).as_bytes()
-        );
-    }
 
     // EFI_ABSOLUTE_POINTER_PROTOCOL (ex. usb-tablet) — préféré au pointeur relatif
     // quand disponible : pas de notion de "grab" fenêtre, la position écran est
@@ -422,6 +507,15 @@ pub fn render_from_marep(
 
     core::mem::forget(gop);
 
+    // Premier point où `st` est de nouveau libre depuis avant l'ouverture GOP —
+    // si ce message N'APPARAIT PAS à l'écran (alors qu'il apparaissait avant
+    // l'ouverture GOP), le blocage se situe précisément entre les deux : très
+    // probablement `gop.set_mode()` (voir son log serial_log juste au-dessus,
+    // récupérable via le fichier \slura_boot.log ou le port série).
+    crate::ovc_exec::screen_log(st, &alloc::format!(
+        "[RENDER] apres GOP/set_mode: ecran encore vivant, {}x{}", w, h
+    ), 0);
+
     // ── Étape 1/N d'un pilote USB/HID natif Slura ─────────────────────────────
     // Purement diagnostique pour l'instant : énumère les devices PCI en lecture
     // seule et logue le contrôleur xHCI s'il est trouvé (voir pci.rs). N'affecte
@@ -430,7 +524,9 @@ pub fn render_from_marep(
     // d'attaquer l'étape suivante (accès MMIO au contrôleur). Placé après le
     // `forget(gop)` : `gop` empruntait `st` en immutable jusque-là, incompatible
     // avec le `&mut st` requis ici (E0502 sinon).
+    crate::ovc_exec::screen_log(st, "[RENDER] scan_for_xhci start", 0);
     let _xhci = crate::pci::scan_for_xhci(st, image_handle);
+    crate::ovc_exec::screen_log(st, "[RENDER] scan_for_xhci done", 0);
 
     // ── Étape 2/N ──────────────────────────────────────────────────────────────
     // Registres de capacité xHCI (lecture seule, aucune init/écriture matérielle
@@ -443,68 +539,51 @@ pub fn render_from_marep(
     // cesser de bouger à partir d'ici, jusqu'à ce que les étapes 4-6 branchent de
     // vrais rapports HID natifs sur pointer_x/y/btn/key_code. Décision assumée
     // par l'utilisateur (curseur temporairement gelé, clavier ConIn non affecté).
-    //
-    // ── Étapes 4-5/N ───────────────────────────────────────────────────────────
-    // Une fois le contrôleur démarré : énumération USB (reset de port, Enable
-    // Slot, Address Device, descripteurs) + configuration HID boot protocol
-    // (clavier/souris) sur les endpoints interrupt trouvés (usb.rs). Best-effort
-    // — chaque device qui échoue est loggé et ignoré, sans bloquer le boot.
-    // ── Interrupteur du pilote HID NATIF (décision produit) ────────────────────
-    // false (DÉFAUT) : on NE touche PAS au contrôleur. init_xhci fait un HCRST qui
-    //   coupe l'alimentation des ports et retire la souris au firmware — si
-    //   l'énumération native ne reprend pas parfaitement la main sur le xHCI réel,
-    //   la souris ne se rallume jamais (LED éteinte, curseur mort). Tant que le
-    //   pilote natif n'est pas VALIDÉ sur vrai matériel via log série, on laisse le
-    //   firmware maître : EFI_SIMPLE_POINTER/ABSOLUTE_POINTER fonctionnent, la souris
-    //   s'allume et marche partout (bare-metal + QEMU, sans grab via usb-tablet).
-    // true : active le pilote natif product-grade (xHCI HCRST + énumération USB +
-    //   HID boot protocol). À basculer UNIQUEMENT en environnement où on peut lire le
-    //   log série [USB]/[XHCI] pour diagnostiquer, car il retire le firmware.
-    const USE_NATIVE_HID: bool = false;
-
     let mut _xhci_ctrl = None;
-    let mut hid_devices: alloc::vec::Vec<crate::usb::HidDevice> = alloc::vec::Vec::new();
     if let Some(xhci) = _xhci.as_ref() {
-        // Lecture SEULE des capacités (aucune écriture matérielle) — sûr, informatif.
+        crate::ovc_exec::screen_log(st, "[RENDER] read_xhci_capabilities start", 0);
         if let Some(caps) = crate::pci::read_xhci_capabilities(st, image_handle, xhci) {
-            if USE_NATIVE_HID {
-                _xhci_ctrl = crate::xhci::init_xhci(st, image_handle, xhci, &caps);
-                if let Some(ref mut ctrl) = _xhci_ctrl {
-                    hid_devices = crate::usb::enumerate_and_setup_hid(st, ctrl, caps.max_ports);
-                    if hid_devices.is_empty() {
-                        crate::ovc_exec::serial_log(
-                            b"[USB] AUCUN device HID natif configure : souris indisponible (firmware retire par le HCRST)\r\n"
-                        );
-                    }
-                }
-            } else {
-                crate::ovc_exec::serial_log(
-                    b"[USB] pilote HID natif DESACTIVE (USE_NATIVE_HID=false) : firmware maitre, souris via EFI pointer protocol\r\n"
-                );
-            }
+            crate::ovc_exec::screen_log(st, "[RENDER] init_xhci start (PREMIERE ecriture materielle)", 0);
+            _xhci_ctrl = crate::xhci::init_xhci(st, image_handle, xhci, &caps);
+            crate::ovc_exec::screen_log(st, "[RENDER] init_xhci done", 0);
         }
     }
 
     // Complément lecture-seule : tables ACPI réelles (RSDP → XSDT → MCFG) au lieu
     // de s'appuyer uniquement sur l'abstraction EFI_PCI_IO_PROTOCOL — donne
     // l'adresse ECAM (config space PCIe mappé mémoire) par segment/plage de bus.
+    crate::ovc_exec::screen_log(st, "[RENDER] scan_acpi_tables start", 0);
     let _mcfg = crate::acpi::scan_acpi_tables(st);
+    crate::ovc_exec::screen_log(st, "[RENDER] scan_acpi_tables done", 0);
 
-    // ── Étape 2/N du plan bureau à fenêtres ───────────────────────────────────
-    // Registre des apps installées (SDC/slu64/apps/*/Maraset.yaml) — purement
-    // diagnostique pour l'instant (log [REGISTRY]), pas encore consommé par le
-    // dock (TemplateView.mara garde ses icônes hardcodées jusqu'au branchement
-    // dynamique, délibérément différé après le jalon 1 du plan).
-    let app_registry = crate::app_registry::scan_installed_apps(st, image_handle);
-    // Publie la liste pour le dock dynamique de TemplateView.mara (builtins AppRegistry***).
-    crate::app_registry::publish_registry(&app_registry);
+    // ── Registre d'apps installées (dock dynamique) ───────────────────────────
+    // scan_installed_apps()/publish_registry() n'étaient jamais appelés nulle part
+    // dans le kernel : AppRegistryCount() retournait donc toujours 0, et le dock
+    // (TemplateView.mara) ne dessinait aucune icône — dockDesignWidth s'effondrait
+    // à la seule marge (appCount*63+dockPad*2 = 28px), plus petit que le rayon de
+    // coin fixe du fond du dock (dkR), ce qui dégénérait la pilule en un artefact
+    // "coupé" (silhouette en lentille au lieu d'une barre). Appelé ICI (juste avant
+    // la boucle de rendu) car scan_installed_apps a besoin de `st`/`image_handle`
+    // encore valides (boot services actifs, SimpleFileSystem ouvrable).
+    crate::ovc_exec::screen_log(st, "[RENDER] scan_installed_apps start", 0);
+    let installed_apps = crate::app_registry::scan_installed_apps(st, image_handle);
+    crate::app_registry::publish_registry(&installed_apps);
+    crate::ovc_exec::screen_log(st, &alloc::format!(
+        "[RENDER] scan_installed_apps done, {} app(s)", installed_apps.len()
+    ), 0);
 
-    // ── Étape 3/N (révisée) du plan bureau à fenêtres ─────────────────────────
-    // La gestion des fenêtres (chargement d'une 2e app, buffer offscreen,
-    // compositeur, chrome, hit-test) est désormais pilotée depuis Maratine
-    // (LAPrevent.mara, via les builtins DrvAPIInterCon***WindowMan...***,
-    // ovc_exec.rs) — le kernel Rust n'appelle plus qu'un seul exec_marep par
-    // tick, exactement comme avant l'introduction du bureau à fenêtres.
+    // ── Volumes physiques réels (disques additionnels au-delà de SDC/A) ──────
+    // Scan lecture seule des volumes UEFI SimpleFileSystem autres que l'ESP
+    // système (voir disk_volumes.rs) — sur QEMU/VMware standard (un seul
+    // volume ESP), retourne généralement une liste vide, honnêtement (pas de
+    // disque fantôme inventé). N'affecte jamais SDC(0)/A(1), déjà montés par
+    // ShiLooker.marep/LAPrevent.mara.
+    crate::ovc_exec::screen_log(st, "[RENDER] scan_physical_volumes start", 0);
+    let physical_volumes = crate::disk_volumes::scan_physical_volumes(st, image_handle);
+    crate::ovc_exec::publish_physical_volumes(physical_volumes);
+    crate::ovc_exec::screen_log(st, "[RENDER] scan_physical_volumes done", 0);
+
+    crate::ovc_exec::screen_log(st, "[RENDER] entree dans la boucle de rafraichissement", 0);
 
     // ── Boucle de rafraîchissement ─────────────────────────────────────────────
     // Chaque tick : lit l'état HID réel, ré-exécute exec_marep (seul point
@@ -527,8 +606,8 @@ pub fn render_from_marep(
                     let nx = (((state.current_x.saturating_sub(minx)) * (w as u64 - 1)) / rx) as i32;
                     let ny = (((state.current_y.saturating_sub(miny)) * (h as u64 - 1)) / ry) as i32;
                     crate::ovc_exec::serial_log(alloc::format!(
-                        "[HID] abs=({},{}) active_buttons={:#x} status={:?} -> cursor=({},{})\r\n",
-                        state.current_x, state.current_y, state.active_buttons, status, nx, ny
+                        "[HID] abs=({},{}) status={:?} -> cursor=({},{})\r\n",
+                        state.current_x, state.current_y, status, nx, ny
                     ).as_bytes());
                     cursor_x = nx.clamp(0, w as i32 - 1);
                     cursor_y = ny.clamp(0, h as i32 - 1);
@@ -549,18 +628,17 @@ pub fn render_from_marep(
             let p = unsafe { &mut *pointer_ptr };
             match p.read_state() {
                 Ok(Some(state)) => {
-                    cursor_x = (cursor_x + state.relative_movement[0]).clamp(0, w as i32 - 1);
-                    cursor_y = (cursor_y + state.relative_movement[1]).clamp(0, h as i32 - 1);
+                    // Normalisation en pixels — voir commentaire de pointer_res_x/y
+                    // ci-dessus. division signée : le signe du delta doit survivre.
+                    let dx = state.relative_movement[0] / pointer_res_x as i32;
+                    let dy = state.relative_movement[1] / pointer_res_y as i32;
+                    cursor_x = (cursor_x + dx).clamp(0, w as i32 - 1);
+                    cursor_y = (cursor_y + dy).clamp(0, h as i32 - 1);
                     pointer_btn |= (state.button[0] as i32) | ((state.button[1] as i32) << 1);
-                    if state.button[0] || state.button[1] {
+                    if dx != 0 || dy != 0 {
                         crate::ovc_exec::serial_log(alloc::format!(
-                            "[HID] rel BOUTON btn0={} btn1={}\r\n", state.button[0], state.button[1]
-                        ).as_bytes());
-                    }
-                    if state.relative_movement[0] != 0 || state.relative_movement[1] != 0 {
-                        crate::ovc_exec::serial_log(alloc::format!(
-                            "[HID] rel=({},{}) -> cursor=({},{})\r\n",
-                            state.relative_movement[0], state.relative_movement[1], cursor_x, cursor_y
+                            "[HID] rel=({},{}) raw=({},{}) -> cursor=({},{})\r\n",
+                            dx, dy, state.relative_movement[0], state.relative_movement[1], cursor_x, cursor_y
                         ).as_bytes());
                     }
                 }
@@ -571,32 +649,11 @@ pub fn render_from_marep(
             }
         }
 
-        let mut key_code: i32 = match st.stdin().read_key() {
+        let key_code: i32 = match st.stdin().read_key() {
             Ok(Some(Key::Printable(c))) => u16::from(c) as i32,
             Ok(Some(Key::Special(scan))) => 0x10000 | scan_code_to_i32(scan),
             _ => 0,
         };
-
-        // ── Étape 6/N ──────────────────────────────────────────────────────────
-        // Rapports HID natifs (usb.rs) — vient s'ADDITIONNER aux sources
-        // firmware ci-dessus, pas les remplacer : si le contrôleur xHCI n'a pas
-        // pu être initialisé/énuméré (hid_devices vide), ce bloc ne fait rien et
-        // les protocoles EFI_SIMPLE_POINTER/ABSOLUTE_POINTER/ConIn restent seuls
-        // maîtres du curseur/clavier, comme avant l'étape 3.
-        if !hid_devices.is_empty() {
-            if let Some(ref mut ctrl) = _xhci_ctrl {
-                let (dx, dy, native_btn, native_key) = crate::usb::poll_hid_reports(st, ctrl, &mut hid_devices);
-                if dx != 0 || dy != 0 {
-                    cursor_x = (cursor_x + dx).clamp(0, w as i32 - 1);
-                    cursor_y = (cursor_y + dy).clamp(0, h as i32 - 1);
-                    crate::ovc_exec::serial_log(alloc::format!(
-                        "[USB-HID] rel=({},{}) -> cursor=({},{})\r\n", dx, dy, cursor_x, cursor_y
-                    ).as_bytes());
-                }
-                pointer_btn |= native_btn;
-                if key_code == 0 && native_key != 0 { key_code = native_key; }
-            }
-        }
 
         // Repli garanti : flèches clavier — ConIn fonctionne systématiquement (aucune
         // dépendance à un protocole pointeur USB/PS2 particulier ni à un grab de
@@ -610,30 +667,27 @@ pub fn render_from_marep(
             _ => {}
         }
 
-        // Police recalculée PAR FRAME : au boot (font_ptr/font_len ci-dessus) le cache SRFS
-        // est vide → font_len=0, ce qui faisait échouer TtfParser::Load (aucun glyphe, titre
-        // de fenêtre invisible). Une fois la police chargée par le marep (1re frame), ce
-        // recalcul donne le bon (ptr,len) pour GpuDrawText*.
-        let (frame_font_ptr, frame_font_len) = {
-            let (p, l) = crate::ovc_exec::srfs_font_ptr();
-            if l > 0 { (p, l) } else { (font_ptr, font_len) }
-        };
         let ctx = ovc_exec::ExecCtx {
             fb: back_fb,
             width:    w as i32,
             height:   h as i32,
             stride,
-            font:     frame_font_ptr,
-            font_len: frame_font_len,
+            font:     font_ptr,
+            font_len,
             pointer_x:   cursor_x,
             pointer_y:   cursor_y,
             pointer_btn,
             key_code,
         };
 
-        ovc_exec::reset_gpu_state();
+        if frame_n == 0 {
+            crate::ovc_exec::screen_log(st, "[RENDER] premiere frame: appel exec_marep (TemplateView.mara)", 0);
+        }
         ovc_exec::reset_gpu_counters();
         let _ = ovc_exec::exec_marep(&mod_refs, &ctx);
+        if frame_n == 0 {
+            crate::ovc_exec::screen_log(st, "[RENDER] premiere frame: exec_marep retourne, copie framebuffer", 0);
+        }
 
         // Bascule atomique : le résultat complet de la frame part d'un coup vers
         // l'écran réel, au lieu que chaque élément apparaisse au fil de son dessin.
@@ -644,4 +698,3 @@ pub fn render_from_marep(
         frame_n = frame_n.wrapping_add(1);
     }
 }
-

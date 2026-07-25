@@ -94,3 +94,34 @@ const unsigned char* stb_rasterize(int glyphIdx, int scaleK) {
 int stb_bmp_w(void)    { return g_bmp_w; }
 int stb_bmp_h(void)    { return g_bmp_h; }
 int stb_bmp_yoff(void) { return g_bmp_yoff; }
+int stb_bmp_xoff(void) { return g_bmp_xoff; }
+
+// Avance horizontale du glyphe en pixels (arrondi) à l'échelle scaleK (*1e6).
+// C'est l'avance TYPO (hmtx), pas la largeur du bitmap : indispensable pour un
+// espacement inter-lettres correct (le bitmap ignore les side bearings).
+int stb_advance(int glyphIdx, int scaleK) {
+    if (!g_font_ok || glyphIdx < 0 || scaleK <= 0) return 0;
+    int adv = 0, lsb = 0;
+    stbtt_GetGlyphHMetrics(&g_font, glyphIdx, &adv, &lsb);
+    float scale = (float)scaleK / 1000000.0f;
+    return (int)(adv * scale + 0.5f);
+}
+
+// Ascent en pixels à l'échelle scaleK : distance haut de ligne → baseline.
+// Tous les glyphes d'une ligne se posent sur cette baseline commune.
+int stb_ascent(int scaleK) {
+    if (!g_font_ok || scaleK <= 0) return 0;
+    int asc = 0, desc = 0, gap = 0;
+    stbtt_GetFontVMetrics(&g_font, &asc, &desc, &gap);
+    float scale = (float)scaleK / 1000000.0f;
+    return (int)(asc * scale + 0.5f);
+}
+
+// Kerning entre deux glyphes en pixels (peut être négatif).
+int stb_kern(int g1, int g2, int scaleK) {
+    if (!g_font_ok || scaleK <= 0) return 0;
+    int k = stbtt_GetGlyphKernAdvance(&g_font, g1, g2);
+    float scale = (float)scaleK / 1000000.0f;
+    float v = (float)k * scale;
+    return (int)(v >= 0.0f ? v + 0.5f : v - 0.5f);
+}

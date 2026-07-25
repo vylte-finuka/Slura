@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<RAbstractallowing xmlns="http://vyft.com/schema/abstractallowing" version="1.0">
+    <Metadata>
+        <PackageName>com.slura.os</PackageName>
+        <SRID>SRID_slura_os_29062617</SRID>
+        <FrameworkVersion>1.0.0</FrameworkVersion>
+        <Target>arm64</Target>
+        <Description>Driver NTFS pour Slura OS — lecture seule sur partition NTC:.</Description>
+    </Metadata>
+    <Permissions>
+        <Permission name="disk.blockio" description="Accès Block I/O UEFI pour lecture de blocs.">
+            <Required>true</Required>
+        </Permission>
+        <Permission name="filesystem.read" description="Lecture de fichiers et répertoires sur NTC:.">
+            <Required>true</Required>
+        </Permission>
+        <Permission name="memory.alloc" description="Allocation heap pour buffers MFT, index et data runs.">
+            <Required>true</Required>
+            <MaxBytes>16777216</MaxBytes>
+        </Permission>
+        <Permission name="mountpoint.register" description="Enregistrement du point de montage NTC: dans le registry Slura.">
+            <Required>true</Required>
+        </Permission>
+    </Permissions>
+    <Capabilities>
+        <Capability name="driver.aprevent"     description="Cycle de vie APrevent."><Enabled>true</Enabled></Capability>
+        <Capability name="filesystem.ntfs"     description="Lecture MFT, attributs, data runs, index B+ des répertoires."><Enabled>true</Enabled></Capability>
+        <Capability name="filesystem.readonly" description="Aucune écriture disque — DiskWrite non implémenté en phase UEFI."><Enabled>true</Enabled></Capability>
+    </Capabilities>
+</RAbstractallowing>

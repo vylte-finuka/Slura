@@ -1,0 +1,138 @@
+#base <std***ComTpe***SlulFrmt***[ DrvAPIInterCon ]>;
+#base <MaratineKit>;
+
+// Sélecteur de dossier de destination des captures ShiCamera. État PROPRIÉTAIRE
+// côté noyau (CapturePickerOpen/Close/IsOpen/GetX/GetY +
+// CapturePickerBrowse{Reset,GetPath,NavigateInto,NavigateUp}) — voir
+// commentaire sur CAPTURE_PICKER_OPEN/CAPTURE_PICKER_PATH dans ovc_exec.rs.
+// IMPORTANT : NE PAS réutiliser DiskBrowseReset/GetPath/NavigateInto/NavigateUp —
+// ce sont ceux de l'onglet Disque de TemplateView.mara (rightView==3), un
+// curseur PERSISTANT entre frames. Le partager ferait sauter le dossier
+// affiché par l'onglet Disque dès que ce picker naviguerait ailleurs.
+// DiskCacheDirCount/GetName restent réutilisés pour le listing : ceux-ci
+// sont reconstruits intégralement à chaque appel, donc sans état persistant.
+//
+// Slot SCROLL_SCRATCH dédié : 31 = prevBtn (edge-detect clic gauche ce picker).
+
+rel op Open: [anchorX i32, anchorY i32] [
+    let _: <i32> = <DrvAPIInterCon***CapturePickerOpen***>(anchorX, anchorY);
+    let _: <i32> = <DrvAPIInterCon***CapturePickerBrowseReset***>("SDC:");
+    ret 0;
+];
+
+rel op Close: [] [
+    let _: <i32> = <DrvAPIInterCon***CapturePickerClose***>();
+    ret 0;
+];
+
+rel op RenderAndHandle: [ctx string, fnt ptr, mx i32, my i32, pbtn i32, sU i32] [
+    let isOpen: <i32> = <DrvAPIInterCon***CapturePickerIsOpen***>();
+    if (isOpen == 0) [ ret 0; ];
+
+    let baseX: <i32> = <DrvAPIInterCon***CapturePickerGetX***>();
+    let baseY: <i32> = <DrvAPIInterCon***CapturePickerGetY***>();
+
+    let prevBtn: <i32> = <DrvAPIInterCon***ScrollGet***>(31);
+    let btnBit: <i32> = pbtn & 1;
+    let prevBit: <i32> = prevBtn & 1;
+    let clickEdge: <bool> = (btnBit == 1 && prevBit == 0);
+
+    let pkW: <i32> = ((280 * sU + 500) / 1000);
+    let pkH: <i32> = ((320 * sU + 500) / 1000);
+    let pkR: <i32> = ((10 * sU + 500) / 1000);
+
+    // Carte givrée : flou AVANT tint (§5.2), même séquence que GlobalMenu.mara.
+    let _: <i32> = <DrvAPIInterCon***GpuSetTransform2D***>(10000, 0, 0, 10000, baseX, baseY);
+    let _: <i32> = <DrvAPIInterCon***GpuBackgroundBlur***>(baseX, baseY, pkW, pkH, pkR, 12);
+    let _: <i32> = <DrvAPIInterCon***GpuResetTransform***>();
+    let _: <i32> = <DrvAPIInterCon***GpuDrawDropShadow***>(baseX, baseY, pkW, pkH, pkR, 0, 4, 8, 0x40000000);
+    let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(baseX, baseY, pkW, pkH, pkR, 0xF0FFFFFF);
+
+    var clickedOutside: <bool> = true;
+    if (mx >= baseX && mx <= (baseX + pkW) && my >= baseY && my <= (baseY + pkH)) [ clickedOutside = false; ];
+
+    let padX: <i32> = ((14 * sU + 500) / 1000);
+    let padY: <i32> = ((14 * sU + 500) / 1000);
+
+    let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>((baseX + padX), (baseY + padY), (pkW - (padX * 2)), "Dossier de capture", 0xFF000000, 0x00000000, fnt, ((16 * sU + 500) / 1000), 0);
+
+    // ── Ligne de disques montés (MountTable) ──
+    let diskCount: <i32> = <DrvAPIInterCon***MountTableCount***>();
+    let rowH: <i32> = ((26 * sU + 500) / 1000);
+    var di: <i32> = 0;
+    var diskY: <i32> = (baseY + padY + ((28 * sU + 500) / 1000));
+    loop (di < diskCount) [
+        let dId: <i32> = <DrvAPIInterCon***MountTableGetDiskId***>(di);
+        let dLabel: <ptr> = <DrvAPIInterCon***MountTableGetLabel***>(di);
+        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>((baseX + padX), diskY, (pkW - (padX * 2)), dLabel, 0xFF2D2D2D, 0x00000000, fnt, ((14 * sU + 500) / 1000), 0);
+        let overDX: <bool> = (mx >= (baseX + padX) && mx <= (baseX + pkW - padX));
+        let overDY: <bool> = (my >= diskY && my <= (diskY + rowH));
+        if (overDX && overDY) [ clickedOutside = false; ];
+        if (overDX && overDY && clickEdge) [
+            // Convention codée en dur par id (pas MountTableGetLetter — format différent).
+            if (dId == 0) [ let _: <i32> = <DrvAPIInterCon***CapturePickerBrowseReset***>("SDC:"); ];
+            if (dId != 0) [ let _: <i32> = <DrvAPIInterCon***CapturePickerBrowseReset***>("A:"); ];
+        ];
+        diskY = diskY + rowH;
+        di = di + 1;
+    ];
+
+    // ── Chemin courant + remonter ──
+    let curPath: <ptr> = <DrvAPIInterCon***CapturePickerBrowseGetPath***>();
+    let pathY: <i32> = (diskY + ((6 * sU + 500) / 1000));
+    let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>((baseX + padX), pathY, (pkW - (padX * 2)), curPath, 0xFF8A8A8A, 0x00000000, fnt, ((12 * sU + 500) / 1000), 0);
+
+    let pathLen: <i32> = <DrvManSpec***StrLen***>(curPath);
+    var atRoot: <bool> = (pathLen <= 5);
+    var listY: <i32> = (pathY + ((22 * sU + 500) / 1000));
+    if (atRoot == false) [
+        let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>((baseX + padX), listY, (pkW - (padX * 2)), ".. (remonter)", 0xFF2D2D2D, 0x00000000, fnt, ((14 * sU + 500) / 1000), 0);
+        let overUX: <bool> = (mx >= (baseX + padX) && mx <= (baseX + pkW - padX));
+        let overUY: <bool> = (my >= listY && my <= (listY + rowH));
+        if (overUX && overUY) [ clickedOutside = false; ];
+        if (overUX && overUY && clickEdge) [ let _: <i32> = <DrvAPIInterCon***CapturePickerBrowseNavigateUp***>(); ];
+        listY = listY + rowH;
+    ];
+
+    // ── Liste du dossier courant (dossiers uniquement, filtrés par '/' final) ──
+    let dirCount: <i32> = <DrvAPIInterCon***DiskCacheDirCount***>(curPath);
+    var fi: <i32> = 0;
+    loop (fi < dirCount) [
+        let entryName: <ptr> = <DrvAPIInterCon***DiskCacheDirGetName***>(fi);
+        let nameLen: <i32> = <DrvManSpec***StrLen***>(entryName);
+        var isFolderEntry: <bool> = false;
+        if (nameLen >= 1) [
+            let lastCh: <i32> = <DrvManSpec***StrCharAt***>(entryName, (nameLen - 1));
+            if (lastCh == 47) [ isFolderEntry = true; ];
+        ];
+        if (isFolderEntry) [
+            let rowY: <i32> = (listY + (fi * rowH));
+            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>((baseX + padX), rowY, (pkW - (padX * 2)), entryName, 0xFF2D2D2D, 0x00000000, fnt, ((14 * sU + 500) / 1000), 0);
+            let overFX: <bool> = (mx >= (baseX + padX) && mx <= (baseX + pkW - padX));
+            let overFY: <bool> = (my >= rowY && my <= (rowY + rowH));
+            if (overFX && overFY) [ clickedOutside = false; ];
+            if (overFX && overFY && clickEdge) [ let _: <i32> = <DrvAPIInterCon***CapturePickerBrowseNavigateInto***>(entryName); ];
+        ];
+        fi = fi + 1;
+    ];
+
+    // ── Bouton "Choisir ce dossier" (bas de carte) ──
+    let btnY: <i32> = (baseY + pkH - ((40 * sU + 500) / 1000));
+    let btnH: <i32> = ((26 * sU + 500) / 1000);
+    let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>((baseX + padX), btnY, (pkW - (padX * 2)), btnH, ((6 * sU + 500) / 1000), 0xFF2D2D2D);
+    let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>((baseX + padX), (btnY + ((5 * sU + 500) / 1000)), (pkW - (padX * 2)), "Choisir ce dossier", 0xFFFFFFFF, 0x00000000, fnt, ((14 * sU + 500) / 1000), 1);
+    let overBX: <bool> = (mx >= (baseX + padX) && mx <= (baseX + pkW - padX));
+    let overBY: <bool> = (my >= btnY && my <= (btnY + btnH));
+    if (overBX && overBY) [ clickedOutside = false; ];
+    if (overBX && overBY && clickEdge) [
+        let _: <i32> = <DrvAPIInterCon***CaptureDirSet***>(curPath);
+        let _: <i32> = <DrvAPIInterCon***CapturePickerClose***>();
+    ];
+
+    // Fermeture sur clic extérieur.
+    if (clickEdge && clickedOutside) [ let _: <i32> = <DrvAPIInterCon***CapturePickerClose***>(); ];
+
+    // Doit être mis à jour APRÈS tout usage de clickEdge cette frame.
+    let _: <i32> = <DrvAPIInterCon***ScrollSet***>(31, pbtn);
+    ret 0;
+];

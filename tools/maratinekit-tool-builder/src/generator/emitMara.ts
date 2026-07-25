@@ -14,6 +14,7 @@ interface EmitState {
   imDeclared: boolean;
   fontDeclared: boolean;
   lines: string[];
+  diamondColor: number; // ARGB — couleur intérieure des losanges [diamond], réglée via l'UI
 }
 
 function assetPath(state: EmitState, file: string): string {
@@ -71,12 +72,24 @@ function emitOp(op: DrawOp, state: EmitState, indent: string): void {
         state.imDeclared = true;
         // déclaré en tête de Render par emitTemplateView — ici on ne fait que l'utiliser
       }
-      const ax = op.uniform ? "u" : "x";
-      const ay = op.uniform ? "u" : "y";
-      L.push(
-        `${indent}im = <DrvAPIInterCon***ImageLoad***>(${assetPath(state, `img${op.index}.png`)});`,
-        `${indent}let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ${scaled(op.x, "x")}, ${scaled(op.y, "y")}, ${scaled(op.w, ax)}, ${scaled(op.h, ay)});`
-      );
+      L.push(`${indent}im = <DrvAPIInterCon***ImageLoad***>(${assetPath(state, `img${op.index}.png`)});`);
+      if (op.uniform) {
+        // Aspect préservé (sU) ET position CENTRÉE sur le centre design : un coin
+        // haut-gauche en sW/sH + une taille en sU décale l'icône hors de sa tuile
+        // dès que l'écran/fenêtre n'a pas le ratio du design.
+        const cx = Math.round(op.x + op.w / 2);
+        const cy = Math.round(op.y + op.h / 2);
+        const v = `icw${op.index}`;
+        L.push(
+          `${indent}let ${v}: <i32> = ${scaled(op.w, "u")};`,
+          `${indent}let ${v}h: <i32> = ${scaled(op.h, "u")};`,
+          `${indent}let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, (${scaled(cx, "x")} - (${v} / 2)), (${scaled(cy, "y")} - (${v}h / 2)), ${v}, ${v}h);`
+        );
+      } else {
+        L.push(
+          `${indent}let _: <i32> = <DrvAPIInterCon***ImageDraw***>(im, ${scaled(op.x, "x")}, ${scaled(op.y, "y")}, ${scaled(op.w, "x")}, ${scaled(op.h, "y")});`
+        );
+      }
       break;
     }
 
@@ -129,6 +142,29 @@ function emitOp(op: DrawOp, state: EmitState, indent: string): void {
       for (const child of op.children) emitOp(child, state, indent);
       L.push(`${indent}let _: <i32> = <DrvAPIInterCon***GpuResetOpacity***>();`);
       break;
+
+    case "diamond": {
+      // Losange verre (façon dock/Shi Windows) : anneau extérieur blanc translucide fixe
+      // (glass, cohérent avec le reste de l'OS) + losange intérieur dans la couleur
+      // PERSONNALISABLE (réglée dans l'UI du plugin, pas le fill Figma du nœud [diamond]).
+      // sU (uniforme) pour la taille/rayon : pas de déformation même si sW≠sH.
+      const cx = op.x + op.w / 2, cy = op.y + op.h / 2;
+      const size = Math.round((op.w + op.h) / 2);
+      L.push(
+        `${indent}// Losange [diamond] — couleur personnalisable via le plugin`,
+        `${indent}let dvx: <i32> = ${scaled(cx, "x")};`,
+        `${indent}let dvy: <i32> = ${scaled(cy, "y")};`,
+        `${indent}let dmw: <i32> = ${scaled(size, "u")};`,
+        `${indent}let dmr: <i32> = ${scaled(op.r, "u")};`,
+        `${indent}let dix: <i32> = (dvx - (dmw / 2));`,
+        `${indent}let diy: <i32> = (dvy - (dmw / 2));`,
+        `${indent}let _: <i32> = <DrvAPIInterCon***GpuSetTransform2D***>(6947, 7193, -7193, 6947, dvx, dvy);`,
+        `${indent}let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>((dix - 1), (diy - 1), (dmw + 2), (dmw + 2), (dmr + 1), 0x66FFFFFF);`,
+        `${indent}let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(dix, diy, dmw, dmw, dmr, ${hex(state.diamondColor)});`,
+        `${indent}let _: <i32> = <DrvAPIInterCon***GpuResetTransform***>();`
+      );
+      break;
+    }
   }
 }
 
@@ -198,9 +234,14 @@ function countImages(ops: DrawOp[]): boolean {
   return false;
 }
 
-/** Génère TemplateView.mara complet. */
-export function emitTemplateView(result: ClassifyResult, appName: string, designW: number, designH: number): string {
-  const state: EmitState = { appName, imDeclared: false, fontDeclared: false, lines: [] };
+/** Génère TemplateView.mara complet.
+ *  diamondColor : couleur ARGB des losanges [diamond] (réglée dans l'UI du plugin) —
+ *  défaut 0x33B9B9B9, celle utilisée par ShiLauncher (dock/Shi Windows). */
+export function emitTemplateView(
+  result: ClassifyResult, appName: string, designW: number, designH: number,
+  diamondColor: number = 0x33b9b9b9
+): string {
+  const state: EmitState = { appName, imDeclared: false, fontDeclared: false, lines: [], diamondColor };
   const L = state.lines;
 
   L.push(

@@ -1,20 +1,22 @@
 package:
   name: base***ShiLauncher
-  version: v1 NAVERTA build 29062617
-  build: 20260707-01
+  version: v1 NAVERTA build 20260720-01
+  build: 21072607
 
 metadata:
   bundle: marep
   target: arm64
   attributes:
-    SRID: SRID_shilauncher
-    Marav: 0.1 build 20260707-01
-    icon: ShiLauncher.slasset/img4.png
-    display_name: "ShiLauncher"
+    SRID: SRID_slura_os_29062617
+    Marav: 0.1 build 21072607
+    icon: ShiLauncher.slasset/ShiLauncher.png
+    display_name: "ShiLauncher  - Shixbook screen"
+    diamond_color: "0x33B9B9B9"
     description: |
-      ShiLauncher — Application Slura OS
+      ShiLauncher — application Slura OS générée par MaratineKit tool's builder.
     slura_min: 1
     slura_max: 5.0
+  dock_menu_items: "New Folder|New File>txt,md,bmp|Mount SDC|Mount A"
 
   entry: OEntry
   lifecycle: LAPrevent
@@ -23,8 +25,6 @@ metadata:
     - gpu.framebuffer
     - fs.read
     - fs.write
-    - ipc.send
-    - ipc.recv
 
   assets:
     - ShiLauncher.slasset/

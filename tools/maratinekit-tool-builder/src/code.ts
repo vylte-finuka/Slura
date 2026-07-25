@@ -16,6 +16,8 @@ interface GenerateMsg {
   // Un logo a été choisi dans l'UI : il devient l'icône du dock (l'UI l'ajoute au zip
   // en <App>.png). Prioritaire sur le nœud AppIcon du design.
   hasCustomIcon?: boolean;
+  // Couleur ARGB des losanges [diamond] — réglée dans l'UI, pas dans le design Figma.
+  diamondColor?: number;
 }
 
 // centerCrop : l'UI recadre le PNG sur son contenu et le centre dans un canvas
@@ -53,7 +55,8 @@ async function generate(msg: GenerateMsg): Promise<void> {
   status(`Analyse de "${node.name}" (${Math.round(node.width)}×${Math.round(node.height)})...`);
 
   const result = await classifyFrame(node);
-  const templateView = emitTemplateView(result, appName, node.width, node.height);
+  const diamondColor = typeof msg.diamondColor === "number" ? msg.diamondColor >>> 0 : 0x33b9b9b9;
+  const templateView = emitTemplateView(result, appName, node.width, node.height, diamondColor);
 
   // Un logo choisi dans l'UI est prioritaire sur le nœud AppIcon du design.
   const hasIcon = msg.hasCustomIcon === true || result.iconPng !== null;
@@ -67,6 +70,9 @@ async function generate(msg: GenerateMsg): Promise<void> {
     // personnalisé de l'UI s'il existe, sinon le nœud "AppIcon" du design. Sinon pas
     // d'icône (le dock dessine juste le losange vide).
     iconFile: hasIcon ? `${appName}.png` : null,
+    // Écrit dans Maraset.yaml (diamond_color) → ShiLauncher colore le losange de CETTE
+    // app (dock + barre de titre) automatiquement, sans reconnaissance par nom.
+    diamondColor,
   };
 
   const files: UiFile[] = [

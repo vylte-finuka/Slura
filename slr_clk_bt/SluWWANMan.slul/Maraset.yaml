@@ -1,0 +1,36 @@
+# Maraset – manifest SluWWANMan.slul
+
+package:
+  name: base***SluWWANMan
+  version: 1.0.0
+  build: 17072617
+
+metadata:
+  target: arm64
+  bundle: slul
+  attributes:
+    SRID: SRID_slura_os_29062617
+    Marav: 0.1 build 17072617-dev
+    description: |
+      Pilote de signal cellulaire (WWAN) pour Slura OS. Sans interface
+      (framebuffer nul comme tout .slul). Détection matérielle RÉELLE au boot
+      (scan PCI lecture seule, classe 02:80 "Other network controller" — voir
+      pci.rs::scan_for_wwan_modem, appelé depuis kernel_runtime.rs juste après
+      le scan xHCI) : aucun modem placeholder, l'état DrvAPIInterCon***WWAN...***
+      reflète ce qui est réellement trouvé (honnêtement "non connecté" sur une
+      VM sans carte WWAN passthrough). Le niveau de signal exact d'un modem
+      détecté n'est pas lu (nécessiterait le protocole AT/QMI/MBIM, hors
+      scope) ; consommé directement par ShiLooker pour la barre de signal, et
+      géré (choix du type réseau affiché) par SluWWANManSrv.marep.
+    slura_min: 1
+    slura_max: 5.0
+
+dependencies:
+  basecon:
+    base***SluraOS***APrevent: 17072617
+    base***SluraOS***OEntry:   17072617
+
+resources:
+  - path: RAbstractallowing.xml
+    type: xml
+    description: "Permissions pilote signal cellulaire."

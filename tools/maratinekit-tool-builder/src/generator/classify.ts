@@ -5,6 +5,11 @@
 // Conventions de nommage reconnues (cf. plan) :
 //   - nœud nommé exactement "HIDcursor"      → boilerplate curseur (pas d'ImageDraw)
 //   - nom contenant "[launch:NomApp]"        → hit-test + WindowManLaunch("NomApp")
+//   - nom contenant "[diamond]"              → losange verre (façon dock/Shi Windows),
+//                                               couleur intérieure PERSONNALISABLE via
+//                                               l'UI du plugin (PAS le fill Figma du nœud) ;
+//                                               ses enfants (ex. icône) sont dessinés
+//                                               par-dessus, non pivotés.
 
 import { isUniform } from "./scale";
 
@@ -19,7 +24,8 @@ export type DrawOp =
   | { kind: "blur"; x: number; y: number; w: number; h: number; r: number; amount: number }
   | { kind: "shadow"; x: number; y: number; w: number; h: number; r: number; offX: number; offY: number; blur: number; color: number }
   | { kind: "rotate"; cos10k: number; sin10k: number; pivotX: number; pivotY: number; children: DrawOp[] }
-  | { kind: "opacity"; value: number; children: DrawOp[] };
+  | { kind: "opacity"; value: number; children: DrawOp[] }
+  | { kind: "diamond"; x: number; y: number; w: number; h: number; r: number };
 
 export interface LaunchZone { x: number; y: number; w: number; h: number; app: string }
 
@@ -37,6 +43,8 @@ export interface ClassifyResult {
 interface Ctx {
   rootX: number;
   rootY: number;
+  rootW: number;
+  rootH: number;
   result: ClassifyResult;
 }
 
@@ -134,7 +142,13 @@ async function fillOps(node: SceneNode, r: { x: number; y: number; w: number; h:
       // que le wallpaper de ShiLauncher ; les enfants ne sont pas re-traversés.
       const bytes = await (node as ExportMixin).exportAsync({ format: "PNG" });
       ctx.result.pngs.push(bytes);
-      out.push({ kind: "image", x: r.x, y: r.y, w: r.w, h: r.h, index: ctx.result.pngs.length, uniform: uni });
+      // Aspect préservé (sU sur les DEUX dimensions) pour toute icône/illustration :
+      // en full-stretch, sW≠sH dès que l'écran/la fenêtre n'a pas le ratio du design,
+      // et une icône émise en sW/sH s'étire (ex. 56×56 → 25×31 dans une fenêtre 4:3 :
+      // elle déborde de sa tuile). Seules les images de COUVERTURE (≥60% du design en
+      // largeur ou hauteur, ex. wallpaper) doivent continuer à stretcher avec sW/sH.
+      const isCover = r.w >= ctx.rootW * 0.6 || r.h >= ctx.rootH * 0.6;
+      out.push({ kind: "image", x: r.x, y: r.y, w: r.w, h: r.h, index: ctx.result.pngs.length, uniform: uni || !isCover });
       return { ops: out, consumedChildren: true };
     } else {
       out.push({ kind: "comment", text: `TODO: fill ${fill.type} non supporté par le générateur v1 (nœud "${node.name}")` });
@@ -169,9 +183,29 @@ async function classifyNode(node: SceneNode, ctx: Ctx): Promise<DrawOp[]> {
     // le nœud est AUSSI dessiné normalement (c'est l'icône cliquable) — on continue.
   }
 
+  // Losange verre « [diamond] » : remplace le rendu du nœud (fill Figma ignoré — la
+  // couleur intérieure vient de l'UI du plugin, cf. emitMara.ts). Les enfants (ex. une
+  // icône posée dessus) sont dessinés normalement, NON pivotés, par-dessus — comme le
+  // motif dock/Shi Windows de ShiLauncher (icône superposée au losange, pas tournée).
+  if (node.name.includes("[diamond]")) {
+    const radii0 = cornerRadii(node);
+    const dr = radii0.uniform ?? Math.round(Math.min(r.w, r.h) * 0.33);
+    const dOps: DrawOp[] = [{ kind: "diamond", x: r.x, y: r.y, w: r.w, h: r.h, r: dr }];
+    if ("children" in node) {
+      for (const child of node.children) {
+        dOps.push(...(await classifyNode(child, ctx)));
+      }
+    }
+    out.push(...dOps);
+    return out;
+  }
+
   const rot = "rotation" in node ? node.rotation : 0;
   const radii = cornerRadii(node);
   let ops: DrawOp[] = [];
+  // Enfants classifiés récursivement — collectés À PART pour ne pas être
+  // enveloppés dans la rotation du nœud (voir plus bas).
+  const childOps: DrawOp[] = [];
 
   // Effets avant fills (ombre sous la forme, blur de fond sous le verre).
   effectOps(node, r, radii.uniform ?? 0, ops);
@@ -247,16 +281,18 @@ async function classifyNode(node: SceneNode, ctx: Ctx): Promise<DrawOp[]> {
       ops.push(...fops);
       if (!consumedChildren && "children" in node) {
         for (const child of node.children) {
-          ops.push(...(await classifyNode(child, ctx)));
+          childOps.push(...(await classifyNode(child, ctx)));
         }
       }
       break;
     }
   }
 
-  // Rotation : les ops PROPRES au nœud passent sous GpuSetTransform2D ; les enfants
-  // déjà traités récursivement gardent leur propre logique (un enfant droit dans un
-  // parent pivoté est approximé droit — limitation v1 documentée dans le plan).
+  // Rotation : UNIQUEMENT les ops PROPRES au nœud passent sous GpuSetTransform2D.
+  // Les enfants classifiés récursivement sont posés en bounds ABSOLUS (déjà pivotés
+  // dans le design) : les envelopper dans la rotation du parent la DOUBLE-appliquait
+  // (ex. icône dock : glyphe personne pivoté 90° à tort une fois le kernel capable
+  // d'appliquer la transformation aux images).
   if (Math.abs(rot) > 0.5) {
     const rad = (rot * Math.PI) / 180;
     ops = [{
@@ -267,8 +303,10 @@ async function classifyNode(node: SceneNode, ctx: Ctx): Promise<DrawOp[]> {
       children: ops,
     }];
   }
+  ops.push(...childOps);
 
-  // Opacité de calque (distincte de l'alpha des fills, déjà porté par la couleur).
+  // Opacité de calque (distincte de l'alpha des fills, déjà porté par la couleur) —
+  // elle, s'applique bien au SOUS-ARBRE entier (ops propres + enfants).
   const nodeOpacity = "opacity" in node ? node.opacity : 1;
   if (nodeOpacity < 0.999) {
     ops = [{ kind: "opacity", value: Math.round(nodeOpacity * 255), children: ops }];
@@ -286,7 +324,7 @@ export async function classifyFrame(root: FrameNode | ComponentNode | InstanceNo
     ops: [], launches: [], pngs: [], svgs: [],
     cursorRefPng: null, iconPng: null, hasCursor: false, hasText: false,
   };
-  const ctx: Ctx = { rootX: bb ? bb.x : 0, rootY: bb ? bb.y : 0, result };
+  const ctx: Ctx = { rootX: bb ? bb.x : 0, rootY: bb ? bb.y : 0, rootW: root.width, rootH: root.height, result };
 
   // Fond du frame racine (fill éventuel), puis enfants dans l'ordre de peinture.
   const rootRect = { x: 0, y: 0, w: root.width, h: root.height };

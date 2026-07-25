@@ -5,25 +5,39 @@
 package:
   name: base***SluGpu
   version: 1.0.0
-  build: 20260616-01
+  build: 25072616
 
 metadata:
   target: arm64
   bundle: slul
   attributes:
-    SRID: SRID_slugpu_001
-    Marav: 0.1 build 06260912-dev
+    SRID: SRID_slura_os_29062617
+    Marav: 0.1 build 25072616-dev
     description: |
-      Template de pilote SLUL écrit en Maratine.
-      Cycle de vie APrevent (OnPowerOn / OnPowerOff / OnSuspend / OnResume).
-      Initialise le pipeline graphique via DrvAPIInterCon.
+      Pilote GPU pour Slura OS (framebuffer GOP, rasterisation CPU réelle —
+      voir crates/vuc-core/lunee-ker/src/ovc_exec.rs). Cycle de vie APrevent
+      (OnPowerOn / OnPowerOff / OnSuspend / OnResume).
+
+      Colorimétrie RÉELLE aujourd'hui : ARGB8888 (8 bits/canal), soit
+      16 777 216 (16,7 millions) de couleurs distinctes par pixel — chaque
+      DrvAPIInterCon***Gpu*** écrit directement dans ce format (voir
+      GpuDrawRect/GpuFill/etc., tous confirmés réels et testés en boot QEMU).
+      Le "espace colorimétrie 32 millions de couleurs" demandé ne correspond
+      à aucun standard 8-bit/10-bit connu (24-bit = 16,7M, 30-bit = 1,07
+      milliard) ; le vrai true-color 24-bit est déjà pleinement supporté.
+
+      HDR / HDR10 / HDR10+ : NON implémenté honnêtement. Nécessiterait un
+      framebuffer 10-bit+/canal (actuellement 8-bit fixe), une courbe de
+      transfert PQ/HLG et un pipeline de tone-mapping — absent du rasteriseur
+      CPU actuel. Voir MaratineKit/MGC/MGCCore.mara (moteur MGC, en cours de
+      réécriture réelle côté 2D) pour le suivi de cette limite.
     slura_min: 1
     slura_max: 5.0
 
 dependencies:
   basecon:
-    base***example***APrevent: 1.0.0
-    base***example***OEntry: 1.0.0
+    base***SluraOS***APrevent: 25072616
+    base***SluraOS***OEntry: 25072616
 
 resources:
   - path: RAbstractallowing.xml

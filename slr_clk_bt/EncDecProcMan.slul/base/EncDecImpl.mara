@@ -1,0 +1,56 @@
+//===================================================================
+//  EncDecImpl.mara – Encodage/Décodage média (EncDecProcMan)
+//  Auteur : Vyft Ltd — 2026
+//  Noms = symboles exportés dans RAbstractallowing.xml.
+//
+//  ProbeFormat/CanDecode/GetFormatName sont des wrappers directs sur les
+//  primitives Rust réelles (DrvManSpec***EncDec***, ovc_exec.rs +
+//  format_detect.rs) — détection par signature binaire, pas par extension.
+//
+//  IDs de format stables (miroir de format_detect.rs — ne pas réordonner) :
+//    0=Inconnu 1=PNG 2=BMP 3=GIF 4=JPEG 5=MP4 6=MOV 7=HEIC 8=HEIF
+//    9=MKV 10=WebM 11=AVI 12=MP3 13=MP2 14=OGG 15=AMR
+//
+//  Niveaux de support (CanDecode) :
+//    2 = décodage complet (pixels affichables) — PNG/BMP/GIF seulement.
+//    1 = identification seule (format reconnu, pas d'échantillons extraits).
+//    0 = format inconnu.
+//
+//  LIMITE CONNUE (même contrainte que HidImpl.mara/SluHIIDMan, VmwareIntegration
+//  documentée dans ShiLauncher) : aucun mécanisme Mara ne permet à un AUTRE
+//  bundle d'appeler ces fonctions (tous les #base sont self-scopés). Ce
+//  fichier reste la référence/doc du pilote ; ShiLooker porte sa propre
+//  copie de ces wrappers (EncDecFormat.mara) appelant directement
+//  DrvManSpec***EncDec*** (namespace Rust global, réellement partagé).
+//===================================================================
+
+#base <std***ComTpe***SlulFrmt***[ DrvManSpec ]>;
+
+// Constantes FMT_* volontairement en littéraux directs dans le code (pas de
+// `let` module-level) — un `let <i32>` de module référencé ailleurs échoue
+// en vérification IR LLVM O2 ("Global is external, but doesn't have
+// external or weak linkage"), confirmé par `marai check` — même piège que
+// VmwareIntegration.mara/HidImpl.mara cette même session. Voir l'en-tête de
+// fichier pour la table des IDs.
+
+// ProbeFormat — lit le fichier réel (SDC/NTFS/SRFS) et détecte son format
+// par signature binaire. Retourne un des FMT_* ci-dessus.
+rel op ProbeFormat: [path string] [
+    ret <DrvManSpec***EncDecProbeFormat***>(path);
+];
+
+// CanDecode — niveau de support réel pour un FMT_* donné (voir en-tête).
+rel op CanDecode: [fmt i32] [
+    ret <DrvManSpec***EncDecCanDecode***>(fmt);
+];
+
+// GetFormatName — nom humain (ASCII) pour affichage UI.
+rel op GetFormatName: [fmt i32] [
+    ret <DrvManSpec***EncDecGetFormatName***>(fmt);
+];
+
+// IsFullyDecodable — raccourci pratique : vrai si CanDecode(fmt) == 2.
+rel op IsFullyDecodable: [fmt i32] [
+    let lvl: <i32> = <DrvManSpec***EncDecCanDecode***>(fmt);
+    ret (lvl == 2);
+];

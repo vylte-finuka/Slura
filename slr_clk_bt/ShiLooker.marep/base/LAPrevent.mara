@@ -19,6 +19,14 @@ rel op LAPrevent: <[string AppLifecycle]>t [
         var fnt: <ptr> = <DrvAPIInterCon***FontLoad***>("SDC:/assets/fonts/brsonomasemibold.ttf");
         if (fnt == nullptr) [ fnt = <DrvAPIInterCon***FontGetDefault***>(); ];
 
+        // Monte automatiquement TOUS les disques connus du noyau (0=SDC, 1=A —
+        // seuls IDs valides, voir ovc_exec.rs::disk_mount) au démarrage de
+        // ShiLooker, pour que leurs tuiles apparaissent directement dans la
+        // page "Disks" sans action manuelle — idempotent (DiskMount renvoie 1
+        // si déjà monté), donc sans risque à rappeler à chaque lancement.
+        let _: <i32> = <DrvAPIInterCon***DiskMount***>(0);
+        let _: <i32> = <DrvAPIInterCon***DiskMount***>(1);
+
         var running: <bool> = true;
         loop (running) [
             let renderResult: <i32> = <TemplateView***Render>(_ctx, fnt);

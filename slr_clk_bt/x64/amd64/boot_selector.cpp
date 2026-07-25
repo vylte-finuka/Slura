@@ -189,7 +189,7 @@ static UINTN wlen(const CHAR16* s) {
 // ── Chaînes ───────────────────────────────────────────────────────────────────
 static const CHAR16 MSG_TITLE[]  = L"\r\n  === Slura OS Boot Selector ===\r\n\r\n";
 static const CHAR16 MSG_OPT[]    = L"  [ENTREE]  Slura OS  (slr_clk_bt.efi)\r\n";
-static const CHAR16 MSG_PROMPT[] = L"\r\n  Appuyez sur une touche pour demarrer...\r\n";
+static const CHAR16 MSG_PROMPT[] = L"\r\n  Appuyez sur une touche, ou demarrage automatique dans 5s...\r\n";
 static const CHAR16 MSG_LOAD[]   = L"\r\n  Lecture de slr_clk_bt.efi...\r\n";
 static const CHAR16 MSG_START[]  = L"  Demarrage Lunee kernel...\r\n";
 static const CHAR16 MSG_ERR[]    = L"\r\n  [ERREUR] Impossible de charger slr_clk_bt.efi\r\n";
@@ -207,8 +207,12 @@ extern "C" EFI_STATUS efi_selector_main(EFI_HANDLE image_handle,
     print(con, MSG_OPT);
     print(con, MSG_PROMPT);
 
-    // ── Attendre une touche ────────────────────────────────────────────────────
-    while (true) {
+    // ── Attendre une touche, avec démarrage automatique après 5s ──────────────
+    // Sans timeout, ce sélecteur bloquait indéfiniment tant qu'aucune touche
+    // n'était reçue — inoffensif avec un clavier réel, mais bloque tout test
+    // automatisé (VMware sans VMware Tools/identifiants invité ne permet pas
+    // d'y injecter une touche par script). 50000µs × 100 = 5s.
+    for (int waited = 0; waited < 100; ++waited) {
         EFI_INPUT_KEY key{0, L'\0'};
         if (cin->ReadKeyStroke(cin, &key) == EFI_SUCCESS) break;
         bs->Stall(50000);

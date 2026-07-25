@@ -33,7 +33,11 @@ rel op APrevent: <[string CycleActivity]>t [
     ];
 
     rel cl onDriverInit: [] [
-        let disk: <ptr> = <DrvManSpec***UefiLocateDisk***>();
+        // 0 = selectionne explicitement le disque virtuel SRFS (voir
+        // ovc_exec.rs::ACTIVE_DISK). NTFSMan pointe le sien avec 1 — chaque
+        // driver fixe son disque, l'ordre de chargement des .slul n'a donc
+        // pas d'incidence sur qui lit quoi.
+        let disk: <ptr> = <DrvManSpec***UefiLocateDisk***>(0);
         if (disk == nullptr) [
             log: "SRFSMan: protocole Block I/O introuvable";
             ret 1;

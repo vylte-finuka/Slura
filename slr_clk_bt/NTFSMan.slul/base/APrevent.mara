@@ -1,0 +1,173 @@
+//===================================================================
+//  APrevent.mara – Cycle de vie + etat NTFS NTFSMan
+//  Projet : NTFSMan.slul
+//  Auteur : Vyft Ltd — 2026
+//  Monte une partition NTFS en LECTURE SEULE : lit le secteur de boot
+//  (BPB), localise le $MFT (record 0, bootstrap direct via son LCN),
+//  applique le fixup et verifie la structure. L'ecriture n'est pas
+//  supportee — DiskWrite est un no-op cote noyau pendant la phase
+//  UEFI (meme limitation que SRFSMan, voir SRFSMan.slul/base/APrevent.mara).
+//  L'etat (geometrie disque, buffer record 0) est stocke comme vars
+//  de classe — pattern DrvInstance.mara identique a SRFSMan.
+//===================================================================
+
+#base <std***ComTpe***SlulFrmt***[ MathSafety, DrvManSpec ]>;
+#base <MaratineKit>;
+#base <MaratineKit***CycleActivity>;
+
+rel op APrevent: <[string CycleActivity]>t [
+
+    var Architecture:       <string> = "";
+    var _diskHandle:        <ptr>    = nullptr;
+    var _mounted:           <i32>    = 0;
+    var _bytesPerSector:    <i32>    = 512;
+    var _sectorsPerCluster: <i32>    = 8;
+    var _clusterSize:       <i32>    = 4096;
+    var _mftRecordSize:     <i32>    = 1024;
+    var _mftLcn:            <i32>    = 0;
+    var _mftRecord0:        <ptr>    = nullptr;
+    var _rootRecordId:      <i32>    = 5;
+
+    rel op OnPowerOn: [arch string] [
+        Architecture = arch;
+        log: "NTFSMan: demarrage driver NTFS (lecture seule)";
+        let r: <i32> = self***onDriverInit();
+        if (r != 0) [
+            log: "NTFSMan: onDriverInit echoue - code " + r;
+            ret r;
+        ];
+        log: "NTFSMan: NTC:\\ monte OK";
+        ret 0;
+    ];
+
+    rel cl onDriverInit: [] [
+        // 1 = sélectionne le disque virtuel NTFS (voir ovc_exec.rs::ACTIVE_DISK).
+        // SRFSMan appelle ce meme point d'entree avec 0 pour SDC: — chacun
+        // pointe explicitement son disque, l'ordre de chargement des .slul
+        // n'a donc pas d'incidence.
+        let disk: <ptr> = <DrvManSpec***UefiLocateDisk***>(1);
+        if (disk == nullptr) [
+            log: "NTFSMan: protocole Block I/O introuvable";
+            ret 1;
+        ];
+        _diskHandle = disk;
+
+        // Secteur de boot (BPB NTFS), 512 octets au bloc 0
+        let bootBuf: <ptr> = <DrvAPIInterCon***MemAlloc***>(512, 0, 4);
+        if (bootBuf == nullptr) [ ret 2; ];
+
+        let r: <i32> = <DrvManSpec***DiskRead***>(0, bootBuf, 512);
+        if (r < 512) [
+            <DrvAPIInterCon***MemFree***>(bootBuf, 0);
+            log: "NTFSMan: lecture secteur de boot echouee";
+            ret 3;
+        ];
+
+        // OEM ID "NTFS    " a l'offset 3 (4 premiers octets suffisent a valider)
+        let oem: <i32> = <DrvManSpec***PtrRead32At***>(bootBuf, 3);
+        let expectOem: <i32> = 78 | (84 << 8) | (70 << 16) | (83 << 24);  // 'N','T','F','S'
+        if (oem != expectOem) [
+            <DrvAPIInterCon***MemFree***>(bootBuf, 0);
+            log: "NTFSMan: signature NTFS absente - partition non reconnue";
+            ret 4;
+        ];
+
+        _bytesPerSector    = <std***core***self***NTFSMft***ReadU16LE>(bootBuf, 11);
+        _sectorsPerCluster = <DrvManSpec***PtrRead8At***>(bootBuf, 13);
+        if (_bytesPerSector <= 0 || _sectorsPerCluster <= 0) [
+            <DrvAPIInterCon***MemFree***>(bootBuf, 0);
+            log: "NTFSMan: BPB invalide (bytesPerSector/sectorsPerCluster)";
+            ret 5;
+        ];
+        _clusterSize = _bytesPerSector * _sectorsPerCluster;
+
+        // LCN du $MFT a l'offset 48 (champ 64-bit, on ne supporte que la
+        // partie basse — limite de DiskRead qui prend un offset i32)
+        let mftLcn: <i32> = <std***core***self***NTFSMft***ReadU32Low64>(bootBuf, 48);
+        if (mftLcn < 0) [
+            <DrvAPIInterCon***MemFree***>(bootBuf, 0);
+            log: "NTFSMan: volume trop grand pour ce pilote (LCN $MFT hors 32 bits)";
+            ret 6;
+        ];
+        _mftLcn = mftLcn;
+
+        // Taille d'un record MFT : octet signe a l'offset 64
+        //   > 0 : nombre de clusters par record
+        //   < 0 : taille = 2^(-valeur) octets (cas courant : 0xF6 = -10 -> 1024)
+        let cpmr: <i32> = <std***core***self***NTFSMft***ReadI8>(bootBuf, 64);
+        if (cpmr > 0) [
+            _mftRecordSize = cpmr * _clusterSize;
+        ] else [
+            var sz: <i32> = 1;
+            var n: <i32> = 0 - cpmr;
+            loop (n > 0) [ sz = sz * 2; n = n - 1; ];
+            _mftRecordSize = sz;
+        ];
+
+        <DrvAPIInterCon***MemFree***>(bootBuf, 0);
+
+        // Lecture bootstrap du record 0 (le $MFT se decrit lui-meme) —
+        // seul record accessible directement via son LCN sans passer par
+        // un data run (ceux de tous les autres records sont resolus via
+        // le $DATA non-resident de ce record 0, voir NTFSMft.ReadMftRecord).
+        _mftRecord0 = <DrvAPIInterCon***MemAlloc***>(_mftRecordSize, 0, 4);
+        if (_mftRecord0 == nullptr) [ ret 7; ];
+
+        let mftByteOff: <i32> = _mftLcn * _clusterSize;
+        let r2: <i32> = <DrvManSpec***DiskRead***>(mftByteOff, _mftRecord0, _mftRecordSize);
+        if (r2 != _mftRecordSize) [
+            log: "NTFSMan: lecture record 0 ($MFT) echouee";
+            ret 8;
+        ];
+
+        let fx: <i32> = <std***core***self***NTFSMft***ApplyFixup>(_mftRecord0, _mftRecordSize, _bytesPerSector);
+        if (fx != 0) [
+            log: "NTFSMan: fixup du record 0 invalide";
+            ret 9;
+        ];
+
+        let magic: <i32> = <DrvManSpec***PtrRead32At***>(_mftRecord0, 0);
+        if (magic != 0x454C4946) [  // 'FILE'
+            log: "NTFSMan: magic FILE absent sur le record 0";
+            ret 10;
+        ];
+
+        _mounted = 1;
+
+        // Lettre de montage — change ici si tu veux une autre lettre (le
+        // parsing de chemin dans NTFSCore.ResolvePath est generique : il
+        // detecte n'importe quel prefixe "X:" a une lettre, rien d'autre
+        // a modifier).
+        let regResult: <i32> = <DrvAPIInterCon***MountPointRegister***>("A:\\", disk);
+        if (regResult != 0) [
+            log: "NTFSMan: enregistrement A: echoue";
+        ];
+
+        log: "NTFSMan: NTFS monte - cluster=" + _clusterSize + " octets, MFT record=" + _mftRecordSize + " octets";
+        ret 0;
+    ];
+
+    rel op OnPowerOff: [] [
+        if (_mounted != 0) [
+            _diskHandle = nullptr;
+            _mounted    = 0;
+        ];
+        log: "NTFSMan: NTC:\\ demonte";
+        ret 0;
+    ];
+
+    rel op OnSuspend: [] [ log: "NTFSMan: suspension"; ret 0; ];
+    rel op OnResume:  [] [ log: "NTFSMan: reprise";    ret 0; ];
+
+    // ── Accesseurs (utilises par NTFSMft / NTFSIndex / NTFSCore) ───────────────
+
+    rel op GetDiskHandle:        [] [ ret _diskHandle;        ];
+    rel op GetMounted:           [] [ ret _mounted;           ];
+    rel op GetBytesPerSector:    [] [ ret _bytesPerSector;    ];
+    rel op GetSectorsPerCluster: [] [ ret _sectorsPerCluster; ];
+    rel op GetClusterSize:       [] [ ret _clusterSize;       ];
+    rel op GetMftRecordSize:     [] [ ret _mftRecordSize;     ];
+    rel op GetMftLcn:            [] [ ret _mftLcn;            ];
+    rel op GetMftRecord0:        [] [ ret _mftRecord0;        ];
+    rel op GetRootRecordId:      [] [ ret _rootRecordId;      ];
+];

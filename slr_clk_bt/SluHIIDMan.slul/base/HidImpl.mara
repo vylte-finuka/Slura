@@ -30,7 +30,7 @@
 //  notion de "mode" clavier — accusé de réception uniquement.
 //===================================================================
 
-#base <std***ComTpe***SlulFrmt***DrvManSpec>;
+#base <std***ComTpe***SlulFrmt***[ DrvManSpec, DrvAPIInterCon ]>;
 
 // ── Pointeur (souris) ──────────────────────────────────────────────────────
 // Format packé du raw : X:12 bits [31:20] | Y:12 bits [19:8] | Btn:8 bits [7:0].
@@ -59,3 +59,107 @@ rel op PointerGetBtn: [] [
 rel op KeyboardReadKey: [] [ ret <DrvManSpec***UefiReadKey***>();               ];
 rel op KeyboardPoll:    [] [ ret <DrvManSpec***UefiPollKey***>();               ];
 rel op KeyboardSetMode: [mode i32] [ ret <DrvManSpec***UefiSetKeyMode***>(mode); ];
+
+// ── Pointeur absolu VMware/QEMU (Vmwaretool) ─────────────────────────────────
+// Protocole "VMMouse" — même mécanisme que VMware Tools (port I/O 0x5658, magic
+// "VMXh") : donne une position absolue reportée directement par l'hyperviseur,
+// contrairement au pointeur relatif ci-dessus qui nécessite un "grab" de la
+// fenêtre hôte tant que VMware ne voit pas ce protocole s'activer — c'est CE
+// grab qui fait "disparaître" le curseur hôte jusqu'à Ctrl+Alt. Toute la
+// connaissance du protocole (constantes, séquence, décodage) vit ICI, en Mara :
+// DrvManSpec***HwBackdoorCall***/***HwBackdoorResultGet*** (ovc_exec.rs) ne sont
+// qu'un échange générique de 4 registres via une instruction IN, sans aucune
+// connaissance vendor — voir leurs commentaires côté Rust.
+//
+// Activation conditionnée à la présence de Vmwaretool (voir ShiLauncher/
+// LAPrevent.mara) : installer l'app EST l'interrupteur.
+//
+// LIMITE CONNUE : aucun mécanisme Mara ne permet à un AUTRE bundle (ex.
+// ShiLauncher.marep) d'appeler les fonctions ci-dessous — tous les `#base`
+// sont self-scopés dans ce compilateur (confirmé par investigation, aucune
+// entrée `dependencies.basecon` ne référence jamais un module d'un AUTRE
+// bundle). `DrvAPIInterCon***PointerGetX***` par ex. n'appelle PAS ce fichier :
+// c'est un arm Rust direct dans ovc_exec.rs qui lit ctx.pointer_x, sans lien
+// Mara avec HidImpl.mara. Ces fonctions restent donc la référence/doc du
+// protocole côté pilote HID, mais ShiLauncher/LAPrevent.mara porte SA PROPRE
+// copie de cette même logique (mêmes littéraux, mêmes primitives Rust
+// génériques HwBackdoorCall/ResultGet) pour pouvoir réellement piloter le
+// curseur visible — pas un import de ce module.
+
+// Constantes du protocole (valeurs littérales dupliquées à chaque appel plutôt
+// que via des `let` de module — un `let <i32>` module-level référencé comme
+// argument d'appel échoue en codegen ARM64 ["undefined variable"], confirmé par
+// `marai check`. Littéral direct = seul chemin prouvé fiable dans ce compilateur.
+//   magic  = 0x564D5868 ("VMXh")     port         = 0x5658
+//   GETVERSION = 10                  ABS_DATA     = 39
+//   ABS_STATUS = 40                  ABS_COMMAND  = 41
+//   READ_ID    = 0x45414552          REQ_RELATIVE = 0x4c455252
+//   REQ_ABSOLUTE = 0x53424152
+//
+// État persistant : `var` de module échoue aussi en codegen dès qu'il est
+// référencé depuis une AUTRE fonction ("undefined variable"), confirmé par
+// `marai check` — cohérent avec le reste du projet, où SCROLL_SCRATCH
+// (DrvAPIInterCon***ScrollGet/Set***) est déjà le seul mécanisme d'état
+// inter-appels fiable (voir ShiLooker/ContextMenu/FolderMenu.mara). Slots 20-23
+// dédiés ici (libres : 1-6,8,12,15,16 déjà pris, 40+ réservés au dock) :
+//   20=enabled  21=absX  22=absY  23=absBtn
+
+// VmBackdoorAvailable — vrai si un hyperviseur compatible répond (VMware ou
+// QEMU, qui émule le même device par défaut). Lecture seule, sans effet de bord.
+rel op VmBackdoorAvailable: [] [
+    let _: <i32> = <DrvManSpec***HwBackdoorCall***>(0x564D5868, 0, 10, 0x5658);
+    let ebx: <i32> = <DrvManSpec***HwBackdoorResultGet***>(1);
+    if (ebx == 0x564D5868) [ ret 1; ];
+    ret 0;
+];
+
+// VmBackdoorEnable — active le pointeur absolu. Idempotent (rappelable sans
+// effet de bord, la séquence READ_ID/RELATIVE/ABSOLUTE est un "wiggle" de
+// réarmement conçu pour ça).
+rel op VmBackdoorEnable: [] [
+    let _: <i32> = <DrvManSpec***HwBackdoorCall***>(0x564D5868, 0x45414552, 41, 0x5658);
+    let _: <i32> = <DrvManSpec***HwBackdoorCall***>(0x564D5868, 0, 40, 0x5658);
+    let status: <i32> = <DrvManSpec***HwBackdoorResultGet***>(0);
+    let hi: <i32> = (status >> 16) & 0xFFFF;
+    if (hi == 0xFFFF) [
+        let _: <i32> = <DrvAPIInterCon***ScrollSet***>(20, 0);
+        ret 0;
+    ];
+    let _: <i32> = <DrvManSpec***HwBackdoorCall***>(0x564D5868, 0x4c455252, 41, 0x5658);
+    let _: <i32> = <DrvManSpec***HwBackdoorCall***>(0x564D5868, 0x53424152, 41, 0x5658);
+    let _: <i32> = <DrvAPIInterCon***ScrollSet***>(20, 1);
+    ret 1;
+];
+
+rel op VmBackdoorIsEnabled: [] [ ret <DrvAPIInterCon***ScrollGet***>(20); ];
+
+// VmBackdoorPoll — à appeler une fois par frame par le propriétaire du curseur
+// (ShiLauncher/LAPrevent.mara). Met à jour PointerGetAbsX/Y/Btn si un paquet est
+// disponible ; retourne 1 si mis à jour, 0 sinon (rien de nouveau, ou pas activé).
+rel op VmBackdoorPoll: [] [
+    let enabled: <i32> = <DrvAPIInterCon***ScrollGet***>(20);
+    if (enabled == 0) [ ret 0; ];
+    let _: <i32> = <DrvManSpec***HwBackdoorCall***>(0x564D5868, 0, 40, 0x5658);
+    let status: <i32> = <DrvManSpec***HwBackdoorResultGet***>(0);
+    let words: <i32> = status & 0xFFFF;
+    if (words < 4) [ ret 0; ];
+    let _: <i32> = <DrvManSpec***HwBackdoorCall***>(0x564D5868, 4, 39, 0x5658);
+    let buttonsRaw: <i32> = <DrvManSpec***HwBackdoorResultGet***>(0);
+    let rawX: <i32> = <DrvManSpec***HwBackdoorResultGet***>(1);
+    let rawY: <i32> = <DrvManSpec***HwBackdoorResultGet***>(2);
+    let _: <i32> = <DrvAPIInterCon***ScrollSet***>(21, rawX);
+    let _: <i32> = <DrvAPIInterCon***ScrollSet***>(22, rawY);
+    var btn: <i32> = 0;
+    if ((buttonsRaw & 0x20) != 0) [ btn = btn + 1; ];
+    if ((buttonsRaw & 0x10) != 0) [ btn = btn + 2; ];
+    let _: <i32> = <DrvAPIInterCon***ScrollSet***>(23, btn);
+    ret 1;
+];
+
+// PointerGetAbsX/Y — position brute 0..0xFFFF telle que reportée par le device,
+// à remettre à l'échelle écran côté appelant (même convention que
+// EFI_ABSOLUTE_POINTER_PROTOCOL, déjà gérée ainsi pour l'autre source absolue
+// dans kernel_runtime.rs).
+rel op PointerGetAbsX:   [] [ ret <DrvAPIInterCon***ScrollGet***>(21); ];
+rel op PointerGetAbsY:   [] [ ret <DrvAPIInterCon***ScrollGet***>(22); ];
+rel op PointerGetAbsBtn: [] [ ret <DrvAPIInterCon***ScrollGet***>(23); ];

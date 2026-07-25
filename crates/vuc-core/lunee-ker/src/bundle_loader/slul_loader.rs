@@ -23,16 +23,28 @@ use super::{zip_reader::ZipReader, BundleError};
 //   1. SluGpu       — framebuffer GOP disponible en premier
 //   2. SluHIIDMan   — entrées clavier + pointeur (HID, ACPI/UEFI standard)
 //   3. SRFSMan      — système de fichiers SDC:\ (avant SluFontConf qui en dépend)
-//   4. SluFontConf  — rendu TTF/WOFF via DrvManSpec***FS***
-//   5. SluEnvSys    — variables d'environnement système (timezone, locale, etc.)
-//   6. CryptoAssetSupport — wallet, crypto, VezCur proxy
+//   4. NTFSMan      — système de fichiers NTFS en lecture seule, monté sur A:\
+//   5. SluDskMan    — service disque (format/mount/unmount honnêtes), après les
+//                     deux pilotes de fichiers dont il lit la table de montage
+//   6. SluWWANMan   — signal cellulaire (état placeholder, aucun modem réel)
+//   7. SluFontConf  — rendu TTF/WOFF via DrvManSpec***FS***
+//   8. SluEnvSys    — variables d'environnement système (timezone, locale, etc.)
+//   9. CryptoAssetSupport — wallet, crypto, VezCur proxy
+// NB: SRFSMan et NTFSMan sélectionnent chacun leur disque virtuel explicitement
+// (UefiLocateDisk(0)/UefiLocateDisk(1) côté Mara) — l'ordre entre eux deux
+// n'a donc pas d'incidence sur quel disque chacun monte.
 const DRIVER_BUNDLES: &[&uefi::CStr16] = &[
     cstr16!("\\sources\\SluGpu.slul"),
     cstr16!("\\sources\\SluHIIDMan.slul"),
     cstr16!("\\sources\\SRFSMan.slul"),
+    cstr16!("\\sources\\NTFSMan.slul"),
+    cstr16!("\\sources\\SluDskMan.slul"),
+    cstr16!("\\sources\\SluWWANMan.slul"),
     cstr16!("\\sources\\SluFontConf.slul"),
     cstr16!("\\sources\\SluEnvSys.slul"),
     cstr16!("\\sources\\CryptoAssetSupport.slul"),
+    cstr16!("\\sources\\EncDecProcMan.slul"),
+    cstr16!("\\sources\\SluPwMan.slul"),
 ];
 
 // Aucun chemin SRFS hardcodé ici.

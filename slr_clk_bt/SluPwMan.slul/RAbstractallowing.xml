@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<RAbstractallowing xmlns="http://vyft.com/schema/abstractallowing" version="1.0">
+    <Metadata>
+        <PackageName>com.slura.os</PackageName>
+        <SRID>SRID_slura_os_29062617</SRID>
+        <FrameworkVersion>1.0.0</FrameworkVersion>
+        <Target>arm64</Target>
+        <Description>Service de gestion de l'alimentation (redémarrer/éteindre/mettre en veille, ACPI Spec 6.4 §7) — sans interface propre, consommé directement par ShiLauncher.marep/ShiLooker.marep.</Description>
+    </Metadata>
+    <Permissions>
+        <Permission name="power.reset" description="Redémarrage/extinction via UEFI Runtime Services ResetSystem.">
+            <Required>true</Required>
+        </Permission>
+        <Permission name="power.sleep" description="Écriture directe du registre ACPI PM1_CNT (SLP_TYP/SLP_EN) pour une entrée S3 réelle, si les tables ACPI l'exposent.">
+            <Required>true</Required>
+        </Permission>
+    </Permissions>
+    <Capabilities>
+        <Capability name="driver.aprevent" description="Cycle de vie APrevent."><Enabled>true</Enabled></Capability>
+        <Capability name="acpi.readonly" description="Ne lit que les tables ACPI déjà scannées au boot (RSDP/XSDT/FADT/DSDT) — aucune écriture ACPI en dehors de PM1_CNT au moment explicite de la mise en veille."><Enabled>true</Enabled></Capability>
+    </Capabilities>
+</RAbstractallowing>

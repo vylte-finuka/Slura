@@ -1,0 +1,47 @@
+# Maraset – manifest SluPwMan.slul
+
+package:
+  name: base***SluPwMan
+  version: 1.0.0
+  build: 18072617
+
+metadata:
+  target: arm64
+  bundle: slul
+  attributes:
+    SRID: SRID_slura_os_29062617
+    Marav: 0.1 build 18072617-dev
+    description: |
+      Service de gestion de l'alimentation pour Slura OS (ACPI Spec 6.4 §7 —
+      Power and Performance Management).
+      Pilote SANS interface (s'exécute avec un framebuffer nul, comme tout
+      .slul) — la surface visible (menu contextuel "Redémarrer / Éteindre /
+      Mettre en veille" sur l'icône du dock ShiLooker) vit dans
+      ShiLauncher.marep/ShiLooker.marep, qui appellent directement les FFI
+      DrvAPIInterCon***Power...*** exposées par ce service (même pattern que
+      MountTableCount déjà consommée sans lien Mara avec SRFSMan).
+
+      Redémarrer/Éteindre : RÉELS — UEFI Runtime Services ResetSystem
+      (EfiResetWarm / EfiResetShutdown), pointeur capturé une fois au boot
+      (kernel_runtime.rs), valide toute la session (ce noyau n'appelle jamais
+      ExitBootServices). Éteindre déclenche une vraie transition ACPI \_S5
+      gérée par le firmware.
+
+      Mettre en veille (S3) : RÉEL si les registres PM1 et l'objet \_S3 ont
+      été trouvés dans les tables ACPI au boot (acpi::scan_power_management,
+      recherche bornée du DSDT — pas un interpréteur AML complet) ; écrit
+      alors SLP_TYP+SLP_EN dans PM1_CNT (port I/O direct, ACPI §7.3/§7.4).
+      Honnêtement indisponible (PowerSleepSupported=0) si un de ces éléments
+      manque — jamais de valeur devinée.
+    slura_min: 1
+    slura_max: 5.0
+
+dependencies:
+  basecon:
+    base***SluraOS***APrevent: 18072617
+    base***SluraOS***OEntry:   18072617
+
+resources:
+  - path: RAbstractallowing.xml
+    type: xml
+    description: "Permissions service alimentation."

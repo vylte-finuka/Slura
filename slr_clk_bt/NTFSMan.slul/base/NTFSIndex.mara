@@ -1,0 +1,157 @@
+//===================================================================
+//  NTFSIndex.mara – Index B+ des repertoires NTFS
+//  Projet : NTFSMan.slul
+//  Auteur : Vyft Ltd — 2026
+//  Recherche d'une entree par nom dans $INDEX_ROOT (resident) puis,
+//  si le repertoire est grand, descente dans $INDEX_ALLOCATION
+//  (tampons INDX non-residents, memes fixups que les records MFT).
+//  Pattern GpuImpl/SRFSBTree : descente iterative, pas de recursion.
+//===================================================================
+
+#base <std***ComTpe***SlulFrmt***DrvManSpec>;
+#base <MaratineKit>;
+
+// Compare le nom UTF-16LE d'une entree d'index (stocke a filenameValueBase,
+// structure $FILE_NAME : longueur a +64, caracteres UTF-16LE a partir de
+// +66) a une chaine ASCII `target`. Comparaison insensible a la casse
+// ASCII uniquement — les caracteres hors ASCII ne matchent jamais.
+// Retourne 0 si egal, <0 si l'entree precede target, >0 si elle le suit.
+rel op CompareEntryName: [filenameValueBase ptr, target string] [
+    let nameLen: <i32> = <DrvManSpec***PtrRead8At***>(filenameValueBase, 64);
+    let nameStart: <ptr> = <DrvManSpec***PtrAdd***>(filenameValueBase, 66);
+    let targetLen: <i32> = <DrvManSpec***StrLen***>(target);
+
+    var minLen: <i32> = nameLen;
+    if (targetLen < minLen) [ minLen = targetLen; ];
+
+    var i: <i32> = 0;
+    var diff: <i32> = 0;
+    loop (i < minLen && diff == 0) [
+        let lo: <i32> = <DrvManSpec***PtrRead8At***>(nameStart, i * 2);
+        let hi: <i32> = <DrvManSpec***PtrRead8At***>(nameStart, i * 2 + 1);
+        var dc: <i32> = lo;
+        if (hi != 0) [ dc = 0xFFFF; ];
+        if (dc >= 97 && dc <= 122) [ dc = dc - 32; ];
+
+        var tc: <i32> = <DrvManSpec***StrCharAt***>(target, i);
+        if (tc >= 97 && tc <= 122) [ tc = tc - 32; ];
+
+        diff = dc - tc;
+        i = i + 1;
+    ];
+    if (diff != 0) [ ret diff; ];
+    ret nameLen - targetLen;
+];
+
+// Parcourt une liste d'entrees d'index (racine residente ou tampon INDX
+// deja fixe-up) a la recherche de `name`.
+//   retour  0 : trouve      -> outParams[0] = MFT record id
+//   retour  1 : descendre    -> outParams[1] = VCN du sous-noeud enfant
+//   retour -1 : introuvable
+rel op NodeScan: [entriesStart ptr, entriesLen i32, name string, outParams ptr] [
+    var off:    <i32> = 0;
+    var result: <i32> = -1;
+    var stop:   <i32> = 0;
+
+    loop (off < entriesLen && stop == 0) [
+        let entry:    <ptr> = <DrvManSpec***PtrAdd***>(entriesStart, off);
+        let entryLen: <i32> = <std***core***self***NTFSMft***ReadU16LE>(entry, 8);
+        let flags:    <i32> = <std***core***self***NTFSMft***ReadU16LE>(entry, 12);
+
+        if (entryLen <= 0) [ stop = 1; ] else [
+            let isLast:   <i32> = flags & 0x02;
+            let hasChild: <i32> = flags & 0x01;
+
+            var cmp: <i32> = 1;  // entree "fin de noeud" : force la regle de descente
+            if (isLast == 0) [
+                let fnBase: <ptr> = <DrvManSpec***PtrAdd***>(entry, 16);
+                cmp = CompareEntryName(fnBase, name);
+                if (cmp == 0) [
+                    <DrvManSpec***PtrWrite32At***>(outParams, 0, <DrvManSpec***PtrRead32At***>(entry, 0));
+                    result = 0;
+                    stop = 1;
+                ];
+            ];
+
+            if (stop == 0) [
+                if (cmp > 0 && hasChild != 0) [
+                    let childVcnPtr: <ptr> = <DrvManSpec***PtrAdd***>(entry, entryLen - 8);
+                    <DrvManSpec***PtrWrite32At***>(outParams, 4, <DrvManSpec***PtrRead32At***>(childVcnPtr, 0));
+                    result = 1;
+                    stop = 1;
+                ] else [
+                    if (cmp > 0) [ stop = 1; ] else [ off = off + entryLen; ];
+                ];
+            ];
+        ];
+    ];
+    ret result;
+];
+
+// Cherche `name` dans le repertoire designe par dirRecordId.
+// Retourne le MFT record id de l'entree, ou -1.
+rel op LookupInDirectory: [dirRecordId i32, name string] [
+    if (dirRecordId < 0 || name == "" || name == null) [ ret -1; ];
+
+    let mftRecordSize:  <i32> = <std***core***self***APrevent***GetMftRecordSize>();
+    let bytesPerSector: <i32> = <std***core***self***APrevent***GetBytesPerSector>();
+
+    let dirBuf: <ptr> = <DrvAPIInterCon***MemAlloc***>(mftRecordSize, 0, 4);
+    let rr: <i32> = <std***core***self***NTFSMft***ReadMftRecord>(dirRecordId, dirBuf);
+    if (rr != 0) [ ret -1; ];
+
+    let rootOff: <i32> = <std***core***self***NTFSMft***FindAttribute>(dirBuf, 0x90);  // $INDEX_ROOT
+    if (rootOff < 0) [ ret -1; ];  // pas un repertoire
+
+    let rootValOff: <i32> = <std***core***self***NTFSMft***ReadU16LE>(dirBuf, rootOff + 20);
+    let rootVal: <ptr> = <DrvManSpec***PtrAdd***>(dirBuf, rootOff + rootValOff);
+    let indexRecordSize: <i32> = <DrvManSpec***PtrRead32At***>(rootVal, 8);
+
+    let hdrBase: <ptr> = <DrvManSpec***PtrAdd***>(rootVal, 16);  // Index Header
+    let firstEntryOff:   <i32> = <DrvManSpec***PtrRead32At***>(hdrBase, 0);
+    let entriesTotalSize:<i32> = <DrvManSpec***PtrRead32At***>(hdrBase, 4);
+
+    var entriesStart: <ptr> = <DrvManSpec***PtrAdd***>(hdrBase, firstEntryOff);
+    var entriesLen:   <i32> = entriesTotalSize - firstEntryOff;
+
+    let scratch: <ptr> = <DrvAPIInterCon***MemAlloc***>(16, 0, 4);
+    var found:   <i32> = -1;
+    var depth:   <i32> = 0;
+    var running: <i32> = 1;
+
+    // Descente iterative dans l'index B+ : d'abord le noeud resident
+    // ($INDEX_ROOT), puis les tampons INDX de $INDEX_ALLOCATION si le
+    // repertoire est trop grand pour tenir dans la racine.
+    loop (running == 1 && depth < 32) [
+        let sc: <i32> = NodeScan(entriesStart, entriesLen, name, scratch);
+        if (sc == 0) [
+            found = <DrvManSpec***PtrRead32At***>(scratch, 0);
+            running = 0;
+        ] else [
+            if (sc == 1) [
+                let childVcn: <i32> = <DrvManSpec***PtrRead32At***>(scratch, 4);
+                let allocOff: <i32> = <std***core***self***NTFSMft***FindAttribute>(dirBuf, 0xA0);  // $INDEX_ALLOCATION
+                if (allocOff < 0) [ running = 0; ] else [
+                    let indxBuf: <ptr> = <DrvAPIInterCon***MemAlloc***>(indexRecordSize, 0, 4);
+                    let readB: <i32> = <std***core***self***NTFSMft***StreamRead>(
+                        dirBuf, allocOff, childVcn * indexRecordSize, indexRecordSize, indxBuf
+                    );
+                    if (readB != indexRecordSize) [ running = 0; ] else [
+                        let fx:    <i32> = <std***core***self***NTFSMft***ApplyFixup>(indxBuf, indexRecordSize, bytesPerSector);
+                        let magic: <i32> = <DrvManSpec***PtrRead32At***>(indxBuf, 0);
+                        if (fx != 0 || magic != 0x58444E49) [ running = 0; ] else [  // 'INDX'
+                            let ihdr: <ptr> = <DrvManSpec***PtrAdd***>(indxBuf, 24);
+                            let feo: <i32> = <DrvManSpec***PtrRead32At***>(ihdr, 0);
+                            let ets: <i32> = <DrvManSpec***PtrRead32At***>(ihdr, 4);
+                            entriesStart = <DrvManSpec***PtrAdd***>(ihdr, feo);
+                            entriesLen   = ets - feo;
+                            depth = depth + 1;
+                        ];
+                    ];
+                ];
+            ] else [ running = 0; ];
+        ];
+    ];
+
+    ret found;
+];

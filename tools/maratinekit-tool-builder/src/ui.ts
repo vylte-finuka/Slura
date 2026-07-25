@@ -10,6 +10,16 @@ const statusEl = document.getElementById("status") as HTMLDivElement;
 const appNameEl = document.getElementById("appname") as HTMLInputElement;
 const desktopEl = document.getElementById("desktop") as HTMLInputElement;
 const iconRatioEl = document.getElementById("iconratio") as HTMLInputElement | null;
+const diamondColorEl = document.getElementById("diamondcolor") as HTMLInputElement | null;
+
+/** Parse "0x33B9B9B9" / "33B9B9B9" → nombre ARGB. Retombe sur le défaut si invalide/vide. */
+function parseArgbHex(raw: string | undefined, fallback: number): number {
+  if (!raw) return fallback;
+  const cleaned = raw.trim().replace(/^0x/i, "");
+  if (!/^[0-9a-fA-F]{1,8}$/.test(cleaned)) return fallback;
+  const n = parseInt(cleaned, 16);
+  return Number.isFinite(n) ? (n >>> 0) : fallback;
+}
 const iconFileEl = document.getElementById("iconfile") as HTMLInputElement | null;
 
 // Logo personnalisé : reste côté UI (accès Blob/Canvas). S'il est fourni, il devient
@@ -71,6 +81,7 @@ document.getElementById("generate")!.addEventListener("click", () => {
         appName: appNameEl.value.trim(),
         isDesktop: desktopEl.checked,
         hasCustomIcon: customIconBytes !== null,
+        diamondColor: parseArgbHex(diamondColorEl?.value, 0x33b9b9b9),
       },
     },
     "*"

@@ -1,0 +1,144 @@
+#base <std***core***self***[ AppLifecycle, ComponentView, RenderContext ]>;
+#base <std***ComTpe***SlulFrmt***[ DrvAPIInterCon, DrvManSpec ]>;
+#base <MaratineKit>;
+
+// EncDecProcManSrv — panneau de statut des formats média (matrice réelle,
+// pas une liste marketing) : interroge DrvManSpec***EncDecCanDecode*** pour
+// CHAQUE format (IDs 1-15, voir EncDecProcMan.slul/EncDecImpl.mara pour la
+// table) et affiche honnêtement 2=décodage complet / 1=identification seule
+// / 0=non reconnu. Aucun appel cross-bundle vers EncDecProcMan.slul (voir
+// sa doc) : ce fichier appelle DrvManSpec directement, comme
+// ShiLauncher/VmwareIntegration.mara le fait pour HwBackdoorCall.
+
+rel op LAPrevent: <[string AppLifecycle]>t [
+
+    var Architecture: <string> = "";
+
+    rel op Launch: [arch string] [
+        Architecture = arch;
+        log: "EncDecProcManSrv: demarrage - arch " + arch;
+
+        let ctx: <string> = <MaratineKit***RenderContext***New()>;
+        var fnt: <ptr> = <DrvAPIInterCon***FontGetDefault***>();
+
+        var running: <bool> = true;
+        loop (running) [
+            let _: <i32> = <DrvAPIInterCon***GpuFill***>(0xFF10141C);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(24, 20, 470, "Codecs & Media", 0xFFFFFFFF, 0x00000000, fnt, 24, 0);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(24, 52, 470, "Formats reellement pris en charge par Slura", 0xFF9FB4CC, 0x00000000, fnt, 13, 0);
+
+            let colX1: <i32> = 24;
+            let colX2: <i32> = 260;
+            var y: <i32> = 90;
+            var col: <i32> = 0;
+
+            // PNG (1)
+            let l1: <i32> = <DrvManSpec***EncDecCanDecode***>(1);
+            let n1: <ptr> = <DrvManSpec***EncDecGetFormatName***>(1);
+            let c1: <i32> = self***if_color(l1);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(colX1, y, 200, n1, c1, 0x00000000, fnt, 15, 0);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>((colX1 + 90), y, 130, self***label_for(l1), c1, 0x00000000, fnt, 12, 0);
+
+            // BMP (2)
+            let l2: <i32> = <DrvManSpec***EncDecCanDecode***>(2);
+            let n2: <ptr> = <DrvManSpec***EncDecGetFormatName***>(2);
+            let c2: <i32> = self***if_color(l2);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(colX1, (y + 26), 200, n2, c2, 0x00000000, fnt, 15, 0);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>((colX1 + 90), (y + 26), 130, self***label_for(l2), c2, 0x00000000, fnt, 12, 0);
+
+            // GIF (3)
+            let l3: <i32> = <DrvManSpec***EncDecCanDecode***>(3);
+            let n3: <ptr> = <DrvManSpec***EncDecGetFormatName***>(3);
+            let c3: <i32> = self***if_color(l3);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(colX1, (y + 52), 200, n3, c3, 0x00000000, fnt, 15, 0);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>((colX1 + 90), (y + 52), 130, self***label_for(l3), c3, 0x00000000, fnt, 12, 0);
+
+            // JPEG (4)
+            let l4: <i32> = <DrvManSpec***EncDecCanDecode***>(4);
+            let n4: <ptr> = <DrvManSpec***EncDecGetFormatName***>(4);
+            let c4: <i32> = self***if_color(l4);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(colX1, (y + 78), 200, n4, c4, 0x00000000, fnt, 15, 0);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>((colX1 + 90), (y + 78), 130, self***label_for(l4), c4, 0x00000000, fnt, 12, 0);
+
+            // MP4 (5) / MOV (6) / HEIC (7) / HEIF (8)
+            let l5: <i32> = <DrvManSpec***EncDecCanDecode***>(5);
+            let n5: <ptr> = <DrvManSpec***EncDecGetFormatName***>(5);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(colX1, (y + 104), 200, n5, self***if_color(l5), 0x00000000, fnt, 15, 0);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>((colX1 + 90), (y + 104), 130, self***label_for(l5), self***if_color(l5), 0x00000000, fnt, 12, 0);
+
+            let l6: <i32> = <DrvManSpec***EncDecCanDecode***>(6);
+            let n6: <ptr> = <DrvManSpec***EncDecGetFormatName***>(6);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(colX1, (y + 130), 200, n6, self***if_color(l6), 0x00000000, fnt, 15, 0);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>((colX1 + 90), (y + 130), 130, self***label_for(l6), self***if_color(l6), 0x00000000, fnt, 12, 0);
+
+            let l7: <i32> = <DrvManSpec***EncDecCanDecode***>(7);
+            let n7: <ptr> = <DrvManSpec***EncDecGetFormatName***>(7);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(colX1, (y + 156), 200, n7, self***if_color(l7), 0x00000000, fnt, 15, 0);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>((colX1 + 90), (y + 156), 130, self***label_for(l7), self***if_color(l7), 0x00000000, fnt, 12, 0);
+
+            // Colonne 2 : MKV(9) WebM(10) AVI(11) MP3(12) MP2(13) OGG(14) AMR(15)
+            let l9: <i32> = <DrvManSpec***EncDecCanDecode***>(9);
+            let n9: <ptr> = <DrvManSpec***EncDecGetFormatName***>(9);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(colX2, y, 200, n9, self***if_color(l9), 0x00000000, fnt, 15, 0);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>((colX2 + 90), y, 130, self***label_for(l9), self***if_color(l9), 0x00000000, fnt, 12, 0);
+
+            let l10: <i32> = <DrvManSpec***EncDecCanDecode***>(10);
+            let n10: <ptr> = <DrvManSpec***EncDecGetFormatName***>(10);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(colX2, (y + 26), 200, n10, self***if_color(l10), 0x00000000, fnt, 15, 0);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>((colX2 + 90), (y + 26), 130, self***label_for(l10), self***if_color(l10), 0x00000000, fnt, 12, 0);
+
+            let l11: <i32> = <DrvManSpec***EncDecCanDecode***>(11);
+            let n11: <ptr> = <DrvManSpec***EncDecGetFormatName***>(11);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(colX2, (y + 52), 200, n11, self***if_color(l11), 0x00000000, fnt, 15, 0);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>((colX2 + 90), (y + 52), 130, self***label_for(l11), self***if_color(l11), 0x00000000, fnt, 12, 0);
+
+            let l12: <i32> = <DrvManSpec***EncDecCanDecode***>(12);
+            let n12: <ptr> = <DrvManSpec***EncDecGetFormatName***>(12);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(colX2, (y + 78), 200, n12, self***if_color(l12), 0x00000000, fnt, 15, 0);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>((colX2 + 90), (y + 78), 130, self***label_for(l12), self***if_color(l12), 0x00000000, fnt, 12, 0);
+
+            let l13: <i32> = <DrvManSpec***EncDecCanDecode***>(13);
+            let n13: <ptr> = <DrvManSpec***EncDecGetFormatName***>(13);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(colX2, (y + 104), 200, n13, self***if_color(l13), 0x00000000, fnt, 15, 0);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>((colX2 + 90), (y + 104), 130, self***label_for(l13), self***if_color(l13), 0x00000000, fnt, 12, 0);
+
+            let l14: <i32> = <DrvManSpec***EncDecCanDecode***>(14);
+            let n14: <ptr> = <DrvManSpec***EncDecGetFormatName***>(14);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(colX2, (y + 130), 200, n14, self***if_color(l14), 0x00000000, fnt, 15, 0);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>((colX2 + 90), (y + 130), 130, self***label_for(l14), self***if_color(l14), 0x00000000, fnt, 12, 0);
+
+            let l15: <i32> = <DrvManSpec***EncDecCanDecode***>(15);
+            let n15: <ptr> = <DrvManSpec***EncDecGetFormatName***>(15);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(colX2, (y + 156), 200, n15, self***if_color(l15), 0x00000000, fnt, 15, 0);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>((colX2 + 90), (y + 156), 130, self***label_for(l15), self***if_color(l15), 0x00000000, fnt, 12, 0);
+
+            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(24, 300, 470, "Decodage complet = pixels/echantillons reellement extraits.", 0xFF6C7A8C, 0x00000000, fnt, 11, 0);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(24, 316, 470, "Identification = format reconnu par signature, pas decode.", 0xFF6C7A8C, 0x00000000, fnt, 11, 0);
+            let _: <i32> = <DrvAPIInterCon***GpuDrawTextFontAlign***>(24, 332, 470, "Video/audio/appel cellulaire reels : projets separes, non fait.", 0xFF6C7A8C, 0x00000000, fnt, 11, 0);
+
+            let flushResult: <i32> = <DrvAPIInterCon***GpuFlushRenderContext***>(ctx);
+            if (flushResult != 0) [ running = false; ];
+        ];
+
+        log: "EncDecProcManSrv: arrete";
+        ret 0;
+    ];
+
+    // if_color — vert si décodage complet (2), ambre si identification (1), gris sinon.
+    rel cl if_color: [lvl i32] [
+        if (lvl == 2) [ ret 0xFF7CFFA0; ];
+        if (lvl == 1) [ ret 0xFFE0C060; ];
+        ret 0xFF6C7A8C;
+    ];
+
+    // label_for — texte du niveau de support.
+    rel cl label_for: [lvl i32] [
+        if (lvl == 2) [ ret "Decodage complet"; ];
+        if (lvl == 1) [ ret "Identification"; ];
+        ret "Non reconnu";
+    ];
+
+    rel op onPause: [] [ ret 0; ];
+    rel op onResume: [] [ ret 0; ];
+    rel cl onDestroy: [] [ log: "EncDecProcManSrv: detruit"; ret 0; ];
+];

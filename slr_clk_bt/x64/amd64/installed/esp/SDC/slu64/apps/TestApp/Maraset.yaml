@@ -1,0 +1,44 @@
+package:
+  name: base***TestApp
+  version: v1 NAVERTA build 29062617
+  build: 20260708-01
+
+metadata:
+  bundle: marep
+  target: arm64
+  attributes:
+    SRID: SRID_testapp
+    Marav: 0.1 build 20260708-01
+    icon: TestApp.slasset/TestApp.png
+    display_name: "VEZ Stablecoin Manager  - TEST"
+    diamond_color: "0x33B8E8C4"
+    description: |
+      TestApp — application minimale de test pour le jalon 1 du bureau à fenêtres
+      (preuve qu'un 2e .marep tourne via un exec_marep independant, cf.
+      C:\Users\emmer\.claude\plans\rosy-waddling-gosling.md, étape 3).
+    slura_min: 1
+    slura_max: 5.0
+
+  entry: OEntry
+  lifecycle: LAPrevent
+
+  permissions:
+    - gpu.framebuffer
+    - fs.read
+
+  assets:
+    - TestApp.slasset/
+
+dependencies:
+  basecon:
+    base***LAPrevent: 1.0.0
+    base***OEntry: 1.0.0
+
+resources:
+  - path: RAbstractallowing.xml
+    type: xml
+    description: "Règles d'autorisation abstraites pour le sandbox Slura."
+
+scripts:
+  postinstall: |
+    slura-reg add --srid ${metadata.attributes.SRID}

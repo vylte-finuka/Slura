@@ -29,6 +29,15 @@ rel op LAPrevent: <[string AppLifecycle]>t [
 
         log: "LAPrevent: assets chargés";
 
+        // ── Images dock (slots 1-7) ──
+        var im1: <ptr> = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png");
+        var im2: <ptr> = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img2.png");
+        var im3: <ptr> = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img3.png");
+        var im4: <ptr> = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img4.png");
+        var im5: <ptr> = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img5.png");
+        var im6: <ptr> = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img6.png");
+        var im7: <ptr> = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img7.png");
+
         // ── État OS — var locales dans Launch (README: pas module-level) ──
         var battLevel:  <i32>    = <SluPwManSrv***GetBatteryLevel***()>;
         var isCharging: <i32>    = <SluPwManSrv***IsCharging***()>;
@@ -39,7 +48,7 @@ rel op LAPrevent: <[string AppLifecycle]>t [
         var running: <bool> = true;
         loop (running) [
             let _: <i32> = <StateRefresh***()>;
-            let renderResult: <i32> = <TemplateView***Render>(_ctx, fnt);
+            let renderResult: <i32> = <TemplateView***Render>(_ctx, fnt, im1, im2, im3, im4, im5, im6, im7);
 
             // ── Bureau à fenêtres (jalon 1) ────────────────────────────────
             // Toute la logique (composition, chrome, déplacement/redimensionnement/
@@ -90,9 +99,22 @@ rel op LAPrevent: <[string AppLifecycle]>t [
                 let dmr: <i32> = 6;
                 let dix: <i32> = (dvx - (dmw / 2));
                 let diy: <i32> = (dvy - (dmw / 2));
+                // Couleur du losange = DONNÉE du .marep (diamond_color dans Maraset.yaml, lue
+                // par le registre) — chaque app porte sa propre couleur, ShiLauncher ne
+                // reconnaît plus aucune app par son nom (pas de couleur figée en dur).
+                let diaColor: <i32> = <DrvAPIInterCon***WindowManGetDiamondColor***>(wi);
                 let _: <i32> = <DrvAPIInterCon***GpuSetTransform2D***>(6947, 7193, -7193, 6947, dvx, dvy);
-                let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>((dix - 1), (diy - 1), (dmw + 2), (dmw + 2), (dmr + 1), 0x66FFFFFF);
-                let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(dix, diy, dmw, dmw, dmr, 0x33B9B9B9);
+                let _: <i32> = <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>((dix - 1), (diy - 1), (dmw + 2), (dmw + 2), (dmr + 1), 0x40FFFFFF);
+                // Grain granulé du dock (GpuDrawFloavaBlob phase=-1 = intérieur uni
+                // + bruit, PAS de plis/rayures) — corrige l'ancien GpuDrawCorrugated
+                // qui produisait un effet « carton ondulé » zébré malgré son
+                // commentaire trompeur (« même recette que le dock » : faux, verdict
+                // user, le zébré ne doit apparaître nulle part, seul le grain compte).
+                let dR: <i32> = (diaColor >> 16) & 0xFF;
+                let dG: <i32> = (diaColor >> 8) & 0xFF;
+                let dB: <i32> = diaColor & 0xFF;
+                let opaqueBase: <i32> = (0xFF << 24) | (dR << 16) | (dG << 8) | dB;
+                let _: <i32> = <DrvAPIInterCon***GpuDrawFloavaBlob***>(dix, diy, dmw, dmw, dmr, opaqueBase, (0 - 1));
                 let _: <i32> = <DrvAPIInterCon***GpuResetTransform***>();
                 let winIcon: <ptr> = <DrvAPIInterCon***WindowManGetIconPath***>(wi);
                 if (winIcon != nullptr) [
@@ -126,8 +148,37 @@ rel op LAPrevent: <[string AppLifecycle]>t [
                 let icClose: <i32> = <DrvAPIInterCon***ImageLoad***>("SDC:/apps/ShiLauncher/ShiLauncher.slasset/img_ctl_close.png");
                 let _: <i32> = <DrvAPIInterCon***ImageDraw***>(icClose, (wbCloseCx - 6), (wbCy - 6), 13, 13);
 
-                // Contenu de l'app composé EN DERNIER, coins bas arrondis (rayon 12).
+                // Contenu de l'app composé EN DERNIER, coins bas arrondis (rayon 12) —
+                // AVANT la détection GlobalMenu ci-dessous, pour que l'app ait eu la
+                // chance de positionner le slot 48 (voir commentaire suivant) si ELLE
+                // gère déjà ce clic droit précis avec son propre menu contextuel.
                 let _: <i32> = <DrvAPIInterCon***WindowManRenderAndComposite***>(wi, 12);
+
+                // ── Menu global "in-app" : PAS de bouton dédié (aucun hamburger) —
+                // clic DROIT n'importe où dans la fenêtre de l'app EN COURS (barre de
+                // titre + tout le corps, façon Windows/macOS), même bouton que le menu
+                // contextuel du dock (ContextMenu.mara, pbtn & 2). Chaque composant
+                // interne (fichier, dossier, tuile disque...) garde la PRIORITÉ sur
+                // son propre menu contextuel : slot SCROLL_SCRATCH 48 = flag partagé
+                // "ce clic droit vient d'ouvrir un menu contextuel plus spécifique"
+                // (ex: FolderMenu.mara le positionne à 1 avant d'ouvrir son propre
+                // menu sur un fichier/dossier) — GlobalMenu ne s'ouvre QUE si ce flag
+                // vaut 0 pour ce tick, jamais en double avec un menu plus précis.
+                // Slot 49+wi = edge-detect clic droit dédié par fenêtre.
+                let gmConsumed: <i32> = <DrvAPIInterCon***ScrollGet***>(48);
+                let gmSlot: <i32> = 49 + wi;
+                let gmPrevBtn: <i32> = <DrvAPIInterCon***ScrollGet***>(gmSlot);
+                let gmClickEdge: <bool> = ((pbtn & 2) != 0 && (gmPrevBtn & 2) == 0);
+                let _: <i32> = <DrvAPIInterCon***ScrollSet***>(gmSlot, pbtn);
+                let overWinX: <bool> = (px >= wx && px <= (wx + ww));
+                let overWinY: <bool> = (py >= (wy - 28) && py <= (wy + wh));
+                let gmAlreadyOpen: <i32> = <DrvAPIInterCon***MenuIsOpenGlobal***>();
+                if (overWinX && overWinY && gmClickEdge && gmAlreadyOpen == 0 && gmConsumed == 0) [
+                    let _: <i32> = <GlobalMenu***OpenGlobal>(px, py);
+                ];
+                // Reset du flag pour le prochain tick — chaque app doit le re-positionner
+                // à 1 SI elle ouvre à nouveau son propre menu sur ce nouveau clic droit.
+                let _: <i32> = <DrvAPIInterCon***ScrollSet***>(48, 0);
 
                 // ══ Interactions fenêtre — comportement Windows 11 ══════════════════════
                 let winRight:  <i32> = (wx + ww);

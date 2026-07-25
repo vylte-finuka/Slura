@@ -1,0 +1,27 @@
+//===================================================================
+//  APrevent.mara – Cycle de vie EncDecProcMan
+//  Projet : EncDecProcMan.slul
+//  Auteur : Vyft Ltd — 2026
+//  Volontairement mince : aucun état matériel à initialiser (la détection
+//  de format est sans état, appelée à la demande depuis EncDecImpl.mara —
+//  voir ce fichier pour les fonctions exportées).
+//===================================================================
+
+#base <std***ComTpe***SlulFrmt***[ DrvAPIInterCon ]>;
+#base <MaratineKit>;
+#base <MaratineKit***CycleActivity>;
+
+rel op APrevent: <[string CycleActivity]>t [
+
+    var Architecture: <string> = "";
+
+    rel op OnPowerOn: [arch string] [
+        Architecture = arch;
+        log: "EncDecProcMan: pilote encodage/decodage media pret - PNG/BMP/GIF decodage complet, autres formats identification seule";
+        ret 0;
+    ];
+
+    rel op OnPowerOff: [] [ log: "EncDecProcMan: arret"; ret 0; ];
+    rel op OnSuspend:  [] [ log: "EncDecProcMan: suspension"; ret 0; ];
+    rel op OnResume:   [] [ log: "EncDecProcMan: reprise"; ret 0; ];
+];

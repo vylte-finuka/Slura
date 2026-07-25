@@ -1,0 +1,44 @@
+package:
+  name: base***SluWWANManSrv
+  version: v1 NAVERTA build 20260718-01
+  build: 17072618
+
+metadata:
+  bundle: marep
+  target: arm64
+  attributes:
+    SRID: SRID_slura_os_29062617
+    Marav: 0.1 build 17072618
+    icon: SluWWANManSrv.slasset/SluWWANManSrv.png
+    display_name: "Cellular"
+    diamond_color: 0xFF3D8B5F
+    description: |
+      SluWWANManSrv — service/app de gestion du signal cellulaire (WWAN).
+      Affiche l'état de connexion et le type réseau (placeholder honnête,
+      aucun modem réel dans ce noyau — voir SluWWANMan.slul) et permet de
+      choisir le type réseau affiché dans la barre de statut.
+    slura_min: 1
+    slura_max: 5.0
+
+  entry: OEntry
+  lifecycle: LAPrevent
+
+  permissions:
+    - gpu.framebuffer
+
+  assets:
+    - SluWWANManSrv.slasset/
+
+dependencies:
+  basecon:
+    base***SluraOS***LAPrevent: 17072617
+    base***SluraOS***OEntry: 17072617
+
+resources:
+  - path: RAbstractallowing.xml
+    type: xml
+    description: "Règles d'autorisation abstraites pour le sandbox Slura."
+
+scripts:
+  postinstall: |
+    slura-reg add --srid ${metadata.attributes.SRID}

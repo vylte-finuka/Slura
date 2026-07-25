@@ -27,12 +27,34 @@ pub struct RunningApp {
     pub content_w: i32,
     pub content_h: i32,
     pub buffer:    Vec<u32>, // taille content_w*content_h, stride == content_w
+    // Tick de frame (CURSOR_TICK) au moment de l'ouverture — sert aux animations
+    // du dock (rotation 360° du losange à l'ouverture, façon rebond OSX).
+    pub opened_tick: u64,
+    // Throttle de rendu : le contenu n'est ré-exécuté (exec_marep, coûteux en
+    // interprété) que périodiquement ou sur input — sinon simple blit du buffer.
+    // `dirty` force un re-rendu (buffer réalloué par resize → sinon fenêtre noire).
+    pub last_rendered_tick: u64,
+    pub dirty: bool,
+    // Argument optionnel passé par WindowManLaunch(name, arg) — sert aux items de menu
+    // contextuel par app (ex: "New Folder" lance l'app avec un arg que celle-ci lit une
+    // fois au premier rendu via WindowManGetLaunchArg). Nul-terminé ("\0" si vide) pour
+    // être renvoyable tel quel comme pointeur consommable par read_cstr côté Mara —
+    // même convention que RegEntry.name_c/display_c dans app_registry.rs.
+    pub launch_arg_c: Vec<u8>,
+    // Incrémenté à chaque écriture de launch_arg_c (lancement initial OU mise à
+    // jour sur une app déjà ouverte via WindowManSetLaunchArg — voir son
+    // commentaire). Démarre à 1 (jamais 0) pour que le compteur "dernière
+    // génération vue" côté Mara (SCROLL_SCRATCH, vaut 0 par défaut) détecte
+    // toujours le tout premier argument comme nouveau.
+    pub launch_arg_gen: u32,
 }
 
 impl RunningApp {
     pub fn new(name: String, modules: Vec<(String, Vec<u8>)>, x: i32, y: i32, content_w: i32, content_h: i32) -> Self {
         let buffer = alloc::vec![0u32; (content_w * content_h).max(0) as usize];
-        Self { name, modules, x, y, content_w, content_h, buffer }
+        Self { name, modules, x, y, content_w, content_h, buffer, opened_tick: 0,
+               last_rendered_tick: 0, dirty: true, launch_arg_c: alloc::vec![0u8],
+               launch_arg_gen: 1 }
     }
 
     /// Références `&[(&str, &[u8])]` pour `ovc_exec::exec_marep` — même pattern
@@ -45,9 +67,14 @@ impl RunningApp {
     /// buffer — perd le contenu précédent, redessiné entièrement au tick suivant
     /// via `WindowManRenderAndComposite`.
     pub fn resize(&mut self, w: i32, h: i32) {
-        self.content_w = w.max(100);
-        self.content_h = h.max(80);
+        let (nw, nh) = (w.max(100), h.max(80));
+        // No-op si la taille ne change pas (SetW/SetH idempotents tenus par le
+        // bouton) — évite de jeter le buffer et de forcer un re-rendu par frame.
+        if nw == self.content_w && nh == self.content_h { return; }
+        self.content_w = nw;
+        self.content_h = nh;
         self.buffer = alloc::vec![0u32; (self.content_w * self.content_h) as usize];
+        self.dirty = true;
     }
 
     /// Recopie `self.buffer` dans `backbuffer` (stride `dst_stride`, hauteur

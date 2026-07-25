@@ -180,6 +180,16 @@ impl HalManager {
         st:           &mut SystemTable<Boot>,
         image_handle: Handle,
     ) -> uefi::Result<()> {
+        // Le plus tôt possible dans le boot, avant tout `find_handles`/`open_protocol`
+        // (GOP, HID, PciIo) fait par ce kernel : force le firmware à connecter tous
+        // les drivers de bus disponibles. Sur QEMU/VMware tout est déjà préconnecté
+        // au boot (find_handles voit tout sans ça) ; sur du matériel réel, un firmware
+        // OEM peut ne binder que le strict nécessaire au chemin de boot et laisser
+        // l'écran, la souris/clavier ou le xHCI non connectés. Voir pci.rs pour le
+        // détail — même fonction, appelée ici une seule fois pour couvrir tous les
+        // usages ultérieurs de find_handles dans le kernel.
+        crate::pci::connect_all_controllers(st);
+
         if self.detect_devices() {
             self.device_state = true;
             self.log(st, "Hardware detected and initialized successfully.");
