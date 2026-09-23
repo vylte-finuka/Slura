@@ -1,0 +1,112 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  body {
+    font-family: Inter, "Segoe UI", sans-serif;
+    font-size: 12px;
+    margin: 0;
+    padding: 16px;
+    color: #1a1a1a;
+  }
+  h1 {
+    font-size: 13px;
+    margin: 0 0 8px 0;
+  }
+  p {
+    color: #666;
+    line-height: 1.4;
+  }
+  button {
+    background: #18a0fb;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    padding: 8px 14px;
+    font-size: 12px;
+    cursor: pointer;
+    margin-right: 8px;
+  }
+  button.secondary {
+    background: #e5e5e5;
+    color: #1a1a1a;
+  }
+  #status {
+    margin-top: 12px;
+    padding: 8px;
+    background: #f5f5f5;
+    border-radius: 6px;
+    min-height: 32px;
+    white-space: pre-wrap;
+  }
+  label {
+    display: block;
+    margin: 10px 0 4px 0;
+    color: #333;
+  }
+  label.check {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 12px 0;
+  }
+  input[type="text"] {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 6px 8px;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    font-size: 12px;
+  }
+  .buttons {
+    margin-top: 8px;
+  }
+  .hint {
+    font-size: 11px;
+    color: #888;
+    margin: 4px 0 0 0;
+    line-height: 1.4;
+  }
+  code {
+    background: #eee;
+    padding: 1px 4px;
+    border-radius: 3px;
+    font-size: 11px;
+  }
+</style>
+</head>
+<body>
+  <h1>MaratineKit tool's builder</h1>
+  <p>Sélectionnez un frame représentant un écran d'app, puis générez ses sources Maratine (.marep) prêtes pour <code>marai build</code>.</p>
+
+  <label for="appname">Nom de l'app (vide = nom du frame)</label>
+  <input id="appname" type="text" placeholder="ShiNotes" />
+
+  <label for="iconfile">Logo de l'app (optionnel — prioritaire sur le nœud <code>AppIcon</code>)</label>
+  <input id="iconfile" type="file" accept="image/png,image/jpeg,image/webp,image/*" />
+  <p class="hint">Choisissez une image (PNG/JPG/WebP) : elle devient l'icône de lancement du dock, recadrée sur son contenu et centrée. Si vide, le nœud <code>AppIcon</code> du design est utilisé (sinon pas d'icône).</p>
+
+  <label for="iconratio">Taille de l'icône dans son cadre (0.48 = petite, verre visible · 1 = remplit)</label>
+  <input id="iconratio" type="number" step="0.02" min="0.1" max="1" value="0.48" />
+
+  <label for="diamondcolor">Couleur du losange (ARGB hex, ex. 0x33B9B9B9)</label>
+  <input id="diamondcolor" type="text" placeholder="0x33B9B9B9" value="0x33B9B9B9" />
+  <p class="hint">Double usage : (1) écrite dans <code>Maraset.yaml</code> (<code>diamond_color</code>) — ShiLauncher colore automatiquement le losange de CETTE app dans le dock et sa barre de titre, aucune modification de ShiLauncher requise. (2) Si le design contient un nœud <code>[diamond]</code> (ex. « Icône [diamond] »), il est rendu en losange verre dans CETTE MÊME couleur à l'intérieur de l'app (le fill Figma du nœud est ignoré ; ses enfants, ex. une icône, sont dessinés par-dessus, non pivotés).</p>
+
+  <label class="check">
+    <input id="desktop" type="checkbox" />
+    Ceci est le bureau/shell (boucle de fenêtres WindowMan dans LAPrevent)
+  </label>
+
+  <div class="buttons">
+    <button id="generate">Générer le .marep.zip</button>
+    <button id="cancel" class="secondary">Fermer</button>
+  </div>
+  <div id="status"></div>
+
+  <script>
+    __BUNDLE_JS__
+  </script>
+</body>
+</html>

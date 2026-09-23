@@ -1,0 +1,121 @@
+
+// Thread principal du plugin (sandbox Figma — a `figma`, pas de DOM/Blob/téléchargement).
+// Orchestration : sélection → classification (classify.ts, exports d'assets inclus) →
+// émission Mara (emitMara.ts) + gabarits (templates.ts) → envoi des fichiers à l'UI,
+// qui construit le zip (JSZip) et déclenche le téléchargement.
+
+import { classifyFrame } from "./generator/classify";
+import { emitTemplateView } from "./generator/emitMara";
+import { OENTRY_MARA, laPreventMara, marasetYaml, rabstractallowingXml, AppMeta } from "./generator/templates";
+
+figma.showUI(__html__, { width: 400, height: 420 });
+
+interface GenerateMsg {
+  type: "generate";
+  appName: string;
+  isDesktop: boolean;
+  // Un logo a été choisi dans l'UI : il devient l'icône du dock (l'UI l'ajoute au zip
+  // en <App>.png). Prioritaire sur le nœud AppIcon du design.
+  hasCustomIcon?: boolean;
+  // Couleur ARGB des losanges [diamond] — réglée dans l'UI, pas dans le design Figma.
+  diamondColor?: number;
+}
+
+// centerCrop : l'UI recadre le PNG sur son contenu et le centre dans un canvas
+// carré (via Canvas) avant de l'ajouter au zip — utilisé pour l'icône du dock.
+type UiFile = { path: string; text?: string; bytes?: Uint8Array; centerCrop?: boolean };
+
+function sanitizeAppName(raw: string): string {
+  const cleaned = raw.replace(/[^A-Za-z0-9]/g, "");
+  if (cleaned.length === 0) return "";
+  return cleaned[0].toUpperCase() + cleaned.slice(1);
+}
+
+function status(text: string): void {
+  figma.ui.postMessage({ type: "status", text });
+}
+
+async function generate(msg: GenerateMsg): Promise<void> {
+  const selection = figma.currentPage.selection;
+  if (selection.length !== 1) {
+    status("Sélectionnez exactement UN frame (l'écran de l'app).");
+    return;
+  }
+  const node = selection[0];
+  if (node.type !== "FRAME" && node.type !== "COMPONENT" && node.type !== "INSTANCE") {
+    status(`La sélection doit être un FRAME/COMPONENT (reçu : ${node.type}).`);
+    return;
+  }
+
+  const appName = sanitizeAppName(msg.appName || node.name);
+  if (!appName) {
+    status("Nom d'app invalide (alphanumérique requis).");
+    return;
+  }
+
+  status(`Analyse de "${node.name}" (${Math.round(node.width)}×${Math.round(node.height)})...`);
+
+  const result = await classifyFrame(node);
+  const diamondColor = typeof msg.diamondColor === "number" ? msg.diamondColor >>> 0 : 0x33b9b9b9;
+  const templateView = emitTemplateView(result, appName, node.width, node.height, diamondColor);
+
+  // Un logo choisi dans l'UI est prioritaire sur le nœud AppIcon du design.
+  const hasIcon = msg.hasCustomIcon === true || result.iconPng !== null;
+  const meta: AppMeta = {
+    appName,
+    // Nom du frame Figma = écran courant → titre barre « Shi Windows » "AppName - Screen".
+    screenName: node.name,
+    isDesktop: msg.isDesktop,
+    hasAssets: result.pngs.length > 0 || result.svgs.length > 0 || result.cursorRefPng !== null || hasIcon,
+    // Icône du dock (nommée <App>.png, convention lue par app_registry.rs) : le logo
+    // personnalisé de l'UI s'il existe, sinon le nœud "AppIcon" du design. Sinon pas
+    // d'icône (le dock dessine juste le losange vide).
+    iconFile: hasIcon ? `${appName}.png` : null,
+    // Écrit dans Maraset.yaml (diamond_color) → ShiLauncher colore le losange de CETTE
+    // app (dock + barre de titre) automatiquement, sans reconnaissance par nom.
+    diamondColor,
+  };
+
+  const files: UiFile[] = [
+    { path: "Maraset.yaml", text: marasetYaml(meta) },
+    { path: "RAbstractallowing.xml", text: rabstractallowingXml(meta) },
+    { path: "base/OEntry.mara", text: OENTRY_MARA },
+    { path: "base/LAPrevent.mara", text: laPreventMara(meta) },
+    { path: "base/TemplateView.mara", text: templateView },
+  ];
+  result.pngs.forEach((bytes, i) => {
+    files.push({ path: `${appName}.slasset/img${i + 1}.png`, bytes });
+  });
+  result.svgs.forEach((bytes, i) => {
+    files.push({ path: `${appName}.slasset/vec${i + 1}.svg`, bytes });
+  });
+  if (result.cursorRefPng) {
+    files.push({ path: `${appName}.slasset/HIDcursor_reference.png`, bytes: result.cursorRefPng });
+  }
+  // Icône du dock : marquée centerCrop → l'UI la recadre sur son contenu et la centre
+  // dans un canvas carré (aucun décalage), nommée <App>.png (référencée par Maraset icon:).
+  // Ignorée si un logo personnalisé a été choisi (l'UI écrit <App>.png depuis ce logo,
+  // prioritaire) — évite d'écrire deux fois la même entrée.
+  if (result.iconPng && msg.hasCustomIcon !== true) {
+    files.push({ path: `${appName}.slasset/${appName}.png`, bytes: result.iconPng, centerCrop: true });
+  }
+
+  figma.ui.postMessage({ type: "files", appName, files });
+  status(
+    `Généré : ${files.length} fichier(s) — ${result.pngs.length} png, ${result.svgs.length} svg` +
+      `${result.hasCursor ? ", curseur" : ""}${result.launches.length ? `, ${result.launches.length} zone(s) [launch:]` : ""}.` +
+      `\nDézippez dans slr_clk_bt/ puis lancez la tâche "marai build: ${appName}.marep".`
+  );
+}
+
+figma.ui.onmessage = (msg: { type: string } & Partial<GenerateMsg>) => {
+  if (msg.type === "generate") {
+    generate(msg as GenerateMsg).catch((err) => {
+      status(`Erreur de génération : ${err instanceof Error ? err.message : String(err)}`);
+    });
+    return;
+  }
+  if (msg.type === "cancel") {
+    figma.closePlugin();
+  }
+};

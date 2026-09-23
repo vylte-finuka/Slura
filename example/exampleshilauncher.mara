@@ -1,0 +1,770 @@
+#base <std***ComTpe***SlulFrmt***[ DrvAPIInterCon ]>;
+#base <MaratineKit>;
+
+// exampleshilauncher.mara
+//
+// Source de vérité graphique : géométrie GPU actuelle de TemplateView.
+// Logique fonctionnelle : reprise de exampleshilauncher.mara.
+//
+// Règles :
+// - bureau = géométrie GPU existante
+// - une seule pilule de dock
+// - six slots physiques fixes du design
+// - aucun pinnedCount pour modifier la géométrie
+// - aucun GpuDrawFloavaBlob
+// - AppRegistry = seule source des applications
+// - dock_menu_items = seule source des options de menus
+// - WindowMan = uniquement consommé pour l'état/occlusion
+// - le rendu des fenêtres reste dans LAPrevent.mara
+
+rel op Render: [ctx string, fnt ptr] [
+    var im: <i32> = 0;
+
+    // =====================================================================
+    // RESPONSIVE
+    // =====================================================================
+
+    let sw: <i32> =
+        <DrvAPIInterCon***GpuGetWidth***>();
+
+    let sh: <i32> =
+        <DrvAPIInterCon***GpuGetHeight***>();
+
+    let sW: <i32> =
+        (sw * 1000) / 1440;
+
+    let sH: <i32> =
+        (sh * 1000) / 1024;
+
+    let sU: <i32> =
+        (sW + sH) / 2;
+
+    var font: <ptr> =
+        fnt;
+
+    if (font == nullptr) [
+        font =
+            <DrvAPIInterCon***FontGetDefault***>();
+    ];
+
+    // =====================================================================
+    // BUREAU — DESIGN EXACT
+    // =====================================================================
+
+    im =
+        <DrvAPIInterCon***ImageLoad***>(
+            "SDC:/apps/ShiLauncher/ShiLauncher.slasset/img1.png"
+        );
+
+    let _: <i32> =
+        <DrvAPIInterCon***ImageDraw***>(
+            im,
+            ((0 * sW + 500) / 1000),
+            ((0 * sH + 500) / 1000),
+            ((1440 * sW + 500) / 1000),
+            ((1024 * sH + 500) / 1000)
+        );
+
+    let _: <i32> =
+        <DrvAPIInterCon***GpuDrawDropShadow***>(
+            ((610 * sW + 500) / 1000),
+            ((1003 * sH + 500) / 1000),
+            ((215 * sW + 500) / 1000),
+            ((1 * sH + 500) / 1000),
+            (
+                (
+                    ((40 * sW + 500) / 1000) +
+                    ((40 * sH + 500) / 1000)
+                ) / 2
+            ),
+            0,
+            4,
+            4,
+            0x40000000
+        );
+
+    let svg1: <ptr> =
+        <DrvAPIInterCon***SvgLoad***>(
+            "SDC:/apps/ShiLauncher/ShiLauncher.slasset/vec1.svg"
+        );
+
+    let _: <i32> =
+        <DrvAPIInterCon***SvgDraw***>(
+            svg1,
+            ((604 * sW + 500) / 1000),
+            ((1001 * sH + 500) / 1000),
+            ((228 * sW + 500) / 1000),
+            ((13 * sH + 500) / 1000)
+        );
+
+    let _: <i32> =
+        <DrvAPIInterCon***SvgFree***>(svg1);
+
+    let _: <i32> =
+        <DrvAPIInterCon***GpuDrawDropShadow***>(
+            ((100 * sW + 500) / 1000),
+            ((-31 * sH + 500) / 1000),
+            ((1314 * sW + 500) / 1000),
+            ((1125 * sH + 500) / 1000),
+            0,
+            0,
+            4,
+            4,
+            0x40000000
+        );
+
+    // =====================================================================
+    // DOCK UNIQUE — GÉOMÉTRIE FIXE
+    // =====================================================================
+
+    let dockX: <i32> =
+        ((526 * sW + 500) / 1000);
+
+    let dockY: <i32> =
+        ((900 * sH + 500) / 1000);
+
+    let dockW: <i32> =
+        ((405 * sW + 500) / 1000);
+
+    let dockH: <i32> =
+        ((80 * sH + 500) / 1000);
+
+    let dockR: <i32> =
+        (
+            (
+                ((30 * sW + 500) / 1000) +
+                ((30 * sH + 500) / 1000)
+            ) / 2
+        );
+
+    // Séquence GPU STRICTEMENT conservée.
+    let _: <i32> =
+        <DrvAPIInterCon***GpuSetOpacity***>(176);
+
+    let _: <i32> =
+        <DrvAPIInterCon***GpuDrawDropShadow***>(
+            dockX,
+            dockY,
+            dockW,
+            dockH,
+            dockR,
+            0,
+            4,
+            4,
+            0x40000000
+        );
+
+    let _: <i32> =
+        <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(
+            dockX,
+            dockY,
+            dockW,
+            dockH,
+            dockR,
+            0x337699CE
+        );
+
+    let _: <i32> =
+        <DrvAPIInterCon***GpuResetOpacity***>();
+
+    let _: <i32> =
+        <DrvAPIInterCon***GpuSetOpacity***>(176);
+
+    let _: <i32> =
+        <DrvAPIInterCon***GpuDrawDropShadow***>(
+            dockX,
+            dockY,
+            dockW,
+            dockH,
+            dockR,
+            0,
+            4,
+            4,
+            0x40000000
+        );
+
+    let _: <i32> =
+        <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(
+            dockX,
+            dockY,
+            dockW,
+            dockH,
+            dockR,
+            0x337699CE
+        );
+
+    let _: <i32> =
+        <DrvAPIInterCon***GpuResetOpacity***>();
+
+    let _: <i32> =
+        <DrvAPIInterCon***GpuSetOpacity***>(176);
+
+    let _: <i32> =
+        <DrvAPIInterCon***GpuDrawDropShadow***>(
+            dockX,
+            dockY,
+            dockW,
+            dockH,
+            dockR,
+            0,
+            4,
+            4,
+            0x40000000
+        );
+
+    let _: <i32> =
+        <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(
+            dockX,
+            dockY,
+            dockW,
+            dockH,
+            dockR,
+            0x337699CE
+        );
+
+    let _: <i32> =
+        <DrvAPIInterCon***GpuResetOpacity***>();
+
+    // =====================================================================
+    // HEADER — DESIGN EXACT
+    // =====================================================================
+
+    let _: <i32> =
+        <DrvAPIInterCon***GpuSetOpacity***>(13);
+
+    let svg2: <ptr> =
+        <DrvAPIInterCon***SvgLoad***>(
+            "SDC:/apps/ShiLauncher/ShiLauncher.slasset/vec2.svg"
+        );
+
+    let _: <i32> =
+        <DrvAPIInterCon***SvgDraw***>(
+            svg2,
+            ((105 * sW + 500) / 1000),
+            ((66 * sH + 500) / 1000),
+            ((1309 * sW + 500) / 1000),
+            ((27 * sH + 500) / 1000)
+        );
+
+    let _: <i32> =
+        <DrvAPIInterCon***SvgFree***>(svg2);
+
+    let _: <i32> =
+        <DrvAPIInterCon***GpuResetOpacity***>();
+
+    // =====================================================================
+    // INPUT
+    // =====================================================================
+
+    let mx: <i32> =
+        <DrvAPIInterCon***PointerGetX***>();
+
+    let my: <i32> =
+        <DrvAPIInterCon***PointerGetY***>();
+
+    let pbtn: <i32> =
+        <DrvAPIInterCon***PointerGetBtn***>();
+
+    let kc: <i32> =
+        <DrvAPIInterCon***KeyGetCode***>();
+
+    let tick: <i32> =
+        <DrvAPIInterCon***GpuGetTick***>();
+
+    // =====================================================================
+    // OCCLUSION
+    // =====================================================================
+
+    let wcount: <i32> =
+        <DrvAPIInterCon***WindowManCount***>();
+
+    var occluded: <bool> =
+        false;
+
+    var wi: <i32> =
+        0;
+
+    loop (wi < wcount) [
+
+        let wx: <i32> =
+            <DrvAPIInterCon***WindowManGetX***>(wi);
+
+        let wy: <i32> =
+            <DrvAPIInterCon***WindowManGetY***>(wi);
+
+        let ww: <i32> =
+            <DrvAPIInterCon***WindowManGetW***>(wi);
+
+        let wh: <i32> =
+            <DrvAPIInterCon***WindowManGetH***>(wi);
+
+        if (
+            mx >= wx &&
+            mx <= (wx + ww) &&
+            my >= (wy - 28) &&
+            my <= (wy + wh)
+        ) [
+            occluded = true;
+        ];
+
+        wi = wi + 1;
+    ];
+
+    // =====================================================================
+    // APPREGISTRY
+    // =====================================================================
+
+    let appCount: <i32> =
+        <DrvAPIInterCon***AppRegistryCount***>();
+
+    // Six emplacements physiques fixes.
+    let slot0X: <i32> = 573;
+    let slot1X: <i32> = 635;
+    let slot2X: <i32> = 697;
+    let slot3X: <i32> = 760;
+    let slot4X: <i32> = 822;
+    let slot5X: <i32> = 885;
+
+    let slotY: <i32> = 938;
+
+    let diamondW: <i32> =
+        ((43 * sU + 500) / 1000);
+
+    let diamondR: <i32> =
+        ((15 * sU + 500) / 1000);
+
+    let hitH: <i32> =
+        (diamondW * 7) / 10;
+
+    // =====================================================================
+    // DOCK — LOGIQUE APPREGISTRY
+    // =====================================================================
+
+    var ownerIdx: <i32> =
+        0;
+
+    var slotIdx: <i32> =
+        0;
+
+    loop (
+        ownerIdx < appCount &&
+        slotIdx < 6
+    ) [
+
+        let pinned: <i32> =
+            <DrvAPIInterCon***AppRegistryGetPinned***>(
+                ownerIdx
+            );
+
+        if (pinned != 0) [
+
+            // -------------------------------------------------------------
+            // SLOT PHYSIQUE
+            // -------------------------------------------------------------
+
+            var slotX: <i32> =
+                slot0X;
+
+            if (slotIdx == 1) [
+                slotX = slot1X;
+            ];
+
+            if (slotIdx == 2) [
+                slotX = slot2X;
+            ];
+
+            if (slotIdx == 3) [
+                slotX = slot3X;
+            ];
+
+            if (slotIdx == 4) [
+                slotX = slot4X;
+            ];
+
+            if (slotIdx == 5) [
+                slotX = slot5X;
+            ];
+
+            let pvx: <i32> =
+                ((slotX * sW + 500) / 1000);
+
+            let pvy: <i32> =
+                ((slotY * sH + 500) / 1000);
+
+            let ix: <i32> =
+                pvx - (diamondW / 2);
+
+            let iy: <i32> =
+                pvy - (diamondW / 2);
+
+            // -------------------------------------------------------------
+            // REGISTRE APPLICATION
+            // -------------------------------------------------------------
+
+            let appName: <ptr> =
+                <DrvAPIInterCon***AppRegistryGetName***>(
+                    ownerIdx
+                );
+
+            let iconPath: <ptr> =
+                <DrvAPIInterCon***AppRegistryGetIconPath***>(
+                    ownerIdx
+                );
+
+            let diamondColor: <i32> =
+                <DrvAPIInterCon***AppRegistryGetDiamondColor***>(
+                    ownerIdx
+                );
+
+            // -------------------------------------------------------------
+            // ÉTAT WINDOWMAN
+            // -------------------------------------------------------------
+
+            let windowIdx: <i32> =
+                <DrvAPIInterCon***WindowManFindByName***>(
+                    appName
+                );
+
+            // -------------------------------------------------------------
+            // ROTATION
+            // -------------------------------------------------------------
+
+            var diaCos: <i32> =
+                6947;
+
+            var diaSin: <i32> =
+                7193;
+
+            if (windowIdx >= 0) [
+
+                let openTick: <i32> =
+                    <DrvAPIInterCon***WindowManGetOpenTick***>(
+                        windowIdx
+                    );
+
+                let age: <i32> =
+                    tick - openTick;
+
+                if (
+                    age >= 0 &&
+                    age < 48
+                ) [
+
+                    let deg: <i32> =
+                        46 + ((age * 360) / 48);
+
+                    diaCos =
+                        <DrvAPIInterCon***MathCos10k***>(
+                            deg
+                        );
+
+                    diaSin =
+                        <DrvAPIInterCon***MathSin10k***>(
+                            deg
+                        );
+                ];
+            ];
+
+            // -------------------------------------------------------------
+            // HIT TEST
+            // -------------------------------------------------------------
+
+            let overX: <bool> =
+                (
+                    mx >= (pvx - hitH) &&
+                    mx <= (pvx + hitH)
+                );
+
+            let overY: <bool> =
+                (
+                    my >= (pvy - hitH) &&
+                    my <= (pvy + hitH)
+                );
+
+            // -------------------------------------------------------------
+            // COULEUR DYNAMIQUE
+            // -------------------------------------------------------------
+
+            let dR: <i32> =
+                (diamondColor >> 16) & 0xFF;
+
+            let dG: <i32> =
+                (diamondColor >> 8) & 0xFF;
+
+            let dB: <i32> =
+                diamondColor & 0xFF;
+
+            let opaqueDiamondColor: <i32> =
+                (0xFF << 24) |
+                (dR << 16) |
+                (dG << 8) |
+                dB;
+
+            // -------------------------------------------------------------
+            // OMBRE DU LOSANGE
+            // -------------------------------------------------------------
+
+            let _: <i32> =
+                <DrvAPIInterCon***GpuDrawDropShadow***>(
+                    ((551 * sW + 500) / 1000),
+                    ((916 * sH + 500) / 1000),
+                    ((43 * sW + 500) / 1000),
+                    ((43 * sH + 500) / 1000),
+                    (
+                        (
+                            ((15 * sW + 500) / 1000) +
+                            ((15 * sH + 500) / 1000)
+                        ) / 2
+                    ),
+                    0,
+                    4,
+                    4,
+                    0x40000000
+                );
+
+            // -------------------------------------------------------------
+            // LOSANGE
+            //
+            // Aucun GpuDrawFloavaBlob.
+            // RoundedRectAlpha transformé uniquement.
+            // -------------------------------------------------------------
+
+            let _: <i32> =
+                <DrvAPIInterCon***GpuSetTransform2D***>(
+                    diaCos,
+                    diaSin,
+                    (0 - diaSin),
+                    diaCos,
+                    pvx,
+                    pvy
+                );
+
+            let _: <i32> =
+                <DrvAPIInterCon***GpuDrawRoundedRectAlpha***>(
+                    ((551 * sW + 500) / 1000),
+                    ((916 * sH + 500) / 1000),
+                    ((43 * sU + 500) / 1000),
+                    ((43 * sU + 500) / 1000),
+                    ((15 * sU + 500) / 1000),
+                    opaqueDiamondColor
+                );
+
+            let _: <i32> =
+                <DrvAPIInterCon***GpuResetTransform***>();
+
+            // -------------------------------------------------------------
+            // ICÔNE
+            //
+            // PARAMÈTRES CONSERVÉS STRICTEMENT :
+            // 28 × 28 en sU.
+            // -------------------------------------------------------------
+
+            if (iconPath != nullptr) [
+
+                im =
+                    <DrvAPIInterCon***ImageLoad***>(
+                        iconPath
+                    );
+
+                let iconW: <i32> =
+                    ((28 * sU + 500) / 1000);
+
+                let iconH: <i32> =
+                    ((28 * sU + 500) / 1000);
+
+                let _: <i32> =
+                    <DrvAPIInterCon***ImageDraw***>(
+                        im,
+                        (pvx - (iconW / 2)),
+                        (pvy - (iconH / 2)),
+                        iconW,
+                        iconH
+                    );
+            ];
+
+            // -------------------------------------------------------------
+            // LANCEMENT
+            //
+            // Même mécanique que exampleshilauncher :
+            // clic gauche OU Entrée sur l'application.
+            // -------------------------------------------------------------
+
+            if (
+                occluded == false &&
+                overX &&
+                overY &&
+                (
+                    ((pbtn & 1) != 0) ||
+                    kc == 13
+                )
+            ) [
+
+                if (windowIdx < 0) [
+
+                    let _: <i32> =
+                        <DrvAPIInterCon***WindowManLaunch***>(
+                            appName
+                        );
+                ];
+            ];
+
+            // -------------------------------------------------------------
+            // MENU CONTEXTUEL
+            //
+            // Clic droit ou appui long.
+            // Les données du menu sont fournies par le registre/package.
+            // -------------------------------------------------------------
+
+            let rightClick: <bool> =
+                (pbtn & 2) != 0;
+
+            let holdSlot: <i32> =
+                40 + ownerIdx;
+
+            var holdTicks: <i32> =
+                <DrvAPIInterCon***ScrollGet***>(
+                    holdSlot
+                );
+
+            let hovering: <bool> =
+                (
+                    overX &&
+                    overY &&
+                    ((pbtn & 1) != 0)
+                );
+
+            if (hovering) [
+                holdTicks =
+                    holdTicks + 1;
+            ] else [
+                holdTicks =
+                    0;
+            ];
+
+            let _: <i32> =
+                <DrvAPIInterCon***ScrollSet***>(
+                    holdSlot,
+                    holdTicks
+                );
+
+            let longPress: <bool> =
+                holdTicks == 40;
+
+            if (
+                occluded == false &&
+                overX &&
+                overY &&
+                (
+                    rightClick ||
+                    longPress
+                )
+            ) [
+
+                let _: <i32> =
+                    <ContextMenu***OpenForDockIcon>(
+                        ownerIdx,
+                        ix,
+                        (pvy + hitH)
+                    );
+            ];
+
+            slotIdx =
+                slotIdx + 1;
+        ];
+
+        ownerIdx =
+            ownerIdx + 1;
+    ];
+
+    // =====================================================================
+    // MENU GLOBAL
+    //
+    // La logique fonctionnelle suit désormais exampleshilauncher :
+    // ouverture depuis le bureau par clic droit.
+    //
+    // Les entrées restent dynamiques côté GlobalMenu/AppRegistry.
+    // =====================================================================
+
+    let menuGlobalOpen: <i32> =
+        <DrvAPIInterCon***MenuIsOpenGlobal***>();
+
+    let rightClickDesktop: <bool> =
+        ((pbtn & 2) != 0);
+
+    let dockX0: <i32> =
+        ((526 * sW + 500) / 1000);
+
+    let dockY0: <i32> =
+        ((900 * sH + 500) / 1000);
+
+    let dockX1: <i32> =
+        (((526 + 405) * sW + 500) / 1000);
+
+    let dockY1: <i32> =
+        (((900 + 80) * sH + 500) / 1000);
+
+    let overDock: <bool> =
+        (
+            mx >= dockX0 &&
+            mx <= dockX1 &&
+            my >= dockY0 &&
+            my <= dockY1
+        );
+
+    if (
+        rightClickDesktop &&
+        menuGlobalOpen == 0 &&
+        occluded == false &&
+        overDock == false
+    ) [
+
+        let _: <i32> =
+            <GlobalMenu***OpenGlobal>(
+                mx,
+                my
+            );
+    ];
+
+    // =====================================================================
+    // RENDU DES MENUS
+    // =====================================================================
+
+    let _: <i32> =
+        <GlobalMenu***RenderAndHandle>(
+            ctx,
+            font,
+            mx,
+            my,
+            pbtn,
+            sU
+        );
+
+    let _: <i32> =
+        <ContextMenu***RenderAndHandle>(
+            ctx,
+            font,
+            mx,
+            my,
+            pbtn,
+            sU
+        );
+
+    // =====================================================================
+    // FLUSH
+    // =====================================================================
+
+    let gpuResult: <i32> =
+        <DrvAPIInterCon***GpuFlushRenderContext***>(
+            ctx
+        );
+
+    if (gpuResult != 0) [
+        ret 1;
+    ];
+
+    ret 0;
+];
+
+rel op Destroy: [] [
+    ret 0;
+];

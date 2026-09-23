@@ -1,0 +1,25 @@
+[package]
+name = "vuc-reader"
+version = "0.0.1"
+authors =  { workspace = true }
+description = "Vyft slurachain smart contract reader."
+license = "Vylte-finuka"
+edition = { workspace = true }
+publish = false
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+tokio = { workspace = true, features = ["full"] }
+uvm-runtime = { workspace = true }
+bincode = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }
+vuc-storage = { version = "0.1.0", path = "../vuc-storage" }
+
+[lib]
+name = "vuc_reader"
+
+[package.metadata]
+license = "Vylte-finuka"
+description = "Vyft slurachain smart contract reader."

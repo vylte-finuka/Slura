@@ -1,0 +1,16 @@
+[package]
+name    = "vuc-platform-uefi"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name       = "vuc_platform_uefi"
+crate-type = ["rlib"]
+path       = "src/lib.rs"
+
+[dependencies]
+hashbrown = { workspace = true, default-features = false }
+
+[package.metadata]
+license     = "Vylte-finuka"
+description = "vuc-platform kernel ABI — cible UEFI no_std (sans tokio/jsonrpsee)."

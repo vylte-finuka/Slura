@@ -1,0 +1,15 @@
+{
+  "name": "shiui-kit-tool",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Plugin Figma : transforme une forme deja dessinee en ruban de soie fluide (signature ShiUI, degrade satine avec reflets) ou en anneau rotatif mat (facettes papier pliees) - geometrie et relief natifs Figma, couleur toujours derivee de la forme d'origine.",
+  "scripts": {
+    "build": "node esbuild.config.mjs",
+    "watch": "node esbuild.config.mjs --watch"
+  },
+  "devDependencies": {
+    "@figma/plugin-typings": "^1.100.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.0"
+  }
+}

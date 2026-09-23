@@ -1,0 +1,5424 @@
+
+Opcode
+Name
+Minimum Gas
+Stack Input
+Stack Output
+Description
+
+Collapse
+00
+STOP
+0
+Halts execution
+Since	Group
+Frontier	Stop and Arithmetic Operations
+Notes
+Exits the current context successfully.
+
+When a call is executed on an address with no code and the EVM tries to read the code data, the default value is returned, 0, which corresponds to this instruction and halts the execution.
+
+01
+ADD
+3
+a
+b
+a + b
+Addition operation
+Since	Group
+Frontier	Stop and Arithmetic Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+a: first integer value to add.
+b: second integer value to add.
+Stack output
+a + b: integer result of the addition modulo 2256.
+Examples
+Input	Output			Input	Output
+1	10	20		1	0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF	0
+2	10			2	1	
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+02
+MUL
+5
+a
+b
+a * b
+Multiplication operation
+Since	Group
+Frontier	Stop and Arithmetic Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+a: first integer value to multiply.
+b: second integer value to multiply.
+Stack output
+a * b: integer result of the multiplication modulo 2256.
+Examples
+Input	Output
+1	10	100
+2	10	
+Input	Output
+1	0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF	0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFE
+2	2	
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+03
+SUB
+3
+a
+b
+a - b
+Subtraction operation
+Since	Group
+Frontier	Stop and Arithmetic Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+a: first integer value.
+b: integer value to subtract from the first.
+Stack output
+a - b: integer result of the subtraction modulo 2256.
+Examples
+Input	Output			Input	Output
+1	10	0		1	0	0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+2	10			2	1	
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+04
+DIV
+5
+a
+b
+a // b
+Integer division operation
+Since	Group
+Frontier	Stop and Arithmetic Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+a: integer numerator
+b: integer denominator.
+Stack output
+a // b: integer result of the integer division. If the denominator is 0, the result will be 0.
+Examples
+Input	Output			Input	Output
+1	10	1		1	1	0
+2	10			2	2	
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+05
+SDIV
+5
+a
+b
+a // b
+Signed integer division operation (truncated)
+Since	Group
+Frontier	Stop and Arithmetic Operations
+Index 1 is top of the stack. See PUSH.
+
+Notes
+All values are treated as two’s complement signed 256-bit integers. Note the overflow semantic when −2255 is negated.
+
+Stack input
+a: integer numerator.
+b: integer denominator.
+Stack output
+a // b: signed integer division result. If the denominator is 0, the result will be 0.
+Examples
+Input	Output			Input	Output
+1	10	1		1	0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFE	2
+2	10			2	0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF	
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+06
+MOD
+5
+a
+b
+a % b
+Modulo remainder operation
+Since	Group
+Frontier	Stop and Arithmetic Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+a: integer numerator.
+b: integer denominator.
+Stack output
+a % b: integer result of the integer modulo. If the denominator equals 0, the result is 0.
+Examples
+Input	Output			Input	Output
+1	10	1		1	17	2
+2	3			2	5	
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+07
+SMOD
+5
+a
+b
+a % b
+Signed modulo remainder operation
+Since	Group
+Frontier	Stop and Arithmetic Operations
+Index 1 is top of the stack. See PUSH.
+
+Notes
+All values are treated as two's complement 256-bit signed integers. Note the overflow semantic when −2255 is negated.
+
+Stack input
+a: integer numerator.
+b: integer denominator.
+Stack output
+a % b: integer result of the signed integer modulo. If the denominator is 0, the result will be 0.
+Examples
+Input	Output
+1	10	1
+2	3	
+Input	Output
+1	0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF8	0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFE
+2	0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFD	
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+08
+ADDMOD
+8
+a
+b
+N
+(a + b) % N
+Modulo addition operation
+Since	Group
+Frontier	Stop and Arithmetic Operations
+Index 1 is top of the stack. See PUSH.
+
+Notes
+All intermediate calculations of this operation are not subject to the 2256 modulo.
+
+Stack input
+a: first integer value to add.
+b: second integer value to add.
+N: integer denominator.
+Stack output
+(a + b) % N: integer result of the addition followed by a modulo. If the denominator is 0, the result will be 0.
+Examples
+Input	Output			Input	Output
+1	10	4		1	0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF	1
+2	10			2	2	
+3	8			2	2	
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+09
+MULMOD
+8
+a
+b
+N
+(a * b) % N
+Modulo multiplication operation
+Since	Group
+Frontier	Stop and Arithmetic Operations
+Index 1 is top of the stack. See PUSH.
+
+Notes
+All intermediate calculations of this operation are not subject to the 2256 modulo.
+
+Stack input
+a: first integer value to multiply.
+b: second integer value to multiply.
+N: integer denominator.
+Stack output
+(a * b) % N: integer result of the multiplication followed by a modulo. If the denominator is 0, the result will be 0.
+Examples
+Input	Output			Input	Output
+1	10	4		1	0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF	9
+2	10			2	0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF	
+3	8			3	12	
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+0a
+EXP
+10
+a
+exponent
+a ** exponent
+Exponential operation
+Since	Group
+Frontier	Stop and Arithmetic Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+a: integer base.
+exponent: integer exponent.
+Stack output
+a ** exponent: integer result of the exponential operation modulo 2256.
+Examples
+Input	Output			Input	Output
+1	10	100		1	2	4
+2	2			2	2	
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+Gas
+static_gas = 10
+dynamic_gas = 50 * exponent_byte_size
+The dynamic gas is simply a function of how many bytes we need to represent the exponent in binary.
+
+Estimate your gas cost
+Input: exponent
+0
+Static gas + dynamic gas = 10
+0b
+SIGNEXTEND
+5
+b
+x
+y
+Extend length of two’s complement signed integer
+Since	Group
+Frontier	Stop and Arithmetic Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+b: size in byte - 1 of the integer to be sign-extended.
+x: integer value to sign extend.
+Stack output
+y: integer result of the sign extend.
+Examples
+Input	Output			Input	Output
+1	0	0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF		1	0	0x7F
+2	0xFF			2	0x7F	
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+10
+LT
+3
+a
+b
+a < b
+Less-than comparison
+Since	Group
+Frontier	Comparison & Bitwise Logic Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+a: left side integer.
+b: right side integer.
+Stack output
+a < b: 1 if the left side is smaller, 0 otherwise.
+Examples
+Input	Output			Input	Output
+1	9	1		1	10	0
+2	10			2	10	
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+11
+GT
+3
+a
+b
+a > b
+Greater-than comparison
+Since	Group
+Frontier	Comparison & Bitwise Logic Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+a: left side integer.
+b: right side integer.
+Stack output
+a > b: 1 if the left side is bigger, 0 otherwise.
+Examples
+Input	Output			Input	Output
+1	10	1		1	10	0
+2	9			2	10	
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+12
+SLT
+3
+a
+b
+a < b
+Signed less-than comparison
+Since	Group
+Frontier	Comparison & Bitwise Logic Operations
+Index 1 is top of the stack. See PUSH.
+
+Notes
+All values are treated as two’s complement signed 256-bit integers.
+
+Stack input
+a: left side signed integer.
+b: right side signed integer.
+Stack output
+a < b: 1 if the left side is smaller, 0 otherwise.
+Examples
+Input	Output			Input	Output
+1	0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF	1		1	10	0
+2	0			2	10	
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+13
+SGT
+3
+a
+b
+a > b
+Signed greater-than comparison
+Since	Group
+Frontier	Comparison & Bitwise Logic Operations
+Index 1 is top of the stack. See PUSH.
+
+Notes
+All values are treated as two’s complement signed 256-bit integers.
+
+Stack input
+a: left side signed integer.
+b: right side signed integer.
+Stack output
+a > b: 1 if the left side is bigger, 0 otherwise.
+Examples
+Input	Output			Input	Output
+1	0	1		1	10	0
+2	0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF			2	10	
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+14
+EQ
+3
+a
+b
+a == b
+Equality comparison
+Since	Group
+Frontier	Comparison & Bitwise Logic Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+a: left side integer.
+b: right side integer.
+Stack output
+a == b: 1 if the left side is equal to the right side, 0 otherwise.
+Examples
+Input	Output			Input	Output
+1	10	1		1	10	0
+2	10			2	5	
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+15
+ISZERO
+3
+a
+a == 0
+Is-zero comparison
+Since	Group
+Frontier	Comparison & Bitwise Logic Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+a: integer.
+Stack output
+a == 0: 1 if a is 0, 0 otherwise.
+Examples
+Input	Output			Input	Output
+1	10	0		1	0	1
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+16
+AND
+3
+a
+b
+a & b
+Bitwise AND operation
+Since	Group
+Frontier	Comparison & Bitwise Logic Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+a: first binary value.
+b: second binary value.
+Stack output
+a & b: the bitwise AND result.
+Examples
+Input	Output			Input	Output
+1	0xF	0xF		1	0xFF	0
+2	0xF			2	0	
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+17
+OR
+3
+a
+b
+a | b
+Bitwise OR operation
+Since	Group
+Frontier	Comparison & Bitwise Logic Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+a: first binary value.
+b: second binary value.
+Stack output
+a | b: the bitwise OR result.
+Examples
+Input	Output			Input	Output
+1	0xF0	0xFF		1	0xFF	0xFF
+2	0xF			2	0xFF	
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+18
+XOR
+3
+a
+b
+a ^ b
+Bitwise XOR operation
+Since	Group
+Frontier	Comparison & Bitwise Logic Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+a: first binary value.
+b: second binary value.
+Stack output
+a ^ b: the bitwise XOR result.
+Examples
+Input	Output			Input	Output
+1	0xF0	0xFF		1	0xFF	0
+2	0xF			2	0xFF	
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+19
+NOT
+3
+a
+~a
+Bitwise NOT operation
+Since	Group
+Frontier	Comparison & Bitwise Logic Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+a: binary value.
+Stack output
+~a: the bitwise NOT result.
+Example
+Input	Output
+1	0	0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+1a
+BYTE
+3
+i
+x
+y
+Retrieve single byte from word
+Since	Group
+Frontier	Comparison & Bitwise Logic Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+i: byte offset starting from the most significant byte.
+x: 32-byte value.
+Stack output
+y: the indicated byte at the least significant position. If the byte offset is out of range, the result is 0.
+Examples
+Input	Output			Input	Output
+1	31	0xFF		1	30	0xFF
+2	0xFF			2	0xFF00	
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+1b
+SHL
+3
+shift
+value
+value << shift
+Left shift operation
+Since	Group
+Constantinople	Comparison & Bitwise Logic Operations
+Index 1 is top of the stack. See PUSH.
+
+Notes
+Shift the bits towards the most significant one. The bits moved after the 256th one are discarded, the new bits are set to 0.
+
+Stack input
+shift: number of bits to shift to the left.
+value: 32 bytes to shift.
+Stack output
+value << shift: the shifted value. If shift is bigger than 255, returns 0.
+Examples
+Input	Output
+1	1	2
+2	1	
+Input	Output
+1	4	0xF000000000000000000000000000000000000000000000000000000000000000
+2	0xFF00000000000000000000000000000000000000000000000000000000000000	
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+1c
+SHR
+3
+shift
+value
+value >> shift
+Logical right shift operation
+Since	Group
+Constantinople	Comparison & Bitwise Logic Operations
+Index 1 is top of the stack. See PUSH.
+
+Notes
+Shift the bits towards the least significant one. The bits moved before the first one are discarded, the new bits are set to 0.
+
+Stack input
+shift: number of bits to shift to the right.
+value: 32 bytes to shift.
+Stack output
+value >> shift: the shifted value. If shift is bigger than 255, returns 0.
+Examples
+Input	Output			Input	Output
+1	1	1		1	4	0xF
+2	2			2	0xFF	
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+1d
+SAR
+3
+shift
+value
+value >> shift
+Arithmetic (signed) right shift operation
+Since	Group
+Constantinople	Comparison & Bitwise Logic Operations
+Index 1 is top of the stack. See PUSH.
+
+Notes
+Shift the bits towards the least significant one. The bits moved before the first one are discarded, the new bits are set to 0 if the previous most significant bit was 0, otherwise the new bits are set to 1.
+
+Stack input
+shift: number of bits to shift to the right.
+value: integer to shift.
+Stack output
+value >> shift: the shifted value.
+Examples
+Input	Output
+1	1	1
+2	2	
+Input	Output
+1	4	0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+2	0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF0	
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+1e
+CLZ
+5
+x
+clz(x)
+Count leading zero bits
+Since	Group
+Osaka	Comparison & Bitwise Logic Operations
+Index 1 is top of the stack.
+
+Notes
+Counts the number of leading zero bits in a 256-bit word. If the input is zero, the result is 256. This operation is useful for efficient implementation of mathematical functions (sqrt, cbrt, log2), byte/word size comparisons, and bitmap operations.
+
+This opcode is specified in EIP-7939.
+
+Stack input
+x: 256-bit value to count leading zeros of.
+Stack output
+clz(x): the number of leading zero bits in x (0 to 256).
+Examples
+Input	Output
+1	0x0000000000000000000000000000000000000000000000000000000000000000	0x100
+Input	Output
+1	0x8000000000000000000000000000000000000000000000000000000000000000	0x0
+Input	Output
+1	0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff	0x0
+Input	Output
+1	0x4000000000000000000000000000000000000000000000000000000000000000	0x1
+Input	Output
+1	0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff	0x1
+Input	Output
+1	0x0000000000000000000000000000000000000000000000000000000000000001	0xff
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+20
+KECCAK256
+30
+offset
+size
+hash
+Compute Keccak-256 hash
+Since	Group
+Frontier	SHA3
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+offset: byte offset in the memory.
+size: byte size to read in the memory.
+Stack output
+hash: Keccak-256 hash of the given data in memory.
+Example
+Memory
+0xFFFFFFFF
+Input	Output
+1	0	0x29045A592007D0C246EF02C2223570DA9522D0CF0F73282C79A1BC8F0BB2C238
+2	4	
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+Gas
+minimum_word_size = (size + 31) / 32
+
+static_gas = 30
+dynamic_gas = 6 * minimum_word_size + memory_expansion_cost
+The memory expansion cost explanation can be found here.
+
+Estimate your gas cost
+Input: offset
+0
+Input: size
+0
+State: current memory size
+0
+Static gas + dynamic gas = 30
+30
+ADDRESS
+2
+address
+Get address of currently executing account
+Since	Group
+Frontier	Environmental Information
+Index 1 is top of the stack. See PUSH.
+
+Stack output
+address: the 20-byte address of the current account.
+Example
+Input	Output
+1		0x9bbfed6889322e016e0a02ee459d306fc19545d8
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+31
+BALANCE
+100
+address
+balance
+Get balance of the given account
+Since	Group
+Frontier	Environmental Information
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+address: 20-byte address of the account to check.
+Stack output
+balance: balance of the given account in wei. Returns 0 if the account doesn't exist.
+Example
+Input	Output
+1	0x9bbfed6889322e016e0a02ee459d306fc19545d8	125985
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+Gas
+The static cost is 0. If the accessed address is warm, the dynamic cost is 100. Otherwise the dynamic cost is 2600. See section access sets.
+
+Estimate your gas cost
+State: 'address' is cold?
+YesNo
+Static gas + dynamic gas = 100
+32
+ORIGIN
+2
+address
+Get execution origination address
+Since	Group
+Frontier	Environmental Information
+Index 1 is top of the stack. See PUSH.
+
+Stack output
+address: the 20-byte address of the sender of the transaction. It can only be an account without code.
+Example
+Input	Output
+1		0xbe862ad9abfe6f22bcb087716c7d89a26051f74c
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+33
+CALLER
+2
+address
+Get caller address
+Since	Group
+Frontier	Environmental Information
+Index 1 is top of the stack. See PUSH.
+
+Stack output
+address: the 20-byte address of the caller account. This is the account that did the last call (except delegate call).
+Example
+Input	Output
+1		0xbe862ad9abfe6f22bcb087716c7d89a26051f74c
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+34
+CALLVALUE
+2
+value
+Get deposited value by the instruction/transaction responsible for this execution
+Since	Group
+Frontier	Environmental Information
+Index 1 is top of the stack. See PUSH.
+
+Stack output
+value: the value of the current call in wei.
+Example
+Input	Output
+1		123456789
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+35
+CALLDATALOAD
+3
+i
+data[i]
+Get input data of current environment
+Since	Group
+Frontier	Environmental Information
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+i: byte offset in the calldata.
+Stack output
+data[i]: 32-byte value starting from the given offset of the calldata. All bytes after the end of the calldata are set to 0.
+Examples
+Calldata
+0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+Input	Output
+1	0	0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+Input	Output
+1	31	0xFF00000000000000000000000000000000000000000000000000000000000000
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+36
+CALLDATASIZE
+2
+size
+Get size of input data in current environment
+Since	Group
+Frontier	Environmental Information
+Index 1 is top of the stack. See PUSH.
+
+Stack output
+size: byte size of the calldata.
+Example
+Calldata
+0xFF
+Input	Output
+1		1
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+37
+CALLDATACOPY
+3
+destOffset
+offset
+size
+Copy input data in current environment to memory
+Since	Group
+Frontier	Environmental Information
+Index 1 is top of the stack. See PUSH.
+
+Notes
+For out of bound bytes, 0s will be copied.
+
+Stack input
+destOffset: byte offset in the memory where the result will be copied.
+offset: byte offset in the calldata to copy.
+size: byte size to copy.
+Examples
+Calldata
+0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+Input 1			Input 2
+1	0		1	0
+2	0		2	31
+3	32		3	8
+Memory before
+0
+Memory after input 1
+0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+Memory after input 1 then 2
+0xFF00000000000000FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+Gas
+minimum_word_size = (size + 31) / 32
+
+static_gas = 3
+dynamic_gas = 3 * minimum_word_size + memory_expansion_cost
+The memory expansion cost explanation can be found here.
+
+Estimate your gas cost
+Input: destOffset
+0
+Input: size
+0
+State: current memory size
+0
+Static gas + dynamic gas = 3
+38
+CODESIZE
+2
+size
+Get size of code running in current environment
+Since	Group
+Frontier	Environmental Information
+Index 1 is top of the stack. See PUSH.
+
+Notes
+Each instruction occupies one byte. In the case of a PUSH instruction, the bytes that need to be pushed are encoded after that, it thus increases the codesize accordingly.
+
+Not allowed in EOFv1 code, code containing this instruction will fail validation.
+
+Stack output
+size: byte size of the code.
+Example
+Input	Output
+1		32
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+39
+CODECOPY
+3
+destOffset
+offset
+size
+Copy code running in current environment to memory
+Since	Group
+Frontier	Environmental Information
+Index 1 is top of the stack. See PUSH.
+
+Notes
+For out of bound bytes, 0s will be copied.
+
+Not allowed in EOFv1 code, code containing this instruction will fail validation.
+
+Stack input
+destOffset: byte offset in the memory where the result will be copied.
+offset: byte offset in the code to copy.
+size: byte size to copy.
+Examples
+Code
+0x7DFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF7F
+Input 1			Input 2
+1	0		1	0
+2	0		2	31
+3	32		3	8
+Memory before
+0
+Memory after input 1
+0x7DFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF7F
+Memory after input 1 then 2
+0x7F00000000000000FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF7F
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+Gas
+minimum_word_size = (size + 31) / 32
+
+static_gas = 3
+dynamic_gas = 3 * minimum_word_size + memory_expansion_cost
+The memory expansion cost explanation can be found here.
+
+Estimate your gas cost
+Input: destOffset
+0
+Input: size
+0
+State: current memory size
+0
+Static gas + dynamic gas = 3
+3a
+GASPRICE
+2
+price
+Get price of gas in current environment
+Since	Group
+Frontier	Environmental Information
+Index 1 is top of the stack. See PUSH.
+
+Stack output
+price: gas price in wei per gas.
+Example
+Input	Output
+1		10
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+3b
+EXTCODESIZE
+100
+address
+size
+Get size of an account’s code
+Since	Group
+Frontier	Environmental Information
+Index 1 is top of the stack. See PUSH.
+
+Notes
+Not allowed in EOFv1 code, code containing this instruction will fail validation.
+
+Stack input
+address: 20-byte address of the contract to query. If address points to an EOF contract, result is as if its code was EF00.
+Stack output
+size: byte size of the code.
+Example
+Input	Output
+1	0x43a61f3f4c73ea0d444c5c1c1a8544067a86219b	32
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+Gas
+The static cost is 0. If the accessed address is warm, the dynamic cost is 100. Otherwise the dynamic cost is 2600. See section access sets.
+
+Estimate your gas cost
+State: 'address' is cold?
+YesNo
+Static gas + dynamic gas = 100
+3c
+EXTCODECOPY
+100
+address
+destOffset
+offset
+size
+Copy an account’s code to memory
+Since	Group
+Frontier	Environmental Information
+Index 1 is top of the stack. See PUSH.
+
+Notes
+For out of bound bytes, 0s will be copied.
+
+Not allowed in EOFv1 code, code containing this instruction will fail validation.
+
+Stack input
+address: 20-byte address of the contract to query. If address points to an EOF contract, result is as if its code was EF00.
+destOffset: byte offset in the memory where the result will be copied.
+offset: byte offset in the code to copy.
+size: byte size to copy.
+Examples
+Code
+0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+Input 1			Input 2
+1	0x43a61f3f4c73ea0d444c5c1c1a8544067a86219b		1	0x43a61f3f4c73ea0d444c5c1c1a8544067a86219b
+2	0		2	0
+3	0		3	31
+4	32		4	8
+Memory before
+0
+Memory after input 1
+0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+Memory after input 1 then 2
+0xFF00000000000000FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+Reproduce in playground
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+Gas
+minimum_word_size = (size + 31) / 32
+
+static_gas = 0
+dynamic_gas = 3 * minimum_word_size + memory_expansion_cost + address_access_cost
+The memory expansion cost explanation can be found here. If the accessed address is warm, address_access_cost is 100, otherwise it is 2600. See section access sets.
+
+Estimate your gas cost
+Input: destOffset
+0
+Input: size
+0
+State: current memory size
+0
+State: 'address' is cold?
+YesNo
+Static gas + dynamic gas = 100
+3d
+RETURNDATASIZE
+2
+size
+Get size of output data from the previous call from the current environment
+Since	Group
+Byzantium	Environmental Information
+Index 1 is top of the stack. See PUSH.
+
+Notes
+A sub context can be created with CALL, CALLCODE, DELEGATECALL or STATICCALL.
+
+Stack output
+size: byte size of the return data from the last executed sub context.
+Example
+Input	Output
+1		32
+Reproduce in playground
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+3e
+RETURNDATACOPY
+3
+destOffset
+offset
+size
+Copy output data from the previous call to memory
+Since	Group
+Byzantium	Environmental Information
+Index 1 is top of the stack. See PUSH.
+
+Notes
+A sub context can be created with CALL, CALLCODE, DELEGATECALL or STATICCALL.
+
+If executed in EOF code, for out of bound bytes, 0s will be copied.
+
+Stack input
+destOffset: byte offset in the memory where the result will be copied.
+offset: byte offset in the return data from the last executed sub context to copy.
+size: byte size to copy.
+Examples
+Return data
+0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+Input 1			Input 2
+1	0		1	32
+2	0		2	31
+3	32		3	1
+Memory before
+0
+Memory after input 1
+0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+Memory after input 1 then 2
+0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+Reproduce in playground
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+The addition offset + size overflows.
+offset + size is larger than RETURNDATASIZE, if executed in legacy (non-EOF) code.
+Gas
+minimum_word_size = (size + 31) / 32
+
+static_gas = 3
+dynamic_gas = 3 * minimum_word_size + memory_expansion_cost
+The memory expansion cost explanation can be found here.
+
+Estimate your gas cost
+Input: destOffset
+0
+Input: size
+0
+State: current memory size
+0
+Static gas + dynamic gas = 3
+3f
+EXTCODEHASH
+100
+address
+hash
+Get hash of an account’s code
+Since	Group
+Constantinople	Environmental Information
+Index 1 is top of the stack. See PUSH.
+
+Notes
+Not allowed in EOFv1 code, code containing this instruction will fail validation.
+
+Stack input
+address: 20-byte address of the account. If address points to an EOF contract, result is as if its code was EF00.
+Stack output
+hash: hash of the chosen account's code, the empty hash (0xc5d24601...) if the account has no code, or 0 if the account does not exist or has been destroyed.
+Examples
+Input	Output
+1	0x43a61f3f4c73ea0d444c5c1c1a8544067a86219b	0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470
+Reproduce in playground
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+Gas
+The static cost is 0. If the accessed address is warm, the dynamic cost is 100. Otherwise the dynamic cost is 2600. See section access sets.
+
+Estimate your gas cost
+State: 'address' is cold?
+YesNo
+Static gas + dynamic gas = 100
+40
+BLOCKHASH
+20
+blockNumber
+hash
+Get the hash of one of the 256 most recent complete blocks
+Since	Group
+Frontier	Block Information
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+blockNumber: block number to get the hash from. Valid range is the last 256 blocks (not including the current one). Current block number can be queried with NUMBER.
+Stack output
+hash: hash of the chosen block, or 0 if the block number is not in the valid range.
+Examples
+Input	Output
+1	599423545	0x29045A592007D0C246EF02C2223570DA9522D0CF0F73282C79A1BC8F0BB2C238
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+41
+COINBASE
+2
+address
+Get the block’s beneficiary address
+Since	Group
+Frontier	Block Information
+Index 1 is top of the stack. See PUSH.
+
+Stack output
+address: miner's 20-byte address.
+Example
+Input	Output
+1		0x5B38Da6a701c568545dCfcB03FcB875f56beddC4
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+42
+TIMESTAMP
+2
+timestamp
+Get the block’s timestamp
+Since	Group
+Frontier	Block Information
+Index 1 is top of the stack. See PUSH.
+
+Stack output
+timestamp: unix timestamp of the current block.
+Example
+Input	Output
+1		1636704767
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+43
+NUMBER
+2
+blockNumber
+Get the block’s number
+Since	Group
+Frontier	Block Information
+Index 1 is top of the stack. See PUSH.
+
+Stack output
+blockNumber: current block number.
+Example
+Input	Output
+1		1636704767
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+44
+PREVRANDAO
+2
+difficulty
+Get the block’s difficulty
+Since	Group
+Merge	Block Information
+Index 1 is top of the stack. See PUSH.
+
+Stack output
+prevRandao: previous block's RANDAO mix.
+Example
+Input	Output
+1		0xce124dee50136f3f93f19667fb4198c6b94eecbacfa300469e5280012757be94
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+45
+GASLIMIT
+2
+gasLimit
+Get the block’s gas limit
+Since	Group
+Frontier	Block Information
+Index 1 is top of the stack. See PUSH.
+
+Stack output
+gasLimit: gas limit.
+Example
+Input	Output
+1		0xffffffffffff
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+46
+CHAINID
+2
+chainId
+Get the chain ID
+Since	Group
+Istanbul	Block Information
+Index 1 is top of the stack. See PUSH.
+
+Notes
+Here are some chain ids:
+
+Id	Chain
+1	Mainnet
+5	Goerli
+11155111	Sepolia
+17000	Holešky
+Stack output
+chainId: chain id of the network.
+Example
+Input	Output
+1		1
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+47
+SELFBALANCE
+5
+balance
+Get balance of currently executing account
+Since	Group
+Istanbul	Block Information
+Index 1 is top of the stack. See PUSH.
+
+Notes
+Semantically equivalent of calling BALANCE with ADDRESS as parameter, but with a reduced gas cost.
+
+Stack output
+balance: balance of the current account in wei.
+Example
+Input	Output
+1		9
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+48
+BASEFEE
+2
+baseFee
+Get the base fee
+Since	Group
+London	Block Information
+Index 1 is top of the stack. See PUSH.
+
+Stack output
+baseFee: base fee in wei.
+Example
+Input	Output
+1		10
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+49
+BLOBHASH
+3
+index
+blobVersionedHashesAtIndex
+Get versioned hashes
+Since	Group
+Cancun	Block Information
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+index
+Stack output
+tx.blob_versioned_hashes[index] if index < len(tx.blob_versioned_hashes), and otherwise with a zeroed bytes32 value.
+Example
+Input	Output
+1		0
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+4a
+BLOBBASEFEE
+2
+blobBaseFee
+Returns the value of the blob base-fee of the current block
+Since	Group
+Cancun	Block Information
+Index 1 is top of the stack. See PUSH.
+
+Stack output
+blobBaseFee: blob base fee in wei.
+Example
+Input	Output
+1		10
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+50
+POP
+2
+y
+Remove item from stack
+Since	Group
+Frontier	Stack Memory Storage and Flow Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+y: a stack item.
+Example
+Input	Output
+1	125985	
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+51
+MLOAD
+3
+offset
+value
+Load word from memory
+Since	Group
+Frontier	Stack Memory Storage and Flow Operations
+Index 1 is top of the stack. See PUSH.
+
+Notes
+Pop from the stack a word as offset to locate and read a word from the memory at offset position and push into top of stack. Expand memory with uint256(0) to the offset position if necessary.
+
+Stack input
+offset: offset in the memory in bytes.
+Stack output
+value: the 32 bytes in memory starting at that offset. If it goes beyond its current size (see MSIZE), writes 0s.
+Examples
+Memory
+0x00000000000000000000000000000000000000000000000000000000000000FF
+Input	Output			Input	Output
+1	0	0xFF		1	1	0xFF00
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+Gas
+static_gas = 3
+dynamic_gas = memory_expansion_cost
+The memory expansion cost explanation can be found here.
+
+Estimate your gas cost
+Input: offset
+0
+State: current memory size
+0
+Static gas + dynamic gas = 6
+52
+MSTORE
+3
+offset
+value
+Save word to memory
+Since	Group
+Frontier	Stack Memory Storage and Flow Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+offset: offset in the memory in bytes.
+value: 32-byte value to write in the memory.
+Examples
+Input 1			Input 2
+1	0		1	1
+2	0xFF		2	0xFF
+Memory before
+0
+Memory after input 1
+0x00000000000000000000000000000000000000000000000000000000000000FF
+Memory after input 1 then 2
+0x0000000000000000000000000000000000000000000000000000000000000000FF
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+Gas
+static_gas = 3
+dynamic_gas = memory_expansion_cost
+The memory expansion cost explanation can be found here.
+
+Estimate your gas cost
+Input: offset
+0
+State: current memory size
+0
+Static gas + dynamic gas = 6
+53
+MSTORE8
+3
+offset
+value
+Save byte to memory
+Since	Group
+Frontier	Stack Memory Storage and Flow Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+offset: offset in the memory in bytes.
+value: 1-byte value to write in the memory (the least significant byte of the 32-byte stack value).
+Examples
+Input 1			Input 2
+1	0		1	1
+2	0xFFFF		2	0xFF
+Memory before
+0
+Memory after input 1
+0xFF
+Memory after input 1 then 2
+0xFFFF
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+Gas
+static_gas = 3
+dynamic_gas = memory_expansion_cost
+The memory expansion cost explanation can be found here.
+
+Estimate your gas cost
+Input: offset
+0
+State: current memory size
+0
+Static gas + dynamic gas = 6
+54
+SLOAD
+100
+key
+value
+Load word from storage
+Since	Group
+Frontier	Stack Memory Storage and Flow Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+key: 32-byte key in storage.
+Stack output
+value: 32-byte value corresponding to that key. 0 if that key was never written before.
+Examples
+Storage key	Storage value
+0	46
+Input	Output			Input	Output
+1	0	46		1	1	0
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+Gas
+The static cost is 0. If the accessed slot is warm, the dynamic cost is 100. Otherwise the dynamic cost is 2100. See section access sets.
+
+Estimate your gas cost
+State: 'key' is cold?
+YesNo
+Static gas + dynamic gas = 100
+55
+SSTORE
+100
+key
+value
+Save word to storage
+Since	Group
+Frontier	Stack Memory Storage and Flow Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+key: 32-byte key in storage.
+value: 32-byte value to store.
+Examples
+Input 1			Input 2
+1	0		1	8965
+2	0xFFFF		2	0xFF
+Storage key before	Storage value
+Storage key after input 1	Storage value
+0	0xFFFF
+Storage key after input 1 then 2	Storage value
+0	0xFFFF
+8965	0xFF
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+The current execution context is from a STATICCALL (since Byzantium fork) or an EXTSTATICCALL (since EOF fork).
+When the amount of gas left to the transaction is less than or equal 2300 (since Istanbul fork).
+Gas
+Definitions:
+value: value from the stack input.
+current_value: current value of the storage slot.
+original_value: value of the storage slot before the current transaction.
+static_gas = 0
+
+if value == current_value
+    base_dynamic_gas = 100
+else if current_value == original_value
+    if original_value == 0
+        base_dynamic_gas = 20000
+    else
+        base_dynamic_gas = 2900
+else
+    base_dynamic_gas = 100
+On top of the cost above, 2100 is added to base_dynamic_gas if the slot is cold. See section access sets.
+
+Gas refunds
+if value != current_value
+    if current_value == original_value
+        if original_value != 0 and value == 0
+            gas_refunds += 4800
+    else
+        if original_value != 0
+            if current_value == 0
+                gas_refunds -= 4800
+            else if value == 0
+                gas_refunds += 4800
+        if value == original_value
+            if original_value == 0
+                gas_refunds += 20000 - 100
+            else
+                gas_refunds += 5000 - 2100 - 100
+See gas refunds.
+
+Estimate your gas cost
+Input: value
+0
+State: current value in storage
+0
+State: original value before the current transaction
+0
+State: 'key' is cold?
+YesNo
+Static gas + dynamic gas = 100
+Gas refund = 0
+56
+JUMP
+8
+counter
+Alter the program counter
+Since	Group
+Frontier	Stack Memory Storage and Flow Operations
+Index 1 is top of the stack. See PUSH.
+
+Notes
+The program counter (PC) is a byte offset in the deployed code. It indicates which instruction will be executed next. When an ADD is executed, for example, the PC is incremented by 1, since the instruction is 1 byte. The PUSH instructions are bigger than one byte, and so will increment the counter accordingly.
+
+The JUMP instruction alters the program counter, thus breaking the linear path of the execution to another point in the deployed code. It is used to implement functionalities like functions.
+
+Not allowed in EOFv1 code, code containing this instruction will fail validation.
+
+Stack input
+counter: byte offset in the deployed code where execution will continue from. Must be a JUMPDEST instruction.
+Example
+See in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+Counter offset is not a JUMPDEST. The error is generated even if the JUMP would not have been done.
+57
+JUMPI
+10
+counter
+b
+Conditionally alter the program counter
+Since	Group
+Frontier	Stack Memory Storage and Flow Operations
+Index 1 is top of the stack. See PUSH.
+
+Notes
+The program counter (PC) is a byte offset in the deployed code. It indicates which instruction will be executed next. When an ADD is executed, for example, the PC is incremented by 1, since the instruction is 1 byte. The PUSH instructions are bigger than one byte, and so will increment the counter accordingly.
+
+The JUMPI instruction may alter the program counter, thus breaking the linear path of the execution to another point in the deployed code. It is used to implement functionalities like loops and conditions.
+
+Not allowed in EOFv1 code, code containing this instruction will fail validation.
+
+Stack input
+counter: byte offset in the deployed code where execution will continue from. Must be a JUMPDEST instruction.
+b: the program counter will be altered with the new value only if this value is different from 0. Otherwise, the program counter is simply incremented and the next instruction will be executed.
+Example
+See in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+Counter offset is not a JUMPDEST. The error is generated only if the JUMP would have been done.
+58
+PC
+2
+counter
+Get the value of the program counter prior to the increment corresponding to this instruction
+Since	Group
+Frontier	Stack Memory Storage and Flow Operations
+Index 1 is top of the stack. See PUSH.
+
+Notes
+The program counter (PC) is a byte offset in the deployed code. It indicates which instruction will be executed next. When an ADD is executed, for example, the PC is incremented by 1, since the instruction is 1 byte. The PUSH instructions are bigger than one byte, and so will increment the counter accordingly.
+
+Not allowed in EOFv1 code, code containing this instruction will fail validation.
+
+Stack output
+counter: PC of this instruction in the current program.
+Example
+See in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+59
+MSIZE
+2
+size
+Get the size of active memory in bytes
+Since	Group
+Frontier	Stack Memory Storage and Flow Operations
+Index 1 is top of the stack. See PUSH.
+
+Notes
+The memory is always fully accessible. What this instruction tracks is the highest offset that was accessed in the current execution. A first write or read to a bigger offset will trigger a memory expansion, which will cost gas. The size is always a multiple of a word (32 bytes).
+
+Stack output
+size: current memory size in bytes (higher offset accessed until now + 1).
+Example
+See in playground
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+5a
+GAS
+2
+gas
+Get the amount of available gas, including the corresponding reduction for the cost of this instruction
+Since	Group
+Frontier	Stack Memory Storage and Flow Operations
+Index 1 is top of the stack. See PUSH.
+
+Notes
+Not allowed in EOFv1 code, code containing this instruction will fail validation.
+
+Stack output
+gas: remaining gas (after this instruction).
+Example
+See in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+5b
+JUMPDEST
+1
+Mark a valid destination for jumps
+Since	Group
+Frontier	Stack Memory Storage and Flow Operations
+Notes
+Mark a valid destination for JUMP or JUMPI. This operation has no effect on machine state during execution.
+
+Has no effect whatsoever on validation or execution of EOF code, where it is renamed to NOP.
+
+5c
+TLOAD
+100
+key
+value
+Load word from transient storage
+Since	Group
+Cancun	Stack Memory Storage and Flow Operations
+Index 1 is top of the stack.
+
+Stack input
+key: 32-byte key in transient storage.
+Stack output
+value: 32-byte value corresponding to that key. 0 if that key was never written before.
+Examples
+Transient storage key	Transient storage value
+0	46
+Input	Output			Input	Output
+1	0	46		1	1	0
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+The current execution context is from a STATICCALL (since Byzantium fork) or an EXTSTATICCALL (since EOF fork).
+5d
+TSTORE
+100
+key
+value
+Save word to transient storage
+Since	Group
+Cancun	Stack Memory Storage and Flow Operations
+Index 1 is top of the stack.
+
+Stack input
+key: 32-byte key in transient storage.
+value: 32-byte value to store.
+Examples
+Input 1			Input 2
+1	0		1	8965
+2	0xFFFF		2	0xFF
+Transient storage key before	Transient storage value
+Transient storage key after input 1	Transient storage value
+0	0xFFFF
+Transient storage key after input 1 then 2	Transient storage value
+0	0xFFFF
+8965	0xFF
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+5e
+MCOPY
+3
+destOffset
+offset
+size
+Copy memory areas
+Since	Group
+Cancun	Stack Memory Storage and Flow Operations
+Index 1 is top of the stack.
+
+Notes
+Copying takes place as if an intermediate buffer was used, allowing the destination and source to overlap. If size > 0 and (src + size or dst + size) is beyond the current memory size, the memory is extended with respective gas cost applied.
+
+Stack input
+destOffset: byte offset in the memory where the result will be copied.
+offset: byte offset in the memory from which to copy.
+size: byte size to copy.
+Examples
+Input 1	
+1	0	
+2	32	
+3	32	
+Memory before
+0000000000000000000000000000000000000000000000000000000000000000 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+Memory after
+000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+Reproduce in playground.
+
+Gas
+static_gas = 3
+dynamic_gas = 3 * words_copied + memory_expansion_cost
+Estimate your gas cost
+Input: destination offset
+0
+Input: input offset
+0
+Input: size
+0
+State: current memory size
+0
+Static gas + dynamic gas = 3
+5f
+PUSH0
+2
+0
+Place value 0 on stack
+Since	Group
+Shanghai	Push Operations
+Index 1 is top of the stack.
+
+Notes
+The new value is put on top of the stack, incrementing all the other value indices. The values for a specific opcode thus have to be pushed in reverse order of the stack. For example, with MSTORE, the first value pushed would have to be value, and then offset.
+
+Stack output
+value: pushed value, equal to 0.
+Example
+Code	0x5F
+Text	PUSH0
+Input	Output
+1		0x00
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+60
+PUSH1
+3
+value
+Place 1 byte item on stack
+Since	Group
+Frontier	Push Operations
+Index 1 is top of the stack.
+
+Notes
+The new value is put on top of the stack, incrementing all the other value indices. The values for a specific opcode thus have to be pushed in reverse order of the stack. For example, with MSTORE, the first value pushed would have to be value, and then offset.
+
+Stack output
+value: pushed value, aligned to the right (put in the lowest significant bytes).
+Example
+Code	0x60FF6000
+Text	PUSH1 FF PUSH1 00
+Input	Output
+1		0x00
+2		0xFF
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+61
+PUSH2
+3
+value
+Place 2 byte item on stack
+Since	Group
+Frontier	Push Operations
+Index 1 is top of the stack.
+
+Notes
+The new value is put on top of the stack, incrementing all the other value indices. The values for a specific opcode thus have to be pushed in reverse order of the stack. For example, with MSTORE, the first value pushed would have to be value, and then offset.
+
+Stack output
+value: pushed value, aligned to the right (put in the lowest significant bytes).
+Example
+Code	0x61FFFF610000
+Text	PUSH2 FFFF PUSH2 0000
+Input	Output
+1		0x0000
+2		0xFFFF
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+62
+PUSH3
+3
+value
+Place 3 byte item on stack
+Since	Group
+Frontier	Push Operations
+Index 1 is top of the stack.
+
+Notes
+The new value is put on top of the stack, incrementing all the other value indices. The values for a specific opcode thus have to be pushed in reverse order of the stack. For example, with MSTORE, the first value pushed would have to be value, and then offset.
+
+Stack output
+value: pushed value, aligned to the right (put in the lowest significant bytes).
+Example
+Code	0x62FFFFFF62000000
+Text	PUSH3 FFFFFF PUSH3 000000
+Input	Output
+1		0x000000
+2		0xFFFFFF
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+63
+PUSH4
+3
+value
+Place 4 byte item on stack
+Since	Group
+Frontier	Push Operations
+Index 1 is top of the stack.
+
+Notes
+The new value is put on top of the stack, incrementing all the other value indices. The values for a specific opcode thus have to be pushed in reverse order of the stack. For example, with MSTORE, the first value pushed would have to be value, and then offset.
+
+Stack output
+value: pushed value, aligned to the right (put in the lowest significant bytes).
+Example
+Code	0x63FFFFFFFF6300000000
+Text	PUSH4 FFFFFFFF PUSH4 00000000
+Input	Output
+1		0x00000000
+2		0xFFFFFFFF
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+64
+PUSH5
+3
+value
+Place 5 byte item on stack
+Since	Group
+Frontier	Push Operations
+Index 1 is top of the stack.
+
+Notes
+The new value is put on top of the stack, incrementing all the other value indices. The values for a specific opcode thus have to be pushed in reverse order of the stack. For example, with MSTORE, the first value pushed would have to be value, and then offset.
+
+Stack output
+value: pushed value, aligned to the right (put in the lowest significant bytes).
+Example
+Code	0x64FFFFFFFFFF640000000000
+Text	PUSH5 FFFFFFFFFF PUSH5 0000000000
+Input	Output
+1		0x0000000000
+2		0xFFFFFFFFFF
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+65
+PUSH6
+3
+value
+Place 6 byte item on stack
+Since	Group
+Frontier	Push Operations
+Index 1 is top of the stack.
+
+Notes
+The new value is put on top of the stack, incrementing all the other value indices. The values for a specific opcode thus have to be pushed in reverse order of the stack. For example, with MSTORE, the first value pushed would have to be value, and then offset.
+
+Stack output
+value: pushed value, aligned to the right (put in the lowest significant bytes).
+Example
+Code	0x65FFFFFFFFFFFF65000000000000
+Text	PUSH6 FFFFFFFFFFFF PUSH6 000000000000
+Input	Output
+1		0x000000000000
+2		0xFFFFFFFFFFFF
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+66
+PUSH7
+3
+value
+Place 7 byte item on stack
+Since	Group
+Frontier	Push Operations
+Index 1 is top of the stack.
+
+Notes
+The new value is put on top of the stack, incrementing all the other value indices. The values for a specific opcode thus have to be pushed in reverse order of the stack. For example, with MSTORE, the first value pushed would have to be value, and then offset.
+
+Stack output
+value: pushed value, aligned to the right (put in the lowest significant bytes).
+Example
+Code	0x66FFFFFFFFFFFFFF6600000000000000
+Text	PUSH7 FFFFFFFFFFFFFF PUSH7 00000000000000
+Input	Output
+1		0x00000000000000
+2		0xFFFFFFFFFFFFFF
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+67
+PUSH8
+3
+value
+Place 8 byte item on stack
+Since	Group
+Frontier	Push Operations
+Index 1 is top of the stack.
+
+Notes
+The new value is put on top of the stack, incrementing all the other value indices. The values for a specific opcode thus have to be pushed in reverse order of the stack. For example, with MSTORE, the first value pushed would have to be value, and then offset.
+
+Stack output
+value: pushed value, aligned to the right (put in the lowest significant bytes).
+Example
+Code	0x67FFFFFFFFFFFFFFFF670000000000000000
+Text	PUSH8 FFFFFFFFFFFFFFFF PUSH8 0000000000000000
+Input	Output
+1		0x0000000000000000
+2		0xFFFFFFFFFFFFFFFF
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+68
+PUSH9
+3
+value
+Place 9 byte item on stack
+Since	Group
+Frontier	Push Operations
+Index 1 is top of the stack.
+
+Notes
+The new value is put on top of the stack, incrementing all the other value indices. The values for a specific opcode thus have to be pushed in reverse order of the stack. For example, with MSTORE, the first value pushed would have to be value, and then offset.
+
+Stack output
+value: pushed value, aligned to the right (put in the lowest significant bytes).
+Example
+Code	0x68FFFFFFFFFFFFFFFFFF68000000000000000000
+Text	PUSH9 FFFFFFFFFFFFFFFFFF PUSH9 000000000000000000
+Input	Output
+1		0x000000000000000000
+2		0xFFFFFFFFFFFFFFFFFF
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+69
+PUSH10
+3
+value
+Place 10 byte item on stack
+Since	Group
+Frontier	Push Operations
+Index 1 is top of the stack.
+
+Notes
+The new value is put on top of the stack, incrementing all the other value indices. The values for a specific opcode thus have to be pushed in reverse order of the stack. For example, with MSTORE, the first value pushed would have to be value, and then offset.
+
+Stack output
+value: pushed value, aligned to the right (put in the lowest significant bytes).
+Example
+Code	0x69FFFFFFFFFFFFFFFFFFFF6900000000000000000000
+Text	PUSH10 FFFFFFFFFFFFFFFFFFFF PUSH10 00000000000000000000
+Input	Output
+1		0x00000000000000000000
+2		0xFFFFFFFFFFFFFFFFFFFF
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+6a
+PUSH11
+3
+value
+Place 11 byte item on stack
+Since	Group
+Frontier	Push Operations
+Index 1 is top of the stack.
+
+Notes
+The new value is put on top of the stack, incrementing all the other value indices. The values for a specific opcode thus have to be pushed in reverse order of the stack. For example, with MSTORE, the first value pushed would have to be value, and then offset.
+
+Stack output
+value: pushed value, aligned to the right (put in the lowest significant bytes).
+Example
+Code	0x6AFFFFFFFFFFFFFFFFFFFFFF6A0000000000000000000000
+Text	PUSH11 FFFFFFFFFFFFFFFFFFFFFF PUSH11 0000000000000000000000
+Input	Output
+1		0x0000000000000000000000
+2		0xFFFFFFFFFFFFFFFFFFFFFF
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+6b
+PUSH12
+3
+value
+Place 12 byte item on stack
+Since	Group
+Frontier	Push Operations
+Index 1 is top of the stack.
+
+Notes
+The new value is put on top of the stack, incrementing all the other value indices. The values for a specific opcode thus have to be pushed in reverse order of the stack. For example, with MSTORE, the first value pushed would have to be value, and then offset.
+
+Stack output
+value: pushed value, aligned to the right (put in the lowest significant bytes).
+Example
+Code	0x6BFFFFFFFFFFFFFFFFFFFFFFFF6B000000000000000000000000
+Text	PUSH12 FFFFFFFFFFFFFFFFFFFFFFFF PUSH12 000000000000000000000000
+Input	Output
+1		0x000000000000000000000000
+2		0xFFFFFFFFFFFFFFFFFFFFFFFF
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+6c
+PUSH13
+3
+value
+Place 13 byte item on stack
+Since	Group
+Frontier	Push Operations
+Index 1 is top of the stack.
+
+Notes
+The new value is put on top of the stack, incrementing all the other value indices. The values for a specific opcode thus have to be pushed in reverse order of the stack. For example, with MSTORE, the first value pushed would have to be value, and then offset.
+
+Stack output
+value: pushed value, aligned to the right (put in the lowest significant bytes).
+Example
+Code	0x6CFFFFFFFFFFFFFFFFFFFFFFFFFF6C00000000000000000000000000
+Text	PUSH13 FFFFFFFFFFFFFFFFFFFFFFFFFF PUSH13 00000000000000000000000000
+Input	Output
+1		0x00000000000000000000000000
+2		0xFFFFFFFFFFFFFFFFFFFFFFFFFF
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+6d
+PUSH14
+3
+value
+Place 14 byte item on stack
+Since	Group
+Frontier	Push Operations
+Index 1 is top of the stack.
+
+Notes
+The new value is put on top of the stack, incrementing all the other value indices. The values for a specific opcode thus have to be pushed in reverse order of the stack. For example, with MSTORE, the first value pushed would have to be value, and then offset.
+
+Stack output
+value: pushed value, aligned to the right (put in the lowest significant bytes).
+Example
+Code	0x6DFFFFFFFFFFFFFFFFFFFFFFFFFFFF6D0000000000000000000000000000
+Text	PUSH14 FFFFFFFFFFFFFFFFFFFFFFFFFFFF PUSH14 0000000000000000000000000000
+Input	Output
+1		0x0000000000000000000000000000
+2		0xFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+6e
+PUSH15
+3
+value
+Place 15 byte item on stack
+Since	Group
+Frontier	Push Operations
+Index 1 is top of the stack.
+
+Notes
+The new value is put on top of the stack, incrementing all the other value indices. The values for a specific opcode thus have to be pushed in reverse order of the stack. For example, with MSTORE, the first value pushed would have to be value, and then offset.
+
+Stack output
+value: pushed value, aligned to the right (put in the lowest significant bytes).
+Example
+Code	0x6EFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF6E000000000000000000000000000000
+Text	PUSH15 FFFFFFFFFFFFFFFFFFFFFFFFFFFFFF PUSH15 000000000000000000000000000000
+Input	Output
+1		0x000000000000000000000000000000
+2		0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+6f
+PUSH16
+3
+value
+Place 16 byte item on stack
+Since	Group
+Frontier	Push Operations
+Index 1 is top of the stack.
+
+Notes
+The new value is put on top of the stack, incrementing all the other value indices. The values for a specific opcode thus have to be pushed in reverse order of the stack. For example, with MSTORE, the first value pushed would have to be value, and then offset.
+
+Stack output
+value: pushed value, aligned to the right (put in the lowest significant bytes).
+Example
+Code	0x6FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF6F00000000000000000000000000000000
+Text	PUSH16 FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF PUSH16 00000000000000000000000000000000
+Input	Output
+1		0x00000000000000000000000000000000
+2		0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+70
+PUSH17
+3
+value
+Place 17 byte item on stack
+Since	Group
+Frontier	Push Operations
+Index 1 is top of the stack.
+
+Notes
+The new value is put on top of the stack, incrementing all the other value indices. The values for a specific opcode thus have to be pushed in reverse order of the stack. For example, with MSTORE, the first value pushed would have to be value, and then offset.
+
+Stack output
+value: pushed value, aligned to the right (put in the lowest significant bytes).
+Example
+Code	0x70FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF700000000000000000000000000000000000
+Text	PUSH17 FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF PUSH17 0000000000000000000000000000000000
+Input	Output
+1		0x0000000000000000000000000000000000
+2		0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+71
+PUSH18
+3
+value
+Place 18 byte item on stack
+Since	Group
+Frontier	Push Operations
+Index 1 is top of the stack.
+
+Notes
+The new value is put on top of the stack, incrementing all the other value indices. The values for a specific opcode thus have to be pushed in reverse order of the stack. For example, with MSTORE, the first value pushed would have to be value, and then offset.
+
+Stack output
+value: pushed value, aligned to the right (put in the lowest significant bytes).
+Example
+Code	0x71FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF71000000000000000000000000000000000000
+Text	PUSH18 FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF PUSH18 000000000000000000000000000000000000
+Input	Output
+1		0x000000000000000000000000000000000000
+2		0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+72
+PUSH19
+3
+value
+Place 19 byte item on stack
+Since	Group
+Frontier	Push Operations
+Index 1 is top of the stack.
+
+Notes
+The new value is put on top of the stack, incrementing all the other value indices. The values for a specific opcode thus have to be pushed in reverse order of the stack. For example, with MSTORE, the first value pushed would have to be value, and then offset.
+
+Stack output
+value: pushed value, aligned to the right (put in the lowest significant bytes).
+Example
+Code	0x72FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF7200000000000000000000000000000000000000
+Text	PUSH19 FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF PUSH19 00000000000000000000000000000000000000
+Input	Output
+1		0x00000000000000000000000000000000000000
+2		0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+73
+PUSH20
+3
+value
+Place 20 byte item on stack
+Since	Group
+Frontier	Push Operations
+Index 1 is top of the stack.
+
+Notes
+The new value is put on top of the stack, incrementing all the other value indices. The values for a specific opcode thus have to be pushed in reverse order of the stack. For example, with MSTORE, the first value pushed would have to be value, and then offset.
+
+Stack output
+value: pushed value, aligned to the right (put in the lowest significant bytes).
+Example
+Code	0x73FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF730000000000000000000000000000000000000000
+Text	PUSH20 FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF PUSH20 0000000000000000000000000000000000000000
+Input	Output
+1		0x0000000000000000000000000000000000000000
+2		0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+74
+PUSH21
+3
+value
+Place 21 byte item on stack
+Since	Group
+Frontier	Push Operations
+Index 1 is top of the stack.
+
+Notes
+The new value is put on top of the stack, incrementing all the other value indices. The values for a specific opcode thus have to be pushed in reverse order of the stack. For example, with MSTORE, the first value pushed would have to be value, and then offset.
+
+Stack output
+value: pushed value, aligned to the right (put in the lowest significant bytes).
+Example
+Code	0x74FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF74000000000000000000000000000000000000000000
+Text	PUSH21 FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF PUSH21 000000000000000000000000000000000000000000
+Input	Output
+1		0x000000000000000000000000000000000000000000
+2		0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+75
+PUSH22
+3
+value
+Place 22 byte item on stack
+Since	Group
+Frontier	Push Operations
+Index 1 is top of the stack.
+
+Notes
+The new value is put on top of the stack, incrementing all the other value indices. The values for a specific opcode thus have to be pushed in reverse order of the stack. For example, with MSTORE, the first value pushed would have to be value, and then offset.
+
+Stack output
+value: pushed value, aligned to the right (put in the lowest significant bytes).
+Example
+Code	0x75FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF7500000000000000000000000000000000000000000000
+Text	PUSH22 FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF PUSH22 00000000000000000000000000000000000000000000
+Input	Output
+1		0x00000000000000000000000000000000000000000000
+2		0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+76
+PUSH23
+3
+value
+Place 23 byte item on stack
+Since	Group
+Frontier	Push Operations
+Index 1 is top of the stack.
+
+Notes
+The new value is put on top of the stack, incrementing all the other value indices. The values for a specific opcode thus have to be pushed in reverse order of the stack. For example, with MSTORE, the first value pushed would have to be value, and then offset.
+
+Stack output
+value: pushed value, aligned to the right (put in the lowest significant bytes).
+Example
+Code	0x76FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF760000000000000000000000000000000000000000000000
+Text	PUSH23 FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF PUSH23 0000000000000000000000000000000000000000000000
+Input	Output
+1		0x0000000000000000000000000000000000000000000000
+2		0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+77
+PUSH24
+3
+value
+Place 24 byte item on stack
+Since	Group
+Frontier	Push Operations
+Index 1 is top of the stack.
+
+Notes
+The new value is put on top of the stack, incrementing all the other value indices. The values for a specific opcode thus have to be pushed in reverse order of the stack. For example, with MSTORE, the first value pushed would have to be value, and then offset.
+
+Stack output
+value: pushed value, aligned to the right (put in the lowest significant bytes).
+Example
+Code	0x77FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF77000000000000000000000000000000000000000000000000
+Text	PUSH24 FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF PUSH24 000000000000000000000000000000000000000000000000
+Input	Output
+1		0x000000000000000000000000000000000000000000000000
+2		0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+78
+PUSH25
+3
+value
+Place 25 byte item on stack
+Since	Group
+Frontier	Push Operations
+Index 1 is top of the stack.
+
+Notes
+The new value is put on top of the stack, incrementing all the other value indices. The values for a specific opcode thus have to be pushed in reverse order of the stack. For example, with MSTORE, the first value pushed would have to be value, and then offset.
+
+Stack output
+value: pushed value, aligned to the right (put in the lowest significant bytes).
+Example
+Code	0x78FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF7800000000000000000000000000000000000000000000000000
+Text	PUSH25 FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF PUSH25 00000000000000000000000000000000000000000000000000
+Input	Output
+1		0x00000000000000000000000000000000000000000000000000
+2		0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+Reprduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+79
+PUSH26
+3
+value
+Place 26 byte item on stack
+Since	Group
+Frontier	Push Operations
+Index 1 is top of the stack.
+
+Notes
+The new value is put on top of the stack, incrementing all the other value indices. The values for a specific opcode thus have to be pushed in reverse order of the stack. For example, with MSTORE, the first value pushed would have to be value, and then offset.
+
+Stack output
+value: pushed value, aligned to the right (put in the lowest significant bytes).
+Example
+Code	0x79FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF790000000000000000000000000000000000000000000000000000
+Text	PUSH26 FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF PUSH26 0000000000000000000000000000000000000000000000000000
+Input	Output
+1		0x0000000000000000000000000000000000000000000000000000
+2		0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+7a
+PUSH27
+3
+value
+Place 27 byte item on stack
+Since	Group
+Frontier	Push Operations
+Index 1 is top of the stack.
+
+Notes
+The new value is put on top of the stack, incrementing all the other value indices. The values for a specific opcode thus have to be pushed in reverse order of the stack. For example, with MSTORE, the first value pushed would have to be value, and then offset.
+
+Stack output
+value: pushed value, aligned to the right (put in the lowest significant bytes).
+Example
+Code	0x7AFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF7A000000000000000000000000000000000000000000000000000000
+Text	PUSH27 FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF PUSH27 000000000000000000000000000000000000000000000000000000
+Input	Output
+1		0x000000000000000000000000000000000000000000000000000000
+2		0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+7b
+PUSH28
+3
+value
+Place 28 byte item on stack
+Since	Group
+Frontier	Push Operations
+Index 1 is top of the stack.
+
+Notes
+The new value is put on top of the stack, incrementing all the other value indices. The values for a specific opcode thus have to be pushed in reverse order of the stack. For example, with MSTORE, the first value pushed would have to be value, and then offset.
+
+Stack output
+value: pushed value, aligned to the right (put in the lowest significant bytes).
+Example
+Code	0x7BFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF7B00000000000000000000000000000000000000000000000000000000
+Text	PUSH28 FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF PUSH28 00000000000000000000000000000000000000000000000000000000
+Input	Output
+1		0x00000000000000000000000000000000000000000000000000000000
+2		0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+7c
+PUSH29
+3
+value
+Place 29 byte item on stack
+Since	Group
+Frontier	Push Operations
+Index 1 is top of the stack.
+
+Notes
+The new value is put on top of the stack, incrementing all the other value indices. The values for a specific opcode thus have to be pushed in reverse order of the stack. For example, with MSTORE, the first value pushed would have to be value, and then offset.
+
+Stack output
+value: pushed value, aligned to the right (put in the lowest significant bytes).
+Example
+Code	0x7CFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF7C0000000000000000000000000000000000000000000000000000000000
+Text	PUSH29 FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF PUSH29 0000000000000000000000000000000000000000000000000000000000
+Input	Output
+1		0x0000000000000000000000000000000000000000000000000000000000
+2		0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+7d
+PUSH30
+3
+value
+Place 30 byte item on stack
+Since	Group
+Frontier	Push Operations
+Index 1 is top of the stack.
+
+Notes
+The new value is put on top of the stack, incrementing all the other value indices. The values for a specific opcode thus have to be pushed in reverse order of the stack. For example, with MSTORE, the first value pushed would have to be value, and then offset.
+
+Stack output
+value: pushed value, aligned to the right (put in the lowest significant bytes).
+Example
+Code	0x7DFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF7D000000000000000000000000000000000000000000000000000000000000
+Text	PUSH30 FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF PUSH30 000000000000000000000000000000000000000000000000000000000000
+Input	Output
+1		0x000000000000000000000000000000000000000000000000000000000000
+2		0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+7e
+PUSH31
+3
+value
+Place 31 byte item on stack
+Since	Group
+Frontier	Push Operations
+Index 1 is top of the stack.
+
+Notes
+The new value is put on top of the stack, incrementing all the other value indices. The values for a specific opcode thus have to be pushed in reverse order of the stack. For example, with MSTORE, the first value pushed would have to be value, and then offset.
+
+Stack output
+value: pushed value, aligned to the right (put in the lowest significant bytes).
+Example
+Code	0x7EFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF7E00000000000000000000000000000000000000000000000000000000000000
+Text	PUSH31 FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF PUSH31 00000000000000000000000000000000000000000000000000000000000000
+Input	Output
+1		0x00000000000000000000000000000000000000000000000000000000000000
+2		0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+7f
+PUSH32
+3
+value
+Place 32 byte (full word) item on stack
+Since	Group
+Frontier	Push Operations
+Index 1 is top of the stack.
+
+Notes
+The new value is put on top of the stack, incrementing all the other value indices. The values for a specific opcode thus have to be pushed in reverse order of the stack. For example, with MSTORE, the first value pushed would have to be value, and then offset.
+
+Stack output
+value: pushed value.
+Example
+Code	0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF7F0000000000000000000000000000000000000000000000000000000000000000
+Text	PUSH32 FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF PUSH32 0000000000000000000000000000000000000000000000000000000000000000
+Input	Output
+1		0x0000000000000000000000000000000000000000000000000000000000000000
+2		0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Stack overflow.
+80
+DUP1
+3
+value
+value
+value
+Duplicate 1st stack item
+Since	Group
+Frontier	Duplication Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+value: value to duplicate.
+Stack output
+value: duplicated value.
+value: original value.
+Example
+Input	Output
+1	1	1
+2		1
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+Stack overflow.
+81
+DUP2
+3
+a
+b
+b
+a
+b
+Duplicate 2nd stack item
+Since	Group
+Frontier	Duplication Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+a: ignored value.
+b: value to duplicate.
+Stack output
+b: duplicated value.
+a: ignored value.
+b: original value.
+Example
+Input	Output
+1	0	1
+2	1	0
+3		1
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+Stack overflow.
+82
+DUP3
+3
+a
+b
+c
+c
+a
+b
+c
+Duplicate 3rd stack item
+Since	Group
+Frontier	Duplication Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+a: ignored value.
+b: ignored value.
+c: value to duplicate.
+Stack output
+c: duplicated value.
+a: ignored value.
+b: ignored value.
+c: original value.
+Example
+Input	Output
+1	0	1
+2	0	0
+3	1	0
+4		1
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+Stack overflow.
+83
+DUP4
+3
+...
+value
+value
+...
+value
+Duplicate 4th stack item
+Since	Group
+Frontier	Duplication Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+ignored value.
+ignored value.
+ignored value.
+value: value to duplicate.
+Stack output
+value: duplicated value.
+ignored value.
+ignored value.
+ignored value.
+value: original value.
+Example
+Input	Output
+1	0	1
+2	0	0
+3	0	0
+4	1	0
+5		1
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+Stack overflow.
+84
+DUP5
+3
+...
+value
+value
+...
+value
+Duplicate 5th stack item
+Since	Group
+Frontier	Duplication Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+value: value to duplicate.
+Stack output
+value: duplicated value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+value: original value.
+Example
+Input	Output
+1	0	1
+2	0	0
+3	0	0
+4	0	0
+5	1	0
+6		1
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+Stack overflow.
+85
+DUP6
+3
+...
+value
+value
+...
+value
+Duplicate 6th stack item
+Since	Group
+Frontier	Duplication Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+value: value to duplicate.
+Stack output
+value: duplicated value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+value: original value.
+Example
+Input	Output
+1	0	1
+2	0	0
+3	0	0
+4	0	0
+5	0	0
+6	1	0
+7		1
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+Stack overflow.
+86
+DUP7
+3
+...
+value
+value
+...
+value
+Duplicate 7th stack item
+Since	Group
+Frontier	Duplication Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+value: value to duplicate.
+Stack output
+value: duplicated value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+value: original value.
+Example
+Input	Output
+1	0	1
+2	0	0
+3	0	0
+4	0	0
+5	0	0
+6	0	0
+7	1	0
+8		1
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+Stack overflow.
+87
+DUP8
+3
+...
+value
+value
+...
+value
+Duplicate 8th stack item
+Since	Group
+Frontier	Duplication Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+value: value to duplicate.
+Stack output
+value: duplicated value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+value: original value.
+Example
+Input	Output
+1	0	1
+2	0	0
+3	0	0
+4	0	0
+5	0	0
+6	0	0
+7	0	0
+8	1	0
+9		1
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+Stack overflow.
+88
+DUP9
+3
+...
+value
+value
+...
+value
+Duplicate 9th stack item
+Since	Group
+Frontier	Duplication Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+value: value to duplicate.
+Stack output
+value: duplicated value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+value: original value.
+Example
+Input	Output
+1	0	1
+2	0	0
+3	0	0
+4	0	0
+5	0	0
+6	0	0
+7	0	0
+8	0	0
+9	1	0
+10		1
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+Stack overflow.
+89
+DUP10
+3
+...
+value
+value
+...
+value
+Duplicate 10th stack item
+Since	Group
+Frontier	Duplication Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+value: value to duplicate.
+Stack output
+value: duplicated value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+value: original value.
+Example
+Input	Output
+1	0	1
+2	0	0
+3	0	0
+4	0	0
+5	0	0
+6	0	0
+7	0	0
+8	0	0
+9	0	0
+10	1	0
+11		1
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+Stack overflow.
+8a
+DUP11
+3
+...
+value
+value
+...
+value
+Duplicate 11th stack item
+Since	Group
+Frontier	Duplication Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+value: value to duplicate.
+Stack output
+value: duplicated value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+value: original value.
+Example
+Input	Output
+1	0	1
+2	0	0
+3	0	0
+4	0	0
+5	0	0
+6	0	0
+7	0	0
+8	0	0
+9	0	0
+10	0	0
+11	1	0
+12		1
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+Stack overflow.
+8b
+DUP12
+3
+...
+value
+value
+...
+value
+Duplicate 12th stack item
+Since	Group
+Frontier	Duplication Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+value: value to duplicate.
+Stack output
+value: duplicated value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+value: original value.
+Example
+Input	Output
+1	0	1
+2	0	0
+3	0	0
+4	0	0
+5	0	0
+6	0	0
+7	0	0
+8	0	0
+9	0	0
+10	0	0
+11	0	0
+12	1	0
+13		1
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+Stack overflow.
+8c
+DUP13
+3
+...
+value
+value
+...
+value
+Duplicate 13th stack item
+Since	Group
+Frontier	Duplication Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+value: value to duplicate.
+Stack output
+value: duplicated value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+value: original value.
+Example
+Input	Output
+1	0	1
+2	0	0
+3	0	0
+4	0	0
+5	0	0
+6	0	0
+7	0	0
+8	0	0
+9	0	0
+10	0	0
+11	0	0
+12	0	0
+13	1	0
+14		1
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+Stack overflow.
+8d
+DUP14
+3
+...
+value
+value
+...
+value
+Duplicate 14th stack item
+Since	Group
+Frontier	Duplication Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+value: value to duplicate.
+Stack output
+value: duplicated value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+value: original value.
+Example
+Input	Output
+1	0	1
+2	0	0
+3	0	0
+4	0	0
+5	0	0
+6	0	0
+7	0	0
+8	0	0
+9	0	0
+10	0	0
+11	0	0
+12	0	0
+13	0	0
+14	1	0
+15		1
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+Stack overflow.
+8e
+DUP15
+3
+...
+value
+value
+...
+value
+Duplicate 15th stack item
+Since	Group
+Frontier	Duplication Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+value: value to duplicate.
+Stack output
+value: duplicated value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+value: original value.
+Example
+Input	Output
+1	0	1
+2	0	0
+3	0	0
+4	0	0
+5	0	0
+6	0	0
+7	0	0
+8	0	0
+9	0	0
+10	0	0
+11	0	0
+12	0	0
+13	0	0
+14	0	0
+15	1	0
+16		1
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+Stack overflow.
+8f
+DUP16
+3
+...
+value
+value
+...
+value
+Duplicate 16th stack item
+Since	Group
+Frontier	Duplication Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+value: value to duplicate.
+Stack output
+value: duplicated value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+value: original value.
+Example
+Input	Output
+1	0	1
+2	0	0
+3	0	0
+4	0	0
+5	0	0
+6	0	0
+7	0	0
+8	0	0
+9	0	0
+10	0	0
+11	0	0
+12	0	0
+13	0	0
+14	0	0
+15	0	0
+16	1	0
+17		1
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+Stack overflow.
+90
+SWAP1
+3
+a
+b
+b
+a
+Exchange 1st and 2nd stack items
+Since	Group
+Frontier	Exchange Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+a: value to swap.
+b: value to swap.
+Stack output
+b: swapped value.
+a: swapped value.
+Example
+Input	Output
+1	1	2
+2	2	1
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+91
+SWAP2
+3
+a
+b
+c
+c
+b
+a
+Exchange 1st and 3rd stack items
+Since	Group
+Frontier	Exchange Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+a: value to swap.
+b: ignored value.
+c: value to swap.
+Stack output
+c: swapped value.
+b: ignored value.
+a: swapped value.
+Example
+Input	Output
+1	1	2
+2	0	0
+3	2	1
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+92
+SWAP3
+3
+a
+...
+b
+b
+...
+a
+Exchange 1st and 4th stack items
+Since	Group
+Frontier	Exchange Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+a: value to swap.
+ignored value.
+ignored value.
+b: value to swap.
+Stack output
+b: swapped value.
+ignored value.
+ignored value.
+a: swapped value.
+Example
+Input	Output
+1	1	2
+2	0	0
+3	0	0
+4	2	1
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+93
+SWAP4
+3
+a
+...
+b
+b
+...
+a
+Exchange 1st and 5th stack items
+Since	Group
+Frontier	Exchange Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+a: value to swap.
+ignored value.
+ignored value.
+ignored value.
+b: value to swap.
+Stack output
+b: swapped value.
+ignored value.
+ignored value.
+ignored value.
+a: swapped value.
+Example
+Input	Output
+1	1	2
+2	0	0
+3	0	0
+4	0	0
+5	2	1
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+94
+SWAP5
+3
+a
+...
+b
+b
+...
+a
+Exchange 1st and 6th stack items
+Since	Group
+Frontier	Exchange Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+a: value to swap.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+b: value to swap.
+Stack output
+b: swapped value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+a: swapped value.
+Example
+Input	Output
+1	1	2
+2	0	0
+3	0	0
+4	0	0
+5	0	0
+6	2	1
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+95
+SWAP6
+3
+a
+...
+b
+b
+...
+a
+Exchange 1st and 7th stack items
+Since	Group
+Frontier	Exchange Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+a: value to swap.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+b: value to swap.
+Stack output
+b: swapped value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+a: swapped value.
+Example
+Input	Output
+1	1	2
+2	0	0
+3	0	0
+4	0	0
+5	0	0
+6	0	0
+7	2	1
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+96
+SWAP7
+3
+a
+...
+b
+b
+...
+a
+Exchange 1st and 8th stack items
+Since	Group
+Frontier	Exchange Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+a: value to swap.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+b: value to swap.
+Stack output
+b: swapped value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+a: swapped value.
+Example
+Input	Output
+1	1	2
+2	0	0
+3	0	0
+4	0	0
+5	0	0
+6	0	0
+7	0	0
+8	2	1
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+97
+SWAP8
+3
+a
+...
+b
+b
+...
+a
+Exchange 1st and 9th stack items
+Since	Group
+Frontier	Exchange Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+a: value to swap.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+b: value to swap.
+Stack output
+b: swapped value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+a: swapped value.
+Example
+Input	Output
+1	1	2
+2	0	0
+3	0	0
+4	0	0
+5	0	0
+6	0	0
+7	0	0
+8	0	0
+9	2	1
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+98
+SWAP9
+3
+a
+...
+b
+b
+...
+a
+Exchange 1st and 10th stack items
+Since	Group
+Frontier	Exchange Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+a: value to swap.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+b: value to swap.
+Stack output
+b: swapped value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+a: swapped value.
+Example
+Input	Output
+1	1	2
+2	0	0
+3	0	0
+4	0	0
+5	0	0
+6	0	0
+7	0	0
+8	0	0
+9	0	0
+10	2	1
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+99
+SWAP10
+3
+a
+...
+b
+b
+...
+a
+Exchange 1st and 11th stack items
+Since	Group
+Frontier	Exchange Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+a: value to swap.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+b: value to swap.
+Stack output
+b: swapped value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+a: swapped value.
+Example
+Input	Output
+1	1	2
+2	0	0
+3	0	0
+4	0	0
+5	0	0
+6	0	0
+7	0	0
+8	0	0
+9	0	0
+10	0	0
+11	2	1
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+9a
+SWAP11
+3
+a
+...
+b
+b
+...
+a
+Exchange 1st and 12th stack items
+Since	Group
+Frontier	Exchange Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+a: value to swap.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+b: value to swap.
+Stack output
+b: swapped value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+a: swapped value.
+Example
+Input	Output
+1	1	2
+2	0	0
+3	0	0
+4	0	0
+5	0	0
+6	0	0
+7	0	0
+8	0	0
+9	0	0
+10	0	0
+11	0	0
+12	2	1
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+9b
+SWAP12
+3
+a
+...
+b
+b
+...
+a
+Exchange 1st and 13th stack items
+Since	Group
+Frontier	Exchange Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+a: value to swap.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+b: value to swap.
+Stack output
+b: swapped value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+a: swapped value.
+Example
+Input	Output
+1	1	2
+2	0	0
+3	0	0
+4	0	0
+5	0	0
+6	0	0
+7	0	0
+8	0	0
+9	0	0
+10	0	0
+11	0	0
+12	0	0
+13	2	1
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+9c
+SWAP13
+3
+a
+...
+b
+b
+...
+a
+Exchange 1st and 14th stack items
+Since	Group
+Frontier	Exchange Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+a: value to swap.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+b: value to swap.
+Stack output
+b: swapped value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+a: swapped value.
+Example
+Input	Output
+1	1	2
+2	0	0
+3	0	0
+4	0	0
+5	0	0
+6	0	0
+7	0	0
+8	0	0
+9	0	0
+10	0	0
+11	0	0
+12	0	0
+13	0	0
+14	2	1
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+9d
+SWAP14
+3
+a
+...
+b
+b
+...
+a
+Exchange 1st and 15th stack items
+Since	Group
+Frontier	Exchange Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+a: value to swap.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+b: value to swap.
+Stack output
+b: swapped value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+a: swapped value.
+Example
+Input	Output
+1	1	2
+2	0	0
+3	0	0
+4	0	0
+5	0	0
+6	0	0
+7	0	0
+8	0	0
+9	0	0
+10	0	0
+11	0	0
+12	0	0
+13	0	0
+14	0	0
+15	2	1
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+9e
+SWAP15
+3
+a
+...
+b
+b
+...
+a
+Exchange 1st and 16th stack items
+Since	Group
+Frontier	Exchange Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+a: value to swap.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+b: value to swap.
+Stack output
+b: swapped value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+a: swapped value.
+Example
+Input	Output
+1	1	2
+2	0	0
+3	0	0
+4	0	0
+5	0	0
+6	0	0
+7	0	0
+8	0	0
+9	0	0
+10	0	0
+11	0	0
+12	0	0
+13	0	0
+14	0	0
+15	0	0
+16	2	1
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+9f
+SWAP16
+3
+a
+...
+b
+b
+...
+a
+Exchange 1st and 17th stack items
+Since	Group
+Frontier	Exchange Operations
+Index 1 is top of the stack. See PUSH.
+
+Stack input
+a: value to swap.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+b: value to swap.
+Stack output
+b: swapped value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+ignored value.
+a: swapped value.
+Example
+Input	Output
+1	1	2
+2	0	0
+3	0	0
+4	0	0
+5	0	0
+6	0	0
+7	0	0
+8	0	0
+9	0	0
+10	0	0
+11	0	0
+12	0	0
+13	0	0
+14	0	0
+15	0	0
+16	0	0
+17	2	1
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+a0
+LOG0
+375
+offset
+size
+Append log record with no topics
+Since	Group
+Frontier	Logging Operations
+Index 1 is top of the stack. See PUSH.
+
+Notes
+This instruction has no effect on the EVM state. See here.
+
+Stack input
+offset: byte offset in the memory in bytes.
+size: byte size to copy.
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+The current execution context is from a STATICCALL (since Byzantium fork) or an EXTSTATICCALL (since EOF fork).
+Gas
+static_gas = 375
+dynamic_gas = 375 * topic_count + 8 * size + memory_expansion_cost
+For LOG0, topic_count is 0. The memory expansion cost explanation can be found here.
+
+Estimate your gas cost
+Input: offset
+0
+Input: size
+0
+State: current memory size
+0
+Static gas + dynamic gas = 375
+a1
+LOG1
+750
+offset
+size
+topic
+Append log record with one topic
+Since	Group
+Frontier	Logging Operations
+Index 1 is top of the stack. See PUSH.
+
+Notes
+This instruction has no effect on the EVM state. See here.
+
+Stack input
+offset: byte offset in the memory in bytes.
+size: byte size to copy.
+topic1: 32-byte value.
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+The current execution context is from a STATICCALL (since Byzantium fork) or an EXTSTATICCALL (since EOF fork).
+Dynamic gas
+static_gas = 375
+dynamic_gas = 375 * topic_count + 8 * size + memory_expansion_cost
+For LOG1, topic_count is 1. The memory expansion cost explanation can be found here.
+
+Estimate your gas cost
+Input: offset
+0
+Input: size
+0
+State: current memory size
+0
+Static gas + dynamic gas = 750
+a2
+LOG2
+1125
+offset
+size
+topic1
+topic2
+Append log record with two topics
+Since	Group
+Frontier	Logging Operations
+Index 1 is top of the stack. See PUSH.
+
+Notes
+This instruction has no effect on the EVM state. See here.
+
+Stack input
+offset: byte offset in the memory in bytes.
+size: byte size to copy.
+topic1: 32-byte value.
+topic2: 32-byte value.
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+The current execution context is from a STATICCALL (since Byzantium fork) or an EXTSTATICCALL (since EOF fork).
+Dynamic gas
+static_gas = 375
+dynamic_gas = 375 * topic_count + 8 * size + memory_expansion_cost
+For LOG2, topic_count is 2. The memory expansion cost explanation can be found here.
+
+Estimate your gas cost
+Input: offset
+0
+Input: size
+0
+State: current memory size
+0
+Static gas + dynamic gas = 1125
+a3
+LOG3
+1500
+offset
+size
+topic1
+topic2
+topic3
+Append log record with three topics
+Since	Group
+Frontier	Logging Operations
+Index 1 is top of the stack. See PUSH.
+
+Notes
+This instruction has no effect on the EVM state. See here.
+
+Stack input
+offset: byte offset in the memory in bytes.
+size: byte size to copy.
+topic1: 32-byte value.
+topic2: 32-byte value.
+topic3: 32-byte value.
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+The current execution context is from a STATICCALL (since Byzantium fork) or an EXTSTATICCALL (since EOF fork).
+Dynamic gas
+static_gas = 375
+dynamic_gas = 375 * topic_count + 8 * size + memory_expansion_cost
+For LOG3, topic_count is 3. The memory expansion cost explanation can be found here.
+
+Estimate your gas cost
+Input: offset
+0
+Input: size
+0
+State: current memory size
+0
+Static gas + dynamic gas = 1500
+a4
+LOG4
+1875
+offset
+size
+topic1
+topic2
+topic3
+topic4
+Append log record with four topics
+Since	Group
+Frontier	Logging Operations
+Index 1 is top of the stack. See PUSH.
+
+Notes
+This instruction has no effect on the EVM state. See here.
+
+Stack input
+offset: byte offset in the memory in bytes.
+size: byte size to copy.
+topic1: 32-byte value.
+topic2: 32-byte value.
+topic3: 32-byte value.
+topic4: 32-byte value.
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+The current execution context is from a STATICCALL (since Byzantium fork) or an EXTSTATICCALL (since EOF fork).
+Dynamic gas
+static_gas = 375
+dynamic_gas = 375 * topic_count + 8 * size + memory_expansion_cost
+For LOG4, topic_count is 4. The memory expansion cost explanation can be found here.
+
+Estimate your gas cost
+Input: offset
+0
+Input: size
+0
+State: current memory size
+0
+Static gas + dynamic gas = 1875
+f0
+CREATE
+32000
+value
+offset
+size
+address
+Create a new account with associated code
+Since	Group
+Frontier	System operations
+Index 1 is top of the stack. See PUSH.
+
+Notes
+Creates a new contract using the initialisation code provided at the indicated offset in the memory. Enters a new sub context of the calculated destination address and executes the initialisation code, then resumes the current context.
+
+Should deployment succeed, the new account's code is set to the return data resulting from executing the initialisation code.
+
+The destination address is calculated as the rightmost 20 bytes (160 bits) of the Keccak-256 hash of the rlp encoding of the sender address followed by its nonce. That is:
+
+address = keccak256(rlp([sender_address,sender_nonce]))[12:]
+Deployment can fail due to:
+
+A contract already exists at the destination address (can happen in combination with CREATE2 and SELFDESTRUCT).
+Insufficient value to send.
+Sub context reverted.
+Insufficient gas to execute the initialisation code.
+Call depth limit reached.
+Note that these failures only affect the return value and do not cause the calling context to revert (unlike the error cases below).
+
+Not allowed in EOFv1 code, code containing this instruction will fail validation.
+
+Stack input
+value: value in wei to send to the new account.
+offset: byte offset in the memory in bytes, the initialisation code for the new account.
+size: byte size to copy (size of the initialisation code).
+Stack output
+address: the address of the deployed contract, 0 if the deployment failed.
+Examples
+See in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+The current execution context is from a STATICCALL (since Byzantium fork) or an EXTSTATICCALL (since EOF fork).
+size is greater than the chain's maximum initcode size (since Shanghai fork).
+Gas
+minimum_word_size = (size + 31) / 32
+init_code_cost = 2 * minimum_word_size
+code_deposit_cost = 200 * deployed_code_size
+
+static_gas = 32000
+dynamic_gas = init_code_cost + memory_expansion_cost + deployment_code_execution_cost + code_deposit_cost
+The deployment_code_execution_cost is the cost of whatever opcode is run to deploy the new contract. On top of that, there are additional costs for storing the code of the new contract and performing a jumpdest-analysis, respectively shown as code_deposit_cost and init_code_cost. The memory expansion cost explanation can be found here.
+
+The new contract address is added in the warm addresses. See section access sets.
+
+Estimate your gas cost
+Input: offset
+0
+Input: size
+0
+State: current memory size
+0
+Estimated deployment execution cost
+0
+Estimated deployed code size in bytes
+0
+Static gas + dynamic gas = 32000
+f1
+CALL
+100
+gas
+address
+value
+argsOffset
+argsSize
+retOffset
+retSize
+success
+Message-call into an account
+Since	Group
+Frontier	System operations
+Index 1 is top of the stack. See PUSH.
+
+Notes
+Creates a new sub context and execute the code of the given account, then resumes the current one. Note that an account with no code will return success as true.
+
+If the size of the return data is not known, it can also be retrieved after the call with the instructions RETURNDATASIZE and RETURNDATACOPY (since the Byzantium fork).
+
+From the Tangerine Whistle fork, gas is capped at all but one 64th (remaining_gas / 64) of the remaining gas of the current context. If a call tries to send more, the gas is changed to match the maximum allowed.
+
+If the caller doesn't have enough balance to send the value, the call fails but the current context is not reverted.
+
+Not allowed in EOFv1 code, code containing this instruction will fail validation.
+
+Stack input
+gas: amount of gas to send to the sub context to execute. The gas that is not used by the sub context is returned to this one.
+address: the account which context to execute.
+value: value in wei to send to the account.
+argsOffset: byte offset in the memory in bytes, the calldata of the sub context.
+argsSize: byte size to copy (size of the calldata).
+retOffset: byte offset in the memory in bytes, where to store the return data of the sub context.
+retSize: byte size to copy (size of the return data).
+Stack output
+success: return 0 if the sub context reverted, 1 otherwise.
+Examples
+See in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+The current execution context is from a STATICCALL (since Byzantium fork) or an EXTSTATICCALL (since EOF fork) and the value is not 0.
+Gas
+static_gas = 0
+dynamic_gas = memory_expansion_cost + code_execution_cost + address_access_cost + positive_value_cost + value_to_empty_account_cost
+The memory expansion cost explanation can be found here.
+
+The different costs are:
+
+code_execution_cost is the cost of the called code execution (limited by the gas parameter).
+If address is warm, then address_access_cost is 100, otherwise it is 2600. See section access sets.
+If value is not 0, then positive_value_cost is 9000. In this case there is also a call stipend that is given to make sure that a basic fallback function can be called. 2300 is thus removed from the cost, and also added to the gas input.
+If value is not 0 and the address given points to an empty account, then value_to_empty_account_cost is 25000. An account is empty if its balance is 0, its nonce is 0 and it has no code.
+Estimate your gas cost
+Input: value
+0
+Input: argsOffset
+0
+Input: argsSize
+0
+Input: retOffset
+0
+Input: retSize
+0
+State: current memory size
+0
+State: 'address' is cold?
+YesNo
+State: is the called account empty?
+YesNo
+Estimated execution cost
+0
+Static gas + dynamic gas = 100
+f2
+CALLCODE
+100
+gas
+address
+value
+argsOffset
+argsSize
+retOffset
+retSize
+success
+Message-call into this account with alternative account’s code
+Since	Group
+Frontier	System operations
+Index 1 is top of the stack. See PUSH.
+
+Notes
+Creates a new sub context as if calling itself, but with the code of the given account. In particular the storage remains the same. Note that an account with no code will return success as true.
+
+If the size of the return data is not known, it can also be retrieved after the call with the instructions RETURNDATASIZE and RETURNDATACOPY (since the Byzantium fork).
+
+From the Tangerine Whistle fork, gas is capped at all but one 64th (remaining_gas / 64) of the remaining gas of the current context. If a call tries to send more, the gas is changed to match the maximum allowed.
+
+If the caller doesn't have enough balance to send the value, the call fails but the current context is not reverted.
+
+Not allowed in EOFv1 code, code containing this instruction will fail validation.
+
+Stack input
+gas: amount of gas to send to the sub context to execute. The gas that is not used by the sub context is returned to this one.
+address: the account which code to execute.
+value: value in wei to send to the account.
+argsOffset: byte offset in the memory in bytes, the calldata of the sub context.
+argsSize: byte size to copy (size of the calldata).
+retOffset: byte offset in the memory in bytes, where to store the return data of the sub context.
+retSize: byte size to copy (size of the return data).
+Stack output
+success: return 0 if the sub context reverted, 1 otherwise.
+Examples
+See in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+Gas
+static_gas = 0
+dynamic_gas = memory_expansion_cost + code_execution_cost + address_access_cost + positive_value_cost
+The memory expansion cost explanation can be found here.
+
+The different costs are:
+
+code_execution_cost is the cost of the called code execution (limited by the gas parameter).
+If address is warm, then address_access_cost is 100, otherwise it is 2600. See section access sets.
+If value is not 0, then positive_value_cost is 9000. In this case there is also a call stipend that is given to make sure that a basic fallback function can be called. 2300 is thus removed from the cost, and also added to the gas input.
+Estimate your gas cost
+Input: value
+0
+Input: argsOffset
+0
+Input: argsSize
+0
+Input: retOffset
+0
+Input: retSize
+0
+State: current memory size
+0
+State: 'address' is cold?
+YesNo
+Estimated execution cost
+0
+Static gas + dynamic gas = 100
+f3
+RETURN
+0
+offset
+size
+Halt execution returning output data
+Since	Group
+Frontier	System operations
+Index 1 is top of the stack. See PUSH.
+
+Notes
+Exits the current context successfully.
+
+Stack input
+offset: byte offset in the memory in bytes, to copy what will be the return data of this context.
+size: byte size to copy (size of the return data).
+Example
+1	Memory
+1	0xFF01
+Input
+1	0
+1	2
+1	Calling context return data
+1	0xFF01
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+Gas
+static_gas = 0
+dynamic_gas = memory_expansion_cost
+The memory expansion cost explanation can be found here.
+
+Estimate your gas cost
+Input: offset
+0
+Input: size
+0
+State: current memory size
+0
+Static gas + dynamic gas = 0
+f4
+DELEGATECALL
+100
+gas
+address
+argsOffset
+argsSize
+retOffset
+retSize
+success
+Message-call into this account with an alternative account’s code, but persisting the current values for sender and value
+Since	Group
+Byzantium	System operations
+Index 1 is top of the stack. See PUSH.
+
+Notes
+Creates a new sub context as if calling itself, but with the code of the given account. In particular the storage, the current sender and the current value remain the same. Note that an account with no code will return success as true.
+
+If the size of the return data is not known, it can also be retrieved after the call with the instructions RETURNDATASIZE and RETURNDATACOPY (since the Byzantium fork).
+
+From the Tangerine Whistle fork, gas is capped at all but one 64th (remaining_gas / 64) of the remaining gas of the current context. If a call tries to send more, the gas is changed to match the maximum allowed.
+
+Not allowed in EOFv1 code, code containing this instruction will fail validation.
+
+Stack input
+gas: amount of gas to send to the sub context to execute. The gas that is not used by the sub context is returned to this one.
+address: the account which code to execute.
+argsOffset: byte offset in the memory in bytes, the calldata of the sub context.
+argsSize: byte size to copy (size of the calldata).
+retOffset: byte offset in the memory in bytes, where to store the return data of the sub context.
+retSize: byte size to copy (size of the return data).
+Stack output
+success: return 0 if the sub context reverted, 1 otherwise.
+Examples
+See in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+Gas
+static_gas = 0
+dynamic_gas = memory_expansion_cost + code_execution_cost + address_access_cost
+The memory expansion cost explanation can be found here.
+
+The different costs are:
+
+code_execution_cost is the cost of the called code execution (limited by the gas parameter).
+If address is warm, then address_access_cost is 100, otherwise it is 2600. See section access sets.
+Estimate your gas cost
+Input: argsOffset
+0
+Input: argsSize
+0
+Input: retOffset
+0
+Input: retSize
+0
+State: current memory size
+0
+State: 'address' is cold?
+YesNo
+Estimated execution cost
+0
+Static gas + dynamic gas = 100
+f5
+CREATE2
+32000
+value
+offset
+size
+salt
+address
+Create a new account with associated code at a predictable address
+Since	Group
+Constantinople	System operations
+Index 1 is top of the stack. See PUSH.
+
+Notes
+Equivalent to CREATE, except the salt allows the new contract to be deployed at a consistent, deterministic address.
+
+Should deployment succeed, the account's code is set to the return data resulting from executing the initialisation code.
+
+The destination address is calculated as follows:
+
+initialisation_code = memory[offset:offset+size]
+address = keccak256(0xff + sender_address + salt + keccak256(initialisation_code))[12:]
+Deployment can fail due to:
+
+A contract already exists at the destination address.
+Insufficient value to transfer.
+Sub context reverted.
+Insufficient gas to execute the initialisation code.
+Call depth limit reached.
+Note that these failures only affect the return value and do not cause the calling context to revert (unlike the error cases below).
+
+Not allowed in EOFv1 code, code containing this instruction will fail validation.
+
+Stack input
+value: value in wei to send to the new account.
+offset: byte offset in the memory in bytes, the initialisation code of the new account.
+size: byte size to copy (size of the initialisation code).
+salt: 32-byte value used to create the new account at a deterministic address.
+Stack output
+address: the address of the deployed contract, 0 if the deployment failed.
+Examples
+See in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+The current execution context is from a STATICCALL (since Byzantium fork) or an EXTSTATICCALL (since EOF fork).
+size is greater than the chain's maximum initcode size (since Shanghai fork).
+Gas
+minimum_word_size = (size + 31) / 32
+init_code_cost = 2 * minimum_word_size
+hash_cost = 6 * minimum_word_size
+code_deposit_cost = 200 * deployed_code_size
+
+static_gas = 32000
+dynamic_gas = init_code_cost + hash_cost + memory_expansion_cost + deployment_code_execution_cost + code_deposit_cost
+The deployment_code_execution_cost is the cost of whatever opcode is run to deploy the new contract. On top of that, there are additional costs for storing the code of the new contract and performing a jumpdest-analysis, respectively shown as code_deposit_cost and init_code_cost. The difference with CREATE is an additional cost to hash the initialisation code before. The memory expansion cost explanation can be found here.
+
+The new contract address is added in the warm addresses. See section access sets.
+
+Estimate your gas cost
+Input: offset
+0
+Input: size
+0
+State: current memory size
+0
+Estimated deployment execution cost
+0
+Estimated deployed code size in bytes
+0
+Static gas + dynamic gas = 32000
+fa
+STATICCALL
+100
+gas
+address
+argsOffset
+argsSize
+retOffset
+retSize
+success
+Static message-call into an account
+Since	Group
+Byzantium	System operations
+Index 1 is top of the stack. See PUSH.
+
+Notes
+Creates a new sub context and executes the code of the given account, then resumes the current one. Note that an account with no code will return success as true (1).
+
+This instruction is equivalent to CALL, except that it does not allow any state modifying instructions or sending ETH in the sub context. The disallowed instructions are CREATE, CREATE2, LOG0, LOG1, LOG2, LOG3, LOG4, SSTORE, SELFDESTRUCT, EOFCREATE, as well as CALL or EXTCALL if the value sent is not 0.
+
+If the size of the return data is not known, it can also be retrieved after the call with the instructions RETURNDATASIZE and RETURNDATACOPY (since the Byzantium fork).
+
+From the Tangerine Whistle fork, gas is capped at all but one 64th (remaining_gas / 64) of the remaining gas of the current context. If a call tries to send more, the gas is changed to match the maximum allowed.
+
+Not allowed in EOFv1 code, code containing this instruction will fail validation.
+
+Stack input
+gas: amount of gas to send to the sub context to execute. The gas that is not used by the sub context is returned to this one.
+address: the account which context to execute.
+argsOffset: byte offset in the memory in bytes, the calldata of the sub context.
+argsSize: byte size to copy (size of the calldata).
+retOffset: byte offset in the memory in bytes, where to store the return data of the sub context.
+retSize: byte size to copy (size of the return data).
+Stack output
+success: return 0 if the sub context reverted, 1 otherwise.
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+Gas
+static_gas = 0
+dynamic_gas = memory_expansion_cost + code_execution_cost + address_access_cost
+The memory expansion cost explanation can be found here.
+
+The different costs are:
+
+code_execution_cost is the cost of the called code execution (limited by the gas parameter).
+If address is warm, then address_access_cost is 100, otherwise it is 2600. See section access sets.
+Estimate your gas cost
+Input: argsOffset
+0
+Input: argsSize
+0
+Input: retOffset
+0
+Input: retSize
+0
+State: current memory size
+0
+State: 'address' is cold?
+YesNo
+Estimated execution cost
+0
+Static gas + dynamic gas = 100
+fd
+REVERT
+0
+offset
+size
+Halt execution reverting state changes but returning data and remaining gas
+Since	Group
+Byzantium	System operations
+Index 1 is top of the stack. See PUSH.
+
+Notes
+Stop the current context execution, revert the state changes (see STATICCALL for a list of state changing opcodes) and return the unused gas to the caller. It also reverts the gas refund to its value before the current context. If the execution is stopped with REVERT, the value 0 is put on the stack of the calling context, which continues to execute normally. The return data of the calling context is set as the given chunk of memory of this context.
+
+Stack input
+offset: byte offset in the memory in bytes. The return data of the calling context.
+size: byte size to copy (size of the return data).
+Example
+1	Memory
+1	0xFF01
+Input
+1	0
+1	2
+1	Calling context return data
+1	0xFF01
+Reproduce in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+Gas
+static_gas = 0
+dynamic_gas = memory_expansion_cost
+The memory expansion cost explanation can be found here.
+
+Estimate your gas cost
+Input: offset
+0
+Input: size
+0
+State: current memory size
+0
+Static gas + dynamic gas = 0
+fe
+INVALID
+NaN
+Designated invalid instruction
+Since	Group
+Homestead	System operations
+Notes
+Equivalent to any other opcode not present in this reference, but guaranteed to remain an invalid instruction. Equivalent to REVERT (since Byzantium fork) with 0,0 as stack parameters, except that all the gas given to the current context is consumed.
+
+Gas
+All the remaining gas in this context is consumed.
+
+Estimate your gas cost
+State: remaining gas in the current context
+0
+Static gas + dynamic gas = 0
+ff
+SELFDESTRUCT
+5000
+address
+Halt execution and register account for later deletion or send all Ether to address (post-Cancun)
+Since	Group
+Frontier	System operations
+Index 1 is top of the stack. See PUSH.
+
+Notes
+From cancun behavior: send all Ether in the account to the target. If executed in the same transaction a contract was created, or pre-Cancun, the current account is registered to be destroyed, and will be at the end of the current transaction. The transfer of the current balance to the given account cannot fail. In particular, the destination account code (if any) is not executed, or, if the account does not exist, the balance is still added to the given address.
+
+Not allowed in EOFv1 code, code containing this instruction will fail validation.
+
+Stack input
+address: account to send the current balance to (see BALANCE or SELFBALANCE since Istanbul fork).
+Example
+See in playground.
+
+Error cases
+The state changes done by the current context are reverted in those cases:
+
+Not enough gas.
+Not enough values on the stack.
+The current execution context is from a STATICCALL (since Byzantium fork) or an EXTSTATICCALL (since EOF fork).
+Gas
+The static gas is 5000. If a positive balance is sent to an empty account, the dynamic gas is 25000. An account is empty if its balance is 0, its nonce is 0 and it has no code. Additionally, if address is cold, there is an additional dynamic cost of 2600. See section access sets. There is no additional cost otherwise.
+
+Estimate your gas cost
+State: is the current account balance empty?
+YesNo
+State: is the beneficiary account empty?
+YesNo
+State: 'address' is cold?
+YesNo
