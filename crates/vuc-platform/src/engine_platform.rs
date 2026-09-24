@@ -4909,6 +4909,7 @@ let already_exists = if let manager = storage.as_ref() {
                 ("EAC_PROXY_AGGREGATOR", "0xcccccccccccccccccccccccccccccccccccccccc"),
                 ("KEYSTONFORWARDER", "0xdddddddddddddddddddddddddddddddddddddddd"),
                 ("VEZRECEIV", "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"),
+                ("VYFTSA", "0xffffffffffffffffffffffffffffffffffffffff"),
             ];
 
             for (env_key, target_addr) in contracts_por {
