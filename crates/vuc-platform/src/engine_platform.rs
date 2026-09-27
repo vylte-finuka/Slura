@@ -4908,7 +4908,7 @@ let already_exists = if let manager = storage.as_ref() {
             let contracts_por = vec![
                 ("EAC_PROXY_AGGREGATOR", "0xcccccccccccccccccccccccccccccccccccccccc"),
                 ("KEYSTONFORWARDER", "0xdddddddddddddddddddddddddddddddddddddddd"),
-                ("VEZRECEIV", "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"),
+                ("VEZRECEIV", "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
                 ("VYFTSA", "0xffffffffffffffffffffffffffffffffffffffff"),
             ];
 
