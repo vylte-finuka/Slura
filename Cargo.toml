@@ -12,7 +12,6 @@ members = [
     "crates/vuc-storage",
     "crates/vuc-tx",
     "crates/vuc-reader/src/uvm/runtime",
-    "crates/vuc-bridge",
 ]
 resolver = "2"
 
@@ -48,6 +47,7 @@ chrono          = { version = "0.4.19", default-features = false }
 fastcrypto      = { version = "0.1.9", default-features = false }
 md5             = { version = "0.7.0", default-features = false }
 sha2            = { version = "0.9.3", default-features = false }
+equihash        = "0.3.0"
 sha3            = { version = "0.9.1", default-features = false }
 reqwest         = { version = "0.11", features = ["json"] }
 

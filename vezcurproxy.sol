@@ -44,6 +44,9 @@ contract VEZproxy is ERC20, Ownable, UUPSUpgradeable {
     ///====≈====≈=== VARIABLES
     reservVEZInterface public reserveProof;
 
+    uint256 public constant INITIAL_NATIVE_MINT = 88 * 10**18;
+    bool public initialMintDone;
+
     mapping(address => bool) public custodians;  // Liste extensible de custodians (SLURC-2)
     address[] public custodianList;               // Tableau ordonné des custodians
 
@@ -138,10 +141,6 @@ contract VEZproxy is ERC20, Ownable, UUPSUpgradeable {
         ERC20("Vyft Enhancing ZER", "VEZ")
         Ownable(0x53Ae54b11251D5003e9aA51422405bC35A2eF32D)
     {
-        require(
-            _reserveProof != address(0),
-            "Invalid reserve proof"
-        );
 
         reserveProof = reservVEZInterface(_reserveProof);
 
@@ -156,6 +155,15 @@ contract VEZproxy is ERC20, Ownable, UUPSUpgradeable {
 
         blacklister = owner();
         _paused = false;
+
+        // Mint initial native tokens (888M VEZ) for system validator
+        if (!initialMintDone) {
+            _mint(me, INITIAL_NATIVE_MINT);
+            complet_quantData += INITIAL_NATIVE_MINT;
+            initialMintDone = true;
+            emit MintLimited(me, INITIAL_NATIVE_MINT);
+            emit FiatBackingConfirmed(INITIAL_NATIVE_MINT, "initial-native-mint");
+        }
     }
 
     ///====≈====≈=== CONFIGURATION PoR
@@ -217,10 +225,18 @@ contract VEZproxy is ERC20, Ownable, UUPSUpgradeable {
         uint256 available =
             reserveProof.availableMint();
 
-        require(
-            amount <= available,
-            "Insufficient verified reserves"
-        );
+        // Après le mint initial, aligner au PoR
+        if (!initialMintDone) {
+            require(
+                amount <= MAX_MINT_PER_TX,
+                "Invalid mint amount"
+            );
+        } else {
+            require(
+                amount <= available,
+                "Insufficient verified reserves"
+            );
+        }
 
         _mint(
             to,

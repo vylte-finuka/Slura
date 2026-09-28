@@ -16,7 +16,7 @@ std     = [
 serde     = { workspace = true, default-features = false, features = ["derive"] }
 md5       = { workspace = true, default-features = false }
 hashbrown = { workspace = true, default-features = false }
-chrono    = { workspace = true, default-features = false, features = ["serde"] }
+chrono    = { workspace = true, default-features = false, features = ["serde", "clock"] }
 
 # ── Std seulement ─────────────────────────────────────────
 tokio   = { workspace = true, default-features = false, optional = true }

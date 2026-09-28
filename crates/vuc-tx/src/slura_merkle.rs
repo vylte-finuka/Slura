@@ -156,8 +156,9 @@ pub fn build_extended_state_trie(
         hashed_accounts.push((addr, Some(evm_account)));
     }
 
-    // Tri obligatoire
+    // Tri obligatoire — DÉDUPLICATION pour éviter add_leaf crash
     hashed_accounts.sort_by(|a, b| a.0.cmp(&b.0));
+    hashed_accounts.dedup_by(|a, b| a.0 == b.0);
 
     // HashedPostState
     let mut post_state = HashedPostState::default();

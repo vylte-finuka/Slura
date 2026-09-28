@@ -115,6 +115,8 @@ pub struct EnginePlatform {
     pub vm: Arc<tokio::sync::RwLock<SlurachainVm>>,
     pub tx_receipts: Arc<tokio::sync::RwLock<HashMap<String, serde_json::Value>>>,
     pub validator_address: String,
+    // ✅ VALIDATEUR SYSTÈME TEMPORAIRE POUR PoR
+    pub system_validator_address: String,
     pub current_block_number: Arc<TokioRwLock<u64>>,
     pub block_transactions: Arc<TokioRwLock<HashMap<u64, Vec<String>>>>,
     // AJOUTS POUR RECEIPT INSTANTANÉ
@@ -140,6 +142,8 @@ impl EnginePlatform {
             vm,
             tx_receipts: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             validator_address,
+            // ✅ VALIDATEUR SYSTÈME TEMPORAIRE POUR PoR
+            system_validator_address: "0x53Ae54b11251D5003e9aA51422405bC35A2eF32D".to_string(),
             current_block_number: Arc::new(TokioRwLock::new(1)),
             block_transactions: Arc::new(TokioRwLock::new(HashMap::new())),
             block_finalized_tx: Arc::new(block_finalized_tx),
@@ -1766,7 +1770,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
 
         let deploy_result = vm.execute_module(
             &contract_address,
-            "deploy",  // nom de fonction vide, pas le bytecode
+            "",  // nom de fonction vide, pas le bytecode
             vec![],
             Some(&from_addr),
             Some(&creation_bytecode),  // bytecode de création comme calldata
@@ -4907,7 +4911,7 @@ let already_exists = if let manager = storage.as_ref() {
             // ─── VRAI DÉPLOIEMENT PoR : plusieurs contrats ───
             let contracts_por = vec![
                 ("EAC_PROXY_AGGREGATOR", "0xcccccccccccccccccccccccccccccccccccccccc"),
-                ("KEYSTONFORWARDER", "0xdddddddddddddddddddddddddddddddddddddddd"),
+                ("KEYSTONFORWARDER", "0xF8344CFd5c43616a4366C34E3EEE75af79a74482"),
                 ("VEZRECEIV", "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
                 ("VYFTSA", "0xffffffffffffffffffffffffffffffffffffffff"),
             ];
@@ -5019,101 +5023,73 @@ let already_exists = if let manager = storage.as_ref() {
                 break;
             }
 
-            println!("🪙 VEZ absent → lancement déploiement unique");
+            println!("🪙 VEZ absent → lancement déploiement multi-contrats (VEZproxy) → 0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
 
-            let bytecode_hex = std::env::var("VEZCUR").unwrap_or_default();
+            let contracts_vez = vec![
+                ("VEZCUR", "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"),
+            ];
 
-            // Support format compact (ex: 60a0604) et hex standard (0x...)
-            let creation_bytecode = if bytecode_hex.is_empty() {
-                Vec::new()
-            } else if bytecode_hex.starts_with("0x") {
-                hex::decode(&bytecode_hex[2..]).unwrap_or_default()
-            } else if bytecode_hex.len() % 2 == 1 && bytecode_hex.chars().all(|c| c.is_ascii_hexdigit()) {
-                // Format compact impair (ex: 60a0604) → préfixer avec 0 pour aligner
-                hex::decode(format!("0{}", bytecode_hex)).unwrap_or_default()
-            } else {
-                hex::decode(&bytecode_hex).unwrap_or_default()
-            };
-
-            if creation_bytecode.is_empty() {
-                eprintln!("❌ Bytecode VEZ vide → abandon");
-                break;
-            }
-
-            // SLU zk-print fixe et déterministe (toujours la même)
-            let slu_zk_address = generate_slu_zk_address(
-                "VEZ_FIXED_SLURACHAIN_IDENTITY_2026",
-                10,
-                32
-            );
-
-            println!("📦 VEZ Creation bytecode chargé → {} bytes", creation_bytecode.len());
-
-            // Pré-insertion minimale du compte
-            {
-                let mut vm = engine_clone.vm.write().await;
-                let mut accounts = vm.state.accounts.write().await;
-                if !accounts.contains_key(&vez_addr) {
-                    let initial_account = vuc_tx::slurachain_vm::AccountState {
-                        eth_address: vez_addr.clone(),
-                        slu_zk_address: vez_addr.clone(),
-                        balance: 0u128,
-                        contract_state: creation_bytecode.clone(),
-                        resources: {
-                            let mut r = BTreeMap::new();
-                             r.insert("slu_zk_address".to_string(), serde_json::Value::String(slu_zk_address.clone()));
-                            r.insert("constructor_pending".to_string(), serde_json::Value::Bool(true));
-                            r.insert("deployed_by".to_string(), serde_json::Value::String(validator_address_generated.clone()));
-                            r
-                        },
-                        state_version: 1,
-                        last_block_number: 0,
-                        nonce: 0,
-                        code_hash: "".to_string(),
-                        storage_root: format!("storage_{}", vez_addr),
-                        is_contract: true,
-                        gas_used: 0,
-                    };
-                    accounts.insert(vez_addr.clone(), initial_account);
-                    println!("   → Compte pré-créé avec creation bytecode");
+            for (env_key, target_addr) in contracts_vez {
+                let bytecode_hex = std::env::var(env_key).unwrap_or_default();
+                if bytecode_hex.is_empty() {
+                    println!("⚠️ {} vide → skip", env_key);
+                    continue;
                 }
-            }
-
-            // Déploiement réel
-            let deploy_vez_tx = serde_json::json!({
-                "from": validator_address_generated,
-                "data": format!("0x{}", hex::encode(&creation_bytecode)),
-                "value": "0x0",
-                "create2": true,
-                "target_address": vez_addr,
-            });
-
-            match engine_clone.send_transaction(deploy_vez_tx).await {
-                Ok(tx_hash) => {
-                    println!("✅ VEZ déployé avec succès à {} (tx: {})", vez_addr, tx_hash);
-                    
-                    // Vérification post-déploiement
-                    {
-                        let vm = engine_clone.vm.read().await;
-                        let accounts = vm.state.accounts.read().await;
-                        if let Some(acc) = accounts.get(&vez_addr) {
-                            println!("   → Bytecode final dans compte : {} bytes", acc.contract_state.len());
-                        }
-                        if let Some(module) = vm.modules.get(&vez_addr) {
-                            println!("   → Bytecode dans module : {} bytes", module.bytecode.len());
-                        }
+                let creation_bytecode = if bytecode_hex.starts_with("0x") {
+                    hex::decode(&bytecode_hex[2..]).unwrap_or_default()
+                } else if bytecode_hex.len() % 2 == 1 && bytecode_hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                    hex::decode(format!("0{}", bytecode_hex)).unwrap_or_default()
+                } else {
+                    hex::decode(&bytecode_hex).unwrap_or_default()
+                };
+                if creation_bytecode.is_empty() {
+                    eprintln!("❌ Bytecode {} vide → abandon", env_key);
+                    continue;
+                }
+                println!("📦 Déploiement {} → {} ({} bytes)", env_key, target_addr, creation_bytecode.len());
+                {
+                    let mut vm = engine_clone.vm.write().await;
+                    let mut accounts = vm.state.accounts.write().await;
+                    if !accounts.contains_key(target_addr) {
+                        let initial_account = vuc_tx::slurachain_vm::AccountState {
+                            eth_address: target_addr.to_string(),
+                            slu_zk_address: target_addr.to_string(),
+                            balance: 0u128,
+                            contract_state: creation_bytecode.clone(),
+                            resources: {
+                                let mut r = BTreeMap::new();
+                                r.insert("contract_type".to_string(), serde_json::Value::String(env_key.to_string()));
+                                r.insert("deployed_by".to_string(), serde_json::Value::String(validator_address_generated.clone()));
+                                r.insert("constructor_pending".to_string(), serde_json::Value::Bool(true));
+                                r
+                            },
+                            state_version: 1,
+                            last_block_number: 0,
+                            nonce: 0,
+                            code_hash: "".to_string(),
+                            storage_root: format!("storage_{}", target_addr),
+                            is_contract: true,
+                            gas_used: 0,
+                        };
+                        accounts.insert(target_addr.to_string(), initial_account);
+                        println!("   → Compte pré-créé pour {}", env_key);
                     }
-
-                    // Force persistance
-                    let _ = engine_clone.persist_all_state().await;
-
-                    break;
                 }
-                Err(e) => {
-                    eprintln!("❌ Échec déploiement VEZ : {}", e);
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                let deploy_vez_tx = serde_json::json!({
+                    "from": validator_address_generated,
+                    "data": format!("0x{}", hex::encode(&creation_bytecode)),
+                    "value": "0x0",
+                    "create2": true,
+                    "target_address": target_addr,
+                });
+                match engine_clone.send_transaction(deploy_vez_tx).await {
+                    Ok(tx_hash) => println!("✅ {} déployé (tx: {})", env_key, tx_hash),
+                    Err(e) => eprintln!("❌ Échec {} : {}", env_key, e),
                 }
             }
+            let _ = engine_clone.persist_all_state().await;
+            println!("✅ Déploiement VEZ terminé (0xeeee...) → aligné multi-contrats");
+            break;
         }
     }
 });
