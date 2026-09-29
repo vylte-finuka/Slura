@@ -226,7 +226,7 @@ contract VEZproxy is ERC20, Ownable, UUPSUpgradeable {
             reserveProof.availableMint();
 
         // Après le mint initial, aligner au PoR
-        if (!initialMintDone) {
+        if (complet_quantData == INITIAL_NATIVE_MINT) {
             require(
                 amount <= MAX_MINT_PER_TX,
                 "Invalid mint amount"
