@@ -285,88 +285,135 @@ if let Some(slu_zk) = account.resources.get("slu_zk_address") {
                     }
                 }
 
+/// Extrait le runtime depuis un creation bytecode Solidity (solc 0.8+).
+/// - Strip metadata CBOR réelle (octets, pas ASCII)
+/// - Accepte préfixes 60806040 et 60a06040 (immutables)
+/// - Ne renvoie JAMAIS le creation code complet
 pub fn extract_runtime_from_creation_bytecode(full: &[u8]) -> Result<Vec<u8>, String> {
-    if full.len() < 8000 {
-        return Err(format!("Bytecode trop court pour contenir un RETURN valide: {} bytes", full.len()));
+    if full.is_empty() {
+        return Err("Bytecode vide".to_string());
+    }
+    if full.len() < 64 {
+        return Err(format!("Bytecode trop court: {} bytes", full.len()));
     }
 
-    println!("Début extraction runtime - taille creation bytecode: {} bytes", full.len());
+    // Déjà un runtime pur (préfixes courants) ?
+    if full.len() >= 4 {
+        let p4 = &full[0..4];
+        if (p4 == [0x60, 0x80, 0x60, 0x40] || p4 == [0x60, 0xa0, 0x60, 0x40])
+            && full.len() < 20_000
+        {
+            // Heuristique: creation VEZCUR ~26k; runtime typiquement plus petit
+            // Si déjà court et préfixe runtime → renvoyer tel quel
+            println!("→ Bytecode déjà runtime-like ({} bytes, prefix {:02x?})", full.len(), p4);
+            return Ok(full.to_vec());
+        }
+    }
 
     let mut code = full.to_vec();
+    println!(
+        "Début extraction runtime - taille creation bytecode: {} bytes",
+        full.len()
+    );
 
-    // 1. Coupe metadata finale si présente (IPFS/solc)
-    let markers: Vec<&[u8]> = vec![
-        b"a2646970667358221220",
-        b"64736f6c634300",
+    // --- 1. Strip metadata CBOR solc (OCTETS réels) ---
+    let cbor_markers: &[&[u8]] = &[
+        &[0xa2, 0x64, 0x69, 0x70, 0x66, 0x73, 0x58, 0x22], // a264697066735822
+        &[0x64, 0x73, 0x6f, 0x6c, 0x63, 0x43],             // 64736f6c6343 "solc"
+    ];
+    for marker in cbor_markers {
+        if let Some(pos) = code.windows(marker.len()).rposition(|w| w == *marker) {
+            code.truncate(pos);
+            println!(
+                "→ Metadata CBOR tronquée @ {} (reste {} bytes)",
+                pos,
+                code.len()
+            );
+            break;
+        }
+    }
+    // Fallback longueur metadata (2 derniers octets big-endian, convention solc)
+    if code.len() >= 2 {
+        let meta_len =
+            u16::from_be_bytes([code[code.len() - 2], code[code.len() - 1]]) as usize;
+        if meta_len > 0 && meta_len < 120 && meta_len + 2 < code.len() {
+            let maybe = code.len() - meta_len - 2;
+            let tail = &code[maybe..];
+            if tail.windows(4).any(|w| {
+                w == [0xa2, 0x64, 0x69, 0x70] || w == [0x64, 0x73, 0x6f, 0x6c]
+            }) {
+                code.truncate(maybe);
+                println!("→ Metadata via longueur finale ({} bytes)", meta_len);
+            }
+        }
+    }
+
+    // --- 2. Trouver le début du runtime (dernier gros segment 6080/60a0) ---
+    let patterns: &[&[u8]] = &[
+        &[0x60, 0x80, 0x60, 0x40],
+        &[0x60, 0xa0, 0x60, 0x40],
     ];
 
-    for marker in &markers {
-        if let Some(pos) = code.windows(marker.len()).rposition(|w: &[u8]| w == *marker) {
-            code.truncate(pos);
-            println!("→ Metadata tronquée à offset {} (reste: {} bytes)", pos, code.len());
-            break;
-        }
-    }
-
-    // 2. Recherche du DERNIER f3 (c'est toujours le bon dans Solidity récent)
-    let mut return_offset = None;
-    for i in (0..code.len()).rev() {
-        if code[i] == 0xf3 {
-            return_offset = Some(i);
-            println!("→ Dernier RETURN (0xf3) trouvé à offset 0x{:04x}", i);
-            break;
-        }
-    }
-
-    let return_pos = return_offset.ok_or("Aucun 0xf3 trouvé dans tout le bytecode !".to_string())?;
-
-    // 3. Ce qui suit le f3 (doit être fe ou direct 60806040)
-    let suffix = &code[return_pos + 1..];
-
-    // Déclaration mutable ici pour pouvoir réassigner dans la boucle de tolérance
-    let mut runtime_start = return_pos + 1;
-
-    if suffix.starts_with(&[0xfe]) && suffix.len() > 5 && &suffix[1..6] == [0x60, 0x80, 0x60, 0x40] {
-        runtime_start = return_pos + 2;  // saute fe
-        println!("→ fe60806040 détecté directement après f3");
-    } else if suffix.starts_with(&[0x60, 0x80, 0x60, 0x40]) {
-        runtime_start = return_pos + 1;
-        println!("→ 60806040 direct après f3");
-    } else {
-        // Tolérance max 8 bytes après f3 (padding rare mais possible)
-        let mut pos = return_pos + 1;
-        let max_skip = 8;
-        while pos + 4 < code.len() && pos < return_pos + 1 + max_skip {
-            if &code[pos..pos + 4] == [0x60, 0x80, 0x60, 0x40] {
-                println!("→ Pattern runtime trouvé après décalage de {} bytes (offset 0x{:04x})", pos - return_pos - 1, pos);
-                runtime_start = pos;
+    let mut best: Option<(usize, usize)> = None; // (start, len)
+    for pat in patterns {
+        let mut search_from = 0usize;
+        while search_from + pat.len() <= code.len() {
+            if let Some(rel) = code[search_from..]
+                .windows(pat.len())
+                .position(|w| w == *pat)
+            {
+                let start = search_from + rel;
+                // ignorer le creation code au tout début
+                if start > 32 {
+                    let len = code.len() - start;
+                    if len >= 200 {
+                        match best {
+                            Some((_, bl)) if len <= bl => {}
+                            _ => best = Some((start, len)),
+                        }
+                    }
+                }
+                search_from = start + 1;
+            } else {
                 break;
             }
-            pos += 1;
-        }
-
-        if pos + 4 >= code.len() || pos >= return_pos + 1 + max_skip {
-            return Err(format!(
-                "Pas de 60806040 après f3 à 0x{:04x} (suffix={:02x?})",
-                return_pos,
-                &suffix[..20.min(suffix.len())]
-            ));
         }
     }
 
-    let runtime = &code[runtime_start..];
+    let (runtime_start, _) = best.ok_or_else(|| {
+        format!(
+            "Aucun runtime 6080/60a0 trouvé (prefix creation={:02x?})",
+            &full[..8.min(full.len())]
+        )
+    })?;
 
-    if runtime.len() < 3000 || runtime[0..4] != [0x60, 0x80, 0x60, 0x40] {
+    let runtime = code[runtime_start..].to_vec();
+
+    if runtime.len() < 200 {
+        return Err(format!("Runtime trop petit: {} bytes", runtime.len()));
+    }
+    if runtime.len() >= full.len() {
+        return Err("Runtime == creation (extraction nulle) — refus du fallback".to_string());
+    }
+
+    let pfx = &runtime[0..4.min(runtime.len())];
+    if pfx != [0x60, 0x80, 0x60, 0x40] && pfx != [0x60, 0xa0, 0x60, 0x40] {
         return Err(format!(
             "Runtime extrait invalide: {} bytes, prefix={:02x?}",
             runtime.len(),
-            &runtime[0..4.min(runtime.len())]
+            pfx
         ));
     }
 
-    println!("→ Extraction réussie ! Runtime: {} bytes (début offset 0x{:04x})", runtime.len(), runtime_start);
-    Ok(runtime.to_vec())
+    println!(
+        "→ Extraction réussie ! Runtime: {} bytes (offset 0x{:x}, creation était {} bytes)",
+        runtime.len(),
+        runtime_start,
+        full.len()
+    );
+    Ok(runtime)
 }
+
         
         /// ✅ NOUVEAU: Restauration d'un compte
         /// ✅ RESTAURATION CORRIGÉE – Récupère la vraie adresse SLU zk-print
@@ -1777,11 +1824,13 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         ).await;
 
         // CORRECTION : extraire le runtime depuis le bytecode de création (pas du résultat JSON)
+        // INTERDIT de fallback sur le creation bytecode complet (cause totalSupply=1 wei)
         let runtime_bytecode = extract_runtime_from_creation_bytecode(&creation_bytecode)
-            .unwrap_or_else(|e| {
-                println!("⚠️ Extraction runtime échouée ({}), utilisation bytecode complet", e);
-                creation_bytecode.clone()
-            });
+            .map_err(|e| {
+                format!("Extraction runtime échouée (déploiement annulé): {}", e)
+            })?;
+        println!("✅ Runtime prêt pour stockage: {} bytes (creation était {} bytes)",
+            runtime_bytecode.len(), creation_bytecode.len());
 
         // Mise à jour module
      if !vm.modules.contains_key(&contract_address) {
@@ -4025,62 +4074,135 @@ mod tests {
     }
 }
 
+/// Extrait le runtime depuis un creation bytecode Solidity (solc 0.8+).
+/// - Strip metadata CBOR réelle (octets, pas ASCII)
+/// - Accepte préfixes 60806040 et 60a06040 (immutables)
+/// - Ne renvoie JAMAIS le creation code complet
 pub fn extract_runtime_from_creation_bytecode(full: &[u8]) -> Result<Vec<u8>, String> {
     if full.is_empty() {
-        return Ok(vec![]);
+        return Err("Bytecode vide".to_string());
+    }
+    if full.len() < 64 {
+        return Err(format!("Bytecode trop court: {} bytes", full.len()));
     }
 
-    // Déjà runtime pur ?
-    if full.len() >= 7 && full[0..7] == [0x60, 0x80, 0x60, 0x40, 0x52, 0x34, 0x80 ] {
-        return Ok(full.to_vec());
+    // Déjà un runtime pur (préfixes courants) ?
+    if full.len() >= 4 {
+        let p4 = &full[0..4];
+        if (p4 == [0x60, 0x80, 0x60, 0x40] || p4 == [0x60, 0xa0, 0x60, 0x40])
+            && full.len() < 20_000
+        {
+            // Heuristique: creation VEZCUR ~26k; runtime typiquement plus petit
+            // Si déjà court et préfixe runtime → renvoyer tel quel
+            println!("→ Bytecode déjà runtime-like ({} bytes, prefix {:02x?})", full.len(), p4);
+            return Ok(full.to_vec());
+        }
     }
 
-    let mut runtime_start = None;
-    let mut i = full.len().saturating_sub(1);
+    let mut code = full.to_vec();
+    println!(
+        "Début extraction runtime - taille creation bytecode: {} bytes",
+        full.len()
+    );
 
-    while i >= 3 {
-        if full[i] == 0xf3 {  // RETURN
-            if i >= 2 && (0x60..=0x7f).contains(&full[i - 2]) {
-                let mut pos = i + 1;
-
-                // Gestion du pattern courant : FE juste avant le runtime
-                if pos < full.len() && full[pos] == 0xfe {
-                    pos += 1;
-                    println!("→ FE détecté → décalage automatique à offset {}", pos);
-                }
-
-                if pos + 4 <= full.len() && full[pos..pos + 4] == [0x60, 0x80, 0x60, 0x40] {
-                    runtime_start = Some(pos);
-                    println!("→ Runtime trouvé à offset {} (début 60806040)", pos);
-                    break; // On prend le premier qui matche (le plus tardif car on part de la fin)
-                }
+    // --- 1. Strip metadata CBOR solc (OCTETS réels) ---
+    let cbor_markers: &[&[u8]] = &[
+        &[0xa2, 0x64, 0x69, 0x70, 0x66, 0x73, 0x58, 0x22], // a264697066735822
+        &[0x64, 0x73, 0x6f, 0x6c, 0x63, 0x43],             // 64736f6c6343 "solc"
+    ];
+    for marker in cbor_markers {
+        if let Some(pos) = code.windows(marker.len()).rposition(|w| w == *marker) {
+            code.truncate(pos);
+            println!(
+                "→ Metadata CBOR tronquée @ {} (reste {} bytes)",
+                pos,
+                code.len()
+            );
+            break;
+        }
+    }
+    // Fallback longueur metadata (2 derniers octets big-endian, convention solc)
+    if code.len() >= 2 {
+        let meta_len =
+            u16::from_be_bytes([code[code.len() - 2], code[code.len() - 1]]) as usize;
+        if meta_len > 0 && meta_len < 120 && meta_len + 2 < code.len() {
+            let maybe = code.len() - meta_len - 2;
+            let tail = &code[maybe..];
+            if tail.windows(4).any(|w| {
+                w == [0xa2, 0x64, 0x69, 0x70] || w == [0x64, 0x73, 0x6f, 0x6c]
+            }) {
+                code.truncate(maybe);
+                println!("→ Metadata via longueur finale ({} bytes)", meta_len);
             }
         }
-        i = i.saturating_sub(1);
     }
 
-    let start = runtime_start.ok_or_else(|| {
-        "Aucun RETURN valide suivi de 60806040 (même après décalage FE)".to_string()
+    // --- 2. Trouver le début du runtime (dernier gros segment 6080/60a0) ---
+    let patterns: &[&[u8]] = &[
+        &[0x60, 0x80, 0x60, 0x40],
+        &[0x60, 0xa0, 0x60, 0x40],
+    ];
+
+    let mut best: Option<(usize, usize)> = None; // (start, len)
+    for pat in patterns {
+        let mut search_from = 0usize;
+        while search_from + pat.len() <= code.len() {
+            if let Some(rel) = code[search_from..]
+                .windows(pat.len())
+                .position(|w| w == *pat)
+            {
+                let start = search_from + rel;
+                // ignorer le creation code au tout début
+                if start > 32 {
+                    let len = code.len() - start;
+                    if len >= 200 {
+                        match best {
+                            Some((_, bl)) if len <= bl => {}
+                            _ => best = Some((start, len)),
+                        }
+                    }
+                }
+                search_from = start + 1;
+            } else {
+                break;
+            }
+        }
+    }
+
+    let (runtime_start, _) = best.ok_or_else(|| {
+        format!(
+            "Aucun runtime 6080/60a0 trouvé (prefix creation={:02x?})",
+            &full[..8.min(full.len())]
+        )
     })?;
 
-    let mut runtime = full[start..].to_vec();
+    let runtime = code[runtime_start..].to_vec();
 
-    // Coupe les metadata CBOR (dernier marqueur)
-    let cbor_marker = b"a2646970667358221220";
-    if let Some(cbor_pos) = runtime.windows(cbor_marker.len()).rposition(|w| w == cbor_marker) {
-        runtime.truncate(cbor_pos);
-        println!("→ Metadata CBOR supprimée (len runtime final: {})", runtime.len());
+    if runtime.len() < 200 {
+        return Err(format!("Runtime trop petit: {} bytes", runtime.len()));
+    }
+    if runtime.len() >= full.len() {
+        return Err("Runtime == creation (extraction nulle) — refus du fallback".to_string());
     }
 
-    if runtime.len() < 4 || runtime[0..4] != [0x60, 0x80, 0x60, 0x40] {
+    let pfx = &runtime[0..4.min(runtime.len())];
+    if pfx != [0x60, 0x80, 0x60, 0x40] && pfx != [0x60, 0xa0, 0x60, 0x40] {
         return Err(format!(
-            "Validation finale échouée - offset={}, len={}, début: {:02x?}",
-            start, runtime.len(), &runtime[0..4.min(runtime.len())]
+            "Runtime extrait invalide: {} bytes, prefix={:02x?}",
+            runtime.len(),
+            pfx
         ));
     }
 
+    println!(
+        "→ Extraction réussie ! Runtime: {} bytes (offset 0x{:x}, creation était {} bytes)",
+        runtime.len(),
+        runtime_start,
+        full.len()
+    );
     Ok(runtime)
 }
+
 
 // ─── CLI PARSER ───
 #[derive(Parser, Debug)]
@@ -4943,7 +5065,7 @@ let already_exists = if let manager = storage.as_ref() {
                             eth_address: target_addr.to_string(),
                             slu_zk_address: target_addr.to_string(),
                             balance: 0u128,
-                            contract_state: creation_bytecode.clone(),
+                            contract_state: vec![], // runtime après constructeur — pas le creation bytecode
                             resources: {
                                 let mut r = BTreeMap::new();
                                 r.insert("contract_type".to_string(), serde_json::Value::String(env_key.to_string()));
@@ -5055,7 +5177,7 @@ let already_exists = if let manager = storage.as_ref() {
                             eth_address: target_addr.to_string(),
                             slu_zk_address: target_addr.to_string(),
                             balance: 0u128,
-                            contract_state: creation_bytecode.clone(),
+                            contract_state: vec![], // runtime après constructeur — pas le creation bytecode
                             resources: {
                                 let mut r = BTreeMap::new();
                                 r.insert("contract_type".to_string(), serde_json::Value::String(env_key.to_string()));
