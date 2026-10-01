@@ -4,17 +4,6 @@ version = "0.1.0"
 edition = { workspace = true }
 default-run = "vuc-platform"
 
-# NOTE : PAS de bloc [dependencies] inconditionnel ici. Toutes les deps std/tokio/
-# ethers/reth/jsonrpsee sont déclarées sous [target.'cfg(not(target_os="uefi"))'] plus
-# bas ; les deps uefi (uefi + uefi-services + hashbrown no_std) sous cfg(target_os="uefi").
-# Un ancien bloc [dependencies] inconditionnel faisait fuiter tout le graphe std (dont
-# ethers→rand_core 0.6.4, incompatible avec RawOsError=usize d'UEFI) dans le build uefi.
-
-[lib]
-name       = "vuc_platform"
-crate-type = ["staticlib", "rlib"]
-path       = "src/lib.rs"
-
 [[bin]]
 name = "vuc-platform"
 path = "src/engine_platform.rs"
