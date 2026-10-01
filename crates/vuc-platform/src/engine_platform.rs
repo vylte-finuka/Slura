@@ -3290,6 +3290,7 @@ module.register_async_method("eth_sendUserOperation", move |params, _meta, _| {
             receiver_op: entry_point.clone(),
             value_tx: "0".to_string(),
             nonce_tx: 0,
+			gas_limit: 0,
             hash: user_op_hash.clone(),
             contract_addr: Some(entry_point.clone()),
             function_name: Some("handleOps".to_string()),
