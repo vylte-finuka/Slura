@@ -56,7 +56,7 @@ bcs               = { workspace = true }
 anyhow            = "1.0.98"
 hex               = "0.4"
 chrono            = { workspace = true,  features = ["serde"] }
-tracing-subscriber= "0.3.20"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing           = { workspace = true }
 rand_chacha       = "0.9.0"
 clap              = { version = "4.5",   features = ["derive"] }
