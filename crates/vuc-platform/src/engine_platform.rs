@@ -4979,13 +4979,22 @@ if local_head <= 1 {
         engine_clone.start_server().await;
     });
 
+    let (vez_deployment_tx, vez_deployment_rx) = tokio::sync::watch::channel(false);
+
     tokio::spawn({
     let lurosonie_manager_clone = Arc::clone(&lurosonie_manager);
     let engine_clone = engine_platform.clone();
     let validator_address_generated = validator_address_generated.clone();
     let storage = storage.clone();
+    let mut vez_deployment_rx = vez_deployment_rx.clone();
 
     async move {
+        if vez_deployment_rx.changed().await.is_err() || !*vez_deployment_rx.borrow() {
+            eprintln!("⛔ Déploiement PoR annulé : VEZ n'a pas été déployé");
+            return;
+        }
+
+        println!("✅ VEZ confirmé, démarrage du déploiement PoR");
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
         loop {
@@ -5129,6 +5138,7 @@ tokio::spawn({
     let engine_clone = engine_platform.clone();
     let validator_address_generated = validator_address_generated.clone();
     let storage = storage.clone();
+    let vez_deployment_tx = vez_deployment_tx;
 
     async move {
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
@@ -5161,6 +5171,7 @@ let already_exists = if let manager = storage.as_ref() {
 
             if already_exists {
                 println!("✅ VEZ existe déjà → fin du spawn");
+                vez_deployment_tx.send_replace(true);
                 break;
             }
 
@@ -5251,6 +5262,7 @@ let already_exists = if let manager = storage.as_ref() {
 
                     // Force persistance
                     let _ = engine_clone.persist_all_state().await;
+                    vez_deployment_tx.send_replace(true);
 
                     break;
                 }
