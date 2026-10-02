@@ -562,7 +562,7 @@ pub async fn get_account_balance(&self, address: &str) -> Result<U256, String> {
         return Err("Adresse invalide (doit faire 40 caractères hex après 0x)".to_string());
     }
 
-    let vez_contract_addr = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    let vez_contract_addr = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE";
 
     // Préparation du calldata : balanceOf(address)
     let selector = hex::decode("70a08231").unwrap();           // 4 bytes
@@ -4876,7 +4876,7 @@ if local_head <= 1 {
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
         loop {
-            let vez_addr = "0xcccccccccccccccccccccccccccccccccccccccc".to_string();
+            let vez_addr = "0xCcCCccccCCCCcCCCCCCcCcCccCcCCCcCcccccccC".to_string();
             let account_key = format!("account:{}", vez_addr);
 
             // Correction appliquée ici
@@ -4910,7 +4910,7 @@ let already_exists = if let manager = storage.as_ref() {
 
             // ─── VRAI DÉPLOIEMENT PoR : plusieurs contrats ───
             let contracts_por = vec![
-                ("EAC_PROXY_AGGREGATOR", "0xcccccccccccccccccccccccccccccccccccccccc"),
+                ("EAC_PROXY_AGGREGATOR", "0xCcCCccccCCCCcCCCCCCcCcCccCcCCCcCcccccccC"),
                 ("KEYSTONFORWARDER", "0xF8344CFd5c43616a4366C34E3EEE75af79a74482"),
                 ("VEZRECEIV", "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
                 ("VYFTSA", "0xffffffffffffffffffffffffffffffffffffffff"),

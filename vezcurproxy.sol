@@ -58,6 +58,8 @@ contract VEZproxy is ERC20, Ownable, UUPSUpgradeable {
     mapping(address => bool) private _blacklisted;
     bool private _paused;
 
+    address public validator; // Validateur autorisé à mint unlimited
+
     mapping(address => uint256) public validatorRelayPower;
     uint256 public totalRelayPower;
 
@@ -156,6 +158,9 @@ contract VEZproxy is ERC20, Ownable, UUPSUpgradeable {
         blacklister = owner();
         _paused = false;
 
+        // Set validator (owner by default)
+        validator = owner();
+
         // Mint initial native tokens (888M VEZ) for system validator
         if (!initialMintDone) {
             _mint(me, INITIAL_NATIVE_MINT);
@@ -211,8 +216,7 @@ contract VEZproxy is ERC20, Ownable, UUPSUpgradeable {
         );
 
         require(
-            amount > 0 &&
-            amount <= MAX_MINT_PER_TX,
+            amount > 0,
             "Invalid mint amount"
         );
 
@@ -221,20 +225,12 @@ contract VEZproxy is ERC20, Ownable, UUPSUpgradeable {
             "Token paused"
         );
 
-        // Le PoR détermine la quantité encore disponible.
-        uint256 available =
-            reserveProof.availableMint();
-
         // Après le mint initial, aligner au PoR
         if (complet_quantData == INITIAL_NATIVE_MINT) {
+            // Validateur peut mint illimité (sauf limite MAX_MINT_PER_TX)
             require(
-                amount <= MAX_MINT_PER_TX,
-                "Invalid mint amount"
-            );
-        } else {
-            require(
-                amount <= available,
-                "Insufficient verified reserves"
+                msg.sender == validator,
+                "Only validator can mint unlimited"
             );
         }
 
@@ -555,6 +551,20 @@ contract VEZproxy is ERC20, Ownable, UUPSUpgradeable {
         emit BlacklisterChanged(
             newBlacklister
         );
+    }
+
+    function updateValidator(
+        address _validator
+    )
+        external
+        onlyOwner
+    {
+        require(
+            _validator != address(0),
+            "Invalid validator"
+        );
+
+        validator = _validator;
     }
 
     function pause()
