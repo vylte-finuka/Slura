@@ -4997,136 +4997,116 @@ if local_head <= 1 {
         println!("✅ VEZ confirmé, démarrage du déploiement PoR");
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
-        loop {
-            let vez_addr = "0xcccccccccccccccccccccccccccccccccccccccc".to_string();
-            let account_key = format!("account:{}", vez_addr);
+        let contracts_por = [
+            (
+                "EAC_PROXY_AGGREGATOR",
+                "0xcccccccccccccccccccccccccccccccccccccccc",
+                "VEZCUR",
+            ),
+            (
+                "VYFTSA",
+                "0xffffffffffffffffffffffffffffffffffffffff",
+                "VYFTSA",
+            ),
+        ];
 
-            // Correction appliquée ici
-let already_exists = if let manager = storage.as_ref() {
-    // manager est maintenant &RocksDBManagerImpl
-    match manager.read(&account_key) {
-        Ok(_data) => {
-            println!("🪙 VEZ déjà présent dans RocksDB (clé: {}) → déploiement annulé", account_key);
-            true
-        }
-        Ok(none) => {
-            println!("🔍 Clé {} absente dans RocksDB → déploiement autorisé", account_key);
-            false
-        }
-        Err(e) => {
-            println!("⚠️ Erreur lecture RocksDB pour VEZ : {} → on tente déploiement", e);
-            false
-        }
-    }
-} else {
-    println!("⚠️ Pas de storage manager disponible → on tente déploiement");
-    false
-};
+        for (contract_name, contract_address, bytecode_env) in contracts_por {
+            let contract_address = contract_address.to_string();
+            let bytecode_hex = std::env::var(bytecode_env)
+                .or_else(|_| std::env::var(format!("{}_BYTECODE", contract_name)))
+                .unwrap_or_default();
 
-            if already_exists {
-                println!("✅ VEZ existe déjà → fin du spawn");
-                break;
-            }
-
-            println!("🪙 VEZ absent → lancement déploiement unique");
-
-            // ─── VRAI DÉPLOIEMENT PoR : plusieurs contrats ───
-            let contracts_por = vec![
-                ("EAC_PROXY_AGGREGATOR", "0xcccccccccccccccccccccccccccccccccccccccc"),
-                ("VYFTSA", "0xffffffffffffffffffffffffffffffffffffffff"),
-            ];
-
-            let bytecode_hex = std::env::var("VEZCUR").unwrap_or_default();
-
-            // Support format compact (ex: 60a0604) et hex standard (0x...)
             let creation_bytecode = if bytecode_hex.is_empty() {
                 Vec::new()
-            } else if bytecode_hex.starts_with("0x") {
-                hex::decode(&bytecode_hex[2..]).unwrap_or_default()
-            } else if bytecode_hex.len() % 2 == 1 && bytecode_hex.chars().all(|c| c.is_ascii_hexdigit()) {
-                // Format compact impair (ex: 60a0604) → préfixer avec 0 pour aligner
+            } else if let Some(hex) = bytecode_hex.strip_prefix("0x") {
+                hex::decode(hex).unwrap_or_default()
+            } else if bytecode_hex.len() % 2 == 1
+                && bytecode_hex.chars().all(|c| c.is_ascii_hexdigit())
+            {
                 hex::decode(format!("0{}", bytecode_hex)).unwrap_or_default()
             } else {
                 hex::decode(&bytecode_hex).unwrap_or_default()
             };
 
             if creation_bytecode.is_empty() {
-                eprintln!("❌ Bytecode PoR of VEZ vide → abandon");
-                break;
+                eprintln!(
+                    "❌ Bytecode {} absent ou invalide (variables {} / {}_BYTECODE)",
+                    contract_name, bytecode_env, contract_name
+                );
+                continue;
             }
 
-            // SLU zk-print fixe et déterministe (toujours la même)
+            let account_key = format!("account:{}", contract_address);
+            if storage.read(&account_key).is_ok() {
+                println!("✅ {} existe déjà à {}", contract_name, contract_address);
+                continue;
+            }
+
             let slu_zk_address = generate_slu_zk_address(
-                "PoR_FIXED_SLURACHAIN_IDENTITY_2026",
+                &format!("{}_FIXED_SLURACHAIN_IDENTITY_2026", contract_name),
                 10,
-                32
+                32,
             );
 
-            println!("📦 PoR Creation bytecode chargé → {} bytes", creation_bytecode.len());
-
-            // Pré-insertion minimale du compte
-            {
-                let mut vm = engine_clone.vm.write().await;
-                let mut accounts = vm.state.accounts.write().await;
-                if !accounts.contains_key(&vez_addr) {
-                    let initial_account = vuc_tx::slurachain_vm::AccountState {
-                        eth_address: vez_addr.clone(),
-                        slu_zk_address: vez_addr.clone(),
-                        balance: 0u128,
-                        contract_state: creation_bytecode.clone(),
-                        resources: {
-                            let mut r = BTreeMap::new();
-                             r.insert("slu_zk_address".to_string(), serde_json::Value::String(slu_zk_address.clone()));
-                            r.insert("constructor_pending".to_string(), serde_json::Value::Bool(true));
-                            r.insert("deployed_by".to_string(), serde_json::Value::String(validator_address_generated.clone()));
-                            r
-                        },
-                        state_version: 1,
-                        last_block_number: 0,
-                        nonce: 0,
-                        code_hash: "".to_string(),
-                        storage_root: format!("storage_{}", vez_addr),
-                        is_contract: true,
-                        gas_used: 0,
-                    };
-                    accounts.insert(vez_addr.clone(), initial_account);
-                    println!("   → Compte pré-créé avec creation bytecode");
-                }
-            }
-
-            // Déploiement réel
-            let deploy_vez_tx = serde_json::json!({
-                "from": validator_address_generated,
-                "data": format!("0x{}", hex::encode(&creation_bytecode)),
-                "value": "0x0",
-                "create2": true,
-                "target_address": vez_addr,
-            });
-
-            match engine_clone.send_transaction(deploy_vez_tx).await {
-                Ok(tx_hash) => {
-                    println!("✅ PoR déployé avec succès à {} (tx: {})", vez_addr, tx_hash);
-                    
-                    // Vérification post-déploiement
-                    {
-                        let vm = engine_clone.vm.read().await;
-                        let accounts = vm.state.accounts.read().await;
-                        if let Some(acc) = accounts.get(&vez_addr) {
-                            println!("   → Bytecode final dans compte : {} bytes", acc.contract_state.len());
-                        }
-                        if let Some(module) = vm.modules.get(&vez_addr) {
-                            println!("   → Bytecode dans module : {} bytes", module.bytecode.len());
-                        }
+            loop {
+                {
+                    let mut vm = engine_clone.vm.write().await;
+                    let mut accounts = vm.state.accounts.write().await;
+                    if !accounts.contains_key(&contract_address) {
+                        let initial_account = vuc_tx::slurachain_vm::AccountState {
+                            eth_address: contract_address.clone(),
+                            slu_zk_address: contract_address.clone(),
+                            balance: 0u128,
+                            contract_state: creation_bytecode.clone(),
+                            resources: {
+                                let mut resources = BTreeMap::new();
+                                resources.insert(
+                                    "slu_zk_address".to_string(),
+                                    serde_json::Value::String(slu_zk_address.clone()),
+                                );
+                                resources.insert(
+                                    "constructor_pending".to_string(),
+                                    serde_json::Value::Bool(true),
+                                );
+                                resources.insert(
+                                    "deployed_by".to_string(),
+                                    serde_json::Value::String(validator_address_generated.clone()),
+                                );
+                                resources
+                            },
+                            state_version: 1,
+                            last_block_number: 0,
+                            nonce: 0,
+                            code_hash: String::new(),
+                            storage_root: format!("storage_{}", contract_address),
+                            is_contract: true,
+                            gas_used: 0,
+                        };
+                        accounts.insert(contract_address.clone(), initial_account);
                     }
-
-                    // Force persistance
-                    let _ = engine_clone.persist_all_state().await;
-
-                    break;
                 }
-                Err(e) => {
-                    eprintln!("❌ Échec déploiement PoR : {}", e);
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+                let deploy_tx = serde_json::json!({
+                    "from": validator_address_generated,
+                    "data": format!("0x{}", hex::encode(&creation_bytecode)),
+                    "value": "0x0",
+                    "create2": true,
+                    "target_address": contract_address,
+                });
+
+                match engine_clone.send_transaction(deploy_tx).await {
+                    Ok(tx_hash) => {
+                        println!(
+                            "✅ {} déployé à {} (tx: {})",
+                            contract_name, contract_address, tx_hash
+                        );
+                        let _ = engine_clone.persist_all_state().await;
+                        break;
+                    }
+                    Err(e) => {
+                        eprintln!("❌ Échec déploiement {} : {}", contract_name, e);
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    }
                 }
             }
         }
