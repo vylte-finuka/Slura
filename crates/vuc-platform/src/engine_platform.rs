@@ -558,6 +558,31 @@ pub async fn get_account_balance(&self, address: &str) -> Result<U256, String> {
         return Err("Adresse invalide (doit faire 40 caractères hex après 0x)".to_string());
     }
 
+    // ✅ NOUVEAU: Gestion du adresse natif VEZ (0xeeee...eeee)
+    // Cette adresse spéciale représente le token natif VEZ
+    // On retourne le solde directement depuis la VM state
+    if user_addr == "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" {
+        // Récupérer le solde depuis la VM state
+        let vm = self.vm.read().await;
+        let accounts = vm.state.accounts.read().await;
+        
+        // Chercher l'adresse dans les comptes (format UIP-10 ou Ethereum)
+        let account = accounts.get(&format!("0x{}", user_addr))
+            .or_else(|| accounts.get(&address.to_lowercase()))
+            .or_else(|| {
+                // Essayer avec préfixe 0x
+                accounts.get(&format!("0x{}", user_addr.to_uppercase()))
+            });
+        
+        if let Some(acc) = account {
+            let balance_u128 = acc.balance;
+            return Ok(U256::from(balance_u128));
+        }
+        
+        // Si pas trouvé, retourner 0
+        return Ok(U256::zero());
+    }
+
     let vez_contract_addr = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE";
 
     // Préparation du calldata : balanceOf(address)
