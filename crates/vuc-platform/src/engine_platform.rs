@@ -5027,6 +5027,8 @@ let already_exists = if let manager = storage.as_ref() {
                 ("VYFTSA", "0xffffffffffffffffffffffffffffffffffffffff"),
             ];
 
+            let bytecode_hex = std::env::var("VEZCUR").unwrap_or_default();
+
             // Support format compact (ex: 60a0604) et hex standard (0x...)
             let creation_bytecode = if bytecode_hex.is_empty() {
                 Vec::new()
