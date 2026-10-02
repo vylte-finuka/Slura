@@ -553,95 +553,23 @@ async fn restore_account_from_data(&self, address: &str, account_data: &serde_js
     }
         
 pub async fn get_account_balance(&self, address: &str) -> Result<U256, String> {
-    let user_addr = address.trim_start_matches("0x").to_lowercase();
-    if user_addr.len() != 40 {
+    let user_addr = address.trim().trim_start_matches("0x").to_ascii_lowercase();
+    if user_addr.len() != 40 || !user_addr.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err("Adresse invalide (doit faire 40 caractères hex après 0x)".to_string());
     }
 
-    // ✅ NOUVEAU: Gestion du adresse natif VEZ (0xeeee...eeee)
-    // Cette adresse spéciale représente le token natif VEZ
-    // On retourne le solde directement depuis la VM state
-    if user_addr == "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" {
-        // Récupérer le solde depuis la VM state
-        let vm = self.vm.read().await;
-        let accounts = vm.state.accounts.read().await;
-        
-        // Chercher l'adresse dans les comptes (format UIP-10 ou Ethereum)
-        let account = accounts.get(&format!("0x{}", user_addr))
-            .or_else(|| accounts.get(&address.to_lowercase()))
-            .or_else(|| {
-                // Essayer avec préfixe 0x
-                accounts.get(&format!("0x{}", user_addr.to_uppercase()))
-            });
-        
-        if let Some(acc) = account {
-            let balance_u128 = acc.balance;
-            return Ok(U256::from(balance_u128));
-        }
-        
-        // Si pas trouvé, retourner 0
-        return Ok(U256::zero());
-    }
-
-    let vez_contract_addr = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE";
-
-    // Préparation du calldata : balanceOf(address)
-    let selector = hex::decode("70a08231").unwrap();           // 4 bytes
-    let padded_addr = hex::decode(&user_addr).unwrap();      // 20 bytes
-    let mut data = Vec::with_capacity(36);
-    data.extend_from_slice(&selector);
-    data.extend(vec![0u8; 12]);                              // padding 12 zeros
-    data.extend_from_slice(&padded_addr);
-
-    let call_payload = serde_json::json!({
-        "to": vez_contract_addr,
-        "from": format!("0x{}", user_addr),  // optionnel mais cohérent
-        "data": format!("0x{}", hex::encode(&data)),
+    let eth_address = format!("0x{}", user_addr);
+    let vm = self.vm.read().await;
+    let accounts = vm.state.accounts.read().await;
+    let account = accounts.get(&eth_address).or_else(|| {
+        accounts.iter()
+            .find(|(stored_address, _)| {
+                stored_address.trim_start_matches("0x").eq_ignore_ascii_case(&user_addr)
+            })
+            .map(|(_, account)| account)
     });
 
-    let raw_result = match self.eth_call(call_payload).await {
-        Ok(res) => res,
-        Err(e) => {
-            println!("⚠️ eth_call balanceOf a échoué : {}", e);
-            return Ok(ethers::types::U256::zero()); // ou Err selon ta politique
-        }
-    };
-
-    // Nettoyage : on enlève "0x" si présent
-    let hex_str = raw_result.trim_start_matches("0x").to_string();
-
-    // Cas le plus courant : retour ABI encodé uint256 → 64 caractères hex (32 bytes)
-    // Ex: 000000000000000000000000000000000000000000000000000533ae54b11251
-    if hex_str.len() == 64 {
-        return U256::from_str_radix(&hex_str, 16)
-            .map_err(|e| format!("Échec décodage hex → u128 : {}", e));
-    }
-
-    // Cas Solidity récent : retour avec offset + length (128 bytes = 256 hex chars)
-    // Ex: 0000000000000000000000000000000000000000000000000000000000000020
-    //     0000000000000000000000000000000000000000000000000000000000000020
-    //     000000000000000000000000000000000000000000000000000533ae54......
-    if hex_str.len() >= 128 {
-        let value_part = &hex_str[128..]; // après offset + length
-        if value_part.len() >= 64 {
-            let value_hex = &value_part[0..64];
-            return U256::from_str_radix(value_hex, 16)
-                .map_err(|e| format!("Échec décodage partie valeur : {}", e));
-        }
-    }
-
-    // Cas fallback : on essaie de décoder directement si c'est court
-    if !hex_str.is_empty() {
-        if let Ok(val) = U256::from_str_radix(&hex_str, 16) {
-            return Ok(val);
-        }
-    }
-
-    Err(format!(
-        "Format de retour balanceOf inattendu (longueur hex = {} chars) : {}",
-        hex_str.len(),
-        raw_result
-    ))
+    Ok(account.map_or_else(U256::zero, |account| U256::from(account.balance)))
 }
 
   pub async fn get_block_by_hash(&self, block_hash: &str, include_txs: bool) -> Result<serde_json::Value, String> {
@@ -2181,6 +2109,27 @@ pub async fn eth_call(&self, call_object: serde_json::Value) -> Result<String, S
         "🔍 [eth_call] contract_addr={:?}, function_name={:?}, arguments={:?}",
         contract_addr, function_name, arguments
     );
+
+    const VEZ_NATIVE_ADDRESS: &str = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    if to_addr == VEZ_NATIVE_ADDRESS
+        && calldata_bytes.len() >= 36
+        && calldata_bytes[..4] == [0x70, 0xa0, 0x82, 0x31]
+    {
+        let wallet_address = format!("0x{}", hex::encode(&calldata_bytes[16..36]));
+        let vm = self.vm.read().await;
+        let accounts = vm.state.accounts.read().await;
+        let balance = accounts
+            .get(&wallet_address)
+            .or_else(|| {
+                accounts
+                    .iter()
+                    .find(|(address, _)| address.eq_ignore_ascii_case(&wallet_address))
+                    .map(|(_, account)| account)
+            })
+            .map_or(0, |account| account.balance);
+
+        return Ok(format!("0x{:064x}", U256::from(balance)));
+    }
 
     // ────────────────────────────────────────────────────────────────
     // Exécution principale via VM
