@@ -1528,6 +1528,28 @@ pub async fn verify_contract_deployment(&self, contract_address: &str) -> Result
         }))
     }
 
+
+/// ecrecover secp256k1 → adresse 0x… (ethers API stable)
+fn recover_eth_signer(sighash: [u8; 32], r_bytes: &[u8], s_bytes: &[u8], y_parity: u8) -> Option<String> {
+    use ethers::types::{Signature as EthSig, H256, U256 as EU256};
+    if r_bytes.is_empty() || s_bytes.is_empty() || r_bytes.len() > 32 || s_bytes.len() > 32 {
+        return None;
+    }
+    let mut r_arr = [0u8; 32];
+    let mut s_arr = [0u8; 32];
+    r_arr[32 - r_bytes.len()..].copy_from_slice(r_bytes);
+    s_arr[32 - s_bytes.len()..].copy_from_slice(s_bytes);
+    let sig = EthSig {
+        r: EU256::from_big_endian(&r_arr),
+        s: EU256::from_big_endian(&s_arr),
+        v: u64::from(y_parity).saturating_add(27),
+    };
+    match sig.recover(H256::from(sighash)) {
+        Ok(addr) => Some(format!("{:#x}", addr).to_lowercase()),
+        Err(_) => None,
+    }
+}
+
 pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<String, String> {
     use sha3::{Digest, Keccak256};
     use ethers::types::U256;
@@ -1917,7 +1939,7 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
             // transfer(address,uint256) = 0xa9059cbb sur VEZ natif → mouvement de balances
             if to_addr == "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
                 && calldata_bytes.len() >= 68
-                && calldata_bytes[0..4] == [0xa9, 0x05, 0x9c, 0xbb]
+                && calldata_bytes.starts_with(&[0xa9, 0x05, 0x9c, 0xbb])
             {
                 let dest = format!("0x{}", hex::encode(&calldata_bytes[16..36])).to_lowercase();
                 let mut amt_bytes = [0u8; 16];
@@ -3388,25 +3410,6 @@ module.register_async_method("eth_sendRawTransaction", move |params, _meta, _| {
         // VEZ reste la devise de frais (disburse dans send_transaction).
         {
             use sha3::{Digest, Keccak256 as Sha3Keccak};
-            use ethers::types::{Signature as EthSig, H256, U256 as EU256};
-
-            // ecrecover via ethers (API stable) — évite les divergences k256 Signature::from_*
-            let recover_from_sig = |sighash: [u8; 32], r_bytes: &[u8], s_bytes: &[u8], recid: u8| -> Option<String> {
-                if r_bytes.is_empty() || s_bytes.is_empty() || r_bytes.len() > 32 || s_bytes.len() > 32 {
-                    return None;
-                }
-                let mut r_arr = [0u8; 32];
-                let mut s_arr = [0u8; 32];
-                r_arr[32 - r_bytes.len()..].copy_from_slice(r_bytes);
-                s_arr[32 - s_bytes.len()..].copy_from_slice(s_bytes);
-                let sig = EthSig {
-                    r: EU256::from_big_endian(&r_arr),
-                    s: EU256::from_big_endian(&s_arr),
-                    v: (recid as u64).saturating_add(27),
-                };
-                let addr = sig.recover(H256::from(sighash)).ok()?;
-                Some(format!("{:#x}", addr).to_lowercase())
-            };
 
             let mut recovered_from: Option<String> = None;
 
@@ -3452,7 +3455,7 @@ module.register_async_method("eth_sendRawTransaction", move |params, _meta, _| {
                     hasher.update(stream.out());
                     let mut sighash = [0u8; 32];
                     sighash.copy_from_slice(&hasher.finalize());
-                    recovered_from = recover_from_sig(sighash, &r_b, &s_b, recid);
+                    recovered_from = recover_eth_signer(sighash, &r_b, &s_b, recid);
                 }
             } else if tx_type == 0x02 {
                 // EIP-1559: 0x02 || rlp([chainId, nonce, maxPriorityFee, maxFee, gas, to, value, data, accessList, yParity, r, s])
@@ -3480,7 +3483,7 @@ module.register_async_method("eth_sendRawTransaction", move |params, _meta, _| {
                     hasher.update(&pre);
                     let mut sighash = [0u8; 32];
                     sighash.copy_from_slice(&hasher.finalize());
-                    recovered_from = recover_from_sig(sighash, &r_b, &s_b, y_parity);
+                    recovered_from = recover_eth_signer(sighash, &r_b, &s_b, y_parity);
                 }
             }
 
