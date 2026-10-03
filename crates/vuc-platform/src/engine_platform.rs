@@ -3242,7 +3242,7 @@ module.register_async_method("eth_sendRawTransaction", move |params, _meta, _| {
                 is_deployment = to_bytes.is_empty();
                 if !is_deployment {
                     to_addr = Some(format!("0x{}", hex::encode(to_bytes)));
-                    tx_obj.insert("to".to_string(), serde_json::Value::String(to_addr.unwrap()));
+                    tx_obj.insert("to".to_string(), serde_json::Value::String(to_addr.clone().unwrap()));
                 }
             }
             _ => {
@@ -3271,8 +3271,9 @@ module.register_async_method("eth_sendRawTransaction", move |params, _meta, _| {
                 }
                 sig_buf[32 - r_bytes.len()..32].copy_from_slice(r_bytes);
                 sig_buf[64 - s_bytes.len()..64].copy_from_slice(s_bytes);
-                let sig = Signature::from_slice(&sig_buf).ok()?;
-                let rid = RecoveryId::try_from(recid).ok()?;
+                // k256 0.13: Signature::from_bytes + RecoveryId::from_byte
+                let sig = Signature::from_bytes((&sig_buf).into()).ok()?;
+                let rid = RecoveryId::from_byte(recid)?;
                 let vk = VerifyingKey::recover_from_prehash(&sighash, &sig, rid).ok()?;
                 let point = vk.to_encoded_point(false);
                 let pub_bytes = point.as_bytes(); // 0x04 || X || Y

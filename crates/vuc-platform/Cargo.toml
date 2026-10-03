@@ -90,7 +90,7 @@ reth-trie         = { path = "../reth-trie-stub" }
 base64            = { workspace = true }
 lazy_static       = { workspace = true }
 futures-util      = "0.3.31"
-k256              = "0.13.4"
+k256              = { version = "0.13.4", features = ["ecdsa"] }
 sha_256           = "1.0.1"
 base64-url        = "3.0.2"
 rlp               = "0.6.1"
