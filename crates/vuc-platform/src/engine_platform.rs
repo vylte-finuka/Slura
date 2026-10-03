@@ -879,11 +879,11 @@ pub async fn get_account_balance(&self, address: &str) -> Result<U256, String> {
         }))
     }
 
-    /// ✅ AJOUT: Méthode manquante get_current_block_number
+    /// Numéro de bloc courant (Lurosonie height + compteur local, min 1)
     pub async fn get_current_block_number(&self) -> u64 {
-        // Pour l'instant, retourner un numéro de bloc fixe
-        // Dans une implémentation complète, cela viendrait du consensus Lurosonie
-        1u64
+        let luro = self.rpc_service.lurosonie_manager.get_block_height().await;
+        let local = *self.current_block_number.read().await;
+        std::cmp::max(1, std::cmp::max(luro, local))
     }
 
 /// ✅ Récupération du nombre de transactions (nonce) - VERSION QUI FONCTIONNE
@@ -929,9 +929,9 @@ pub async fn get_transaction_count(&self, address: &str) -> Result<u64, String> 
         }
     };
 
-    // ─── CAS SPÉCIAL : BLOC GENESIS / BLOC 1 ───
-    // C'est ici qu'on force un format compatible Ethereum pour éviter le crash d'outils. 
-    if block_number <= 1 {
+    // ─── CAS SPÉCIAL : GENESIS uniquement si aucun bloc Lurosonie miné ───
+    let luro_height = self.rpc_service.lurosonie_manager.get_block_height().await;
+    if block_number == 0 || (block_number == 1 && luro_height == 0) {
         let genesis_hash = "0x04a8efabadcb1c2556393a09833b710d7a7b57ba8698cb7905ddf55b0b426812".to_string();
 
         let genesis = serde_json::json!({
@@ -1988,6 +1988,59 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         }
     } else {
         println!("⚠️ Storage manager non disponible pour persistance des receipts");
+    }
+
+    // ─── Mineur : mempool + production de bloc (consomme la TX) ───────────
+    {
+        let tx_req = vuc_platform::slurachain_rpc_service::TxRequest {
+            from_op: from_addr.clone(),
+            receiver_op: if is_deployment {
+                contract_address.clone()
+            } else {
+                to_addr.clone()
+            },
+            value_tx: value.to_string(),
+            nonce_tx: final_nonce,
+            hash: normalized_hash.clone(),
+            gas_limit: estimated_gas,
+            contract_addr: if is_deployment {
+                Some(contract_address.clone())
+            } else if !to_addr.is_empty() {
+                Some(to_addr.clone())
+            } else {
+                None
+            },
+            function_name: None,
+            arguments: None,
+        };
+        self.rpc_service
+            .lurosonie_manager
+            .add_transaction_to_mempool(tx_req)
+            .await;
+
+        let next_height = self.rpc_service.lurosonie_manager.get_block_height().await + 1;
+        let producer = self.validator_address.clone();
+        match self
+            .rpc_service
+            .lurosonie_manager
+            .produce_lurosonie_block_with_consensus(next_height, &producer, true)
+            .await
+        {
+            Ok(()) => {
+                let mut bn = self.current_block_number.write().await;
+                *bn = next_height;
+                println!("⛏️  Bloc #{} scellé avec TX {}", next_height, normalized_hash);
+            }
+            Err(e) => {
+                // Solo / bootstrap : on avance quand même le compteur local pour eth_blockNumber
+                let mut bn = self.current_block_number.write().await;
+                *bn = (*bn).saturating_add(1);
+                println!(
+                    "⚠️ Production bloc Lurosonie échouée ({} ) — compteur local → {} (état TX déjà appliqué)",
+                    e, *bn
+                );
+            }
+        }
     }
 
     // Logs finaux

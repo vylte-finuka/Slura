@@ -788,7 +788,11 @@ impl LurosonieManager {
 
     async fn get_consensus_threshold(&self) -> u64 {
         // Seuil BFT : 2/3 du pouvoir total (aligné avec Solidity relay_master)
+        // Solo / bootstrap (0–1 validateur) → seuil 0 pour que le mineur consomme les TX RPC
         let validators = self.relay_validators.read().await;
+        if validators.len() <= 1 {
+            return 0;
+        }
         let total_power: u64 = validators.values().map(|v| v.total_power).sum();
         if total_power == 0 {
             return 0; // seuil minimal pour démarrer
