@@ -3296,9 +3296,10 @@ module.register_async_method("eth_sendRawTransaction", move |params, _meta, _| {
                             stream.append_raw(item.as_raw(), 1);
                         }
                     }
-                    let mut pre = Vec::with_capacity(1 + stream.out().len());
+                    let encoded = stream.out();
+                    let mut pre = Vec::with_capacity(1 + encoded.len());
                     pre.push(0x02);
-                    pre.extend_from_slice(&stream.out());
+                    pre.extend_from_slice(&encoded);
                     let mut hasher = Sha3Keccak::new();
                     hasher.update(&pre);
                     let mut sighash = [0u8; 32];
