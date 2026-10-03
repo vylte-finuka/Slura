@@ -1913,22 +1913,81 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
             recv.balance = recv.balance.saturating_add(value);
             println!("💰 Crédit {} → +{} naeït (total {})", to_addr, value, recv.balance);
         } else if !to_addr.is_empty() && !calldata_bytes.is_empty() {
-            // Appel contrat avec data (hors init VEZ déjà gérée) — best-effort execute_module
             println!("📞 Appel contrat {} data_len={}", to_addr, calldata_bytes.len());
-            // Les appels métier (transfer ERC20-like) passent par execute_module si module connu
-            let mut vm_sim = self.vm.write().await;
-            if vm_sim.modules.contains_key(&to_addr) {
-                // selector 4 bytes
-                if calldata_bytes.len() >= 4 {
-                    let sel = format!("function_{}", hex::encode(&calldata_bytes[0..4]));
-                    let args = vec![serde_json::Value::String(format!("0x{}", hex::encode(&calldata_bytes[4..])))];
-                    match vm_sim.execute_module(&to_addr, &sel, args, Some(&from_addr), Some(&calldata_bytes)).await {
-                        Ok(_) => println!("✅ execute_module {} OK", sel),
-                        Err(e) => println!("⚠️ execute_module {} : {}", sel, e),
-                    }
+            // transfer(address,uint256) = 0xa9059cbb sur VEZ natif → mouvement de balances
+            if to_addr == "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+                && calldata_bytes.len() >= 68
+                && calldata_bytes[0..4] == [0xa9, 0x05, 0x9c, 0xbb]
+            {
+                let dest = format!("0x{}", hex::encode(&calldata_bytes[16..36])).to_lowercase();
+                let mut amt_bytes = [0u8; 16];
+                // uint256 amount in last 32 bytes of first two words after selector — bytes 36..68
+                let amount_word = &calldata_bytes[36..68];
+                // take low 16 bytes for u128
+                amt_bytes.copy_from_slice(&amount_word[16..32]);
+                let amount = u128::from_be_bytes(amt_bytes);
+                let vm = self.vm.write().await;
+                let mut accounts = vm.state.accounts.write().await;
+                let sender_bal = accounts.get(&from_addr).map(|a| a.balance).unwrap_or(0);
+                if sender_bal < amount {
+                    return Err(format!(
+                        "VEZ transfer: solde insuffisant {} < {}",
+                        sender_bal, amount
+                    ));
                 }
+                if let Some(acc) = accounts.get_mut(&from_addr) {
+                    acc.balance = acc.balance.saturating_sub(amount);
+                }
+                let recv = accounts.entry(dest.clone()).or_insert_with(|| {
+                    vuc_tx::slurachain_vm::AccountState {
+                        eth_address: dest.clone(),
+                        slu_zk_address: generate_slu_zk_address(&format!("account:{}", dest), 10, 32),
+                        balance: 0,
+                        contract_state: vec![],
+                        resources: BTreeMap::new(),
+                        state_version: 1,
+                        last_block_number: 0,
+                        nonce: 0,
+                        code_hash: String::new(),
+                        storage_root: String::new(),
+                        is_contract: false,
+                        gas_used: 0,
+                    }
+                });
+                recv.balance = recv.balance.saturating_add(amount);
+                println!("✅ VEZ ERC20 transfer {} → {} amount {}", from_addr, dest, amount);
             } else {
-                println!("ℹ️ Pas de module VM enregistré pour {} — value déjà traité, data ignorée", to_addr);
+                let mut vm_sim = self.vm.write().await;
+                let mkey = if vm_sim.modules.contains_key(&to_addr) {
+                    Some(to_addr.clone())
+                } else {
+                    vm_sim
+                        .modules
+                        .keys()
+                        .find(|k| k.eq_ignore_ascii_case(&to_addr))
+                        .cloned()
+                };
+                if let Some(key) = mkey {
+                    if calldata_bytes.len() >= 4 {
+                        let sel = format!("function_{}", hex::encode(&calldata_bytes[0..4]));
+                        let args = vec![serde_json::Value::String(format!(
+                            "0x{}",
+                            hex::encode(&calldata_bytes[4..])
+                        ))];
+                        match vm_sim
+                            .execute_module(&key, &sel, args, Some(&from_addr), Some(&calldata_bytes))
+                            .await
+                        {
+                            Ok(_) => println!("✅ execute_module {} OK", sel),
+                            Err(e) => println!("⚠️ execute_module {} : {}", sel, e),
+                        }
+                    }
+                } else {
+                    println!(
+                        "ℹ️ Pas de module VM pour {} — data non exécutée (value déjà traité si >0)",
+                        to_addr
+                    );
+                }
             }
         } else {
             println!("ℹ️ TX sans value ni data significative");
@@ -2234,11 +2293,70 @@ pub async fn eth_call(&self, call_object: serde_json::Value) -> Result<String, S
     );
 
     const VEZ_NATIVE_ADDRESS: &str = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
-    if to_addr == VEZ_NATIVE_ADDRESS
-        && calldata_bytes.len() >= 36
-        && calldata_bytes[..4] == [0x70, 0xa0, 0x82, 0x31]
-    {
-        let wallet_address = format!("0x{}", hex::encode(&calldata_bytes[16..36]));
+
+    // ─── Helpers ABI view (évite execute_module qui renvoyait du bytecode) ───
+    let encode_u256 = |v: u128| -> String { format!("0x{:064x}", v) };
+
+    // VEZ natif = devise native (AccountState.balance) — view functions fiables
+    if to_addr == VEZ_NATIVE_ADDRESS && calldata_bytes.len() >= 4 {
+        let sel = &calldata_bytes[0..4];
+        // balanceOf(address) = 0x70a08231
+        if sel == [0x70, 0xa0, 0x82, 0x31] && calldata_bytes.len() >= 36 {
+            let wallet_address = format!("0x{}", hex::encode(&calldata_bytes[16..36])).to_lowercase();
+            let vm = self.vm.read().await;
+            let accounts = vm.state.accounts.read().await;
+            // BTreeMap in AccountState store - accounts is BTreeMap not HashMap
+            let balance = accounts
+                .get(&wallet_address)
+                .or_else(|| {
+                    accounts
+                        .iter()
+                        .find(|(address, _)| address.eq_ignore_ascii_case(&wallet_address))
+                        .map(|(_, account)| account)
+                })
+                .map_or(0u128, |account| account.balance);
+            println!("📗 [eth_call] VEZ balanceOf({}) = {}", wallet_address, balance);
+            return Ok(encode_u256(balance));
+        }
+        // totalSupply() = 0x18160ddd
+        if sel == [0x18, 0x16, 0x0d, 0xdd] {
+            let vm = self.vm.read().await;
+            let accounts = vm.state.accounts.read().await;
+            let mut supply: u128 = 0;
+            for (_a, acc) in accounts.iter() {
+                if !acc.is_contract {
+                    supply = supply.saturating_add(acc.balance);
+                } else {
+                    // Inclure aussi les soldes éventuels sur contrats
+                    supply = supply.saturating_add(acc.balance);
+                }
+            }
+            println!("📗 [eth_call] VEZ totalSupply = {}", supply);
+            return Ok(encode_u256(supply));
+        }
+        // decimals() = 0x313ce567 → 18
+        if sel == [0x31, 0x3c, 0xe5, 0x67] {
+            return Ok(encode_u256(18));
+        }
+        // complet_quant / answer-like if used as view — owner() 0x8da5cb5b
+        if sel == [0x8d, 0xa5, 0xcb, 0x5b] {
+            // owner = premier custodian / miner connu
+            let owner = "0x53ae54b11251d5003e9aa51422405bc35a2ef32d";
+            return Ok(format!("0x{:0>64}", &owner[2..]));
+        }
+        // name() 0x06fdde03 — return ABI string is complex; return short bytes32-style empty + note
+        // symbol() 0x95d89b41
+        if sel == [0x95, 0xd8, 0x9b, 0x41] {
+            // bytes32 "VEZ"
+            let mut b = [0u8; 32];
+            b[0] = b'V'; b[1] = b'E'; b[2] = b'Z';
+            return Ok(format!("0x{}", hex::encode(b)));
+        }
+    }
+
+    // balanceOf sur n'importe quel contrat : fallback solde natif si module absent
+    if calldata_bytes.len() >= 36 && calldata_bytes[..4] == [0x70, 0xa0, 0x82, 0x31] {
+        let wallet_address = format!("0x{}", hex::encode(&calldata_bytes[16..36])).to_lowercase();
         let vm = self.vm.read().await;
         let accounts = vm.state.accounts.read().await;
         let balance = accounts
@@ -2249,9 +2367,13 @@ pub async fn eth_call(&self, call_object: serde_json::Value) -> Result<String, S
                     .find(|(address, _)| address.eq_ignore_ascii_case(&wallet_address))
                     .map(|(_, account)| account)
             })
-            .map_or(0, |account| account.balance);
-
-        return Ok(format!("0x{:064x}", U256::from(balance)));
+            .map_or(0u128, |account| account.balance);
+        // Si le contrat n'a pas de module, renvoyer le solde natif (compat wallets)
+        let has_module = vm.modules.contains_key(&to_addr)
+            || vm.modules.keys().any(|k| k.eq_ignore_ascii_case(&to_addr));
+        if !has_module || to_addr == VEZ_NATIVE_ADDRESS {
+            return Ok(encode_u256(balance));
+        }
     }
 
     // ────────────────────────────────────────────────────────────────
@@ -2261,16 +2383,23 @@ pub async fn eth_call(&self, call_object: serde_json::Value) -> Result<String, S
     let mut vm_sim = vm_arc.write().await;
 
     if let Some(addr) = &contract_addr {
-        if vm_sim.modules.contains_key(addr) {
-            // ⛔️ Correction : ne passe PAS les arguments décodés pour un appel EVM
-            // let args = arguments.clone().unwrap_or_else(|| ...);
-            let args = vec![]; // <-- toujours vide pour EVM pur
+        // Résolution module case-insensitive
+        let module_key = if vm_sim.modules.contains_key(addr) {
+            Some(addr.clone())
+        } else {
+            vm_sim
+                .modules
+                .keys()
+                .find(|k| k.eq_ignore_ascii_case(addr))
+                .cloned()
+        };
 
+        if let Some(mkey) = module_key {
+            let args = vec![];
             let fn_name = function_name.as_deref().unwrap_or("unknown");
 
-            // Exécution avec calldata brut passé explicitement
             if let Ok(result) = vm_sim
-                .execute_module(addr, fn_name, args, Some(&from_addr), Some(&calldata_bytes))
+                .execute_module(&mkey, fn_name, args, Some(&from_addr), Some(&calldata_bytes))
                 .await
             {
                 println!("✅ [eth_call] Résultat VM brut: {:?}", result);
@@ -2366,6 +2495,16 @@ pub async fn eth_call(&self, call_object: serde_json::Value) -> Result<String, S
                 
                                 // Log pour debug
                                 println!("📤 [eth_call] Résultat final formaté (hex 32 bytes): {}", result_hex);
+
+                                // Rejeter les faux retours (bytecode runtime au lieu d'ABI)
+                                let body = result_hex.trim_start_matches("0x");
+                                if body.len() > 64 * 8
+                                    || body.starts_with("60806040")
+                                    || body.starts_with("575f5ffd")
+                                {
+                                    println!("⚠️ [eth_call] résultat ressemble à du bytecode → 0x0");
+                                    return Ok("0x0000000000000000000000000000000000000000000000000000000000000000".to_string());
+                                }
                 
                                 return Ok(result_hex);
             } else {
@@ -2375,28 +2514,15 @@ pub async fn eth_call(&self, call_object: serde_json::Value) -> Result<String, S
     }
 
     // ────────────────────────────────────────────────────────────────
-    // Fallback : transfert natif VEZ (si pas de module trouvé)
+    // Fallback eth_call : pas de module / échec VM → uint256(0) propre
+    // (ne pas simuler transfer ERC20 ici : eth_call est read-only)
     // ────────────────────────────────────────────────────────────────
-    let vez_contract_addr = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_string();
-    let args = vec![
-        serde_json::Value::String(to_addr.clone()),
-        serde_json::Value::Number(serde_json::Number::from(value)),
-    ];
-
-    match vm_sim
-        .execute_module(&vez_contract_addr, "function_a9059cbb", args, Some(&from_addr), None)
-        .await
-    {
-        Ok(result) => {
-            let result_hex = match result {
-                serde_json::Value::Number(n) => format!("0x{:064x}", n.as_u64().unwrap_or(0)),
-                serde_json::Value::String(s) => format!("0x{}", hex::encode(s.as_bytes())),
-                _ => "0x".to_string(),
-            };
-            Ok(result_hex)
-        }
-        Err(e) => Err(format!("Erreur VM transfert natif: {}", e)),
-    }
+    println!(
+        "⚠️ [eth_call] Pas de résultat VM pour to={} data_len={} → 0x0",
+        to_addr,
+        calldata_bytes.len()
+    );
+    Ok("0x0000000000000000000000000000000000000000000000000000000000000000".to_string())
 }
     
         /// ✅ Estimation du gas
