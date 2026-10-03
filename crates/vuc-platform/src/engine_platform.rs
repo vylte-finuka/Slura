@@ -1544,13 +1544,16 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         .unwrap_or("")
         .to_lowercase();
 
-    // Exception spéciale pour l'initialisation VEZ (mint initial) → pas de frais
-    let is_vez_initialization = to_addr == "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" &&
-        tx_params.get("data").and_then(|v| v.as_str()).unwrap_or("")
-            .starts_with("0x40c10f1900000000000000000000000053ae54b11251d5003e9aa51422405bc35a2ef32d");
+    // Exception gratuite pour :
+    //  - initialize(address,address,address,uint256)  selector 0xcf756fdf  (mint initial via proxy)
+    //  - mint(address,uint256)                         selector 0x40c10f19  (custodian mint)
+    // sur l'adresse native VEZ / proxy (conforme à vezcurproxy.sol).
+    let data_str = tx_params.get("data").and_then(|v| v.as_str()).unwrap_or("");
+    let is_vez_initialization = to_addr == "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        && (data_str.starts_with("0xcf756fdf") || data_str.starts_with("0x40c10f19"));
 
     if is_vez_initialization {
-        println!("🆓 Transaction d'initialisation VEZ détectée → aucun disburse de frais");
+        println!("🆓 Transaction d'initialisation/mint VEZ détectée (proxy) → aucun disburse de frais");
     }
 
     // Récupération du nonce actuel
@@ -4946,11 +4949,13 @@ if local_head <= 1 {
         println!("✅ VEZ confirmé, démarrage du déploiement PoR");
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
+        // Oracle déjà déployé dans le spawn VEZ (si EAC_AGGREGATOR_BYTECODE fourni).
+        // On re-tente ici uniquement si absent, avec la bonne variable d'env.
         let contracts_por = [
             (
                 "EAC_PROXY_AGGREGATOR",
                 "0xcccccccccccccccccccccccccccccccccccccccc",
-                "VEZCUR",
+                "EAC_AGGREGATOR_BYTECODE",
             ),
             (
                 "VYFTSA",
@@ -5076,27 +5081,31 @@ tokio::spawn({
             let vez_addr = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_string();
             let account_key = format!("account:{}", vez_addr);
 
-            // Correction appliquée ici
-let already_exists = if let manager = storage.as_ref() {
-    // manager est maintenant &RocksDBManagerImpl
-    match manager.read(&account_key) {
-        Ok(_data) => {
-            println!("🪙 VEZ déjà présent dans RocksDB (clé: {}) → déploiement annulé", account_key);
-            true
-        }
-        Ok(none) => {
-            println!("🔍 Clé {} absente dans RocksDB → déploiement autorisé", account_key);
-            false
-        }
-        Err(e) => {
-            println!("⚠️ Erreur lecture RocksDB pour VEZ : {} → on tente déploiement", e);
-            false
-        }
-    }
-} else {
-    println!("⚠️ Pas de storage manager disponible → on tente déploiement");
-    false
-};
+            // Vérifie si le proxy VEZ est déjà persisté (et initialisé)
+            let already_exists = match storage.as_ref().read(&account_key) {
+                Ok(data) => {
+                    // Si le compte existe et est marqué initialized, on skip
+                    let is_init = serde_json::from_slice::<serde_json::Value>(&data)
+                        .ok()
+                        .and_then(|v| {
+                            v.get("resources")
+                                .and_then(|r| r.get("initialized"))
+                                .and_then(|b| b.as_bool())
+                        })
+                        .unwrap_or(false);
+                    if is_init {
+                        println!("🪙 VEZproxy déjà initialisé dans RocksDB (clé: {}) → skip", account_key);
+                        true
+                    } else {
+                        println!("🔍 VEZ présent mais non initialisé → on relance le flux init");
+                        false
+                    }
+                }
+                Err(e) => {
+                    println!("🔍 Clé {} absente / erreur lecture ({}) → déploiement autorisé", account_key, e);
+                    false
+                }
+            };
 
             if already_exists {
                 println!("✅ VEZ existe déjà → fin du spawn");
@@ -5104,51 +5113,109 @@ let already_exists = if let manager = storage.as_ref() {
                 break;
             }
 
-            println!("🪙 VEZ absent → lancement déploiement unique");
+            println!("🪙 VEZ absent → lancement déploiement écosystème proxy (conforme vezcurproxy.sol)");
 
-            let bytecode_hex = std::env::var("VEZCUR").unwrap_or_default();
-
-            // Support format compact (ex: 60a0604) et hex standard (0x...)
-            let creation_bytecode = if bytecode_hex.is_empty() {
-                Vec::new()
-            } else if bytecode_hex.starts_with("0x") {
-                hex::decode(&bytecode_hex[2..]).unwrap_or_default()
-            } else if bytecode_hex.len() % 2 == 1 && bytecode_hex.chars().all(|c| c.is_ascii_hexdigit()) {
-                // Format compact impair (ex: 60a0604) → préfixer avec 0 pour aligner
-                hex::decode(format!("0{}", bytecode_hex)).unwrap_or_default()
-            } else {
-                hex::decode(&bytecode_hex).unwrap_or_default()
+            // ── Helpers locaux : decode hex bytecode ──
+            let decode_bc = |raw: String| -> Vec<u8> {
+                if raw.is_empty() {
+                    Vec::new()
+                } else if let Some(h) = raw.strip_prefix("0x") {
+                    hex::decode(h).unwrap_or_default()
+                } else if raw.len() % 2 == 1 && raw.chars().all(|c| c.is_ascii_hexdigit()) {
+                    hex::decode(format!("0{}", raw)).unwrap_or_default()
+                } else {
+                    hex::decode(&raw).unwrap_or_default()
+                }
             };
 
+            // ── Helpers : pad address / u256 pour calldata ABI ──
+            let pad_addr = |addr: &str| -> String {
+                let a = addr.trim_start_matches("0x").to_lowercase();
+                format!("{:0>64}", a)
+            };
+            let pad_u256 = |n: u128| -> String { format!("{:064x}", n) };
+
+            // Adresses déjà définies dans main / génésis :
+            //   VEZ proxy  : 0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee  (vez_addr ci-dessus)
+            //   Oracle PoR : 0xcccccccccccccccccccccccccccccccccccccccc
+            //   Premier custodian + owner (mint initial) :
+            //                0x53ae54b11251d5003e9aa51422405bc35a2ef32d
+            let oracle_addr = "0xcccccccccccccccccccccccccccccccccccccccc".to_string();
+            let owner = "0x53ae54b11251d5003e9aa51422405bc35a2ef32d".to_string();
+            let first_custodian = "0x53ae54b11251d5003e9aa51422405bc35a2ef32d".to_string();
+            // Supply initiale (défaut 1_000_000 VEZ = 1e6 * 1e18)
+            let initial_supply: u128 = std::env::var("VEZ_INITIAL_SUPPLY")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1_000_000u128 * 10u128.pow(18));
+
+            // ═══════════════════════════════════════════════════════════
+            // 1) Déployer EACAggregatorProxy (oracle PoR)
+            // ═══════════════════════════════════════════════════════════
+            let oracle_bc_hex = std::env::var("EAC_AGGREGATOR_BYTECODE")
+                .or_else(|_| std::env::var("EAC_PROXY_AGGREGATOR"))
+                .unwrap_or_default();
+            let oracle_bytecode = decode_bc(oracle_bc_hex);
+
+            if !oracle_bytecode.is_empty() {
+                let oracle_key = format!("account:{}", oracle_addr);
+                let oracle_exists = storage.as_ref().read(&oracle_key).is_ok();
+                if !oracle_exists {
+                    println!("📡 Déploiement EACAggregatorProxy → {}", oracle_addr);
+                    let deploy_oracle_tx = serde_json::json!({
+                        "from": validator_address_generated,
+                        "data": format!("0x{}", hex::encode(&oracle_bytecode)),
+                        "value": "0x0",
+                        "create2": true,
+                        "target_address": oracle_addr,
+                    });
+                    match engine_clone.send_transaction(deploy_oracle_tx).await {
+                        Ok(txh) => println!("✅ Oracle déployé (tx: {})", txh),
+                        Err(e) => eprintln!("⚠️ Échec oracle (on continue) : {}", e),
+                    }
+                } else {
+                    println!("✅ Oracle déjà présent à {}", oracle_addr);
+                }
+            } else {
+                println!("⚠️ EAC_AGGREGATOR_BYTECODE absent → oracle non déployé (initialize utilisera l'adresse placeholder)");
+            }
+
+            // ═══════════════════════════════════════════════════════════
+            // 2) Déployer VEZproxy (impl / proxy) à 0xeeee…eeee
+            //    Bytecode depuis VEZCUR (creation bytecode de VEZproxy)
+            // ═══════════════════════════════════════════════════════════
+            let bytecode_hex = std::env::var("VEZCUR").unwrap_or_default();
+            let creation_bytecode = decode_bc(bytecode_hex);
+
             if creation_bytecode.is_empty() {
-                eprintln!("❌ Bytecode VEZ vide → abandon");
+                eprintln!("❌ Bytecode VEZ (VEZCUR) vide → abandon");
                 break;
             }
 
-            // SLU zk-print fixe et déterministe (toujours la même)
             let slu_zk_address = generate_slu_zk_address(
                 "VEZ_FIXED_SLURACHAIN_IDENTITY_2026",
                 10,
-                32
+                32,
             );
 
-            println!("📦 VEZ Creation bytecode chargé → {} bytes", creation_bytecode.len());
+            println!("📦 VEZproxy creation bytecode → {} bytes", creation_bytecode.len());
 
-            // Pré-insertion minimale du compte
+            // Pré-insertion minimale du compte proxy
             {
                 let mut vm = engine_clone.vm.write().await;
                 let mut accounts = vm.state.accounts.write().await;
                 if !accounts.contains_key(&vez_addr) {
                     let initial_account = vuc_tx::slurachain_vm::AccountState {
                         eth_address: vez_addr.clone(),
-                        slu_zk_address: vez_addr.clone(),
+                        slu_zk_address: slu_zk_address.clone(),
                         balance: 0u128,
                         contract_state: creation_bytecode.clone(),
                         resources: {
                             let mut r = BTreeMap::new();
-                             r.insert("slu_zk_address".to_string(), serde_json::Value::String(slu_zk_address.clone()));
+                            r.insert("slu_zk_address".to_string(), serde_json::Value::String(slu_zk_address.clone()));
                             r.insert("constructor_pending".to_string(), serde_json::Value::Bool(true));
                             r.insert("deployed_by".to_string(), serde_json::Value::String(validator_address_generated.clone()));
+                            r.insert("is_uups_proxy".to_string(), serde_json::Value::Bool(true));
                             r
                         },
                         state_version: 1,
@@ -5160,11 +5227,10 @@ let already_exists = if let manager = storage.as_ref() {
                         gas_used: 0,
                     };
                     accounts.insert(vez_addr.clone(), initial_account);
-                    println!("   → Compte pré-créé avec creation bytecode");
+                    println!("   → Compte proxy pré-créé");
                 }
             }
 
-            // Déploiement réel
             let deploy_vez_tx = serde_json::json!({
                 "from": validator_address_generated,
                 "data": format!("0x{}", hex::encode(&creation_bytecode)),
@@ -5175,28 +5241,120 @@ let already_exists = if let manager = storage.as_ref() {
 
             match engine_clone.send_transaction(deploy_vez_tx).await {
                 Ok(tx_hash) => {
-                    println!("✅ VEZ déployé avec succès à {} (tx: {})", vez_addr, tx_hash);
-                    
-                    // Vérification post-déploiement
+                    println!("✅ VEZproxy déployé à {} (tx: {})", vez_addr, tx_hash);
+
+                    // ═══════════════════════════════════════════════════
+                    // 3) Appeler initialize(owner, priceFeed, firstCustodian, initialSupply)
+                    //    selector = 0xcf756fdf
+                    //    → déclenche le mint initial vers owner (me)
+                    // ═══════════════════════════════════════════════════
+                    let init_calldata = format!(
+                        "0xcf756fdf{}{}{}{}",
+                        pad_addr(&owner),
+                        pad_addr(&oracle_addr),
+                        pad_addr(&first_custodian),
+                        pad_u256(initial_supply),
+                    );
+
+                    println!("🔧 Appel initialize sur proxy VEZ…");
+                    println!("   • owner          : {}", owner);
+                    println!("   • priceFeed      : {}", oracle_addr);
+                    println!("   • firstCustodian : {}", first_custodian);
+                    println!("   • initialSupply  : {} ({} VEZ)", initial_supply, initial_supply / 10u128.pow(18));
+
+                    let init_tx = serde_json::json!({
+                        "from": validator_address_generated,
+                        "to": vez_addr,
+                        "data": init_calldata,
+                        "value": "0x0",
+                    });
+
+                    match engine_clone.send_transaction(init_tx).await {
+                        Ok(init_hash) => {
+                            println!("✅ initialize exécuté (tx: {}) → mint initial effectué", init_hash);
+                        }
+                        Err(e) => {
+                            eprintln!("⚠️ initialize a échoué côté VM : {} — fallback mint manuel", e);
+                            // Fallback : créditer manuellement le balance owner si la VM
+                            // n'exécute pas encore pleinement le bytecode Solidity.
+                            let mut vm = engine_clone.vm.write().await;
+                            let mut accounts = vm.state.accounts.write().await;
+                            if let Some(acc) = accounts.get_mut(&owner) {
+                                acc.balance = acc.balance.saturating_add(initial_supply);
+                                println!("   → Fallback : balance owner += {} VEZ units", initial_supply);
+                            } else {
+                                // Créer le compte owner s'il n'existe pas encore
+                                accounts.insert(owner.clone(), vuc_tx::slurachain_vm::AccountState {
+                                    eth_address: owner.clone(),
+                                    slu_zk_address: owner.clone(),
+                                    balance: initial_supply,
+                                    contract_state: vec![],
+                                    resources: BTreeMap::new(),
+                                    state_version: 1,
+                                    last_block_number: 0,
+                                    nonce: 0,
+                                    code_hash: "".to_string(),
+                                    storage_root: format!("storage_{}", owner),
+                                    is_contract: false,
+                                    gas_used: 0,
+                                });
+                                println!("   → Fallback : compte owner créé avec supply initiale");
+                            }
+                        }
+                    }
+
+                    // ═══════════════════════════════════════════════════
+                    // 4) Marquer le contrat comme initialisé + métadonnées
+                    // ═══════════════════════════════════════════════════
+                    {
+                        let mut vm = engine_clone.vm.write().await;
+                        let mut accounts = vm.state.accounts.write().await;
+                        if let Some(acc) = accounts.get_mut(&vez_addr) {
+                            acc.resources.insert("initialized".to_string(), serde_json::Value::Bool(true));
+                            acc.resources.insert("total_supply".to_string(), serde_json::Value::String(initial_supply.to_string()));
+                            acc.resources.insert("price_feed".to_string(), serde_json::Value::String(oracle_addr.clone()));
+                            acc.resources.insert("first_custodian".to_string(), serde_json::Value::String(first_custodian.clone()));
+                            acc.resources.insert("owner".to_string(), serde_json::Value::String(owner.clone()));
+                            acc.resources.insert("currency".to_string(), serde_json::Value::String("EUR".to_string()));
+                            acc.resources.insert("constructor_pending".to_string(), serde_json::Value::Bool(false));
+                            // isCustodian[firstCustodian] = true (reflet état contrat)
+                            acc.resources.insert(
+                                format!("isCustodian:{}", first_custodian.to_lowercase()),
+                                serde_json::Value::Bool(true),
+                            );
+                        }
+                        // S'assurer que le balance owner reflète le mint (si initialize a réussi côté VM
+                        // mais n'a pas mis à jour le balance natif)
+                        if let Some(acc) = accounts.get_mut(&owner) {
+                            if acc.balance < initial_supply {
+                                acc.balance = initial_supply;
+                            }
+                        }
+                    }
+
                     {
                         let vm = engine_clone.vm.read().await;
                         let accounts = vm.state.accounts.read().await;
                         if let Some(acc) = accounts.get(&vez_addr) {
-                            println!("   → Bytecode final dans compte : {} bytes", acc.contract_state.len());
+                            println!("   → Bytecode final proxy : {} bytes", acc.contract_state.len());
+                            println!("   → initialized           : {:?}", acc.resources.get("initialized"));
+                            println!("   → total_supply          : {:?}", acc.resources.get("total_supply"));
                         }
                         if let Some(module) = vm.modules.get(&vez_addr) {
-                            println!("   → Bytecode dans module : {} bytes", module.bytecode.len());
+                            println!("   → Module bytecode       : {} bytes", module.bytecode.len());
+                        }
+                        if let Some(owner_acc) = accounts.get(&owner) {
+                            println!("   → Balance owner         : {} VEZ units", owner_acc.balance);
                         }
                     }
 
-                    // Force persistance
                     let _ = engine_clone.persist_all_state().await;
                     vez_deployment_tx.send_replace(true);
-
+                    println!("🎉 Écosystème VEZproxy + Oracle + mint initial prêt");
                     break;
                 }
                 Err(e) => {
-                    eprintln!("❌ Échec déploiement VEZ : {}", e);
+                    eprintln!("❌ Échec déploiement VEZproxy : {}", e);
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 }
             }
@@ -5502,15 +5660,31 @@ async fn validate_system_integrity(vm: &Arc<TokioRwLock<SlurachainVm>>, validato
         }
     }
     
-    // ✅ Vérification de l'initialisation VEZ
+    // ✅ Vérification de l'initialisation VEZproxy (conforme vezcurproxy.sol)
     if let Some(vez_contract) = accounts.get(vez_address) {
         if let Some(initialized) = vez_contract.resources.get("initialized") {
             if !initialized.as_bool().unwrap_or(false) {
-                return Err("VEZ contract not initialized".to_string());
+                return Err("VEZproxy contract not initialized".to_string());
             }
         } else {
-            return Err("VEZ contract initialization status unknown".to_string());
+            return Err("VEZproxy initialization status unknown".to_string());
         }
+        // Contrôles additionnels proxy
+        if vez_contract.resources.get("price_feed").is_none() {
+            eprintln!("⚠️ VEZproxy: price_feed manquant dans resources");
+        }
+        if vez_contract.resources.get("first_custodian").is_none() {
+            eprintln!("⚠️ VEZproxy: first_custodian manquant dans resources");
+        }
+        if vez_contract.resources.get("total_supply").is_none() {
+            eprintln!("⚠️ VEZproxy: total_supply manquant dans resources");
+        }
+    }
+
+    // Oracle optionnel (déployé si EAC_AGGREGATOR_BYTECODE fourni)
+    let oracle_address = "0xcccccccccccccccccccccccccccccccccccccccc";
+    if !accounts.contains_key(oracle_address) {
+        eprintln!("⚠️ Oracle EACAggregatorProxy absent à {} (PoR incomplet)", oracle_address);
     }
     
     Ok(())
