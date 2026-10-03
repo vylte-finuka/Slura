@@ -3387,29 +3387,25 @@ module.register_async_method("eth_sendRawTransaction", move |params, _meta, _| {
         // ─── Récupération du `from` via ecrecover (MetaMask / wallets) ───────
         // VEZ reste la devise de frais (disburse dans send_transaction).
         {
-            use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
             use sha3::{Digest, Keccak256 as Sha3Keccak};
+            use ethers::types::{Signature as EthSig, H256, U256 as EU256};
 
+            // ecrecover via ethers (API stable) — évite les divergences k256 Signature::from_*
             let recover_from_sig = |sighash: [u8; 32], r_bytes: &[u8], s_bytes: &[u8], recid: u8| -> Option<String> {
-                let mut sig_buf = [0u8; 64];
                 if r_bytes.is_empty() || s_bytes.is_empty() || r_bytes.len() > 32 || s_bytes.len() > 32 {
                     return None;
                 }
-                sig_buf[32 - r_bytes.len()..32].copy_from_slice(r_bytes);
-                sig_buf[64 - s_bytes.len()..64].copy_from_slice(s_bytes);
-                // k256 0.13: Signature::from_bytes + RecoveryId::from_byte
-                let sig = Signature::from_bytes((&sig_buf).into()).ok()?;
-                let rid = RecoveryId::from_byte(recid)?;
-                let vk = VerifyingKey::recover_from_prehash(&sighash, &sig, rid).ok()?;
-                let point = vk.to_encoded_point(false);
-                let pub_bytes = point.as_bytes(); // 0x04 || X || Y
-                if pub_bytes.len() != 65 {
-                    return None;
-                }
-                let mut hasher = Sha3Keccak::new();
-                hasher.update(&pub_bytes[1..]);
-                let hash = hasher.finalize();
-                Some(format!("0x{}", hex::encode(&hash[12..32])).to_lowercase())
+                let mut r_arr = [0u8; 32];
+                let mut s_arr = [0u8; 32];
+                r_arr[32 - r_bytes.len()..].copy_from_slice(r_bytes);
+                s_arr[32 - s_bytes.len()..].copy_from_slice(s_bytes);
+                let sig = EthSig {
+                    r: EU256::from_big_endian(&r_arr),
+                    s: EU256::from_big_endian(&s_arr),
+                    v: (recid as u64).saturating_add(27),
+                };
+                let addr = sig.recover(H256::from(sighash)).ok()?;
+                Some(format!("{:#x}", addr).to_lowercase())
             };
 
             let mut recovered_from: Option<String> = None;
