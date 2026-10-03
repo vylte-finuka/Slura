@@ -1864,8 +1864,75 @@ pub async fn send_transaction(&self, tx_params: serde_json::Value) -> Result<Str
         println!("   • Adresse SLU zk-print      : {}", slu_zk_contract_addr);
         println!("   • TX Hash                   : {}", normalized_hash);
     } else {
-        println!("→ Transaction normale (appel de fonction) sur {}", to_addr);
-        // Ton code pour les appels normaux peut être ajouté ici si nécessaire
+        println!("→ Transaction normale sur {}", to_addr);
+        // ─── Transfert natif VEZ (balance compte) ───────────────────────────
+        // Les frais restent payés en VEZ via disburse (ci-dessus).
+        // Ici on applique uniquement le `value` expéditeur → destinataire.
+        if value > 0 {
+            if to_addr.is_empty() || to_addr == "0x" {
+                return Err("Transfert value>0 sans adresse destinataire".to_string());
+            }
+            let vm = self.vm.write().await;
+            let mut accounts = vm.state.accounts.write().await;
+
+            // Solde expéditeur
+            let sender_bal = accounts.get(&from_addr).map(|a| a.balance).unwrap_or(0);
+            if sender_bal < value {
+                return Err(format!(
+                    "Solde insuffisant pour transfert: {} a {} naeït, value={}",
+                    from_addr, sender_bal, value
+                ));
+            }
+
+            // Débit expéditeur
+            if let Some(acc) = accounts.get_mut(&from_addr) {
+                acc.balance = acc.balance.saturating_sub(value);
+                println!("💸 Débit {} → -{} naeït (reste {})", from_addr, value, acc.balance);
+            } else {
+                return Err(format!("Compte expéditeur inconnu: {}", from_addr));
+            }
+
+            // Crédit destinataire (créer le compte si besoin)
+            let recv = accounts.entry(to_addr.clone()).or_insert_with(|| {
+                println!("🆕 Création compte destinataire {}", to_addr);
+                vuc_tx::slurachain_vm::AccountState {
+                    eth_address: to_addr.clone(),
+                    slu_zk_address: generate_slu_zk_address(&format!("account:{}", to_addr), 10, 32),
+                    balance: 0,
+                    contract_state: vec![],
+                    resources: BTreeMap::new(),
+                    state_version: 1,
+                    last_block_number: 0,
+                    nonce: 0,
+                    code_hash: String::new(),
+                    storage_root: String::new(),
+                    is_contract: false,
+                    gas_used: 0,
+                }
+            });
+            recv.balance = recv.balance.saturating_add(value);
+            println!("💰 Crédit {} → +{} naeït (total {})", to_addr, value, recv.balance);
+        } else if !to_addr.is_empty() && !calldata_bytes.is_empty() {
+            // Appel contrat avec data (hors init VEZ déjà gérée) — best-effort execute_module
+            println!("📞 Appel contrat {} data_len={}", to_addr, calldata_bytes.len());
+            // Les appels métier (transfer ERC20-like) passent par execute_module si module connu
+            let mut vm_sim = self.vm.write().await;
+            if vm_sim.modules.contains_key(&to_addr) {
+                // selector 4 bytes
+                if calldata_bytes.len() >= 4 {
+                    let sel = format!("function_{}", hex::encode(&calldata_bytes[0..4]));
+                    let args = vec![serde_json::Value::String(format!("0x{}", hex::encode(&calldata_bytes[4..])))];
+                    match vm_sim.execute_module(&to_addr, &sel, args, Some(&from_addr), Some(&calldata_bytes)).await {
+                        Ok(_) => println!("✅ execute_module {} OK", sel),
+                        Err(e) => println!("⚠️ execute_module {} : {}", sel, e),
+                    }
+                }
+            } else {
+                println!("ℹ️ Pas de module VM enregistré pour {} — value déjà traité, data ignorée", to_addr);
+            }
+        } else {
+            println!("ℹ️ TX sans value ni data significative");
+        }
     }
 
     // Mise à jour nonce expéditeur
@@ -3136,6 +3203,116 @@ module.register_async_method("eth_sendRawTransaction", move |params, _meta, _| {
 
         if is_deployment {
             tx_obj.remove("to");
+        }
+
+        // ─── Récupération du `from` via ecrecover (MetaMask / wallets) ───────
+        // VEZ reste la devise de frais (disburse dans send_transaction).
+        {
+            use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
+            use sha3::{Digest, Keccak256 as Sha3Keccak};
+
+            let recover_from_sig = |sighash: [u8; 32], r_bytes: &[u8], s_bytes: &[u8], recid: u8| -> Option<String> {
+                let mut sig_buf = [0u8; 64];
+                if r_bytes.is_empty() || s_bytes.is_empty() || r_bytes.len() > 32 || s_bytes.len() > 32 {
+                    return None;
+                }
+                sig_buf[32 - r_bytes.len()..32].copy_from_slice(r_bytes);
+                sig_buf[64 - s_bytes.len()..64].copy_from_slice(s_bytes);
+                let sig = Signature::from_slice(&sig_buf).ok()?;
+                let rid = RecoveryId::try_from(recid).ok()?;
+                let vk = VerifyingKey::recover_from_prehash(&sighash, &sig, rid).ok()?;
+                let point = vk.to_encoded_point(false);
+                let pub_bytes = point.as_bytes(); // 0x04 || X || Y
+                if pub_bytes.len() != 65 {
+                    return None;
+                }
+                let mut hasher = Sha3Keccak::new();
+                hasher.update(&pub_bytes[1..]);
+                let hash = hasher.finalize();
+                Some(format!("0x{}", hex::encode(&hash[12..32])).to_lowercase())
+            };
+
+            let mut recovered_from: Option<String> = None;
+
+            if tx_type == 0 {
+                // Legacy: [nonce, gasPrice, gas, to, value, data, v, r, s]
+                let rlp = Rlp::new(&raw_bytes);
+                if rlp.item_count().unwrap_or(0) >= 9 {
+                    let v_val = rlp.val_at::<u64>(6).unwrap_or(0);
+                    let r_b = rlp.at(7).ok().and_then(|x| x.data().ok().map(|d| d.to_vec())).unwrap_or_default();
+                    let s_b = rlp.at(8).ok().and_then(|x| x.data().ok().map(|d| d.to_vec())).unwrap_or_default();
+
+                    // EIP-155: v = chainId*2 + 35 + yParity  OR 27/28
+                    let (recid, chain_for_hash): (u8, Option<u64>) = if v_val >= 35 {
+                        let cid = (v_val - 35) / 2;
+                        (((v_val - 35) % 2) as u8, Some(cid))
+                    } else if v_val >= 27 {
+                        ((v_val - 27) as u8, None)
+                    } else {
+                        (v_val as u8, None)
+                    };
+
+                    // unsigned payload for sighash
+                    let mut stream = rlp::RlpStream::new();
+                    if let Some(cid) = chain_for_hash {
+                        stream.begin_list(9);
+                        for i in 0..6 {
+                            if let Ok(item) = rlp.at(i) {
+                                stream.append_raw(item.as_raw(), 1);
+                            }
+                        }
+                        stream.append(&cid);
+                        stream.append(&0u8);
+                        stream.append(&0u8);
+                    } else {
+                        stream.begin_list(6);
+                        for i in 0..6 {
+                            if let Ok(item) = rlp.at(i) {
+                                stream.append_raw(item.as_raw(), 1);
+                            }
+                        }
+                    }
+                    let mut hasher = Sha3Keccak::new();
+                    hasher.update(stream.out());
+                    let mut sighash = [0u8; 32];
+                    sighash.copy_from_slice(&hasher.finalize());
+                    recovered_from = recover_from_sig(sighash, &r_b, &s_b, recid);
+                }
+            } else if tx_type == 0x02 {
+                // EIP-1559: 0x02 || rlp([chainId, nonce, maxPriorityFee, maxFee, gas, to, value, data, accessList, yParity, r, s])
+                let payload = &raw_bytes[1..];
+                let rlp = Rlp::new(payload);
+                let n = rlp.item_count().unwrap_or(0);
+                if n >= 12 {
+                    let y_parity = rlp.val_at::<u8>(9).unwrap_or(0);
+                    let r_b = rlp.at(10).ok().and_then(|x| x.data().ok().map(|d| d.to_vec())).unwrap_or_default();
+                    let s_b = rlp.at(11).ok().and_then(|x| x.data().ok().map(|d| d.to_vec())).unwrap_or_default();
+
+                    // sighash = keccak256(0x02 || rlp(fields[0..9]))
+                    let mut stream = rlp::RlpStream::new();
+                    stream.begin_list(9);
+                    for i in 0..9 {
+                        if let Ok(item) = rlp.at(i) {
+                            stream.append_raw(item.as_raw(), 1);
+                        }
+                    }
+                    let mut pre = Vec::with_capacity(1 + stream.out().len());
+                    pre.push(0x02);
+                    pre.extend_from_slice(&stream.out());
+                    let mut hasher = Sha3Keccak::new();
+                    hasher.update(&pre);
+                    let mut sighash = [0u8; 32];
+                    sighash.copy_from_slice(&hasher.finalize());
+                    recovered_from = recover_from_sig(sighash, &r_b, &s_b, y_parity);
+                }
+            }
+
+            if let Some(addr) = recovered_from {
+                println!("🔑 from récupéré via ecrecover: {}", addr);
+                tx_obj.insert("from".to_string(), serde_json::Value::String(addr));
+            } else {
+                println!("⚠️ ecrecover impossible — from absent (MetaMask TX refusée si from requis)");
+            }
         }
 
         let tx_val = serde_json::Value::Object(tx_obj);
